@@ -420,14 +420,17 @@ Modules can participate in **block persistence** without node-specific policy co
 
 ### Convention
 
-A module registers `ModuleAPI` with method **`filter_block_before_store`** (`register_module_api` capability). The node calls it from the IBD flush path (`ParallelIBD::do_flush_to_storage`) before witness data is written to the blockstore.
+A module registers `ModuleAPI` methods (`register_module_api` capability). Routing uses the **short method name**; the first registrant wins — method names must be unique across modules.
 
-### Request / response (bincode)
+| Method | Node caller | Fail-open |
+|--------|-------------|-----------|
+| `filter_block_before_store` | IBD flush (`do_flush_to_storage`) | store unfiltered |
+| `rehydrate_block_for_consensus` | reorg reconnect | use stored archival |
+| `get_canonical_txids` | `verifychain` merkle, `gettxoutproof` | use stored bodies |
+| `lookup_block_for_txids` | `gettxoutproof` / `getrawtransaction` without blockhash | existing search / not found |
+| `filter_block_download_policy` | IBD getdata inventory | `MSG_WITNESS_BLOCK` |
 
-- **Params:** `{ height, block, witnesses }`
-- **Returns:** `{ block, witnesses, stripped_txids, filtered }`
-
-Any module may implement this method; routing uses the short method name (`filter_block_before_store`). The reference implementation is **blvm-selective-sync**.
+The reference implementation is **blvm-selective-sync**. The node has **no** strip/registry types — only serialize → `route_call` → timeout.
 
 ### Failure semantics
 

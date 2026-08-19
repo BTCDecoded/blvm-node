@@ -18,10 +18,7 @@ fn main() -> anyhow::Result<()> {
             .context("usage: backfill_engine_export_muhash DATA_DIR")?,
     );
     let storage = Storage::new(&data_dir)?;
-    let export_h = storage
-        .chain()
-        .get_engine_export_height()?
-        .unwrap_or(0);
+    let export_h = storage.chain().get_engine_export_height()?.unwrap_or(0);
     if export_h == 0 {
         println!("no engine export height — nothing to backfill");
         return Ok(());

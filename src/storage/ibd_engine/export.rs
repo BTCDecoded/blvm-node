@@ -176,7 +176,8 @@ impl<'a> CheckpointChunkWriter<'a> {
             self.checkpoint_height,
             std::process::id()
         ));
-        let f = File::create(&path).with_context(|| format!("E3c spill create {}", path.display()))?;
+        let f =
+            File::create(&path).with_context(|| format!("E3c spill create {}", path.display()))?;
         self.spill = Some(BufWriter::with_capacity(8 << 20, f));
         self.spill_path = Some(path);
         Ok(())
@@ -225,10 +226,7 @@ impl<'a> CheckpointChunkWriter<'a> {
         if self.global_offset_sort {
             self.ensure_spill()?;
             let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    &kv as *const OutputKV as *const u8,
-                    OutputKV::SIZE,
-                )
+                std::slice::from_raw_parts(&kv as *const OutputKV as *const u8, OutputKV::SIZE)
             };
             self.spill
                 .as_mut()
@@ -325,11 +323,11 @@ impl<'a> CheckpointChunkWriter<'a> {
                         let end = (start + shard_len).min(n);
                         let mut mh = MuHash3072::new();
                         let mut pairs = Vec::with_capacity(end.saturating_sub(start));
-                        for rank in start..end {
+                        for (off, kv) in kvs[start..end].iter().enumerate() {
+                            let rank = start + off;
                             let Some(detail) = details.get(rank) else {
                                 continue;
                             };
-                            let kv = &kvs[rank];
                             let op = output_key_to_outpoint(&kv.key);
                             let rocks_key = outpoint_to_key(&op);
                             let utxo = detail.utxo.as_ref();
@@ -465,7 +463,7 @@ impl<'a> CheckpointChunkWriter<'a> {
         let t0 = std::time::Instant::now();
         let mut readers: Vec<AppendRunReader> = runs
             .iter()
-            .map(|p| AppendRunReader::open(p))
+            .map(AppendRunReader::open)
             .collect::<Result<_>>()?;
 
         // Min-heap of (key, run_idx). Reverse Ordering → BinaryHeap as min-heap.
@@ -482,8 +480,6 @@ impl<'a> CheckpointChunkWriter<'a> {
 
         let commit_every = export_append_commit_every();
         let t_append = std::time::Instant::now();
-        let mut readers = readers;
-        let mut heap = heap;
         let written = {
             #[cfg(feature = "heed3")]
             {
@@ -829,8 +825,7 @@ pub fn run_watermark_export(
          — not scan_all_live (OOM-prone at tip)",
         tip_height
     );
-    let (muhash, count, timings) =
-        run_checkpoint_export_replace(db, tree, tip_height, codec)?;
+    let (muhash, count, timings) = run_checkpoint_export_replace(db, tree, tip_height, codec)?;
     info!(
         "IBD engine watermark export finished in {:.1}s (height={}, utxos={}, wall_ms={})",
         t.elapsed().as_secs_f64(),
@@ -1380,8 +1375,7 @@ mod tests {
         let _pin = db.append(&block, &[txid], 50).unwrap();
 
         crate::storage::ibd_engine::set_gc_fence(50);
-        let muhash =
-            run_watermark_export(&db, &tree, 50, ValueCodec::Bincode).unwrap();
+        let muhash = run_watermark_export(&db, &tree, 50, ValueCodec::Bincode).unwrap();
 
         let op = OutPoint {
             hash: txid,

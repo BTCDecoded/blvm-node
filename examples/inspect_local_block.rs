@@ -31,10 +31,7 @@ fn inspect_one(
         }
     };
     let row_key = block_height_row_key(height, &hash);
-    let body_row = blockstore
-        .blocks_tree()?
-        .get(row_key.as_slice())?
-        .is_some();
+    let body_row = blockstore.blocks_tree()?.get(row_key.as_slice())?.is_some();
     let witness_row = blockstore.has_witness_blob(&hash)?;
 
     println!(
@@ -60,7 +57,9 @@ fn inspect_one(
         Err(miss) => {
             println!("load=MISS reason={miss}");
             if miss == LocalBlockMiss::WitnessMissing {
-                println!("hint: body on disk but witness row missing — WAN re-fetch + IBD_WITNESS_REPAIR");
+                println!(
+                    "hint: body on disk but witness row missing — WAN re-fetch + IBD_WITNESS_REPAIR"
+                );
             } else if miss == LocalBlockMiss::WitnessEmptyStale {
                 println!("hint: re-fetch with MSG_WITNESS_BLOCK or repair witness blob");
             }
@@ -70,7 +69,7 @@ fn inspect_one(
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut args = std::env::args().skip(1).collect::<Vec<_>>();
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
     let data_dir = PathBuf::from(
         args.first()
             .context("usage: inspect_local_block DATA_DIR HEIGHT | --scan START END")?,
@@ -100,8 +99,12 @@ fn main() -> anyhow::Result<()> {
                 Some(h) => h,
                 None => continue,
             };
-            match try_load_local_ibd_block_with_reason(blockstore.as_ref(), h, hash, protocol_version)?
-            {
+            match try_load_local_ibd_block_with_reason(
+                blockstore.as_ref(),
+                h,
+                hash,
+                protocol_version,
+            )? {
                 Ok(_) => {}
                 Err(miss) => {
                     misses += 1;

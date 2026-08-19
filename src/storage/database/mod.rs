@@ -431,9 +431,7 @@ pub fn legacy_ibd_utxo_standalone_has_data(data_dir: &Path) -> bool {
 /// At h=956k the live UTXO set is ~12 GB; 32 GB provides comfortable headroom.
 ///
 /// Falls back to a no-op stub on non-Heed3 builds.
-pub fn create_ibd_utxo_standalone_db<P: AsRef<Path>>(
-    utxo_dir: P,
-) -> Result<Box<dyn Database>> {
+pub fn create_ibd_utxo_standalone_db<P: AsRef<Path>>(utxo_dir: P) -> Result<Box<dyn Database>> {
     std::fs::create_dir_all(utxo_dir.as_ref()).with_context(|| {
         format!(
             "create_ibd_utxo_standalone_db: failed to create directory {:?}",
@@ -452,7 +450,7 @@ pub fn create_ibd_utxo_standalone_db<P: AsRef<Path>>(
             .and_then(|s| s.parse().ok())
             .unwrap_or(IBD_UTXO_MAP_SIZE_MB_DEFAULT);
         let result = Heed3Database::new_for_ibd_with_map_size_mb(utxo_dir, None, map_size_mb);
-        return Ok(Box::new(result?));
+        Ok(Box::new(result?))
     }
     #[cfg(not(feature = "heed3"))]
     {
@@ -560,7 +558,8 @@ pub fn try_create_module_kv_database_with_preference<P: AsRef<Path>>(
 pub fn detect_backend_from_db(db: &dyn Database) -> DatabaseBackend {
     #[cfg(feature = "rocksdb")]
     {
-        if db.as_any()
+        if db
+            .as_any()
             .downcast_ref::<rocksdb_impl::RocksDBDatabase>()
             .is_some()
         {
@@ -575,7 +574,8 @@ pub fn detect_backend_from_db(db: &dyn Database) -> DatabaseBackend {
     }
     #[cfg(feature = "tidesdb")]
     {
-        if db.as_any()
+        if db
+            .as_any()
             .downcast_ref::<tidesdb_impl::TidesDBDatabase>()
             .is_some()
         {
@@ -584,7 +584,8 @@ pub fn detect_backend_from_db(db: &dyn Database) -> DatabaseBackend {
     }
     #[cfg(feature = "redb")]
     {
-        if db.as_any()
+        if db
+            .as_any()
             .downcast_ref::<redb_impl::RedbDatabase>()
             .is_some()
         {
@@ -593,7 +594,8 @@ pub fn detect_backend_from_db(db: &dyn Database) -> DatabaseBackend {
     }
     #[cfg(feature = "sled")]
     {
-        if db.as_any()
+        if db
+            .as_any()
             .downcast_ref::<sled_impl::SledDatabase>()
             .is_some()
         {

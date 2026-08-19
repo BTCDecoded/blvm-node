@@ -474,10 +474,7 @@ impl DiskSegment {
 
     pub(super) fn clear_hot_body(&self) {
         if self.hot_body.write().take().is_some() {
-            tracing::info!(
-                "DiskSegment: hot-pin cleared path={}",
-                self.path.display()
-            );
+            tracing::info!("DiskSegment: hot-pin cleared path={}", self.path.display());
         }
     }
 
@@ -647,14 +644,17 @@ impl DiskSegment {
         let raw = &slice[byte_offset..end];
         debug_assert_eq!(raw.as_ptr() as usize % std::mem::align_of::<OutputKV>(), 0);
         // Safety: aligned repr(C) OutputKV image written by this crate.
-        Ok(unsafe {
-            std::slice::from_raw_parts(raw.as_ptr() as *const OutputKV, count)
-        })
+        Ok(unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const OutputKV, count) })
     }
 
     /// Read `count` raw `OutputKV` entries from disk starting at entry index `lo`
     /// into `out` (cleared first). Prefer [`Self::mmap_bucket_slice`] when mmap is on.
-    fn read_bucket_into(&self, lo: usize, hi: usize, out: &mut Vec<OutputKV>) -> anyhow::Result<()> {
+    fn read_bucket_into(
+        &self,
+        lo: usize,
+        hi: usize,
+        out: &mut Vec<OutputKV>,
+    ) -> anyhow::Result<()> {
         out.clear();
         let count = hi - lo;
         if count == 0 {
@@ -1048,8 +1048,8 @@ impl DiskSegment {
                     return Ok(());
                 }
 
-                let parallel = disk_parallel_pread_from_env()
-                    && ranges.len() >= PARALLEL_PREAD_MIN_RANGES;
+                let parallel =
+                    disk_parallel_pread_from_env() && ranges.len() >= PARALLEL_PREAD_MIN_RANGES;
                 for r in ranges.iter() {
                     note_pread((r.hi - r.lo) * OutputKV::SIZE);
                 }

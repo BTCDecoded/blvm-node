@@ -96,7 +96,8 @@ impl PeerManager {
                 // Unknown services (version not yet received): include optimistically.
                 if services != 0 {
                     let has_full_network = (services & NODE_NETWORK) != 0;
-                    let has_limited_only = !has_full_network && (services & NODE_NETWORK_LIMITED) != 0;
+                    let has_limited_only =
+                        !has_full_network && (services & NODE_NETWORK_LIMITED) != 0;
                     // Exclude only genuinely pruned-only peers (LIMITED without NETWORK).
                     // Nodes advertising both NODE_NETWORK and NODE_NETWORK_LIMITED are treated
                     // as archive: NODE_NETWORK is the authoritative "full blockchain" claim.

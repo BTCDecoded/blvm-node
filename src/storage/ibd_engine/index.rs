@@ -298,9 +298,6 @@ fn choose_eviction_age(avail_mb: u64) -> usize {
     // pipeline. OOM prevention is now handled by the RSS hard gate in the dispatch loop
     // (validation_loop.rs [RSS_HARD_GATE]) which pauses block ingestion when anon RSS
     // exceeds 92% of budget, letting the engine reclaim memory before continuing.
-    {
-        age
-    };
 
     tracing::info!(
         "UTXO engine: eviction age = {} (auto-detected: {:.1} GiB physical RAM, {:.1} GiB available)",
@@ -653,9 +650,7 @@ impl UtxoIndex {
     /// Whether age `age_idx` currently holds `is_merging` (COMPACTER_GATE diagnostics).
     pub fn age_is_merging(&self, age_idx: usize) -> bool {
         if age_idx < K_AGES {
-            self.ages[age_idx]
-                .is_merging
-                .load(Ordering::Relaxed)
+            self.ages[age_idx].is_merging.load(Ordering::Relaxed)
         } else {
             false
         }
@@ -681,12 +676,16 @@ impl UtxoIndex {
     /// Used by MEM_REPORT to show per-tier breakdown so operators can see if the compacter
     /// is falling behind (runs accumulating in an age tier) or if a specific tier dominates.
     pub fn age_detail(&self) -> (Vec<(usize, u64)>, (usize, u64)) {
-        let ages: Vec<(usize, u64)> = self.ages.iter().map(|a| {
-            // Read under guard — do not snapshot_runs(); MEM_REPORT must not pin tip Arcs.
-            let guard = a.runs.read();
-            let bytes: usize = guard.iter().map(|r| r.mem_bytes()).sum();
-            (guard.len(), bytes as u64 / (1024 * 1024))
-        }).collect();
+        let ages: Vec<(usize, u64)> = self
+            .ages
+            .iter()
+            .map(|a| {
+                // Read under guard — do not snapshot_runs(); MEM_REPORT must not pin tip Arcs.
+                let guard = a.runs.read();
+                let bytes: usize = guard.iter().map(|r| r.mem_bytes()).sum();
+                (guard.len(), bytes as u64 / (1024 * 1024))
+            })
+            .collect();
         let disk_segs = self.disk_index.segment_count();
         let disk_bloom_mb = self.disk_index.bloom_bytes_total() as u64 / (1024 * 1024);
         (ages, (disk_segs, disk_bloom_mb))
@@ -917,7 +916,7 @@ impl UtxoIndex {
         // counter REVERT on synth S10 dens floor.
         let t_ages = Instant::now();
         for i in 0..K_AGES {
-            if !ids.iter().any(|id| *id == OutputId::MAX) {
+            if !ids.contains(&OutputId::MAX) {
                 break;
             }
             self.ages[i].batch_query(keys, ids, 0, before);
@@ -927,7 +926,7 @@ impl UtxoIndex {
         // memory) so disk_index skips them. disk_index.batch_query also normalizes
         // any remaining OUTPUT_ID_DELETED → OutputId::MAX before returning.
         let t_disk = Instant::now();
-        if ids.iter().any(|id| *id == OutputId::MAX) {
+        if ids.contains(&OutputId::MAX) {
             self.disk_index.batch_query(keys, ids, before);
         }
         let disk_ms = t_disk.elapsed().as_millis() as u64;
@@ -1379,6 +1378,7 @@ mod tests {
         k
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn w52_force_merge_spill_thresholds() {
         // Defaults: 1536 MiB source or 6M entries.
@@ -1387,6 +1387,7 @@ mod tests {
         assert!(force_merge_spill_to_disk(1, 6_000_000));
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_append_and_query() {
         let idx = UtxoIndex::new_for_test();
@@ -1396,6 +1397,7 @@ mod tests {
         assert_eq!(idx.lookup_key(&make_key(2)), None);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_batch_query() {
         let idx = UtxoIndex::new_for_test();
@@ -1409,6 +1411,7 @@ mod tests {
         assert_eq!(ids[1], 20);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_contiguous_length() {
         let idx = UtxoIndex::new_for_test();
@@ -1418,6 +1421,7 @@ mod tests {
         assert_eq!(idx.contiguous_length(), 50);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_erase_since() {
         let idx = UtxoIndex::new_for_test();
@@ -1438,6 +1442,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn critical_pressure_lowers_eviction_age_to_mutable_floor() {
         use std::sync::atomic::Ordering;
@@ -1451,13 +1456,8 @@ mod tests {
         }
         let tmp = tempfile::tempdir().expect("tempdir");
         let (disk_index, restored_cl) = DiskIndex::new(tmp.path()).expect("DiskIndex::new");
-        let idx = UtxoIndex::open_with_disk(
-            Arc::new(disk_index),
-            24 * 1024,
-            restored_cl,
-            None,
-        )
-        .expect("open_with_disk");
+        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None)
+            .expect("open_with_disk");
         assert_eq!(idx.boot_eviction_age, 4);
         idx.memory_pressure_tick(2);
         assert_eq!(
@@ -1467,6 +1467,7 @@ mod tests {
         std::mem::forget(tmp);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn tip_crawl_supply_healthy_holds_boot_under_critical() {
         use std::sync::atomic::Ordering;
@@ -1485,13 +1486,8 @@ mod tests {
         crate::node::parallel_ibd::tip_stage::test_seed_getdata_body_ewma(40, 32);
         let tmp = tempfile::tempdir().expect("tempdir");
         let (disk_index, restored_cl) = DiskIndex::new(tmp.path()).expect("DiskIndex::new");
-        let idx = UtxoIndex::open_with_disk(
-            Arc::new(disk_index),
-            24 * 1024,
-            restored_cl,
-            None,
-        )
-        .expect("open_with_disk");
+        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None)
+            .expect("open_with_disk");
         let boot = idx.boot_eviction_age;
         idx.memory_pressure_tick(2); // Critical — Land E holds boot
         assert_eq!(
@@ -1519,6 +1515,7 @@ mod tests {
         std::mem::forget(tmp);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn elevated_no_demote_keeps_boot_age_under_elevated() {
         use std::sync::atomic::Ordering;
@@ -1532,13 +1529,8 @@ mod tests {
         }
         let tmp = tempfile::tempdir().expect("tempdir");
         let (disk_index, restored_cl) = DiskIndex::new(tmp.path()).expect("DiskIndex::new");
-        let idx = UtxoIndex::open_with_disk(
-            Arc::new(disk_index),
-            24 * 1024,
-            restored_cl,
-            None,
-        )
-        .expect("open_with_disk");
+        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None)
+            .expect("open_with_disk");
         let boot = idx.boot_eviction_age;
         assert!(boot >= 4);
         idx.memory_pressure_tick(1); // Elevated — must not demote
@@ -1558,6 +1550,7 @@ mod tests {
         std::mem::forget(tmp);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn critical_no_demote_keeps_boot_age_under_critical() {
         use std::sync::atomic::Ordering;
@@ -1571,13 +1564,8 @@ mod tests {
         }
         let tmp = tempfile::tempdir().expect("tempdir");
         let (disk_index, restored_cl) = DiskIndex::new(tmp.path()).expect("DiskIndex::new");
-        let idx = UtxoIndex::open_with_disk(
-            Arc::new(disk_index),
-            24 * 1024,
-            restored_cl,
-            None,
-        )
-        .expect("open_with_disk");
+        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None)
+            .expect("open_with_disk");
         let boot = idx.boot_eviction_age;
         assert!(boot >= 4);
         idx.memory_pressure_tick(2); // Critical — must not demote
@@ -1597,6 +1585,7 @@ mod tests {
         std::mem::forget(tmp);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn critical_soft_demote_steps_one_from_boot() {
         use std::sync::atomic::Ordering;
@@ -1609,19 +1598,11 @@ mod tests {
         }
         let tmp = tempfile::tempdir().expect("tempdir");
         let (disk_index, restored_cl) = DiskIndex::new(tmp.path()).expect("DiskIndex::new");
-        let idx = UtxoIndex::open_with_disk(
-            Arc::new(disk_index),
-            24 * 1024,
-            restored_cl,
-            None,
-        )
-        .expect("open_with_disk");
+        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None)
+            .expect("open_with_disk");
         assert_eq!(idx.boot_eviction_age, 5);
         idx.memory_pressure_tick(2); // Critical — soft → 4, not mutable floor
-        assert_eq!(
-            idx.compacter.eviction_age_live.load(Ordering::Relaxed),
-            4,
-        );
+        assert_eq!(idx.compacter.eviction_age_live.load(Ordering::Relaxed), 4,);
         idx.memory_pressure_tick(3); // Emergency — floor
         assert_eq!(
             idx.compacter.eviction_age_live.load(Ordering::Relaxed),
@@ -1634,6 +1615,7 @@ mod tests {
         std::mem::forget(tmp);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn critical_demote_hold_defers_floor_then_demotes() {
         use std::sync::atomic::Ordering;
@@ -1647,13 +1629,8 @@ mod tests {
         }
         let tmp = tempfile::tempdir().expect("tempdir");
         let (disk_index, restored_cl) = DiskIndex::new(tmp.path()).expect("DiskIndex::new");
-        let idx = UtxoIndex::open_with_disk(
-            Arc::new(disk_index),
-            24 * 1024,
-            restored_cl,
-            None,
-        )
-        .expect("open_with_disk");
+        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None)
+            .expect("open_with_disk");
         let boot = idx.boot_eviction_age;
         assert_eq!(boot, 4);
         idx.memory_pressure_tick(2); // first Critical — hold boot
@@ -1679,6 +1656,7 @@ mod tests {
         std::mem::forget(tmp);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn hot_pin_emergency_hold_defers_clear() {
         use std::sync::atomic::Ordering;
@@ -1711,6 +1689,7 @@ mod tests {
         std::mem::forget(tmp);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn tip_resident_keeps_boot_under_critical_emergency_floors() {
         unsafe {
@@ -1724,24 +1703,13 @@ mod tests {
         }
         let tmp = tempfile::tempdir().expect("tempdir");
         let (disk_index, restored_cl) = DiskIndex::new(tmp.path()).expect("DiskIndex::new");
-        let idx = UtxoIndex::open_with_disk(
-            Arc::new(disk_index),
-            24 * 1024,
-            restored_cl,
-            None,
-        )
-        .expect("open_with_disk");
+        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None)
+            .expect("open_with_disk");
         assert_eq!(idx.boot_eviction_age, 5);
         idx.memory_pressure_tick(1); // Elevated — tip_res keeps boot
-        assert_eq!(
-            idx.compacter.eviction_age_live.load(Ordering::Relaxed),
-            5,
-        );
+        assert_eq!(idx.compacter.eviction_age_live.load(Ordering::Relaxed), 5,);
         idx.memory_pressure_tick(2); // Critical — tip_res keeps boot
-        assert_eq!(
-            idx.compacter.eviction_age_live.load(Ordering::Relaxed),
-            5,
-        );
+        assert_eq!(idx.compacter.eviction_age_live.load(Ordering::Relaxed), 5,);
         idx.memory_pressure_tick(3); // Emergency — floor
         assert_eq!(
             idx.compacter.eviction_age_live.load(Ordering::Relaxed),
@@ -1754,6 +1722,7 @@ mod tests {
         std::mem::forget(tmp);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn oldest_accumulate_keeps_boot_under_critical_emergency_floors() {
         unsafe {
@@ -1767,19 +1736,11 @@ mod tests {
         }
         let tmp = tempfile::tempdir().expect("tempdir");
         let (disk_index, restored_cl) = DiskIndex::new(tmp.path()).expect("DiskIndex::new");
-        let idx = UtxoIndex::open_with_disk(
-            Arc::new(disk_index),
-            24 * 1024,
-            restored_cl,
-            None,
-        )
-        .expect("open_with_disk");
+        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None)
+            .expect("open_with_disk");
         assert_eq!(idx.boot_eviction_age, 4);
         idx.memory_pressure_tick(2);
-        assert_eq!(
-            idx.compacter.eviction_age_live.load(Ordering::Relaxed),
-            4,
-        );
+        assert_eq!(idx.compacter.eviction_age_live.load(Ordering::Relaxed), 4,);
         idx.memory_pressure_tick(3);
         assert_eq!(
             idx.compacter.eviction_age_live.load(Ordering::Relaxed),

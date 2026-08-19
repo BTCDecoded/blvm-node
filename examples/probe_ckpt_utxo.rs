@@ -42,7 +42,9 @@ fn main() -> anyhow::Result<()> {
     let wm = storage.chain().get_utxo_watermark()?;
     let count = storage.chain().get_engine_export_utxo_count()?;
     let tip = storage.chain().get_height()?;
-    println!("chain_tip={tip:?} wm={wm:?} export_h={export_h:?} active_slot={slot} utxo_count={count:?}");
+    println!(
+        "chain_tip={tip:?} wm={wm:?} export_h={export_h:?} active_slot={slot} utxo_count={count:?}"
+    );
     for name in ["ibd_utxos_ckpt_a", "ibd_utxos_ckpt_b", "ibd_utxos"] {
         let tree = storage.open_tree(name)?;
         let empty = tree.is_empty().unwrap_or(true);

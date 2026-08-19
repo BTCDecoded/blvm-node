@@ -25,6 +25,7 @@ This page records **why** each advisory remains suppressed and how to **re-verif
 | RUSTSEC-2026-0009 | **`time`** | Git **`[patch.crates-io]`** to tagged **`time`** (see **`Cargo.toml`**). | crates.io release absorbs patch; drop **`patch`** + ignore | 2026-05-17 |
 | RUSTSEC-2026-0118 | **`hickory-proto`** — NSEC3 closest-encloser validation unbounded loop (OOM / debug panic) | [`RUSTSEC-2026-0118`](https://rustsec.org/advisories/RUSTSEC-2026-0118); verify edge with **`cargo tree -i hickory-proto`** when present (graph may omit **`hickory`** until a transitive path lands). Typical exit: bump **`iroh`** / resolver stack to lines **`>=0.26.0-beta.1`** / patched **`hickory-net`** per advisory. | Clean audit without ignore, or pinned patched **`hickory-*`** | 2026-05-17 |
 | RUSTSEC-2026-0119 | **`hickory-proto`** — O(n²) name compression CPU DoS during encode | [`RUSTSEC-2026-0119`](https://rustsec.org/advisories/RUSTSEC-2026-0119); verify with **`cargo tree -i hickory-proto`**. Patched **`>=0.26.1`**. | Same | 2026-05-17 |
+| RUSTSEC-2026-0204 | **`crossbeam-epoch`** — invalid pointer deref in **`fmt::Pointer`** for null **`Atomic`/`Shared`** | Transitive via **`rayon`** → **`blvm-consensus`**. Only triggers when formatting a null epoch pointer with **`{:p}`**; production code does not. Patched **`>=0.9.20`**. | **`rayon`** / consensus graph pulls **`crossbeam-epoch` >= 0.9.20`**, or drop ignore after verify | 2026-08-18 |
 
 **Owner:** Bitcoin Commons maintainers / release sheriffs for **`blvm-node`**.
 

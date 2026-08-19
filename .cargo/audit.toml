@@ -17,4 +17,6 @@ ignore = [
     "RUSTSEC-2026-0037",
     "RUSTSEC-2026-0118",
     "RUSTSEC-2026-0119",
+    # fmt::Pointer on null Atomic/Shared only; rayon does not format null epoch pointers.
+    "RUSTSEC-2026-0204",
 ]

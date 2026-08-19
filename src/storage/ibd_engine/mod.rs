@@ -56,13 +56,13 @@ pub use export::{
     run_checkpoint_export_replace, run_watermark_export, sync_tree_after_persist,
 };
 pub use import::{bootstrap_ckpt_from_legacy_standalone, seed_from_ibd_utxos};
+pub use index::take_last_query_split_ms;
 pub use memory_run::{advance_gc_fence_to, set_gc_fence};
 pub use meta::{
     clear_engine_dirty_flag, contiguous_length_sidecar, engine_dirty_flag_path,
     read_contiguous_length_sidecar, remove_contiguous_length_sidecar,
     write_contiguous_length_sidecar,
 };
-pub use index::take_last_query_split_ms;
 pub use spend_session::{
     PartialSpendSession, SpendSession, hotpath_timer_sample, session_fill_utxo_set,
     session_to_utxo_set,

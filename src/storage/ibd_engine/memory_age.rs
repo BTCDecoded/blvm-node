@@ -84,8 +84,8 @@ pub fn memory_age_window_slow_pct() -> Option<u64> {
         None
     };
 
-    let should_roll = elapsed >= APPEND_WINDOW_MAX_AGE
-        || (pct.is_some() && elapsed >= APPEND_WINDOW_MIN_AGE);
+    let should_roll =
+        elapsed >= APPEND_WINDOW_MAX_AGE || (pct.is_some() && elapsed >= APPEND_WINDOW_MIN_AGE);
     if should_roll {
         window.baseline_in_place = in_place;
         window.baseline_slow = slow;
@@ -268,11 +268,7 @@ impl MemoryAge {
 
     /// Total approximate resident bytes across all runs in this age tier.
     pub fn mem_bytes(&self) -> usize {
-        self.runs
-            .read()
-            .iter()
-            .map(|r| r.mem_bytes())
-            .sum()
+        self.runs.read().iter().map(|r| r.mem_bytes()).sum()
     }
 
     /// Number of runs currently in this age.
@@ -394,7 +390,11 @@ impl MemoryAge {
     }
 
     /// Like `collect_entries_into` but only entries with `height <= max_height`.
-    pub(super) fn collect_entries_at_or_below_into(&self, max_height: i32, out: &mut Vec<OutputKV>) {
+    pub(super) fn collect_entries_at_or_below_into(
+        &self,
+        max_height: i32,
+        out: &mut Vec<OutputKV>,
+    ) {
         let guard = self.runs.read();
         for run in guard.iter() {
             for &entry in &run.entries {
@@ -407,22 +407,18 @@ impl MemoryAge {
 
     /// Merge `dispatch_staging` into the mutable tip. Uses in-place append when unique, else slow-path clone.
     fn try_merge_dispatch_staging(&self) {
-        loop {
-            let mut staging = self.dispatch_staging.lock();
-            if staging.is_empty() {
-                return;
+        let mut staging = self.dispatch_staging.lock();
+        if staging.is_empty() {
+            return;
+        }
+        match self.try_append_in_place(&staging) {
+            Ok(()) => {
+                staging.clear();
             }
-            match self.try_append_in_place(&staging) {
-                Ok(()) => {
-                    staging.clear();
-                    return;
-                }
-                Err(miss) => {
-                    let batch = std::mem::take(&mut *staging);
-                    drop(staging);
-                    self.append_slow_path(batch, miss);
-                    return;
-                }
+            Err(miss) => {
+                let batch = std::mem::take(&mut *staging);
+                drop(staging);
+                self.append_slow_path(batch, miss);
             }
         }
     }
@@ -452,7 +448,7 @@ impl MemoryAge {
             Some(ref last)
                 if last.is_mutable
                     && last.len() + entries.len() <= Self::mutable_run_max_entries() =>
-                {
+            {
                 // Extend mutable run in place (bounded: ≤ mutable_run_max_entries).
                 let mut run = (**last).clone();
                 run.append_and_rebuild(&entries);
@@ -520,9 +516,7 @@ impl MemoryAge {
         {
             let mut w = self.runs.write();
             if Arc::strong_count(&*w) == 1 {
-                Arc::get_mut(&mut *w)
-                    .expect("strong_count==1")
-                    .push(run);
+                Arc::get_mut(&mut *w).expect("strong_count==1").push(run);
             } else {
                 let mut new_runs = (**w).clone();
                 new_runs.push(run);
@@ -579,7 +573,7 @@ impl MemoryAge {
     ) -> QueryResult {
         let mut result = QueryResult::default();
         for run in snapshot.iter().rev() {
-            if !ids.iter().any(|id| *id == OutputId::MAX) {
+            if !ids.contains(&OutputId::MAX) {
                 break;
             }
             run.batch_lookup(keys, ids, since, before);
@@ -608,7 +602,7 @@ impl MemoryAge {
         let mut result = QueryResult::default();
         let runs_guard = super::timed_age_runs_read(&self.runs);
         for run in runs_guard.iter().rev() {
-            if !ids.iter().any(|id| *id == OutputId::MAX) {
+            if !ids.contains(&OutputId::MAX) {
                 break;
             }
             run.batch_lookup(keys, ids, since, before);
@@ -655,10 +649,7 @@ impl MemoryAge {
     fn mergeable_prefix_len(runs: &[Arc<MemoryRun>], min_pin: Option<i32>) -> usize {
         match min_pin {
             None => runs.len(),
-            Some(pin) => runs
-                .iter()
-                .take_while(|r| r.height_range.1 < pin)
-                .count(),
+            Some(pin) => runs.iter().take_while(|r| r.height_range.1 < pin).count(),
         }
     }
 
@@ -708,8 +699,7 @@ impl MemoryAge {
         let run_count = guard.len();
         let mergeable = Self::mergeable_prefix_len(&guard, min_pin);
         let spill_early = self.spill_early_take.load(Ordering::Relaxed);
-        if Self::merge_take_count(run_count, mergeable, self.merge_fan_in, spill_early).is_some()
-        {
+        if Self::merge_take_count(run_count, mergeable, self.merge_fan_in, spill_early).is_some() {
             return true;
         }
         if log_blocked && run_count >= self.merge_fan_in {
@@ -959,7 +949,10 @@ mod tests {
             )])));
         }
         let _pin = age.pin_height(5); // oldest fan_in (1..8) overlaps; mergeable prefix = 4
-        assert!(age.merge_ready(), "backlogged age must partial-merge below pin");
+        assert!(
+            age.merge_ready(),
+            "backlogged age must partial-merge below pin"
+        );
         let taken = age.take_for_merge().expect("partial take");
         // At ≥2×fan_in backlog, take ≤2 so spill→disk writes stay small/frequent.
         assert_eq!(taken.len(), 2);
@@ -980,7 +973,10 @@ mod tests {
             )])));
         }
         let _pin = age.pin_height(2);
-        assert!(age.merge_ready(), "mergeable_prefix=1 must drain when backlogged");
+        assert!(
+            age.merge_ready(),
+            "mergeable_prefix=1 must drain when backlogged"
+        );
         let taken = age.take_for_merge().expect("1-run partial");
         assert_eq!(taken.len(), 1);
         assert_eq!(taken[0].height_range.1, 1);
@@ -1059,7 +1055,11 @@ mod tests {
         reset_append_diagnostics_for_test();
         bump_append_stats_detailed_for_test(90_000, 140_600, 140_600);
         set_append_window_baseline_for_test(90_000, 140_600);
-        bump_append_stats_detailed_for_test(0, APPEND_WINDOW_MIN_SAMPLES, APPEND_WINDOW_MIN_SAMPLES);
+        bump_append_stats_detailed_for_test(
+            0,
+            APPEND_WINDOW_MIN_SAMPLES,
+            APPEND_WINDOW_MIN_SAMPLES,
+        );
         assert_eq!(memory_age_throttle_slow_pct(), 100);
     }
 }

@@ -292,12 +292,13 @@ mod tests {
 
     /// `configured_retire_shards()` must auto-scale with CPU count when no env var is set,
     /// and must clamp to `available_parallelism / 2` for sane values.
+    #[serial_test::serial(ibd)]
     #[test]
     fn configured_retire_shards_defaults_and_clamps() {
         // Each test that mutates BLVM_IBD_RETIRE_SHARDS must serialize on this lock so
         // the env var doesn't leak into other tests running in parallel. The env reads
         // happen inside this lock too, since cargo runs tests in parallel by default.
-        let _guard = ENV_LOCK.lock();
+        let _guard = crate::ibd_test_lock::guard();
 
         let cpus = std::thread::available_parallelism()
             .map(|p| p.get())
@@ -354,9 +355,8 @@ mod tests {
         }
     }
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     /// Work at height `h` must land on shard `h % num_shards`.
+    #[serial_test::serial(ibd)]
     #[test]
     fn dispatcher_routes_work_by_height_modulo_shards() {
         use super::super::IbdRetireWork;

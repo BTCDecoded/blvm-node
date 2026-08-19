@@ -37,20 +37,20 @@ use super::types::{
     IdCodec, OUTPUT_ID_DELETED, OutputDetail, OutputId, OutputKey, outpoint_to_output_key,
     output_key_to_outpoint,
 };
+use blvm_consensus::utxo_overlay::UtxoLookup;
 use blvm_protocol::transaction::is_coinbase;
 use blvm_protocol::types::SharedByteString;
 use blvm_protocol::{Block, OutPoint, UTXO};
-use blvm_consensus::utxo_overlay::UtxoLookup;
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 thread_local! {
-    static FETCH_IDS_SCRATCH: RefCell<Vec<OutputId>> = RefCell::new(Vec::new());
+    static FETCH_IDS_SCRATCH: RefCell<Vec<OutputId>> = const { RefCell::new(Vec::new()) };
     /// Reuse per-block query shells (plan backlog: SpendSession::complete alloc).
-    static IDS_SCRATCH: RefCell<Vec<OutputId>> = RefCell::new(Vec::new());
-    static FETCH_ORDER_SCRATCH: RefCell<Vec<(usize, OutputId)>> = RefCell::new(Vec::new());
+    static IDS_SCRATCH: RefCell<Vec<OutputId>> = const { RefCell::new(Vec::new()) };
+    static FETCH_ORDER_SCRATCH: RefCell<Vec<(usize, OutputId)>> = const { RefCell::new(Vec::new()) };
     static KEY_TO_IDX_SCRATCH: RefCell<FxHashMap<OutputKey, usize>> =
         RefCell::new(FxHashMap::with_hasher(Default::default()));
 }
@@ -134,69 +134,81 @@ impl PartialSpendSession {
 
         // Step 1: query external keys (batch binary-search in age-tiered index).
         let t_query = Instant::now();
-        let (query_ms, ages_ms, disk_ms, disk_preads, disk_pread_kb, disk_max_pread_kb, disk_cands, disk_segs, details, key_to_idx, fetch_ms, map_ms) =
-            IDS_SCRATCH.with(|ids_cell| {
-                FETCH_ORDER_SCRATCH.with(|order_cell| {
-                    KEY_TO_IDX_SCRATCH.with(|map_cell| {
-                        let mut ids = ids_cell.borrow_mut();
-                        ids.clear();
-                        ids.resize(external_keys.len(), OutputId::MAX);
-                        db.query(&external_keys, &mut ids, height);
-                        let query_ms = t_query.elapsed().as_millis() as u64;
-                        let (ages_ms, disk_ms) = super::index::take_last_query_split_ms();
-                        let (disk_preads, disk_pread_kb, disk_max_pread_kb, disk_cands, disk_segs) =
-                            super::index::take_last_disk_io_stats();
+        let (
+            query_ms,
+            ages_ms,
+            disk_ms,
+            disk_preads,
+            disk_pread_kb,
+            disk_max_pread_kb,
+            disk_cands,
+            disk_segs,
+            details,
+            key_to_idx,
+            fetch_ms,
+            map_ms,
+        ) = IDS_SCRATCH.with(|ids_cell| {
+            FETCH_ORDER_SCRATCH.with(|order_cell| {
+                KEY_TO_IDX_SCRATCH.with(|map_cell| {
+                    let mut ids = ids_cell.borrow_mut();
+                    ids.clear();
+                    ids.resize(external_keys.len(), OutputId::MAX);
+                    db.query(&external_keys, &mut ids, height);
+                    let query_ms = t_query.elapsed().as_millis() as u64;
+                    let (ages_ms, disk_ms) = super::index::take_last_query_split_ms();
+                    let (disk_preads, disk_pread_kb, disk_max_pread_kb, disk_cands, disk_segs) =
+                        super::index::take_last_disk_io_stats();
 
-                        let t_fetch = Instant::now();
-                        let mut fetch_order = order_cell.borrow_mut();
-                        fetch_order.clear();
-                        for (i, id) in ids.iter().enumerate() {
-                            if *id != OutputId::MAX && *id != OUTPUT_ID_DELETED {
-                                fetch_order.push((i, *id));
-                            }
+                    let t_fetch = Instant::now();
+                    let mut fetch_order = order_cell.borrow_mut();
+                    fetch_order.clear();
+                    for (i, id) in ids.iter().enumerate() {
+                        if *id != OutputId::MAX && *id != OUTPUT_ID_DELETED {
+                            fetch_order.push((i, *id));
                         }
-                        fetch_order.sort_unstable_by_key(|&(_, id)| IdCodec::decode(id).0);
+                    }
+                    fetch_order.sort_unstable_by_key(|&(_, id)| IdCodec::decode(id).0);
 
-                        let mut raw_details: Vec<OutputDetail> = Vec::new();
-                        FETCH_IDS_SCRATCH.with(|cell| {
-                            let mut fetch_ids = cell.borrow_mut();
-                            fetch_ids.clear();
-                            fetch_ids.reserve(fetch_order.len());
-                            fetch_ids.extend(fetch_order.iter().map(|&(_, id)| id));
-                            raw_details.reserve(fetch_ids.len());
-                            db.fetch(&fetch_ids, &mut raw_details)?;
-                            Ok::<(), anyhow::Error>(())
-                        })?;
-                        let fetch_ms = t_fetch.elapsed().as_millis() as u64;
+                    let mut raw_details: Vec<OutputDetail> = Vec::new();
+                    FETCH_IDS_SCRATCH.with(|cell| {
+                        let mut fetch_ids = cell.borrow_mut();
+                        fetch_ids.clear();
+                        fetch_ids.reserve(fetch_order.len());
+                        fetch_ids.extend(fetch_order.iter().map(|&(_, id)| id));
+                        raw_details.reserve(fetch_ids.len());
+                        db.fetch(&fetch_ids, &mut raw_details)?;
+                        Ok::<(), anyhow::Error>(())
+                    })?;
+                    let fetch_ms = t_fetch.elapsed().as_millis() as u64;
 
-                        let t_map = Instant::now();
-                        let mut key_to_idx = map_cell.borrow_mut();
-                        key_to_idx.clear();
-                        key_to_idx.reserve(fetch_order.len());
-                        for (fetch_rank, (key_idx, _id)) in fetch_order.iter().enumerate() {
-                            let key = external_keys[*key_idx];
-                            key_to_idx.insert(key, fetch_rank);
-                        }
-                        let key_to_idx = std::mem::take(&mut *key_to_idx);
-                        let map_ms = t_map.elapsed().as_millis() as u64;
+                    let t_map = Instant::now();
+                    let mut key_to_idx = map_cell.borrow_mut();
+                    key_to_idx.clear();
+                    key_to_idx.reserve(fetch_order.len());
+                    for (fetch_rank, (key_idx, _id)) in fetch_order.iter().enumerate() {
+                        let key = external_keys[*key_idx];
+                        key_to_idx.insert(key, fetch_rank);
+                    }
+                    let key_to_idx = std::mem::take(&mut *key_to_idx);
+                    let map_ms = t_map.elapsed().as_millis() as u64;
 
-                        Ok::<_, anyhow::Error>((
-                            query_ms,
-                            ages_ms,
-                            disk_ms,
-                            disk_preads,
-                            disk_pread_kb,
-                            disk_max_pread_kb,
-                            disk_cands,
-                            disk_segs,
-                            raw_details,
-                            key_to_idx,
-                            fetch_ms,
-                            map_ms,
-                        ))
-                    })
+                    Ok::<_, anyhow::Error>((
+                        query_ms,
+                        ages_ms,
+                        disk_ms,
+                        disk_preads,
+                        disk_pread_kb,
+                        disk_max_pread_kb,
+                        disk_cands,
+                        disk_segs,
+                        raw_details,
+                        key_to_idx,
+                        fetch_ms,
+                        map_ms,
+                    ))
                 })
-            })?;
+            })
+        })?;
 
         // Step 4: resolve intra-block keys from engine tail — batched.
         let local_spends = resolve_intra_block(&db, intra_block_keys, height)?;
@@ -405,10 +417,7 @@ impl UtxoLookup for SpendSessionLookup<'_> {
         if let Some(&idx) = self.0.key_to_idx.get(&key) {
             return Some(self.0.details[idx].utxo.as_ref());
         }
-        self.0
-            .local_spends
-            .get(&key)
-            .map(|d| d.utxo.as_ref())
+        self.0.local_spends.get(&key).map(|d| d.utxo.as_ref())
     }
 
     #[inline]
@@ -463,11 +472,12 @@ pub fn session_lookup_matches_fill(session: &SpendSession) -> bool {
     }
     for (op, arc) in filled.iter() {
         match lookup.get(op) {
-            Some(u) if std::ptr::eq(u as *const _, arc.as_ref() as *const _)
-                || (u.value == arc.value
-                    && u.height == arc.height
-                    && u.is_coinbase == arc.is_coinbase
-                    && u.script_pubkey.as_ref() == arc.script_pubkey.as_ref()) => {}
+            Some(u)
+                if std::ptr::eq(u as *const _, arc.as_ref() as *const _)
+                    || (u.value == arc.value
+                        && u.height == arc.height
+                        && u.is_coinbase == arc.is_coinbase
+                        && u.script_pubkey.as_ref() == arc.script_pubkey.as_ref()) => {}
             _ => return false,
         }
     }

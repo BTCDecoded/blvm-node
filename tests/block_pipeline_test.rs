@@ -8,6 +8,7 @@ use blvm_node::module::inter_module::api::ModuleAPI;
 use blvm_node::module::inter_module::{ModuleApiRegistry, ModuleRouter};
 use blvm_node::module::pipeline::{
     install_block_pipeline, reset_block_pipeline_for_tests, try_filter_block_before_store,
+    try_filter_block_download_policy, try_get_canonical_txids, try_rehydrate_block_for_consensus,
 };
 use blvm_node::module::traits::ModuleError;
 use blvm_protocol::{
@@ -248,4 +249,121 @@ async fn block_pipeline_filter_times_out_fail_open_when_module_hangs() {
         w[1].iter().any(|stack| !stack.is_empty()),
         "expected fail-open pass-through when filter times out"
     );
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RehydrateRequest {
+    height: u64,
+    block_hash: [u8; 32],
+    block: Block,
+    witnesses: Vec<Vec<blvm_protocol::segwit::Witness>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RehydrateResponse {
+    block: Block,
+    witnesses: Vec<Vec<blvm_protocol::segwit::Witness>>,
+    canonical_txids: Vec<String>,
+    found: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CanonicalTxidsRequest {
+    height: u64,
+    block_hash: [u8; 32],
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CanonicalTxidsResponse {
+    canonical_txids: Vec<String>,
+    found: bool,
+}
+
+struct RestoreWitnessApi;
+
+#[async_trait]
+impl ModuleAPI for RestoreWitnessApi {
+    async fn handle_request(
+        &self,
+        method: &str,
+        params: &[u8],
+        _caller: &str,
+    ) -> Result<Vec<u8>, ModuleError> {
+        match method {
+            "rehydrate_block_for_consensus" => {
+                let req: RehydrateRequest = bincode::deserialize(params)
+                    .map_err(|e| ModuleError::OperationError(e.to_string()))?;
+                let mut witnesses = req.witnesses;
+                if let Some(tx_w) = witnesses.get_mut(1) {
+                    *tx_w = vec![vec![vec![0x99]]];
+                }
+                let resp = RehydrateResponse {
+                    block: req.block,
+                    witnesses,
+                    canonical_txids: vec!["aa".repeat(32), "bb".repeat(32)],
+                    found: true,
+                };
+                bincode::serialize(&resp)
+                    .map_err(|e| ModuleError::SerializationError(e.to_string()))
+            }
+            "get_canonical_txids" => {
+                let _req: CanonicalTxidsRequest = bincode::deserialize(params)
+                    .map_err(|e| ModuleError::OperationError(e.to_string()))?;
+                let resp = CanonicalTxidsResponse {
+                    canonical_txids: vec!["aa".repeat(32)],
+                    found: true,
+                };
+                bincode::serialize(&resp)
+                    .map_err(|e| ModuleError::SerializationError(e.to_string()))
+            }
+            _ => Err(ModuleError::OperationError(format!("unknown {method}"))),
+        }
+    }
+
+    fn list_methods(&self) -> Vec<String> {
+        vec![
+            "rehydrate_block_for_consensus".to_string(),
+            "get_canonical_txids".to_string(),
+        ]
+    }
+
+    fn api_version(&self) -> u32 {
+        1
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn block_pipeline_rehydrate_and_canonical_txids() {
+    reset_block_pipeline_for_tests();
+    let (block, witnesses) = sample_block_with_witnesses();
+    let registry = Arc::new(ModuleApiRegistry::new());
+    let router = Arc::new(ModuleRouter::new(Arc::clone(&registry)));
+    registry
+        .register_api("rehydrate_test".to_string(), Arc::new(RestoreWitnessApi))
+        .await
+        .expect("register_api");
+    install_block_pipeline(router);
+
+    let block_hash = [0x11u8; 32];
+    let w = witnesses.as_ref().clone();
+    let (_, restored) = tokio::task::spawn_blocking(move || {
+        try_rehydrate_block_for_consensus(1, block_hash, block, w)
+    })
+    .await
+    .expect("spawn");
+    assert_eq!(restored[1][0], vec![vec![0x99]]);
+
+    let txids = tokio::task::spawn_blocking(move || try_get_canonical_txids(1, block_hash))
+        .await
+        .expect("spawn");
+    assert!(txids.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn block_pipeline_download_policy_fail_open() {
+    reset_block_pipeline_for_tests();
+    let skip = try_filter_block_download_policy(1, [0u8; 32], [0u8; 32]);
+    assert!(!skip, "no module → download full witness");
 }

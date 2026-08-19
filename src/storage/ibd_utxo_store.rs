@@ -345,18 +345,20 @@ impl PendingFlushPackage {
             let encoded: Vec<(OutPointKey, Option<Vec<u8>>)> = self
                 .ops
                 .par_iter()
-                .map(|(key, value_opt)| -> Result<(OutPointKey, Option<Vec<u8>>)> {
-                    let bytes = match value_opt {
-                        Some(arc) => Some(
-                            crate::storage::utxo_value_codec::encode_utxo_with_codec(
-                                codec,
-                                arc.as_ref(),
-                            )?,
-                        ),
-                        None => None,
-                    };
-                    Ok((*key, bytes))
-                })
+                .map(
+                    |(key, value_opt)| -> Result<(OutPointKey, Option<Vec<u8>>)> {
+                        let bytes = match value_opt {
+                            Some(arc) => {
+                                Some(crate::storage::utxo_value_codec::encode_utxo_with_codec(
+                                    codec,
+                                    arc.as_ref(),
+                                )?)
+                            }
+                            None => None,
+                        };
+                        Ok((*key, bytes))
+                    },
+                )
                 .collect::<Result<Vec<_>>>()?;
 
             // Phase 2: sequential slab assembly (pure memcpy, very fast).
@@ -602,7 +604,7 @@ impl IbdUtxoStore {
         value_codec: ValueCodec,
     ) -> Self {
         Self {
-            cache: DashMap::with_hasher_and_shard_amount(FxBuildHasher::default(), 128),
+            cache: DashMap::with_hasher_and_shard_amount(FxBuildHasher, 128),
             disk,
             total_utxo_count: AtomicIsize::new(0),
             flush_threshold,
@@ -613,7 +615,7 @@ impl IbdUtxoStore {
                 .map(|_| Mutex::new(Vec::new()))
                 .collect(),
             pending_log_size: AtomicUsize::new(0),
-            pending_add_count_by_height: DashMap::with_hasher(FxBuildHasher::default()),
+            pending_add_count_by_height: DashMap::with_hasher(FxBuildHasher),
             memory_only,
             max_entries_cap: AtomicUsize::new(max_entries),
             eviction_strategy,
@@ -622,8 +624,8 @@ impl IbdUtxoStore {
             utxo_disk_commit_height: AtomicU64::new(utxo_disk_commit_through),
             utxo_barrier_mu: Mutex::new(()),
             utxo_barrier_cv: Condvar::new(),
-            in_flight_insertions: DashMap::with_hasher(FxBuildHasher::default()),
-            protected_heights: DashSet::with_hasher(FxBuildHasher::default()),
+            in_flight_insertions: DashMap::with_hasher(FxBuildHasher),
+            protected_heights: DashSet::with_hasher(FxBuildHasher),
             stats_disk_loads: AtomicU64::new(0),
             stats_cache_hits: AtomicU64::new(0),
             stats_evictions: AtomicU64::new(0),
@@ -765,7 +767,8 @@ impl IbdUtxoStore {
                 inflight_count
             );
         }
-        self.max_entries_cap.store(cap.max(4_096), Ordering::Relaxed);
+        self.max_entries_cap
+            .store(cap.max(4_096), Ordering::Relaxed);
 
         // Compact DashMap backing arrays after the local-replay peak.
         //
@@ -860,7 +863,9 @@ impl IbdUtxoStore {
                 tracing::info!(
                     "[IBD_UTXO_STORE] shrink_to_fit (unconditional overalloc): \
                      cap={} len={} logical_max={}",
-                    physical_cap, live_len, new_cap
+                    physical_cap,
+                    live_len,
+                    new_cap
                 );
                 self.cache.shrink_to_fit();
             }
@@ -878,7 +883,9 @@ impl IbdUtxoStore {
             {
                 tracing::info!(
                     "[IBD_UTXO_STORE] shrink_to_fit (overalloc/stable): cap={} len={} max={}",
-                    cache_cap, cache_len, old
+                    cache_cap,
+                    cache_len,
+                    old
                 );
                 self.cache.shrink_to_fit();
             }
@@ -897,7 +904,9 @@ impl IbdUtxoStore {
                 tracing::info!(
                     "[IBD_UTXO_STORE] shrink_to_fit (inflight overalloc/stable): \
                      cap={} len={} max={}",
-                    inflight_cap, inflight_len, old
+                    inflight_cap,
+                    inflight_len,
+                    old
                 );
                 self.in_flight_insertions.shrink_to_fit();
             }
@@ -934,7 +943,11 @@ impl IbdUtxoStore {
                 tracing::info!(
                     "[IBD_UTXO_STORE] shrink_to_fit (cap-driven): cap={} len={} new_max={} \
                      (large_cut={} live_below_cap={})",
-                    cache_cap, cache_len, new_cap, large_cut, live_below_cap
+                    cache_cap,
+                    cache_len,
+                    new_cap,
+                    large_cut,
+                    live_below_cap
                 );
                 self.cache.shrink_to_fit();
             }
@@ -948,7 +961,9 @@ impl IbdUtxoStore {
                 tracing::info!(
                     "[IBD_UTXO_STORE] shrink_to_fit (inflight cap-driven): \
                      cap={} len={} new_max={}",
-                    inflight_cap, inflight_len, new_cap
+                    inflight_cap,
+                    inflight_len,
+                    new_cap
                 );
                 self.in_flight_insertions.shrink_to_fit();
             }
@@ -965,7 +980,8 @@ impl IbdUtxoStore {
     /// Reduces contention from N atomic fetch_adds (one per UTXO) to 1 per block.
     #[inline]
     fn claim_cache_generations(&self, count: usize) -> u64 {
-        self.cache_generation.fetch_add(count as u64, Ordering::Relaxed)
+        self.cache_generation
+            .fetch_add(count as u64, Ordering::Relaxed)
     }
 
     #[inline]
@@ -1800,10 +1816,16 @@ impl IbdUtxoStore {
         }
         for i in 0..PENDING_SHARDS {
             if !add_buckets[i].is_empty() {
-                self.add_shards[i].lock().expect("add shard lock").append(&mut add_buckets[i]);
+                self.add_shards[i]
+                    .lock()
+                    .expect("add shard lock")
+                    .append(&mut add_buckets[i]);
             }
             if !del_buckets[i].is_empty() {
-                self.del_shards[i].lock().expect("del shard lock").append(&mut del_buckets[i]);
+                self.del_shards[i]
+                    .lock()
+                    .expect("del shard lock")
+                    .append(&mut del_buckets[i]);
             }
         }
         self.pending_log_size.fetch_add(total, Ordering::Relaxed);
@@ -2184,7 +2206,9 @@ impl IbdUtxoStore {
                 })
                 .ok();
         }
-        let remaining = self.pending_log_size.load(std::sync::atomic::Ordering::Relaxed);
+        let remaining = self
+            .pending_log_size
+            .load(std::sync::atomic::Ordering::Relaxed);
         if drained > 0 {
             tracing::debug!(
                 "[DRAIN_ADDS] drained={drained} cap_hit={} remaining_pending={remaining}",
@@ -2626,16 +2650,21 @@ impl IbdUtxoStore {
             // of redundant heap copies per batch, reducing GC pressure and flush latency.
             #[cfg(feature = "heed3")]
             let ops_in_batch = if let Some(heed3_tree) = self.disk.as_heed3_tree() {
-                let iter = chunk.iter().filter_map(|(key, value_opt)| {
-                    match value_opt {
-                        Some((start, len)) => {
-                            if filter == FlushFilter::DelsOnly { return None; }
-                            Some((key.as_slice(), Some(&slab[*start as usize..][..*len as usize])))
+                let iter = chunk.iter().filter_map(|(key, value_opt)| match value_opt {
+                    Some((start, len)) => {
+                        if filter == FlushFilter::DelsOnly {
+                            return None;
                         }
-                        None => {
-                            if filter == FlushFilter::AddsOnly { return None; }
-                            Some((key.as_slice(), None))
+                        Some((
+                            key.as_slice(),
+                            Some(&slab[*start as usize..][..*len as usize]),
+                        ))
+                    }
+                    None => {
+                        if filter == FlushFilter::AddsOnly {
+                            return None;
                         }
+                        Some((key.as_slice(), None))
                     }
                 });
                 heed3_tree.write_slice_batch(iter)?
@@ -2658,7 +2687,9 @@ impl IbdUtxoStore {
                         }
                     }
                 }
-                if n > 0 { b.commit_no_wal()?; }
+                if n > 0 {
+                    b.commit_no_wal()?;
+                }
                 n
             };
             #[cfg(not(feature = "heed3"))]
@@ -2681,7 +2712,9 @@ impl IbdUtxoStore {
                         }
                     }
                 }
-                if n > 0 { b.commit_no_wal()?; }
+                if n > 0 {
+                    b.commit_no_wal()?;
+                }
                 n
             };
             total_flushed += ops_in_batch;
@@ -2719,11 +2752,9 @@ impl IbdUtxoStore {
                     if to_evict == 0 {
                         break;
                     }
-                    if value_opt.is_some() {
-                        if self.cache.remove(key).is_some() {
-                            evicted += 1;
-                            to_evict = to_evict.saturating_sub(1);
-                        }
+                    if value_opt.is_some() && self.cache.remove(key).is_some() {
+                        evicted += 1;
+                        to_evict = to_evict.saturating_sub(1);
                     }
                 }
                 if evicted > 0 {
@@ -2835,7 +2866,9 @@ impl IbdUtxoStore {
         let flush_batch = |batch: &[(OutPointKey, Vec<u8>)]| -> Result<usize> {
             #[cfg(feature = "heed3")]
             if let Some(heed3_tree) = self.disk.as_heed3_tree() {
-                let iter = batch.iter().map(|(k, v)| (k.as_slice(), Some(v.as_slice())));
+                let iter = batch
+                    .iter()
+                    .map(|(k, v)| (k.as_slice(), Some(v.as_slice())));
                 return heed3_tree.write_slice_batch(iter);
             }
             let mut b = self.disk.batch()?;
@@ -2852,7 +2885,10 @@ impl IbdUtxoStore {
                 Ok(bytes) => batch.push((key, bytes)),
                 Err(e) => {
                     encode_errors += 1;
-                    warn!("[IBD_UTXO_STORE] flush_full_cache_to_lmdb: encode error key {:?}: {e}", &key[..4]);
+                    warn!(
+                        "[IBD_UTXO_STORE] flush_full_cache_to_lmdb: encode error key {:?}: {e}",
+                        &key[..4]
+                    );
                 }
             }
             if batch.len() >= MAX_BATCH_OPS {
@@ -2895,8 +2931,14 @@ mod del_backlog_unit_tests {
         unsafe {
             std::env::set_var("BLVM_IBD_DRAIN_CAP", "150000");
         }
-        assert_eq!(IbdUtxoStore::adaptive_drain_cap_for_pending(3_000_000), 150_000);
-        assert_eq!(IbdUtxoStore::adaptive_drain_cap_for_pending(100_000), 100_000);
+        assert_eq!(
+            IbdUtxoStore::adaptive_drain_cap_for_pending(3_000_000),
+            150_000
+        );
+        assert_eq!(
+            IbdUtxoStore::adaptive_drain_cap_for_pending(100_000),
+            100_000
+        );
         unsafe {
             std::env::remove_var("BLVM_IBD_DRAIN_CAP");
         }

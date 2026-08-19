@@ -22,9 +22,7 @@ use crate::network::protocol::{
     BlockMessage, GetDataMessage, InventoryVector, NotFoundMessage, ProtocolMessage,
     ProtocolParser, TxMessage,
 };
-use crate::node::parallel_ibd::local_block::{
-    cached_feature_registry, empty_witness_unacceptable,
-};
+use crate::node::parallel_ibd::local_block::{cached_feature_registry, empty_witness_unacceptable};
 use crate::storage::blockstore::{decode_wire_body_blob, is_wire_body_blob};
 use anyhow::Result;
 use blvm_protocol::ProtocolVersion;
@@ -201,9 +199,9 @@ impl NetworkManager {
                 MSG_BLOCK | MSG_WITNESS_BLOCK
                     if !(maint || self.is_block_serve_denied(&item.hash)) =>
                 {
-                    let join = jobs[send_i]
-                        .take()
-                        .expect("A4: block job must be launched before send");
+                    let join = jobs[send_i].take().ok_or_else(|| {
+                        anyhow::anyhow!("getdata A4: block job missing at inventory index {send_i}")
+                    })?;
                     let res = match join.await {
                         Ok(inner) => inner,
                         Err(e) => Err(anyhow::anyhow!("getdata block join: {e}")),
@@ -457,8 +455,8 @@ mod tests {
             .blocks()
             .store_block_with_witness(&block, &[], height)
             .unwrap();
-        let out = build_block_wire(storage.blocks().as_ref(), &hash, ProtocolVersion::BitcoinV1)
-            .unwrap();
+        let out =
+            build_block_wire(storage.blocks().as_ref(), &hash, ProtocolVersion::BitcoinV1).unwrap();
         assert!(
             out.is_none(),
             "commitment + empty witnesses must notfound (mirror IBD local load)"

@@ -412,10 +412,7 @@ impl OrderedReadyBridge {
     /// Cap burst size (default 64): unbounded flush after tip emit dumped 1500+ blocks into
     /// the feeder (live W56b soft-resume) and spiked anon while validation was still at tip.
     /// N13: batch under one lock and at most one tip Condvar notify per burst.
-    fn flush_contiguous_to_feeder(
-        feeder: &super::feeder::FeederState,
-        g: &mut OrderedReadyInner,
-    ) {
+    fn flush_contiguous_to_feeder(feeder: &super::feeder::FeederState, g: &mut OrderedReadyInner) {
         let Some(mut n) = g.next_expected else {
             return;
         };
@@ -429,8 +426,7 @@ impl OrderedReadyBridge {
         let wait_tip = super::IBD_FEEDER_WAIT_TIP.load(Ordering::Relaxed);
         // N16: estimate outside the feeder lock (same as `insert_ready_into_feeder`).
         // Holding feeder.0 across full witness walks stalled tip take under burst flush.
-        let mut prepared: Vec<(ReadyItem, usize)> = Vec::new();
-        prepared.reserve(max_burst as usize);
+        let mut prepared: Vec<(ReadyItem, usize)> = Vec::with_capacity(max_burst as usize);
         let mut n_scan = n;
         while (prepared.len() as u64) < max_burst {
             let Some(item) = g.pending.remove(&n_scan) else {
@@ -601,9 +597,7 @@ impl OrderedReadyBridge {
             .inner
             .lock()
             .expect("OrderedReadyBridge mutex poisoned");
-        let next_expected_missing = g
-            .next_expected
-            .is_some_and(|n| !g.pending.contains_key(&n));
+        let next_expected_missing = g.next_expected.is_some_and(|n| !g.pending.contains_key(&n));
 
         // W18: always purge pending heights below the delivery floor — they can never flush
         // (flush starts at next_expected). Live W17 soak: bridge_min=640001 while tip≈6859xx
@@ -651,7 +645,10 @@ impl OrderedReadyBridge {
                 // W34c: peel sooner on WAN tip gap — don't wait for 64+ pending slots.
                 32usize.min(pending_max.max(1))
             } else {
-                pending_max.saturating_div(4).max(64).min(pending_max.max(1))
+                pending_max
+                    .saturating_div(4)
+                    .max(64)
+                    .min(pending_max.max(1))
             }
         } else {
             pending_max
@@ -663,7 +660,7 @@ impl OrderedReadyBridge {
                 .unwrap_or(128)
                 .clamp(32, 512)
         } else {
-            window.saturating_div(4).max(16).min(64)
+            window.saturating_div(4).clamp(16, 64)
         };
         let far_ceiling = next_needed.saturating_add(window);
         let ceiling = if next_expected_missing && window >= tight_keep {
@@ -725,7 +722,11 @@ impl OrderedReadyBridge {
                 .saturating_div(2)
                 .max(tight_keep as usize)
                 .min(g.pending.len().saturating_sub(1));
-            let peel = g.pending.len().saturating_sub(target).min(B1B_EVICT_BATCH_MAX);
+            let peel = g
+                .pending
+                .len()
+                .saturating_sub(target)
+                .min(B1B_EVICT_BATCH_MAX);
             let mut keys: Vec<u64> = g
                 .pending
                 .keys()
@@ -1056,6 +1057,7 @@ mod tests {
         )
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ordered_ready_bridge_emits_in_height_order() {
         let (tx, rx) = unbounded();
@@ -1070,6 +1072,7 @@ mod tests {
         assert_eq!(rx.recv().unwrap().0, 12);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn worker_complete_drops_duplicate_below_cursor() {
         let (tx, rx) = unbounded();
@@ -1085,6 +1088,7 @@ mod tests {
         assert!(!bridge.pending_contains(10));
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn rewind_cursor_allows_reemit_of_lost_tip() {
         let (tx, rx) = unbounded();
@@ -1101,6 +1105,7 @@ mod tests {
         assert_eq!(rx.recv().unwrap().0, 11);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ordered_ready_bridge_may_accept_respects_pending_cap() {
         let (tx, _rx) = unbounded();
@@ -1110,7 +1115,10 @@ mod tests {
         bridge.worker_complete(11, dummy_ready(11), 0);
         bridge.worker_complete(12, dummy_ready(12), 0);
         assert_eq!(bridge.pending_len(), 2);
-        assert!(!bridge.may_accept_height(13, 2), "at cap: refuse ahead height");
+        assert!(
+            !bridge.may_accept_height(13, 2),
+            "at cap: refuse ahead height"
+        );
         assert!(
             bridge.may_accept_height(10, 2),
             "at cap: still accept gap height to drain"
@@ -1118,6 +1126,7 @@ mod tests {
         assert!(bridge.may_accept_height(13, 3), "under cap: accept ahead");
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ordered_ready_bridge_try_flush_emits_when_gap_already_pending() {
         let (tx, rx) = unbounded();
@@ -1138,6 +1147,7 @@ mod tests {
         assert_eq!(bridge.next_expected(), Some(12));
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn try_emit_direct_to_feeder_even_when_pending_has_ahead() {
         // W26: tip must not take the ready-channel hop just because ahead blocks are pending.
@@ -1170,6 +1180,7 @@ mod tests {
         assert_eq!(bridge.next_expected(), Some(13));
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn try_emit_skips_reemit_when_tip_already_taken() {
         // W40: vh atomic lags retire; tip_stage advances on feeder take — no REEMIT storm.
@@ -1205,6 +1216,7 @@ mod tests {
         assert_eq!(bridge.next_expected(), Some(11));
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn fast_forward_cursor_when_validation_ahead() {
         // W26b: bridge behind validation — advance cursor and drop obsolete pending.
@@ -1225,6 +1237,7 @@ mod tests {
         let _ = rx.try_recv(); // 66 may already have been flushed
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn repair_missing_cursor_hole_flushes_stranded_tip() {
         // Live 698202: bridge_next=698199 missing, tip 698202 in pending.
@@ -1244,6 +1257,7 @@ mod tests {
         assert!(!bridge.pending_contains(200), "below-tip pending dropped");
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn repair_missing_cursor_hole_skips_when_tip_not_pending() {
         // Local-replay race: hole at cursor but tip not yet in pending — do not FF.
@@ -1262,6 +1276,7 @@ mod tests {
         assert!(bridge.pending_contains(200));
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn flush_try_send_full_channel_leaves_pending_and_returns() {
         let (tx, rx) = crossbeam_channel::bounded(1);
@@ -1283,6 +1298,7 @@ mod tests {
         assert_eq!(bridge.next_expected(), Some(12));
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ordered_ready_bridge_evicts_far_ahead_when_gap_missing() {
         let (tx, _rx) = unbounded();
@@ -1301,6 +1317,7 @@ mod tests {
         assert_eq!(bridge.pending_len(), 1);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ordered_ready_bridge_evicts_when_next_expected_missing_from_pending() {
         let (tx, _rx) = unbounded();
@@ -1333,6 +1350,7 @@ mod tests {
         assert_eq!(bridge2.evict_far_ahead_pending(23, 1, false, 3), 0);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ordered_ready_bridge_b1_evicts_under_cap_when_next_expected_missing() {
         // Live soak: bridge_pending=64–450, never hit 512 — old gate never fired.
@@ -1357,6 +1375,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ordered_ready_bridge_b1b_peel_disabled_by_default() {
         // L2: inside-window peel is opt-in. Far-ceiling (tight keep) still runs for heights
@@ -1379,6 +1398,7 @@ mod tests {
         assert_eq!(bridge.pending_len(), 64);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ordered_ready_bridge_no_evict_when_under_cap() {
         let (tx, _rx) = unbounded();
@@ -1392,8 +1412,12 @@ mod tests {
         );
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ordered_ready_bridge_w17_wan_default_preserves_tip_pipe() {
+        let _guard = crate::ibd_test_lock::guard();
+        // SAFETY: test-only; peel opt-in must not leak from parallel env tests.
+        unsafe { std::env::remove_var("BLVM_IBD_WAN_B1B_PEEL") };
         // 2026-07-14: default WAN peel/tight_keep=16 wiped pending→0 every tip tick.
         // Near-ahead inside next+128 must be kept while tip is missing.
         let (tx, _rx) = unbounded();
@@ -1411,6 +1435,7 @@ mod tests {
         assert_eq!(bridge.pending_len(), 64);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ordered_ready_bridge_w17_wan_peel_opt_in() {
         // Opt-in peel still available for experiments.
@@ -1431,6 +1456,7 @@ mod tests {
         assert!(bridge.pending_len() < 64);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ordered_ready_bridge_w18_purges_stale_below_floor() {
         // Live W17: bridge_min=640001 while tip=6859xx — dead pending never flushed.
@@ -1448,11 +1474,15 @@ mod tests {
         assert_eq!(bridge.pending_len(), 3);
         // Tip healthy — still purge stale below floor.
         let evicted = bridge.evict_far_ahead_pending_ex(200, 256, false, 512, true);
-        assert!(evicted >= 2, "must purge h=50,51 below floor=200 (evicted={evicted})");
+        assert!(
+            evicted >= 2,
+            "must purge h=50,51 below floor=200 (evicted={evicted})"
+        );
         assert!(!bridge.pending_contains(50));
         assert!(!bridge.pending_contains(51));
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ordered_ready_bridge_w19_under_min_only_evicts_beyond_far_ceiling() {
         // 2026-07-14: under-min + tight_keep=16 deleted tip-pipe (h=120..139 with tip=100).
@@ -1466,7 +1496,10 @@ mod tests {
         }
         assert_eq!(bridge.pending_len(), 20);
         let kept = bridge.evict_far_ahead_pending_ex(100, 256, false, 512, true);
-        assert_eq!(kept, 0, "must not wipe tip-pipe under min_pending (evicted={kept})");
+        assert_eq!(
+            kept, 0,
+            "must not wipe tip-pipe under min_pending (evicted={kept})"
+        );
         assert_eq!(bridge.pending_len(), 20);
 
         // Beyond far_ceiling=356 — may evict even under min.
@@ -1484,6 +1517,7 @@ mod tests {
         assert!(bridge2.pending_len() < 20);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ordered_ready_bridge_wan_no_pending_zero_thrash() {
         // Live signature: one ahead ReadyItem arrives, eviction leaves pending=0.

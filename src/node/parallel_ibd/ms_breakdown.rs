@@ -35,14 +35,13 @@ pub(crate) enum WallState {
 
 fn enabled() -> bool {
     super::latch_env!(bool, {
-        match std::env::var("BLVM_IBD_MS_BREAKDOWN")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-        {
-            Some("1") | Some("true") | Some("on") | Some("yes") => true,
-            _ => false,
-        }
+        matches!(
+            std::env::var("BLVM_IBD_MS_BREAKDOWN")
+                .ok()
+                .as_deref()
+                .map(str::trim),
+            Some("1") | Some("true") | Some("on") | Some("yes")
+        )
     })
 }
 
@@ -123,7 +122,9 @@ impl Buckets {
             return;
         }
         match binder {
-            "SUPPLY_TIP_HOLE" => self.binder_tip_hole_ms = self.binder_tip_hole_ms.saturating_add(ms),
+            "SUPPLY_TIP_HOLE" => {
+                self.binder_tip_hole_ms = self.binder_tip_hole_ms.saturating_add(ms)
+            }
             "SUPPLY_GD_SLOW" => self.binder_gd_slow_ms = self.binder_gd_slow_ms.saturating_add(ms),
             "SUPPLY_EMPTY_TIP" => {
                 self.binder_empty_tip_ms = self.binder_empty_tip_ms.saturating_add(ms)
@@ -134,7 +135,9 @@ impl Buckets {
             "SUPPLY_THIN_RUNWAY" => {
                 self.binder_thin_runway_ms = self.binder_thin_runway_ms.saturating_add(ms)
             }
-            "SUPPLY_FAILOVER" => self.binder_failover_ms = self.binder_failover_ms.saturating_add(ms),
+            "SUPPLY_FAILOVER" => {
+                self.binder_failover_ms = self.binder_failover_ms.saturating_add(ms)
+            }
             "ENGINE_PRESSURE" => {
                 self.binder_pressure_ms = self.binder_pressure_ms.saturating_add(ms)
             }
@@ -149,15 +152,15 @@ impl Buckets {
             engine_append_wall_ms: self
                 .engine_append_wall_ms
                 .saturating_sub(prev.engine_append_wall_ms),
-            collect_wait_ms: self
-                .collect_wait_ms
-                .saturating_sub(prev.collect_wait_ms),
+            collect_wait_ms: self.collect_wait_ms.saturating_sub(prev.collect_wait_ms),
             drain_ms: self.drain_ms.saturating_sub(prev.drain_ms),
             other_ms: self.other_ms.saturating_sub(prev.other_ms),
             binder_tip_hole_ms: self
                 .binder_tip_hole_ms
                 .saturating_sub(prev.binder_tip_hole_ms),
-            binder_gd_slow_ms: self.binder_gd_slow_ms.saturating_sub(prev.binder_gd_slow_ms),
+            binder_gd_slow_ms: self
+                .binder_gd_slow_ms
+                .saturating_sub(prev.binder_gd_slow_ms),
             binder_empty_tip_ms: self
                 .binder_empty_tip_ms
                 .saturating_sub(prev.binder_empty_tip_ms),
@@ -302,12 +305,16 @@ pub(crate) fn note_tip_stage(
             s.cum.tip_gd_body_ms = s.cum.tip_gd_body_ms.saturating_add(gd_body_ms as u64);
         }
         if body_feeder_ms >= 0 {
-            s.cum.tip_body_feeder_ms =
-                s.cum.tip_body_feeder_ms.saturating_add(body_feeder_ms as u64);
+            s.cum.tip_body_feeder_ms = s
+                .cum
+                .tip_body_feeder_ms
+                .saturating_add(body_feeder_ms as u64);
         }
         if feeder_done_ms >= 0 {
-            s.cum.tip_feeder_done_ms =
-                s.cum.tip_feeder_done_ms.saturating_add(feeder_done_ms as u64);
+            s.cum.tip_feeder_done_ms = s
+                .cum
+                .tip_feeder_done_ms
+                .saturating_add(feeder_done_ms as u64);
         }
     }
 }
@@ -349,9 +356,7 @@ fn pct(part: u64, whole: u64) -> f64 {
 
 fn emit_line(tag: &str, w: &Buckets, h: u64) {
     let wall = w.wall_total().max(1);
-    let tip_supply = w
-        .tip_need_body_ms
-        .max(w.tip_gd_body_ms); // need→body is the true tip wait; gd is subset-ish
+    let tip_supply = w.tip_need_body_ms.max(w.tip_gd_body_ms); // need→body is the true tip wait; gd is subset-ish
     info!(
         "[IBD_MS_BREAKDOWN] {} h={} window_ms={} | wall_wait_feeder={}ms({:.1}%) dispatch={}ms({:.1}%) eng_append_wall={}ms({:.1}%) collect_wait={}ms({:.1}%) drain={}ms({:.1}%) other={}ms({:.1}%) | wait_binder tip_hole={}ms gd_slow={}ms empty_tip={}ms starve={}ms thin={}ms failover={}ms engine={}ms pressure={}ms | tip_n={} tip_need_body_sum={}ms tip_gd_body_sum={}ms tip_body_feeder_sum={}ms tip_feeder_done_sum={}ms tip_need_body_avg={:.1} | eng_n={} eng_append_sum={}ms eng_view_sum={}ms eng_validate_sum={}ms eng_validate_avg={:.1} collect_ready_n={} collect_block_n={} | tip_supply_vs_wall={:.1}%",
         tag,

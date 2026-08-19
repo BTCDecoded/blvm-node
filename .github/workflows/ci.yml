@@ -855,6 +855,7 @@ jobs:
         working-directory: fuzz
         env:
           RUSTFLAGS: ''
+          BLVM_SECP256K1_NO_GPU: "1"
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo +nightly fuzz build

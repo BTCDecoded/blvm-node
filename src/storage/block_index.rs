@@ -80,7 +80,7 @@ impl BlockIndex {
     ///   only validated, accepted blocks reach this path
     pub fn insert_ibd_batch(
         &self,
-        entries: &[(&Hash, u64, &Hash)],  // (hash, height, prev_hash); status always Valid
+        entries: &[(&Hash, u64, &Hash)], // (hash, height, prev_hash); status always Valid
     ) -> Result<()> {
         if entries.is_empty() {
             return Ok(());

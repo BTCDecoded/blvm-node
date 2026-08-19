@@ -166,7 +166,27 @@ pub fn try_activate_heavier_fork(
         return Ok(false);
     }
 
-    let new_witnesses = witnesses_for_chain(blockstore, storage, &new_chain, protocol)?;
+    let mut new_chain = new_chain;
+    let mut new_witnesses = witnesses_for_chain(blockstore, storage, &new_chain, protocol)?;
+    for (block, witnesses) in new_chain.iter_mut().zip(new_witnesses.iter_mut()) {
+        let hash = blockstore.get_block_hash(block);
+        let height = storage
+            .chain()
+            .block_index()
+            .get(&hash)
+            .ok()
+            .flatten()
+            .map(|e| e.height)
+            .unwrap_or(0);
+        let (restored, w) = crate::module::pipeline::try_rehydrate_block_for_consensus(
+            height,
+            hash,
+            block.clone(),
+            std::mem::take(witnesses),
+        );
+        *block = restored;
+        *witnesses = w;
+    }
     let network = protocol_network(protocol);
     let utxo_backup = utxo_set.clone();
     let owned_utxo = std::mem::take(utxo_set);
@@ -179,17 +199,18 @@ pub fn try_activate_heavier_fork(
         })
     };
 
-    let mut connect_context = move |_height: u64,
-                                    recent_headers: Option<&[blvm_consensus::types::BlockHeader]>,
-                                    network_time: u64,
-                                    net: Network|
-          -> blvm_consensus::block::BlockValidationContext {
-        blvm_consensus::block::block_validation_context_for_connect_ibd(
-            recent_headers,
-            network_time,
-            net,
-        )
-    };
+    let mut connect_context =
+        move |_height: u64,
+              recent_headers: Option<&[blvm_consensus::types::BlockHeader]>,
+              network_time: u64,
+              net: Network|
+              -> blvm_consensus::block::BlockValidationContext {
+            blvm_consensus::block::block_validation_context_for_connect_ibd(
+                recent_headers,
+                network_time,
+                net,
+            )
+        };
 
     let result = reorganize_chain_with_witnesses(
         &new_chain,

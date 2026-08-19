@@ -3,13 +3,13 @@
 //! Use to wipe a poisoned/incomplete slot before `fill_empty_ckpt_slot`.
 //!
 //! ```bash
-//! cargo run --example clear_ckpt_slot --profile release-fast --features production,heed3 -- \
+//! cargo run --example clear_ckpt_slot --profile release-fast --features production,heed3,ibd-dev -- \
 //!   $DATADIR/blvm-hotpath-400k 1
 //! ```
 
-use anyhow::{bail, Context};
-use blvm_node::storage::ibd_engine::ckpt_tree_for_slot;
+use anyhow::{Context, bail};
 use blvm_node::storage::Storage;
+use blvm_node::storage::ibd_engine::ckpt_tree_for_slot;
 use std::path::PathBuf;
 
 fn main() -> anyhow::Result<()> {

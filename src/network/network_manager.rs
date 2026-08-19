@@ -1189,6 +1189,51 @@ impl NetworkManager {
         rx
     }
 
+    /// Ask a connected peer for one full block via existing GetData (not persisted).
+    pub async fn request_block(
+        &self,
+        block_hash: blvm_protocol::Hash,
+    ) -> Option<(
+        blvm_protocol::Block,
+        Vec<Vec<blvm_protocol::segwit::Witness>>,
+    )> {
+        use crate::network::inventory::MSG_WITNESS_BLOCK;
+        use crate::network::protocol::{GetDataMessage, InventoryVector, ProtocolMessage};
+
+        const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+        let peers = self.peer_addresses();
+        for peer_addr in peers {
+            if !self.is_peer_connected(peer_addr).await {
+                continue;
+            }
+            let block_rx = self.register_block_request(peer_addr, block_hash);
+            let inventory = vec![InventoryVector {
+                inv_type: MSG_WITNESS_BLOCK,
+                hash: block_hash,
+            }];
+            let wire_msg =
+                match ProtocolParser::serialize_message(&ProtocolMessage::GetData(GetDataMessage {
+                    inventory,
+                })) {
+                    Ok(msg) => msg,
+                    Err(_) => {
+                        self.cancel_block_request(peer_addr, block_hash);
+                        continue;
+                    }
+                };
+            if self.send_to_peer(peer_addr, wire_msg).await.is_err() {
+                self.cancel_block_request(peer_addr, block_hash);
+                continue;
+            }
+            match tokio::time::timeout(FETCH_TIMEOUT, block_rx).await {
+                Ok(Ok((block, witnesses, _wire))) => return Some((block, witnesses)),
+                _ => self.cancel_block_request(peer_addr, block_hash),
+            }
+        }
+        None
+    }
+
     /// Register multiple block download requests in a single mutex acquisition.
     ///
     /// Equivalent to calling [`register_block_request`] N times but acquires
@@ -1890,7 +1935,6 @@ impl NetworkManager {
         }
         Ok(())
     }
-
 
     pub async fn ping_all_peers(&self) -> Result<()> {
         use crate::network::protocol::{PingMessage, ProtocolMessage, ProtocolParser};

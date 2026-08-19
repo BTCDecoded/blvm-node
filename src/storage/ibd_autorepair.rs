@@ -205,12 +205,10 @@ pub(crate) fn reconcile_ibd_utxo_watermark_with_disk(
         let utxo_store_dir = root.join(crate::storage::database::IBD_UTXO_STORE_SUBDIR);
         if utxo_store_dir.exists() {
             match crate::storage::database::create_ibd_utxo_standalone_db(&utxo_store_dir) {
-                Ok(db) => {
-                    match db.open_tree("ibd_utxos") {
-                        Ok(t) => t.is_empty().unwrap_or(true) == false,
-                        Err(_) => false,
-                    }
-                }
+                Ok(db) => match db.open_tree("ibd_utxos") {
+                    Ok(t) => !t.is_empty().unwrap_or(true),
+                    Err(_) => false,
+                },
                 Err(_) => false,
             }
         } else {
@@ -357,8 +355,8 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
         // while metadata still claims a full count — live 2026-07-14: rolled to slot 0 at
         // h=418818 with tree len 54.5M while chain_info expected 97M → infinite UTXO-miss).
         // Detect poison from metadata *or* actual tree size.
-        let meta_poisoned = export_height > 0
-            && !checkpoint_utxo_count_plausible(export_height, export_utxo_count);
+        let meta_poisoned =
+            export_height > 0 && !checkpoint_utxo_count_plausible(export_height, export_utxo_count);
         let tree_poisoned = export_height > 0
             && (!checkpoint_utxo_count_plausible(export_height, active_tree_len)
                 || (export_utxo_count > 0 && active_tree_len != export_utxo_count));
@@ -408,9 +406,7 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
                 storage
                     .chain()
                     .force_set_engine_export_utxo_count(good_len)?;
-                storage
-                    .chain()
-                    .force_set_ibd_utxo_watermark(good_height)?;
+                storage.chain().force_set_ibd_utxo_watermark(good_height)?;
                 if let Some(root) = storage.data_dir() {
                     let engine_dir = root.join("ibd_engine");
                     let _ = std::fs::remove_dir_all(&engine_dir);
@@ -429,12 +425,9 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
             for tree_name in &["ibd_utxos_ckpt_a", "ibd_utxos_ckpt_b"] {
                 if let Ok(tree) = storage.open_tree(tree_name) {
                     if let Err(e) = tree.clear() {
-                        warn!(
-                            "[ibd_autorepair] genesis reset: failed to clear {tree_name}: {e}"
-                        );
-                        return Err(e).context(format!(
-                            "IBD UTXO autorepair: failed to clear {tree_name}"
-                        ));
+                        warn!("[ibd_autorepair] genesis reset: failed to clear {tree_name}: {e}");
+                        return Err(e)
+                            .context(format!("IBD UTXO autorepair: failed to clear {tree_name}"));
                     }
                 }
             }
@@ -509,9 +502,7 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
             rolled_back.saturating_add(1)
         );
     } else {
-        info!(
-            "IBD UTXO autorepair (soft): watermark already 0; preserving ibd_utxos"
-        );
+        info!("IBD UTXO autorepair (soft): watermark already 0; preserving ibd_utxos");
     }
     clear_ibd_utxo_repair_flag(data_dir)?;
     warn!(
@@ -537,7 +528,10 @@ mod ibd_autorepair_tests {
         let data_dir = dir.path();
         let storage = Storage::new(data_dir).unwrap();
 
-        storage.chain().force_set_ibd_utxo_watermark(680_811).unwrap();
+        storage
+            .chain()
+            .force_set_ibd_utxo_watermark(680_811)
+            .unwrap();
         let tree = storage.open_tree("ibd_utxos").unwrap();
         tree.insert(b"tkey", b"tval").unwrap();
         storage.flush().unwrap();
@@ -585,8 +579,8 @@ mod ibd_autorepair_tests {
     /// Lock around autorepair-related env vars so parallel tests do not leak.
     struct AutorepairEnvGuard;
     impl AutorepairEnvGuard {
-        fn cleared() -> std::sync::MutexGuard<'static, ()> {
-            let g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        fn cleared() -> crate::ibd_test_lock::Guard {
+            let g = crate::ibd_test_lock::guard();
             unsafe {
                 std::env::remove_var("BLVM_IBD_AGGRESSIVE_REPAIR");
                 std::env::remove_var("BLVM_IBD_DEFER_CHECKPOINT_INTERVAL");
@@ -601,7 +595,7 @@ mod ibd_autorepair_tests {
     /// into the other.
     struct AggressiveRepairEnvGuard;
     impl AggressiveRepairEnvGuard {
-        fn set() -> std::sync::MutexGuard<'static, ()> {
+        fn set() -> crate::ibd_test_lock::Guard {
             let g = AutorepairEnvGuard::cleared();
             unsafe {
                 std::env::set_var("BLVM_IBD_AGGRESSIVE_REPAIR", "1");
@@ -609,11 +603,10 @@ mod ibd_autorepair_tests {
             }
             g
         }
-        fn cleared() -> std::sync::MutexGuard<'static, ()> {
+        fn cleared() -> crate::ibd_test_lock::Guard {
             AutorepairEnvGuard::cleared()
         }
     }
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn apply_autorepair_no_op_when_marker_missing_preserves_watermark() {
@@ -649,8 +642,7 @@ mod ibd_autorepair_tests {
         let storage = Storage::new(data_dir).unwrap();
         storage.chain().force_set_ibd_utxo_watermark(0).unwrap();
 
-        let utxo_store_dir =
-            data_dir.join(crate::storage::database::IBD_UTXO_STORE_SUBDIR);
+        let utxo_store_dir = data_dir.join(crate::storage::database::IBD_UTXO_STORE_SUBDIR);
         std::fs::create_dir_all(&utxo_store_dir).unwrap();
         std::fs::write(utxo_store_dir.join("marker"), b"stale").unwrap();
 
@@ -666,7 +658,7 @@ mod ibd_autorepair_tests {
 
     #[test]
     fn apply_autorepair_soft_engine_rolls_back_to_prev_slot_when_available() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::ibd_test_lock::guard();
         unsafe {
             std::env::remove_var("BLVM_IBD_AGGRESSIVE_REPAIR");
             std::env::remove_var("BLVM_IBD_DEFER_CHECKPOINT_INTERVAL");
@@ -687,7 +679,10 @@ mod ibd_autorepair_tests {
             .chain()
             .set_engine_ckpt_slot_height(1, 40_000)
             .unwrap();
-        storage.chain().force_set_ibd_utxo_watermark(48_702).unwrap();
+        storage
+            .chain()
+            .force_set_ibd_utxo_watermark(48_702)
+            .unwrap();
         storage
             .chain()
             .force_set_engine_export_height(48_702)
@@ -715,10 +710,7 @@ mod ibd_autorepair_tests {
             storage.chain().get_engine_export_height().unwrap(),
             Some(40_000)
         );
-        assert_eq!(
-            storage.chain().get_utxo_watermark().unwrap(),
-            Some(40_000)
-        );
+        assert_eq!(storage.chain().get_utxo_watermark().unwrap(), Some(40_000));
         assert_eq!(
             storage.chain().get_engine_export_utxo_count().unwrap(),
             Some(8_000),
@@ -737,12 +729,11 @@ mod ibd_autorepair_tests {
     fn apply_autorepair_soft_engine_keeps_healthy_active_slot() {
         // Live 2026-07-14 bug: soft repair preferred prev slot even when active looked fine,
         // abandoning a good 426k snapshot for an incomplete 418k tree.
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::ibd_test_lock::guard();
         unsafe {
             std::env::remove_var("BLVM_IBD_AGGRESSIVE_REPAIR");
             std::env::remove_var("BLVM_IBD_DEFER_CHECKPOINT_INTERVAL");
             std::env::set_var("BLVM_IBD_ENGINE", "1");
-            std::env::set_var("BLVM_IBD_ENGINE_CHECKPOINT_INTERVAL", "200");
         }
         let dir = TempDir::new().unwrap();
         let data_dir = dir.path();
@@ -757,7 +748,10 @@ mod ibd_autorepair_tests {
             .chain()
             .set_engine_ckpt_slot_height(0, 40_000)
             .unwrap();
-        storage.chain().force_set_ibd_utxo_watermark(42_000).unwrap();
+        storage
+            .chain()
+            .force_set_ibd_utxo_watermark(42_000)
+            .unwrap();
         storage
             .chain()
             .force_set_engine_export_height(42_000)
@@ -797,18 +791,16 @@ mod ibd_autorepair_tests {
         );
         unsafe {
             std::env::remove_var("BLVM_IBD_ENGINE");
-            std::env::remove_var("BLVM_IBD_ENGINE_CHECKPOINT_INTERVAL");
         }
     }
 
     #[test]
     fn apply_autorepair_soft_engine_raises_watermark_up_to_export() {
         // Live 2026-07-15: wm already below export (prior interval rollback) must clamp UP.
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::ibd_test_lock::guard();
         unsafe {
             std::env::remove_var("BLVM_IBD_AGGRESSIVE_REPAIR");
             std::env::set_var("BLVM_IBD_ENGINE", "1");
-            std::env::set_var("BLVM_IBD_ENGINE_CHECKPOINT_INTERVAL", "750");
         }
         let dir = TempDir::new().unwrap();
         let data_dir = dir.path();
@@ -819,7 +811,10 @@ mod ibd_autorepair_tests {
             .chain()
             .set_engine_ckpt_slot_height(1, 42_000)
             .unwrap();
-        storage.chain().force_set_ibd_utxo_watermark(41_250).unwrap();
+        storage
+            .chain()
+            .force_set_ibd_utxo_watermark(41_250)
+            .unwrap();
         storage
             .chain()
             .force_set_engine_export_height(42_000)
@@ -847,13 +842,12 @@ mod ibd_autorepair_tests {
         );
         unsafe {
             std::env::remove_var("BLVM_IBD_ENGINE");
-            std::env::remove_var("BLVM_IBD_ENGINE_CHECKPOINT_INTERVAL");
         }
     }
 
     #[test]
     fn apply_autorepair_soft_engine_wipes_when_utxo_count_implausible() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::ibd_test_lock::guard();
         unsafe {
             std::env::remove_var("BLVM_IBD_AGGRESSIVE_REPAIR");
             std::env::set_var("BLVM_IBD_ENGINE", "1");
@@ -871,7 +865,10 @@ mod ibd_autorepair_tests {
             .chain()
             .set_engine_ckpt_slot_height(1, 40_000)
             .unwrap();
-        storage.chain().force_set_ibd_utxo_watermark(48_702).unwrap();
+        storage
+            .chain()
+            .force_set_ibd_utxo_watermark(48_702)
+            .unwrap();
         storage
             .chain()
             .force_set_engine_export_height(48_702)
@@ -892,10 +889,7 @@ mod ibd_autorepair_tests {
 
         assert!(!ibd_utxo_repair_flag_present(data_dir));
         assert_eq!(storage.chain().get_utxo_watermark().unwrap(), Some(0));
-        assert_eq!(
-            storage.chain().get_engine_export_height().unwrap(),
-            Some(0)
-        );
+        assert_eq!(storage.chain().get_engine_export_height().unwrap(), Some(0));
         assert!(ckpt_a.is_empty().unwrap());
         assert!(ckpt_b.is_empty().unwrap());
         unsafe {
@@ -913,7 +907,7 @@ mod ibd_autorepair_tests {
 
     #[test]
     fn apply_autorepair_soft_engine_wipes_poisoned_ckpt_when_no_prev_slot() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::ibd_test_lock::guard();
         unsafe {
             std::env::remove_var("BLVM_IBD_AGGRESSIVE_REPAIR");
             std::env::remove_var("BLVM_IBD_DEFER_CHECKPOINT_INTERVAL");
@@ -923,7 +917,10 @@ mod ibd_autorepair_tests {
         let data_dir = dir.path();
         let storage = Storage::new(data_dir).unwrap();
 
-        storage.chain().force_set_ibd_utxo_watermark(48_702).unwrap();
+        storage
+            .chain()
+            .force_set_ibd_utxo_watermark(48_702)
+            .unwrap();
         storage
             .chain()
             .force_set_engine_export_height(48_702)
@@ -941,10 +938,7 @@ mod ibd_autorepair_tests {
 
         assert!(!ibd_utxo_repair_flag_present(data_dir));
         assert_eq!(storage.chain().get_utxo_watermark().unwrap(), Some(0));
-        assert_eq!(
-            storage.chain().get_engine_export_height().unwrap(),
-            Some(0)
-        );
+        assert_eq!(storage.chain().get_engine_export_height().unwrap(), Some(0));
         assert!(
             ckpt.is_empty().unwrap(),
             "soft engine repair with no prior slot must wipe poisoned ckpt trees"

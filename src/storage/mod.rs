@@ -980,16 +980,19 @@ impl Storage {
             Err(e) => warn!("prepare phase3 promote: open {inactive_name} failed: {e:#}"),
         }
         // Clear legacy production tree only when canonical is not pointing at it — reclaim space.
-        let canonical = self.chain().get_ibd_utxo_canonical_tree().unwrap_or_else(|_| {
-            crate::storage::ibd_engine::IBD_UTXOS_TREE.to_string()
-        });
+        let canonical = self
+            .chain()
+            .get_ibd_utxo_canonical_tree()
+            .unwrap_or_else(|_| crate::storage::ibd_engine::IBD_UTXOS_TREE.to_string());
         if canonical == crate::storage::ibd_engine::IBD_UTXOS_TREE {
             // Still using ibd_utxos as canonical — leave it; catchup/full path will clear+rewrite.
         } else if let Ok(tree) = self.open_tree(crate::storage::ibd_engine::IBD_UTXOS_TREE) {
             if let Err(e) = tree.clear() {
                 warn!("prepare phase3 promote: clear ibd_utxos failed: {e:#}");
             } else {
-                info!("[HEED3] cleared unused ibd_utxos before Phase 3 promote (canonical={canonical})");
+                info!(
+                    "[HEED3] cleared unused ibd_utxos before Phase 3 promote (canonical={canonical})"
+                );
             }
         }
         if let Err(e) = self.flush() {
@@ -1027,9 +1030,7 @@ impl Storage {
                     if let Err(e) = tree.clear() {
                         warn!("prepare tip export: clear {name} failed: {e:#}");
                     } else {
-                        info!(
-                            "[HEED3] cleared {name} before tip UTXO export (reclaim freelist)"
-                        );
+                        info!("[HEED3] cleared {name} before tip UTXO export (reclaim freelist)");
                     }
                 }
                 Err(e) => warn!("prepare tip export: open {name} failed: {e:#}"),

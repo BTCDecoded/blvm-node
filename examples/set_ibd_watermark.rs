@@ -1,7 +1,7 @@
 //! Set IBD UTXO watermark (rollback after unclean shutdown).
 //!
 //! ```bash
-//! cargo run --example set_ibd_watermark --features production,heed3 -- \
+//! cargo run --example set_ibd_watermark --features production,heed3,ibd-dev -- \
 //!   /mnt/data/blvm-mainnet-ibd 601289
 //! ```
 

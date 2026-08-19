@@ -86,7 +86,7 @@ pub fn backfill_engine_export_muhash_if_missing(storage: &Storage) -> Result<boo
         let utxo: UTXO = decode_utxo_with_codec(codec, &val_bytes)?;
         mh.insert_mut(&utxo_muhash_preimage(&op, &utxo));
         count += 1;
-        if count.is_multiple_of(5_000_000) {
+        if count % 5_000_000 == 0 {
             tracing::info!(
                 "IBD engine MuHash backfill: scanned {} UTXOs from {} ({:.1}s)",
                 count,
@@ -148,8 +148,8 @@ pub(crate) fn fold_block_engine_muhash(
     session: &crate::storage::ibd_engine::SpendSession,
     acc: &mut MuHash3072,
 ) {
-    use blvm_protocol::transaction::is_coinbase;
     use crate::storage::ibd_engine::types::outpoint_to_output_key;
+    use blvm_protocol::transaction::is_coinbase;
 
     for (ti, tx) in block.transactions.iter().enumerate() {
         if ti >= tx_ids.len() {
@@ -202,41 +202,42 @@ pub(crate) fn verify_ibd_utxo_muhash_startup(storage: &Storage) -> Result<()> {
     // Open the IBD UTXO tree from the standalone LMDB when it exists, otherwise fall back to
     // the main storage canonical tree (may be a ckpt after Phase 3 promote).
     let _standalone_db: Option<Box<dyn crate::storage::database::Database>>;
-    let tree: std::sync::Arc<dyn crate::storage::database::Tree> =
-        if let Some(root) = storage.data_dir() {
-            let utxo_store_dir = root.join(crate::storage::database::IBD_UTXO_STORE_SUBDIR);
-            if utxo_store_dir.exists() {
-                match crate::storage::database::create_ibd_utxo_standalone_db(&utxo_store_dir) {
-                    Ok(db) => match db.open_tree("ibd_utxos") {
-                        Ok(t) => {
-                            _standalone_db = Some(db);
-                            std::sync::Arc::from(t)
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "MuHash verify: standalone ibd_utxo open_tree failed ({e}); \
-                                 using main storage canonical"
-                            );
-                            _standalone_db = None;
-                            storage.open_ibd_utxo_tree()?
-                        }
-                    },
+    let tree: std::sync::Arc<dyn crate::storage::database::Tree> = if let Some(root) =
+        storage.data_dir()
+    {
+        let utxo_store_dir = root.join(crate::storage::database::IBD_UTXO_STORE_SUBDIR);
+        if utxo_store_dir.exists() {
+            match crate::storage::database::create_ibd_utxo_standalone_db(&utxo_store_dir) {
+                Ok(db) => match db.open_tree("ibd_utxos") {
+                    Ok(t) => {
+                        _standalone_db = Some(db);
+                        std::sync::Arc::from(t)
+                    }
                     Err(e) => {
                         tracing::warn!(
-                            "MuHash verify: standalone LMDB open failed ({e}); using main storage canonical"
+                            "MuHash verify: standalone ibd_utxo open_tree failed ({e}); \
+                                 using main storage canonical"
                         );
                         _standalone_db = None;
                         storage.open_ibd_utxo_tree()?
                     }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        "MuHash verify: standalone LMDB open failed ({e}); using main storage canonical"
+                    );
+                    _standalone_db = None;
+                    storage.open_ibd_utxo_tree()?
                 }
-            } else {
-                _standalone_db = None;
-                storage.open_ibd_utxo_tree()?
             }
         } else {
             _standalone_db = None;
             storage.open_ibd_utxo_tree()?
-        };
+        }
+    } else {
+        _standalone_db = None;
+        storage.open_ibd_utxo_tree()?
+    };
     let mut scan = MuHash3072::new();
 
     // heed3 fast path: scan_heed3 streams (k, v) slices from mmap'd LMDB pages —

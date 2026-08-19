@@ -10,7 +10,7 @@
 //! `batch_lookup` uses rayon only when `keys.len() >= RAYON_BATCH_THRESHOLD`. Below that,
 //! pool steal/pin overhead dominated early-height IBD (~300 BPS); sequential is faster.
 
-use super::types::{OutputKey, OUTPUT_ID_DELETED, OutputId, OutputKV};
+use super::types::{OUTPUT_ID_DELETED, OutputId, OutputKV, OutputKey};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicUsize, Ordering};
 
@@ -28,14 +28,13 @@ pub(super) const RAYON_SORT_THRESHOLD: usize = 128;
 
 /// Default on. `BLVM_IBD_QUERY_RAYON=0` forces serial `batch_lookup` (findings bisect).
 fn query_rayon_enabled() -> bool {
-    match std::env::var("BLVM_IBD_QUERY_RAYON")
-        .ok()
-        .as_deref()
-        .map(str::trim)
-    {
-        Some("0") | Some("false") | Some("no") | Some("off") => false,
-        _ => true,
-    }
+    !matches!(
+        std::env::var("BLVM_IBD_QUERY_RAYON")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("0") | Some("false") | Some("no") | Some("off")
+    )
 }
 
 /// Sort output keys for batch_query; parallel only when the slice is large enough.
@@ -598,13 +597,7 @@ impl MemoryRun {
     ///
     /// N22 `remaining` counter REVERT on synth dens (S10 floor ~189 vs champ 197.9) —
     /// callers early-exit with short-circuit `any(MAX)` instead.
-    pub fn batch_lookup(
-        &self,
-        keys: &[[u8; 36]],
-        ids: &mut [OutputId],
-        since: i32,
-        before: i32,
-    ) {
+    pub fn batch_lookup(&self, keys: &[[u8; 36]], ids: &mut [OutputId], since: i32, before: i32) {
         debug_assert_eq!(keys.len(), ids.len());
         let lookup_one = |key: &[u8; 36], id: &mut OutputId| {
             if *id == OutputId::MAX {
@@ -849,6 +842,7 @@ mod tests {
         k
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_advance_gc_fence_monotonic() {
         set_gc_fence(260_000);
@@ -858,8 +852,10 @@ mod tests {
         assert_eq!(gc_fence_snapshot(), 270_000);
         advance_gc_fence_to(265_000);
         assert_eq!(gc_fence_snapshot(), 270_000);
+        set_gc_fence(i32::MAX);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_bloom_no_false_negatives() {
         let keys: Vec<[u8; 36]> = (0..100).map(make_key).collect();
@@ -870,6 +866,7 @@ mod tests {
         }
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_bloom_fpr_under_2pct() {
         // Build with 1000 entries, check 10000 random non-overlapping keys.
@@ -893,6 +890,7 @@ mod tests {
         assert!(fpr < 0.02, "FPR too high: {:.2}%", fpr * 100.0);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_directory_matches_linear_scan() {
         let entries: Vec<OutputKV> = (0u32..500)
@@ -913,6 +911,7 @@ mod tests {
         }
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_lookup_key_basic() {
         let k1 = make_key(1);
@@ -927,6 +926,7 @@ mod tests {
         assert_eq!(run.lookup_key(&make_key(3), 0, i32::MAX), None);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_lookup_height_window() {
         let k = make_key(1);
@@ -937,6 +937,7 @@ mod tests {
         assert_eq!(run.lookup_key(&k, 101, i32::MAX), None);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_delete_hides_add() {
         let k = make_key(1);
@@ -948,6 +949,7 @@ mod tests {
         assert_eq!(run.lookup_key(&k, 0, i32::MAX), Some(OUTPUT_ID_DELETED));
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_merge_cancellation_same_height() {
         let k = make_key(1);
@@ -961,8 +963,11 @@ mod tests {
         );
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_merge_cancellation_cross_height() {
+        // Other --lib tests mutate the process-wide fence (`set_gc_fence` / `UtxoDatabase::open`).
+        set_gc_fence(i32::MAX);
         let k = make_key(1);
         // UTXO created at h=100, spent at h=290000 — different heights.
         let run_a = Arc::new(MemoryRun::build(vec![OutputKV::new_add(k, 100, 42)]));
@@ -976,6 +981,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_merge_cross_height_with_recreation() {
         let k = make_key(1);
@@ -998,6 +1004,7 @@ mod tests {
         assert!(merged.entries[0].is_add());
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_merge_dangling_delete_preserved() {
         let k = make_key(1);
@@ -1008,6 +1015,7 @@ mod tests {
         assert!(merged.entries[0].is_delete());
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_erase_since() {
         let k1 = make_key(1);

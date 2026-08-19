@@ -75,10 +75,10 @@ struct DiskRead {
 }
 
 thread_local! {
-    static FETCH_RESULT_SLOTS: RefCell<Vec<Option<OutputDetail>>> = RefCell::new(Vec::new());
-    static FETCH_DISK_READS: RefCell<Vec<DiskRead>> = RefCell::new(Vec::new());
-    static FETCH_STAGING: RefCell<Vec<u8>> = RefCell::new(Vec::new());
-    static FETCH_STAGE_OFFS: RefCell<Vec<usize>> = RefCell::new(Vec::new());
+    static FETCH_RESULT_SLOTS: RefCell<Vec<Option<OutputDetail>>> = const { RefCell::new(Vec::new()) };
+    static FETCH_DISK_READS: RefCell<Vec<DiskRead>> = const { RefCell::new(Vec::new()) };
+    static FETCH_STAGING: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static FETCH_STAGE_OFFS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
 // ─── UtxoTable ────────────────────────────────────────────────────────────────
@@ -161,16 +161,13 @@ impl UtxoTable {
 
     /// Approximate bytes held in the in-memory tail (script bytes for recent blocks).
     pub fn tail_bytes(&self) -> usize {
-        self.tail
-            .read()
-            .iter()
-            .map(|b| b.data.capacity())
-            .sum()
+        self.tail.read().iter().map(|b| b.data.capacity()).sum()
     }
 
     /// Total bytes written to the on-disk flat file (not in RAM — pread64 path).
     pub fn file_size_bytes(&self) -> u64 {
-        self.committed_fence.load(std::sync::atomic::Ordering::Relaxed)
+        self.committed_fence
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Append a block's outputs to the tail.
@@ -336,8 +333,7 @@ impl UtxoTable {
                         for (slot, &id) in ids.iter().enumerate() {
                             let (offset, length) = IdCodec::decode(id);
                             if offset >= fence && !tail_snap.is_empty() {
-                                let pos =
-                                    tail_snap.partition_point(|b| b.begin_offset <= offset);
+                                let pos = tail_snap.partition_point(|b| b.begin_offset <= offset);
                                 if pos > 0 {
                                     if let Some((hdr, script)) =
                                         tail_snap[pos - 1].get(offset, length)
@@ -375,7 +371,7 @@ impl UtxoTable {
                                 if data.len() >= OutputHeader::SIZE {
                                     let hdr = unsafe {
                                         std::ptr::read_unaligned(
-                                            data.as_ptr() as *const OutputHeader,
+                                            data.as_ptr() as *const OutputHeader
                                         )
                                     };
                                     result_slots[e.slot] = Some(output_detail_from_parts(
@@ -529,7 +525,9 @@ fn read_disk_batch(
     staging: &mut Vec<u8>,
 ) -> anyhow::Result<()> {
     let gap = fetch_coalesce_gap_bytes();
-    if gap > 0 && entries.len() >= 2 && read_disk_batch_coalesced(file, entries, stage_offs, staging, gap)?
+    if gap > 0
+        && entries.len() >= 2
+        && read_disk_batch_coalesced(file, entries, stage_offs, staging, gap)?
     {
         return Ok(());
     }
@@ -554,6 +552,7 @@ fn read_disk_batch(
 /// Coalesce sorted `DiskRead`s within `gap` into large `pread`s.
 ///
 /// Returns `Ok(false)` when the batch is too sparse (prefer io_uring).
+#[allow(clippy::ptr_arg)] // resize/clear the buffer; a slice cannot grow
 fn read_disk_batch_coalesced(
     file: &File,
     entries: &[DiskRead],

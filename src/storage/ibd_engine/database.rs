@@ -55,8 +55,9 @@ impl UtxoDatabase {
     /// - `tail_bytes`: in-memory tail of UtxoTable (recent block scripts)
     pub fn mem_usage_bytes(&self) -> (usize, usize, usize) {
         let index_bytes = self.index.mem_bytes();
-        let compacter_inflight_bytes =
-            super::index::COMPACTER_INFLIGHT_BYTES.load(std::sync::atomic::Ordering::Relaxed) as usize;
+        let compacter_inflight_bytes = super::index::COMPACTER_INFLIGHT_BYTES
+            .load(std::sync::atomic::Ordering::Relaxed)
+            as usize;
         let tail_bytes = self.table.tail_bytes();
         (index_bytes, compacter_inflight_bytes, tail_bytes)
     }
@@ -467,10 +468,7 @@ mod tests {
         db.append(&block, &[txid], 50).unwrap();
         assert_eq!(db.contiguous_length(), 50);
         drop(db);
-        assert_eq!(
-            meta::read_contiguous_length_sidecar(tmp.path()),
-            Some(50)
-        );
+        assert_eq!(meta::read_contiguous_length_sidecar(tmp.path()), Some(50));
         let db2 = UtxoDatabase::open(tmp.path(), 0).unwrap();
         assert_eq!(db2.contiguous_length(), 50);
     }

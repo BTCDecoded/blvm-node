@@ -1083,11 +1083,8 @@ pub(crate) fn test_backdate_awaiting_ms(ago_ms: u64) {
 
 /// Serialize tests that mutate process-global tip-stage / bridge atomics.
 #[cfg(test)]
-pub(crate) fn test_tip_atomics_lock() -> std::sync::MutexGuard<'static, ()> {
-    static L: OnceLock<Mutex<()>> = OnceLock::new();
-    L.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+pub(crate) fn test_tip_atomics_lock() -> crate::ibd_test_lock::Guard {
+    crate::ibd_test_lock::guard()
 }
 
 /// Test helper: zero tip-stage atomics so parallel unit tests do not leak soft-retry /
@@ -1259,7 +1256,11 @@ mod tests {
         reset_tracker();
         // Deep pipe GetData while tip still at 0.
         mark_getdata(100);
-        assert_eq!(GETDATA_MS.load(Ordering::Relaxed), 0, "untracked must not stamp live");
+        assert_eq!(
+            GETDATA_MS.load(Ordering::Relaxed),
+            0,
+            "untracked must not stamp live"
+        );
         // Tip rolls to 100 — credit original GetData time.
         mark_needed(100);
         let gd = GETDATA_MS.load(Ordering::Relaxed);

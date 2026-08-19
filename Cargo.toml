@@ -13,7 +13,7 @@ categories = ["cryptography::cryptocurrencies", "network-programming"]
 rust-version = "1.85"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("governance", "erlay", "rayon", "wasm-modules"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("governance", "erlay", "rayon", "wasm-modules", "ibd-dev"))'] }
 # Integration tests (`tests/*.rs`) intentionally exercise APIs without always consuming every binding.
 unused_variables = "allow"
 unused_comparisons = "allow"
@@ -55,7 +55,7 @@ rusty-leveldb = { version = "4", optional = true }
 # heed3: LMDB mdb.master3 wrapper (MVCC, concurrent readers). Requires liblmdb at link time.
 heed3 = { version = "=0.22.1", optional = true, default-features = false }
 # rkyv: zero-copy archived values paired with heed3 mmap reads.
-rkyv = { version = "=0.8.16", optional = true, features = ["bytecheck"] }
+rkyv = { version = "=0.8.18", optional = true, features = ["bytecheck"] }
 # Pinned rev; build.rs builds libtidesdb from source and links lz4/zstd/snappy (CI installs -dev packages).
 tidesdb = { git = "https://github.com/tidesdb/tidesdb-rs.git", rev = "2c128540b02400a538475d992a122d940eb93da3", version = "0.6.7", optional = true }
 
@@ -250,10 +250,14 @@ libc = ["dep:libc"]
 rayon = ["dep:rayon"]
 # Production optimizations (parallel block validation, etc.)
 production = ["blvm-protocol/production", "dep:blvm-consensus", "rayon", "jemalloc"]
-# Optional in-tree CUDA ECDSA/Schnorr batch (blvm-secp256k1/gpu). Requires nvcc + CUDA runtime.
+# Force CUDA at compile (fails if nvcc missing). Default builds already
+# auto-link GPU when nvcc is found; runtime falls back to CPU if no device.
 secp-gpu = ["blvm-consensus/secp-gpu"]
 # Profiling: IBD_PROFILE, PERF, BATCH logs. NOT for production.
 profile = ["blvm-protocol/profile", "dep:blvm-consensus"]
+# Lab / rematch only: synthetic WAN harness + destructive IBD examples.
+# Not in default. Rematch: `cargo build -p blvm --features ibd-dev`.
+ibd-dev = []
 # Privacy relay (Dandelion++); enabled in default release builds.
 # blvm-spec-lock: #[spec_locked("10.6")] for Orange Paper Dandelion verification
 dandelion = ["dep:blvm-spec-lock", "blvm-protocol/dandelion"]
@@ -386,7 +390,7 @@ required-features = ["heed3"]
 [[example]]
 name = "set_ibd_watermark"
 path = "examples/set_ibd_watermark.rs"
-required-features = ["production", "heed3"]
+required-features = ["production", "heed3", "ibd-dev"]
 
 [[example]]
 name = "backfill_engine_export_muhash"
@@ -396,12 +400,12 @@ required-features = ["production", "heed3"]
 [[example]]
 name = "copy_ibd_ckpt"
 path = "examples/copy_ibd_ckpt.rs"
-required-features = ["production", "heed3"]
+required-features = ["production", "heed3", "ibd-dev"]
 
 [[example]]
 name = "fill_empty_ckpt_slot"
 path = "examples/fill_empty_ckpt_slot.rs"
-required-features = ["production", "heed3"]
+required-features = ["production", "heed3", "ibd-dev"]
 
 [[example]]
 name = "inspect_local_block"
@@ -411,22 +415,22 @@ required-features = ["production", "heed3"]
 [[example]]
 name = "strip_bodies_above"
 path = "examples/strip_bodies_above.rs"
-required-features = ["production", "heed3"]
+required-features = ["production", "heed3", "ibd-dev"]
 
 [[example]]
 name = "strip_bodies_range"
 path = "examples/strip_bodies_range.rs"
-required-features = ["production", "heed3"]
+required-features = ["production", "heed3", "ibd-dev"]
 
 [[example]]
 name = "recover_ckpt_slot"
 path = "examples/recover_ckpt_slot.rs"
-required-features = ["production", "heed3"]
+required-features = ["production", "heed3", "ibd-dev"]
 
 [[example]]
 name = "clear_ckpt_slot"
 path = "examples/clear_ckpt_slot.rs"
-required-features = ["production", "heed3"]
+required-features = ["production", "heed3", "ibd-dev"]
 
 [[example]]
 name = "probe_ckpt_utxo"

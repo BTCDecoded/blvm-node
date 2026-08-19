@@ -8,7 +8,7 @@
 //! confirmed otherwise seed `IBD_LOCAL_AHEAD` at ignition.
 //!
 //! ```bash
-//! cargo run --example strip_bodies_above --features production,heed3 --release -- \
+//! cargo run --example strip_bodies_above --features production,heed3,ibd-dev --release -- \
 //!   $DATADIR/blvm-wan-bodies-400k 400287
 //! ```
 
@@ -21,9 +21,10 @@ use std::path::PathBuf;
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
-    let data_dir = PathBuf::from(args.next().context(
-        "usage: strip_bodies_above DATA_DIR KEEP_BODY_MAX_HEIGHT",
-    )?);
+    let data_dir = PathBuf::from(
+        args.next()
+            .context("usage: strip_bodies_above DATA_DIR KEEP_BODY_MAX_HEIGHT")?,
+    );
     let keep_max: u64 = args
         .next()
         .context("missing KEEP_BODY_MAX_HEIGHT")?
@@ -57,9 +58,7 @@ fn main() -> anyhow::Result<()> {
     }
     let after_c = probe_confirmed_body_height(&blockstore)?;
     let after_h = probe_highest_stored_body_height(&blockstore)?;
-    println!(
-        "removed_bodies≈{removed} after confirmed_body={after_c} highest_body={after_h}"
-    );
+    println!("removed_bodies≈{removed} after confirmed_body={after_c} highest_body={after_h}");
     if after_c.max(after_h) > keep_max {
         anyhow::bail!(
             "strip failed: confirmed={after_c} highest={after_h} still > keep_max={keep_max}"

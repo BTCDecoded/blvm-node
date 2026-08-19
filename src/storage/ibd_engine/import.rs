@@ -136,28 +136,26 @@ pub fn seed_from_ibd_utxos(
                         flags: if archived.is_coinbase { 1 } else { 0 },
                         amount: archived.value.into(),
                     };
-                    batch_items.push((
-                        out_key,
-                        header,
-                        archived.script_pubkey.to_vec(),
-                    ));
-                    if batch_items.len() >= SEED_BATCH {
-                        if push_seed_batch(
+                    batch_items.push((out_key, header, archived.script_pubkey.to_vec()));
+                    if batch_items.len() >= SEED_BATCH
+                        && push_seed_batch(
                             db,
                             checkpoint_height,
                             &mut batch_items,
                             &mut entry_buf,
                             &tx,
                             &mut total,
-                        )? {
-                            channel_closed.set(true);
-                            return Ok(());
-                        }
+                        )?
+                    {
+                        channel_closed.set(true);
+                        return Ok(());
                     }
                     Ok(())
                 });
                 if let Err(e) = scan {
-                    warn!("IBD engine seed: heed3 scan failed ({e:#}); falling back to tree.iter()");
+                    warn!(
+                        "IBD engine seed: heed3 scan failed ({e:#}); falling back to tree.iter()"
+                    );
                 } else if !channel_closed.get() {
                     if push_seed_batch(
                         db,
@@ -190,13 +188,20 @@ pub fn seed_from_ibd_utxos(
                                     anyhow::bail!(
                                         "IBD engine seed: imported {} UTXOs but chain_info expected {} \
                                          at height {} (Δ={}) — checkpoint incomplete/poisoned (refusing seed)",
-                                        total, expected, checkpoint_height, delta
+                                        total,
+                                        expected,
+                                        checkpoint_height,
+                                        delta
                                     );
                                 }
                                 warn!(
                                     "IBD engine seed: imported {} UTXOs vs chain_info expected {} at h={} \
                                      (Δ={}) — accepting within slack {}",
-                                    total, expected, checkpoint_height, delta, MAX_EXPORT_META_SLACK
+                                    total,
+                                    expected,
+                                    checkpoint_height,
+                                    delta,
+                                    MAX_EXPORT_META_SLACK
                                 );
                             }
                         }
@@ -207,7 +212,8 @@ pub fn seed_from_ibd_utxos(
                             anyhow::bail!(
                                 "IBD engine seed: imported {} UTXOs at height {} fails \
                                  plausibility — checkpoint poisoned (refusing seed)",
-                                total, checkpoint_height
+                                total,
+                                checkpoint_height
                             );
                         }
                         db.finalize_seed(seg, checkpoint_height);
@@ -250,32 +256,32 @@ pub fn seed_from_ibd_utxos(
         let utxo: UTXO = decode_utxo_with_codec(codec, &val_bytes)?;
         seed_entry_from_utxo(out_key, &utxo, &mut batch_items);
 
-        if batch_items.len() >= SEED_BATCH {
-            if push_seed_batch(
+        if batch_items.len() >= SEED_BATCH
+            && push_seed_batch(
                 db,
                 checkpoint_height,
                 &mut batch_items,
                 &mut entry_buf,
                 &tx,
                 &mut total,
-            )? {
-                send_err = true;
-                break 'outer;
-            }
+            )?
+        {
+            send_err = true;
+            break 'outer;
         }
     }
 
-    if !send_err {
-        if push_seed_batch(
+    if !send_err
+        && push_seed_batch(
             db,
             checkpoint_height,
             &mut batch_items,
             &mut entry_buf,
             &tx,
             &mut total,
-        )? {
-            send_err = true;
-        }
+        )?
+    {
+        send_err = true;
     }
 
     // Close sender → writer thread sees end-of-iterator → finalises segment file.
@@ -305,7 +311,10 @@ pub fn seed_from_ibd_utxos(
                 anyhow::bail!(
                     "IBD engine seed: imported {} UTXOs but chain_info expected {} \
                      at height {} (Δ={}) — checkpoint incomplete/poisoned (refusing seed)",
-                    total, expected, checkpoint_height, delta
+                    total,
+                    expected,
+                    checkpoint_height,
+                    delta
                 );
             }
             warn!(
@@ -322,7 +331,8 @@ pub fn seed_from_ibd_utxos(
         anyhow::bail!(
             "IBD engine seed: imported {} UTXOs at height {} fails \
              plausibility — checkpoint poisoned (refusing seed)",
-            total, checkpoint_height
+            total,
+            checkpoint_height
         );
     }
 
@@ -367,7 +377,9 @@ pub fn bootstrap_ckpt_from_legacy_standalone(
 ) -> Result<bool> {
     use crate::storage::database::create_ibd_utxo_standalone_db;
     use crate::storage::disk_utxo::key_to_outpoint;
-    use crate::storage::ibd_engine::{ckpt_inactive_slot, ckpt_tree_for_slot, sync_tree_after_persist};
+    use crate::storage::ibd_engine::{
+        ckpt_inactive_slot, ckpt_tree_for_slot, sync_tree_after_persist,
+    };
     use blvm_muhash::{MuHash3072, serialize_coin_for_muhash};
 
     if !utxo_store_dir.exists() {

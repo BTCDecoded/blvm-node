@@ -7,8 +7,8 @@ use super::types::{SharedBlock, SharedWitnesses};
 use crate::storage::blockstore::BlockStore;
 use anyhow::Result;
 use blvm_protocol::features::FeatureRegistry;
-use blvm_protocol::{Block, Hash, ProtocolVersion, segwit::Witness};
 use blvm_protocol::types::ARC_BLOCK_CREATED;
+use blvm_protocol::{Block, Hash, ProtocolVersion, segwit::Witness};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, OnceLock};
@@ -52,7 +52,11 @@ impl fmt::Display for LocalBlockMiss {
         match self {
             Self::NotInStore => write!(f, "block body not in store"),
             Self::HashMismatch { computed } => {
-                write!(f, "block hash mismatch (computed {})", hex::encode(computed))
+                write!(
+                    f,
+                    "block hash mismatch (computed {})",
+                    hex::encode(computed)
+                )
             }
             Self::WitnessMissing => write!(f, "witness missing for segwit height"),
             Self::WitnessEmptyStale => write!(f, "witness blob all-empty (stale MSG_BLOCK fetch)"),
@@ -63,9 +67,7 @@ impl fmt::Display for LocalBlockMiss {
 
 /// Highest height with a stored block body (binary search over height index).
 pub fn probe_confirmed_body_height(blockstore: &BlockStore) -> Result<u64> {
-    let header_max = blockstore
-        .highest_stored_height()?
-        .unwrap_or(0);
+    let header_max = blockstore.highest_stored_height()?.unwrap_or(0);
     if header_max == 0 {
         return Ok(0);
     }
@@ -84,7 +86,7 @@ pub fn probe_confirmed_body_height(blockstore: &BlockStore) -> Result<u64> {
     let mut lo = 1u64;
     let mut hi = header_max;
     while lo < hi {
-        let mid = lo + (hi - lo + 1) / 2;
+        let mid = lo + (hi - lo).div_ceil(2);
         if has_body(mid)? {
             lo = mid;
         } else {
@@ -143,9 +145,7 @@ pub fn extend_contiguous_body_tip(
 /// Scans backward from the height index tip: binary search fails when headers exist without bodies
 /// below the highest stored body (non-monotonic `has_body`).
 pub fn probe_highest_stored_body_height(blockstore: &BlockStore) -> Result<u64> {
-    let header_max = blockstore
-        .highest_stored_height()?
-        .unwrap_or(0);
+    let header_max = blockstore.highest_stored_height()?.unwrap_or(0);
     if header_max == 0 {
         return Ok(0);
     }
@@ -176,8 +176,7 @@ pub fn should_skip_block_store_write(
 
 /// True when at least one witness stack item is non-empty.
 pub fn has_real_witnesses(w: &[Vec<Witness>]) -> bool {
-    w.iter()
-        .any(|tx_w| tx_w.iter().any(|s| !s.is_empty()))
+    w.iter().any(|tx_w| tx_w.iter().any(|s| !s.is_empty()))
 }
 
 /// BIP141 witness commitment in coinbase (`OP_RETURN 0x24 aa21a9ed …`).
@@ -198,7 +197,11 @@ pub fn coinbase_has_witness_commitment(block: &Block) -> bool {
 
 /// Empty witnesses are only unacceptable when segwit is active **and** the coinbase
 /// commits to a witness merkle root (so a real `MSG_WITNESS_BLOCK` must carry data).
-pub fn empty_witness_unacceptable(block: &Block, witnesses: &[Vec<Witness>], segwit_on: bool) -> bool {
+pub fn empty_witness_unacceptable(
+    block: &Block,
+    witnesses: &[Vec<Witness>],
+    segwit_on: bool,
+) -> bool {
     segwit_on && !has_real_witnesses(witnesses) && coinbase_has_witness_commitment(block)
 }
 
@@ -233,18 +236,25 @@ pub fn try_repair_missing_witness(
     }
     let header_ts = match block_in_memory {
         Some(b) => b.header.timestamp,
-        None => blockstore
-            .get_block(&block_hash)?
-            .ok_or_else(|| anyhow::anyhow!("block disappeared during witness repair at {height}"))?
-            .header
-            .timestamp,
+        None => {
+            blockstore
+                .get_block(&block_hash)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("block disappeared during witness repair at {height}")
+                })?
+                .header
+                .timestamp
+        }
     };
     let registry = cached_feature_registry(protocol_version);
     if !registry.is_feature_active("segwit", height, header_ts) {
         return Ok(false);
     }
     blockstore.store_witness_at_height(&block_hash, height, witnesses)?;
-    debug!("[IBD_WITNESS_REPAIR] stored missing witness for height {}", height);
+    debug!(
+        "[IBD_WITNESS_REPAIR] stored missing witness for height {}",
+        height
+    );
     Ok(true)
 }
 
@@ -461,7 +471,9 @@ pub fn try_load_local_ibd_block(
 
 pub fn ibd_stall_abort_gap_fetch_on_confirmed_bodies() -> bool {
     matches!(
-        std::env::var("BLVM_IBD_STALL_ABORT_GAP_FETCH").ok().as_deref(),
+        std::env::var("BLVM_IBD_STALL_ABORT_GAP_FETCH")
+            .ok()
+            .as_deref(),
         Some("1") | Some("true") | Some("TRUE")
     )
 }
@@ -482,7 +494,10 @@ pub fn ibd_stall_aborts_inflight_gap_fetch(
     confirmed_body_height: u64,
     gap_height: u64,
 ) -> bool {
-    match std::env::var("BLVM_IBD_STALL_ABORT_GAP_FETCH").ok().as_deref() {
+    match std::env::var("BLVM_IBD_STALL_ABORT_GAP_FETCH")
+        .ok()
+        .as_deref()
+    {
         Some("1") | Some("true") | Some("TRUE") => true,
         Some("0") | Some("false") | Some("FALSE") => false,
         _ => {
@@ -493,10 +508,8 @@ pub fn ibd_stall_aborts_inflight_gap_fetch(
                 // A6i: never abort calm WAN gap fetches (local replay or tip crawl).
                 let _ = (confirmed_body_height, gap_height);
                 false
-            } else if confirmed_body_height > 0 && gap_height <= confirmed_body_height {
-                false
             } else {
-                true
+                !(confirmed_body_height > 0 && gap_height <= confirmed_body_height)
             }
         }
     }
@@ -704,9 +717,11 @@ mod tests {
     use super::*;
     use crate::storage::blockstore::BlockStore;
     use crate::storage::database::{create_database, default_backend};
-    use blvm_protocol::{Block, BlockHeader, OutPoint, Transaction, TransactionInput, TransactionOutput};
-    use std::sync::atomic::AtomicU64;
+    use blvm_protocol::{
+        Block, BlockHeader, OutPoint, Transaction, TransactionInput, TransactionOutput,
+    };
     use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
     use tempfile::TempDir;
 
     fn temp_blockstore() -> BlockStore {
@@ -726,10 +741,12 @@ mod tests {
     /// W5/N1: wire-bytes body coexists with bincode; inject loads via one wire deser.
     #[test]
     fn w5_wire_bytes_persist_and_inject_coexist_with_bincode() {
+        use crate::storage::blockstore::{
+            decode_wire_body_blob, encode_wire_body_blob, is_wire_body_blob,
+        };
         use blvm_protocol::serialization::{
             deserialize_block_with_witnesses, serialize_block_with_witnesses,
         };
-        use crate::storage::blockstore::{decode_wire_body_blob, encode_wire_body_blob, is_wire_body_blob};
 
         let blockstore = temp_blockstore();
         let height = 500u64;
@@ -771,14 +788,10 @@ mod tests {
             payload.as_slice()
         );
 
-        let loaded = try_load_local_ibd_block(
-            &blockstore,
-            height,
-            hash,
-            ProtocolVersion::BitcoinV1,
-        )
-        .unwrap()
-        .expect("inject load");
+        let loaded =
+            try_load_local_ibd_block(&blockstore, height, hash, ProtocolVersion::BitcoinV1)
+                .unwrap()
+                .expect("inject load");
         assert_eq!(blockstore.get_block_hash(&loaded.0), hash);
 
         // Legacy bincode at another height still works (dual-format).
@@ -788,17 +801,14 @@ mod tests {
             b2.header.nonce = 99;
             let h = blockstore.get_block_hash(&b2);
             blockstore.store_height(h2, &h).unwrap();
-            blockstore.store_block_with_witness(&b2, &witnesses, h2).unwrap();
+            blockstore
+                .store_block_with_witness(&b2, &witnesses, h2)
+                .unwrap();
             h
         };
-        let legacy = try_load_local_ibd_block(
-            &blockstore,
-            h2,
-            hash2,
-            ProtocolVersion::BitcoinV1,
-        )
-        .unwrap()
-        .expect("bincode inject");
+        let legacy = try_load_local_ibd_block(&blockstore, h2, hash2, ProtocolVersion::BitcoinV1)
+            .unwrap()
+            .expect("bincode inject");
         assert_eq!(blockstore.get_block_hash(&legacy.0), hash2);
 
         // Micro: bincode ser+de×2 vs memcpy+wire deser (same payload).
@@ -851,10 +861,15 @@ mod tests {
         for h in 0..height {
             blockstore.store_height(h, &placeholder).unwrap();
         }
-        blockstore.store_block_with_witness(&block, &[], height).unwrap();
+        blockstore
+            .store_block_with_witness(&block, &[], height)
+            .unwrap();
         blockstore.store_height(height, &hash).unwrap();
         assert_eq!(probe_confirmed_body_height(&blockstore).unwrap(), 0);
-        assert_eq!(probe_highest_stored_body_height(&blockstore).unwrap(), height);
+        assert_eq!(
+            probe_highest_stored_body_height(&blockstore).unwrap(),
+            height
+        );
         assert!(should_skip_block_store_write(&blockstore, height, &hash, 0).unwrap());
         assert!(!should_skip_block_store_write(&blockstore, height + 1, &[0xBBu8; 32], 0).unwrap());
     }
@@ -881,7 +896,9 @@ mod tests {
         };
         blockstore.store_block_with_witness(&block, &[], 1).unwrap();
         blockstore.store_height(0, &[0u8; 32]).unwrap();
-        blockstore.store_height(1, &blockstore.get_block_hash(&block)).unwrap();
+        blockstore
+            .store_height(1, &blockstore.get_block_hash(&block))
+            .unwrap();
         assert_eq!(probe_confirmed_body_height(&blockstore).unwrap(), 1);
         assert_eq!(probe_highest_stored_body_height(&blockstore).unwrap(), 1);
     }
@@ -893,7 +910,10 @@ mod tests {
         assert!(std::ptr::eq(a, b), "same protocol must reuse one registry");
         assert!(a.is_feature_active("segwit", 500_000, 1_600_000_000));
         let r = cached_feature_registry(ProtocolVersion::Regtest);
-        assert!(!std::ptr::eq(a, r), "distinct protocols get distinct caches");
+        assert!(
+            !std::ptr::eq(a, r),
+            "distinct protocols get distinct caches"
+        );
     }
 
     #[test]
@@ -949,9 +969,7 @@ mod tests {
             };
             let hash = blockstore.get_block_hash(&block);
             blockstore.store_height(h, &hash).unwrap();
-            blockstore
-                .store_block_with_witness(&block, &[], h)
-                .unwrap();
+            blockstore.store_block_with_witness(&block, &[], h).unwrap();
         }
         assert_eq!(
             extend_contiguous_body_tip(&blockstore, 100, 256).unwrap(),
@@ -1073,7 +1091,10 @@ mod tests {
             ProtocolVersion::BitcoinV1,
         )
         .unwrap();
-        assert!(!persisted, "W1 must refuse empty-witness persist when commitment present");
+        assert!(
+            !persisted,
+            "W1 must refuse empty-witness persist when commitment present"
+        );
         assert!(
             !blockstore.has_block_body(&hash).unwrap(),
             "body must not be written"
@@ -1213,15 +1234,16 @@ mod tests {
         };
         let hash = blockstore.get_block_hash(&block);
         blockstore.store_height(height, &hash).unwrap();
-        blockstore.store_block_with_witness(&block, &[], height).unwrap();
-        let loaded = try_load_local_ibd_block(
-            &blockstore,
-            height,
-            hash,
-            ProtocolVersion::BitcoinV1,
-        )
-        .unwrap();
-        assert!(loaded.is_some(), "body without commitment must load with empty witnesses");
+        blockstore
+            .store_block_with_witness(&block, &[], height)
+            .unwrap();
+        let loaded =
+            try_load_local_ibd_block(&blockstore, height, hash, ProtocolVersion::BitcoinV1)
+                .unwrap();
+        assert!(
+            loaded.is_some(),
+            "body without commitment must load with empty witnesses"
+        );
         assert!(
             !is_local_witness_hole(&blockstore, height, hash, ProtocolVersion::BitcoinV1).unwrap(),
             "no commitment → not a witness hole"
@@ -1300,7 +1322,9 @@ mod tests {
         };
         let hash = blockstore.get_block_hash(&block);
         blockstore.store_height(500, &hash).unwrap();
-        blockstore.store_block_with_witness(&block, &[], 500).unwrap();
+        blockstore
+            .store_block_with_witness(&block, &[], 500)
+            .unwrap();
 
         let mut reorder_buffer = std::collections::BTreeMap::new();
         let already_dispatched = rustc_hash::FxHashSet::default();
@@ -1344,7 +1368,9 @@ mod tests {
         };
         let hash = blockstore.get_block_hash(&block);
         blockstore.store_height(500, &hash).unwrap();
-        blockstore.store_block_with_witness(&block, &[], 500).unwrap();
+        blockstore
+            .store_block_with_witness(&block, &[], 500)
+            .unwrap();
 
         let mut reorder_buffer = std::collections::BTreeMap::new();
         let mut already_dispatched = rustc_hash::FxHashSet::default();
@@ -1460,7 +1486,9 @@ mod tests {
         };
         let hash = blockstore.get_block_hash(&block);
         blockstore.store_height(500, &hash).unwrap();
-        blockstore.store_block_with_witness(&block, &[], 500).unwrap();
+        blockstore
+            .store_block_with_witness(&block, &[], 500)
+            .unwrap();
 
         let mut reorder_buffer = std::collections::BTreeMap::new();
         let mut already_dispatched = rustc_hash::FxHashSet::default();
@@ -1511,7 +1539,9 @@ mod tests {
         // Height index is required: store_witness_at_height writes the row key
         // (height||hash); has_witness_blob / get_witness resolve via height_index.
         blockstore.store_height(height, &hash).unwrap();
-        blockstore.store_block_with_witness(&block, &[], height).unwrap();
+        blockstore
+            .store_block_with_witness(&block, &[], height)
+            .unwrap();
         assert!(!blockstore.has_witness_blob(&hash).unwrap());
 
         let witnesses: Vec<Vec<Witness>> = vec![vec![vec![vec![0x51u8]]]];

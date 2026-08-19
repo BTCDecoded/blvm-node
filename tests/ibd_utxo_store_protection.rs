@@ -534,9 +534,7 @@ fn capped_adds_only_drain_defers_height_release_until_fully_drained() {
     );
 
     // Simulate durability: flush ADDs but do not release (heights set empty).
-    let prepared = pkg1
-        .prepare_for_disk(ValueCodec::Bincode)
-        .expect("prepare");
+    let prepared = pkg1.prepare_for_disk(ValueCodec::Bincode).expect("prepare");
     store
         .flush_prepared_package_adds_only(&prepared)
         .expect("flush adds");

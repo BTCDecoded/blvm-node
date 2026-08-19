@@ -22,7 +22,10 @@ struct MemTree {
 
 impl Tree for MemTree {
     fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.inner.lock().unwrap().insert(key.to_vec(), value.to_vec());
+        self.inner
+            .lock()
+            .unwrap()
+            .insert(key.to_vec(), value.to_vec());
         Ok(())
     }
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {

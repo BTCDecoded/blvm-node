@@ -892,10 +892,17 @@ impl BlockchainRpc {
 
                         // Check level 2: Verify merkle root
                         if check_level >= 2 {
-                            use blvm_protocol::mining::calculate_merkle_root;
+                            use blvm_protocol::mining::{
+                                calculate_merkle_root, calculate_merkle_root_from_tx_ids,
+                            };
 
-                            if let Ok(calculated_root) = calculate_merkle_root(&block.transactions)
-                            {
+                            let calculated_root = crate::module::pipeline::try_get_canonical_txids(
+                                height, block_hash,
+                            )
+                            .and_then(|txids| calculate_merkle_root_from_tx_ids(&txids).ok())
+                            .or_else(|| calculate_merkle_root(&block.transactions).ok());
+
+                            if let Some(calculated_root) = calculated_root {
                                 if calculated_root != block.header.merkle_root {
                                     errors.push(format!(
                                         "Block at height {height} has incorrect merkle root"

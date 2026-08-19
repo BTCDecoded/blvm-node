@@ -1,6 +1,11 @@
 //! Synthetic WAN IBD harness — snapshot bodies, fake peers, no real P2P.
 //!
-//! Lab/dens synth only; Mode T rematch must leave unset.
+//! **Compile gate:** linked only with `feature = "ibd-dev"` or `cfg(test)`.
+//! Production binaries compile `synthetic_wan_stub.rs` under the same module name;
+//! `BLVM_IBD_SYNTH_WAN` is then a no-op.
+//!
+//! Lab/dens synth only; Mode T rematch: `--features ibd-dev` and leave env unset
+//! unless the cell is a synth soak.
 //!
 //! Enable with `BLVM_IBD_SYNTH_WAN=1`. Bodies load from disk (like `local-disk`) but
 //! `wan_body_tip` can be pinned below stored bodies so assigner tip-crawl / multi-peer
@@ -122,11 +127,10 @@ mod tests {
     use super::*;
     use crate::network::peer_scoring::is_lan_peer;
 
-    static SYNTH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    #[serial_test::serial(ibd)]
     #[test]
     fn synth_peer_ids_are_non_lan_wan_addrs() {
-        let _lock = SYNTH_ENV_LOCK.lock().unwrap();
+        let _lock = crate::ibd_test_lock::guard();
         unsafe { std::env::set_var("BLVM_IBD_SYNTH_WAN", "1") };
         unsafe { std::env::set_var("BLVM_IBD_SYNTH_WAN_PEER_COUNT", "3") };
         let peers = peer_ids();
@@ -140,10 +144,11 @@ mod tests {
         unsafe { std::env::remove_var("BLVM_IBD_SYNTH_WAN_PEER_COUNT") };
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn bulk_delay_zero_single_peer_uses_local_disk_stream() {
         // Serialize env mutations — parallel synth tests share process env.
-        let _lock = SYNTH_ENV_LOCK.lock().unwrap();
+        let _lock = crate::ibd_test_lock::guard();
         unsafe { std::env::set_var("BLVM_IBD_SYNTH_WAN", "1") };
         unsafe { std::env::set_var("BLVM_IBD_SYNTH_WAN_PEER_COUNT", "1") };
         unsafe { std::env::remove_var("BLVM_IBD_SYNTH_GETDATA_DELAY_MS") };

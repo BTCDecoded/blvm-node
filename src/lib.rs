@@ -35,7 +35,12 @@
 // `cargo test` uses the default allocator: mimalloc arenas can retain RSS during heavy
 // IBD, and some integration tests have faulted under mimalloc while passing with the
 // system allocator and in `blvm-protocol` tests.
-#[cfg(all(not(target_os = "windows"), feature = "mimalloc", not(test), not(feature = "jemalloc")))]
+#[cfg(all(
+    not(target_os = "windows"),
+    feature = "mimalloc",
+    not(test),
+    not(feature = "jemalloc")
+))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -54,6 +59,8 @@ pub mod bip21;
 pub mod cli;
 pub mod config;
 
+#[cfg(test)]
+mod ibd_test_lock;
 pub mod module;
 pub mod network;
 pub mod node;

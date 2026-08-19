@@ -51,8 +51,7 @@ fn coordinator_inject_returns_false_when_body_missing() {
 fn try_load_reports_not_in_store_for_missing_block() {
     let blockstore = temp_blockstore();
     let hash = [0xABu8; 32];
-    let r =
-        try_load_local_ibd_block_with_reason(&blockstore, 1, hash, ProtocolVersion::BitcoinV1)
-            .unwrap();
+    let r = try_load_local_ibd_block_with_reason(&blockstore, 1, hash, ProtocolVersion::BitcoinV1)
+        .unwrap();
     assert_eq!(r, Err(LocalBlockMiss::NotInStore));
 }

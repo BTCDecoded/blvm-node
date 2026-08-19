@@ -1,7 +1,7 @@
 //! Roll engine resume to a prior ping-pong checkpoint slot (poisoned export recovery).
 //!
 //! ```bash
-//! cargo run --example recover_ckpt_slot --features production,heed3 -- \
+//! cargo run --example recover_ckpt_slot --features production,heed3,ibd-dev -- \
 //!   ~/.local/share/blvm-mainnet 1 640000
 //! ```
 
@@ -60,6 +60,8 @@ fn main() -> anyhow::Result<()> {
     println!(
         "recovered: slot {before_slot}->{slot} export {before_export:?}->{height} wm {before_wm:?}->{height}"
     );
-    println!("cleared ibd_engine/ and repair marker; next start re-seeds from {tree_name} @ {height}");
+    println!(
+        "cleared ibd_engine/ and repair marker; next start re-seeds from {tree_name} @ {height}"
+    );
     Ok(())
 }

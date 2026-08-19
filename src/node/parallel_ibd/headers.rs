@@ -141,11 +141,19 @@ pub(crate) async fn download_header_range(
                 // Switch to a fresh connected peer instead of giving up.
                 let fresh = network.get_connected_peer_addresses().await;
                 if let Some(&next) = fresh.iter().find(|&&p| p != current_peer) {
-                    debug!("Range {}-{}: switching from {} to {}", start_height, end_height, current_peer, next);
+                    debug!(
+                        "Range {}-{}: switching from {} to {}",
+                        start_height, end_height, current_peer, next
+                    );
                     current_peer = next;
                     consecutive_failures = 0;
                 } else {
-                    return Err(anyhow::anyhow!("No peers for range {}-{}: {}", start_height, end_height, e));
+                    return Err(anyhow::anyhow!(
+                        "No peers for range {}-{}: {}",
+                        start_height,
+                        end_height,
+                        e
+                    ));
                 }
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -327,12 +335,7 @@ pub(crate) async fn download_headers_parallel(
     let mut free_peers: VecDeque<SocketAddr> = peer_addrs.iter().copied().collect();
     let mut join_set: JoinSet<HeaderRangeJob> = JoinSet::new();
 
-    spawn_header_range_jobs(
-        &mut join_set,
-        &mut pending,
-        &mut free_peers,
-        &network_mgr,
-    );
+    spawn_header_range_jobs(&mut join_set, &mut pending, &mut free_peers, &network_mgr);
 
     let mut all_headers: Vec<(u64, Vec<blvm_protocol::BlockHeader>)> = Vec::new();
     let mut highest_success = start_height;
@@ -362,10 +365,7 @@ pub(crate) async fn download_headers_parallel(
                     range_start, range_end
                 );
                 let fresh_peers = network_mgr.get_connected_peer_addresses().await;
-                let retry_peer = fresh_peers
-                    .into_iter()
-                    .next()
-                    .unwrap_or(peer_addr);
+                let retry_peer = fresh_peers.into_iter().next().unwrap_or(peer_addr);
                 let net = Arc::clone(&network_mgr);
                 match download_header_range(net, retry_peer, start_hash, range_start, range_end)
                     .await
@@ -396,12 +396,7 @@ pub(crate) async fn download_headers_parallel(
         }
 
         free_peers.push_back(peer_addr);
-        spawn_header_range_jobs(
-            &mut join_set,
-            &mut pending,
-            &mut free_peers,
-            &network_mgr,
-        );
+        spawn_header_range_jobs(&mut join_set, &mut pending, &mut free_peers, &network_mgr);
     }
 
     // If no ranges succeeded fall back to full sequential download — don't return
@@ -466,10 +461,14 @@ pub(crate) async fn download_headers_parallel(
             current_height = gap_result.tip_height + 1;
             last_hash = blockstore
                 .get_hash_by_height(gap_result.tip_height)?
-                .ok_or_else(|| anyhow::anyhow!("no hash after gap fill at {}", gap_result.tip_height))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("no hash after gap fill at {}", gap_result.tip_height)
+                })?;
             if current_height != range_start {
                 return Err(anyhow::anyhow!(
-                    "Gap fill ended at {} but expected {}", current_height, range_start
+                    "Gap fill ended at {} but expected {}",
+                    current_height,
+                    range_start
                 ));
             }
         }
@@ -941,14 +940,11 @@ pub(crate) async fn download_headers(
                 warn!("Header sync: no connected peers — triggering archive peer re-discovery");
                 // Fire both archive and regular DNS seeds in parallel for speed.
                 let default_ban = Default::default();
-                let (arc_res, _) = tokio::join!(
-                    network.discover_archive_peers_from_dns(),
-                    {
-                        let (net_name, port) =
-                            crate::network::protocol::ProtocolParser::dns_seed_network();
-                        network.discover_peers_from_dns(net_name, port, &default_ban)
-                    },
-                );
+                let (arc_res, _) = tokio::join!(network.discover_archive_peers_from_dns(), {
+                    let (net_name, port) =
+                        crate::network::protocol::ProtocolParser::dns_seed_network();
+                    network.discover_peers_from_dns(net_name, port, &default_ban)
+                },);
                 let _ = arc_res;
                 let _ = network.connect_peers_from_database(16).await;
                 // Wait up to 15 s in 2-second slices for a peer to connect.
@@ -956,12 +952,17 @@ pub(crate) async fn download_headers(
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     peer_addrs = network.get_connected_peer_addresses().await;
                     if !peer_addrs.is_empty() {
-                        info!("Header sync: {} peer(s) reconnected, resuming", peer_addrs.len());
+                        info!(
+                            "Header sync: {} peer(s) reconnected, resuming",
+                            peer_addrs.len()
+                        );
                         break;
                     }
                 }
                 if peer_addrs.is_empty() {
-                    return Err(anyhow::anyhow!("No peers available after 70s wait + re-discovery"));
+                    return Err(anyhow::anyhow!(
+                        "No peers available after 70s wait + re-discovery"
+                    ));
                 }
             }
         }
@@ -1001,7 +1002,11 @@ mod n13_tests {
             (400, [4u8; 32]),
         ];
         let ranges = checkpoint_header_ranges(&cps, 0, 400);
-        assert_eq!(ranges.len(), 4, "all windows kept (old bug: take(peers) dropped tail)");
+        assert_eq!(
+            ranges.len(),
+            4,
+            "all windows kept (old bug: take(peers) dropped tail)"
+        );
         assert_eq!(ranges[0].0, 0);
         assert_eq!(ranges[3].1, 400);
         // Peers=2 would have dropped ranges 2–3 under the old .take(peers) cap.

@@ -541,7 +541,8 @@ impl DiskIndex {
     pub fn wait_pending_spills(&self) {
         for _ in 0..6000 {
             // up to ~60s
-            if self.pending_spills.read().is_empty() && !self.async_spill_busy.load(Ordering::Acquire)
+            if self.pending_spills.read().is_empty()
+                && !self.async_spill_busy.load(Ordering::Acquire)
             {
                 return;
             }
@@ -565,10 +566,7 @@ impl DiskIndex {
         let keep_prior = max_segs.saturating_sub(1);
         let snapshot = Arc::clone(&*self.segments.read());
         // Segment list order = age (oldest first).
-        let pinned: Vec<&Arc<DiskSegment>> = snapshot
-            .iter()
-            .filter(|s| s.has_hot_body())
-            .collect();
+        let pinned: Vec<&Arc<DiskSegment>> = snapshot.iter().filter(|s| s.has_hot_body()).collect();
         if pinned.len() <= keep_prior {
             return;
         }
@@ -739,10 +737,9 @@ impl DiskIndex {
     /// segments indefinitely, growing the merged result and causing OOMs.
     pub fn compact_for_checkpoint_sync(&self) {
         self.wait_pending_spills();
-        if let Err(e) = self.compact_for_checkpoint_sync_with_sink(
-            -1,
-            None::<fn(OutputKV) -> anyhow::Result<()>>,
-        ) {
+        if let Err(e) = self
+            .compact_for_checkpoint_sync_with_sink(-1, None::<fn(OutputKV) -> anyhow::Result<()>>)
+        {
             tracing::warn!("compact_for_checkpoint_sync failed: {e:#}");
         }
     }
@@ -844,7 +841,8 @@ impl DiskIndex {
             Ok(())
         })();
 
-        self.last_checkpoint_compact_fence.store(fence, Ordering::Release);
+        self.last_checkpoint_compact_fence
+            .store(fence, Ordering::Release);
         self.is_compacting.store(false, Ordering::Release);
         result
     }
@@ -933,11 +931,8 @@ impl DiskIndex {
         let to_compact: Vec<Arc<DiskSegment>> = {
             let r = self.segments.read();
             let fan = disk_fan_in_from_env();
-            let cold: Vec<Arc<DiskSegment>> = r
-                .iter()
-                .filter(|s| !s.has_hot_body())
-                .cloned()
-                .collect();
+            let cold: Vec<Arc<DiskSegment>> =
+                r.iter().filter(|s| !s.has_hot_body()).cloned().collect();
             if cold.len() < fan {
                 Vec::new()
             } else {
@@ -1272,12 +1267,12 @@ impl DiskIndex {
         // F5a: attribute pread fan-out for HOTPATH timers (reset every query).
         super::disk_segment::reset_disk_io_stats();
         // Skip segment lookup when all keys are already resolved (none remaining as MAX).
-        if ids.iter().any(|id| *id == OutputId::MAX) {
+        if ids.contains(&OutputId::MAX) {
             // HP-M3: pending async spills are newer than on-disk segments — query first.
             {
                 let pending = self.pending_spills.read();
                 for run in pending.iter().rev() {
-                    if !ids.iter().any(|id| *id == OutputId::MAX) {
+                    if !ids.contains(&OutputId::MAX) {
                         break;
                     }
                     run.batch_lookup(keys, ids, 0, before);
@@ -1287,7 +1282,7 @@ impl DiskIndex {
 
             // Query newest-to-oldest: last segment first (most recent overflow data).
             for seg in snapshot.iter().rev() {
-                if !ids.iter().any(|id| *id == OutputId::MAX) {
+                if !ids.contains(&OutputId::MAX) {
                     break;
                 }
                 if let Err(e) = seg.batch_lookup(keys, ids, 0, before) {
@@ -1310,11 +1305,7 @@ impl DiskIndex {
 
     /// Total approximate resident bytes for in-RAM bloom filters + directories across all segments.
     pub fn bloom_bytes_total(&self) -> usize {
-        self.segments
-            .read()
-            .iter()
-            .map(|s| s.ram_bytes())
-            .sum()
+        self.segments.read().iter().map(|s| s.ram_bytes()).sum()
     }
 
     /// Call `f` with a snapshot of all segments (oldest-to-newest) for scanning.
@@ -1350,8 +1341,8 @@ impl std::fmt::Debug for DiskIndex {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::{OutputId, OutputKV};
+    use super::*;
     use std::sync::{Mutex, MutexGuard};
 
     fn hot_pin_env_lock() -> MutexGuard<'static, ()> {
@@ -1359,6 +1350,7 @@ mod tests {
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn disk_fan_in_env_default_and_clamp() {
         // SAFETY: single-threaded test; env restored before exit.
@@ -1375,6 +1367,7 @@ mod tests {
         }
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn register_seg_hot_pins_seed_when_eligible() {
         let _guard = hot_pin_env_lock();
@@ -1422,6 +1415,7 @@ mod tests {
         std::mem::forget(tmp);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn compact_skips_hot_pin_seed_prefix() {
         let _guard = hot_pin_env_lock();
@@ -1463,8 +1457,15 @@ mod tests {
             ]))
             .expect("spill");
         }
-        assert!(disk.segments.read()[0].has_hot_body(), "seed pinned before compact");
-        assert!(disk.compactable_count() >= 3, "cold={}", disk.compactable_count());
+        assert!(
+            disk.segments.read()[0].has_hot_body(),
+            "seed pinned before compact"
+        );
+        assert!(
+            disk.compactable_count() >= 3,
+            "cold={}",
+            disk.compactable_count()
+        );
         // Bypass min-interval throttle used by compact_oldest_if_needed.
         disk.do_compact_plain().expect("compact");
         let segs = disk.segments.read();
@@ -1483,6 +1484,7 @@ mod tests {
         std::mem::forget(tmp);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn hot_pin_max_segs2_keeps_seed_and_newest() {
         let _guard = hot_pin_env_lock();
@@ -1531,6 +1533,7 @@ mod tests {
         std::mem::forget(tmp);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn hot_pin_max_segs3_keeps_seed_and_two_newest() {
         let _guard = hot_pin_env_lock();
@@ -1578,6 +1581,7 @@ mod tests {
         std::mem::forget(tmp);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn hot_pin_serves_batch_query_and_clears_on_demand() {
         let _guard = hot_pin_env_lock();
@@ -1630,6 +1634,7 @@ mod tests {
         std::mem::forget(tmp);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn clear_hot_pins_keep_seed_preserves_oldest() {
         let _guard = hot_pin_env_lock();
@@ -1670,6 +1675,7 @@ mod tests {
         std::mem::forget(tmp);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn hot_pin_max_segs_keeps_prior_mega() {
         let _guard = hot_pin_env_lock();
@@ -1748,6 +1754,7 @@ mod tests {
         std::mem::forget(tmp);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn spill_max_entries_size_splits_into_multiple_segments() {
         let _guard = hot_pin_env_lock();
@@ -1791,6 +1798,7 @@ mod tests {
         std::mem::forget(tmp);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn async_spill_serves_queries_via_pending_then_registers() {
         let _guard = hot_pin_env_lock();

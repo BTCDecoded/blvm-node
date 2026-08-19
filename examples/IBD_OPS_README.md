@@ -1,7 +1,17 @@
 # IBD ops examples (lab / rematch)
 
-Lab and soak helpers for parallel IBD checkpoints and body trees. Build with
-`cargo run -p blvm-node --example <name> --features production,heed3`.
+Lab and soak helpers for parallel IBD checkpoints and body trees.
+
+**Destructive** examples require the `ibd-dev` feature (not in default production
+builds). Read-only helpers stay on `production,heed3` only.
+
+```bash
+# Destructive (strip / copy / clear / recover / watermark)
+cargo run -p blvm-node --example strip_bodies_above --features production,heed3,ibd-dev -- $DATADIR HEIGHT
+
+# Read-only
+cargo run -p blvm-node --example probe_ckpt_utxo --features production,heed3 -- $DATADIR TXID:VOUT
+```
 
 **Hard rule:** never wipe archives, GOLDEN pins, or `blvm.a31-frontier` unless
 explicitly ordered in the current session.

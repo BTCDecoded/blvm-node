@@ -16,19 +16,24 @@ mod chunk_assigner;
 mod download;
 mod env_latch;
 pub(crate) use env_latch::latch_env;
-pub mod local_block;
 mod feeder;
 mod headers;
 #[cfg(feature = "production")]
 mod ibd_staging;
+pub mod local_block;
 mod memory;
-mod tip_release;
-pub(crate) mod tip_stage;
 mod ms_breakdown;
+mod policy;
 mod prefetch;
-mod synthetic_wan;
 #[cfg(feature = "production")]
 mod retire_dispatcher;
+#[cfg(any(feature = "ibd-dev", test))]
+mod synthetic_wan;
+#[cfg(not(any(feature = "ibd-dev", test)))]
+#[path = "synthetic_wan_stub.rs"]
+mod synthetic_wan;
+mod tip_release;
+pub(crate) mod tip_stage;
 mod types;
 #[cfg(feature = "production")]
 mod validation_loop;
@@ -41,7 +46,7 @@ pub(crate) use validation_loop::IbdRetireWork;
 use chunk_assigner::{ChunkAssigner, ChunkGuard, create_chunks as create_chunks_impl};
 
 pub use chunk_assigner::BlockChunk;
-use download::{download_chunk, is_local_disk_peer, is_snapshot_sourced_peer, LOCAL_DISK_PEER_ID};
+use download::{LOCAL_DISK_PEER_ID, download_chunk, is_local_disk_peer, is_snapshot_sourced_peer};
 use feeder::{new_feeder_state, run_feeder_thread};
 use local_block::{
     body_warehouse_enabled, coordinator_inject_local_gap, extend_contiguous_body_tip,
@@ -129,15 +134,22 @@ pub(crate) static IBD_CHECKPOINT_EXPORT_ACTIVE: AtomicBool = AtomicBool::new(fal
 /// checkpoint export holds the disk. Off by default (tip60 soaks want crawl+export
 /// overlap). Enable via `BLVM_IBD_EXPORT_ISOLATION=1` (alias: `…_LADDER_EXPORT_ISOLATION`).
 pub(crate) fn export_isolation_enabled() -> bool {
-    for key in ["BLVM_IBD_EXPORT_ISOLATION", "BLVM_IBD_LADDER_EXPORT_ISOLATION"] {
+    for key in [
+        "BLVM_IBD_EXPORT_ISOLATION",
+        "BLVM_IBD_LADDER_EXPORT_ISOLATION",
+    ] {
         if let Ok(v) = std::env::var(key) {
             let t = v.trim();
-            if t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+            if t == "1"
+                || t.eq_ignore_ascii_case("true")
+                || t.eq_ignore_ascii_case("yes")
                 || t.eq_ignore_ascii_case("on")
             {
                 return true;
             }
-            if t == "0" || t.eq_ignore_ascii_case("false") || t.eq_ignore_ascii_case("no")
+            if t == "0"
+                || t.eq_ignore_ascii_case("false")
+                || t.eq_ignore_ascii_case("no")
                 || t.eq_ignore_ascii_case("off")
             {
                 return false;
@@ -150,8 +162,7 @@ pub(crate) fn export_isolation_enabled() -> bool {
 /// True when export is in flight **and** isolation mode is enabled.
 #[inline]
 pub(crate) fn export_isolation_active() -> bool {
-    export_isolation_enabled()
-        && IBD_CHECKPOINT_EXPORT_ACTIVE.load(Ordering::Relaxed)
+    export_isolation_enabled() && IBD_CHECKPOINT_EXPORT_ACTIVE.load(Ordering::Relaxed)
 }
 /// W177: `next_needed ≤ body_tip` (soft-resume / local inject). Export during this
 /// window fights DiskIndex compact + MemoryHigh (`high_ev` tens of thousands) and
@@ -167,10 +178,7 @@ fn reorder_has_feeder_prefetch_band(
     target: usize,
 ) -> bool {
     let band_end = next_needed.saturating_add(target as u64);
-    reorder_buffer
-        .range(next_needed..band_end)
-        .next()
-        .is_some()
+    reorder_buffer.range(next_needed..band_end).next().is_some()
 }
 
 /// W34h: WAN tip crawl with feeder below prefetch target.
@@ -298,9 +306,7 @@ pub(crate) fn export_start_gate_allows() -> bool {
     // between tips) — live genesis→250k: **0** checkpoint exports, tip60≈100, gap_missing≈100%,
     // feeder0≈97%. Only defer on *actual* tip distress / recent validation stall.
     // Live W75 freeze @344348 still trips late-body / soft-retry freeze here.
-    if tip_stage::tip_ahead_frozen_for_late_body()
-        || tip_stage::tip_ahead_frozen_for_soft_retry()
-    {
+    if tip_stage::tip_ahead_frozen_for_late_body() || tip_stage::tip_ahead_frozen_for_soft_retry() {
         return false;
     }
     // W174/W176: defer during tip-hole storms. Piggyback export holds `is_compacting`
@@ -444,9 +450,7 @@ pub(crate) fn drain_block_rx_tip_first(
     batch.sort_by(|(a, _, _), (b, _, _)| {
         let a_tip = *a == next_needed;
         let b_tip = *b == next_needed;
-        b_tip
-            .cmp(&a_tip)
-            .then_with(|| a.cmp(b))
+        b_tip.cmp(&a_tip).then_with(|| a.cmp(b))
     });
     let mut admitted = 0usize;
     for (h, block, witnesses) in batch {
@@ -538,8 +542,7 @@ pub(crate) fn wan_bulk_catchup_gap() -> u64 {
 /// Past body tip but still far from header tip — open multi-peer pipeline (not tip-crawl).
 #[inline]
 pub(crate) fn wan_bulk_catchup(header_tip: u64, next_needed: u64) -> bool {
-    header_tip >= next_needed
-        && header_tip.saturating_sub(next_needed) >= wan_bulk_catchup_gap()
+    header_tip >= next_needed && header_tip.saturating_sub(next_needed) >= wan_bulk_catchup_gap()
 }
 
 /// F-D: spawn 2 download workers per WAN peer so sticky dual-pipe can arm.
@@ -547,13 +550,7 @@ pub(crate) fn wan_bulk_catchup(header_tip: u64, next_needed: u64) -> bool {
 /// drop (~17→~9) and tip-owner churn (many owners, few sticky tenure). Span=128 alone
 /// is the primary pipe-fill fix. Set `BLVM_IBD_STICKY_DUAL_WORKER=1` to experiment.
 pub(crate) fn sticky_dual_worker_enabled() -> bool {
-    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        match std::env::var("BLVM_IBD_STICKY_DUAL_WORKER") {
-            Ok(v) => v == "1" || v.eq_ignore_ascii_case("true"),
-            Err(_) => false,
-        }
-    })
+    policy::sticky_dual_worker()
 }
 
 /// Mode T tip-glue / sticky flight clamp. Opt-in: `BLVM_IBD_SOLE_TIP_PRIORITY=1`.
@@ -561,13 +558,7 @@ pub(crate) fn sticky_dual_worker_enabled() -> bool {
 /// Default **off** (2026-08-06): default-on + TOP=1 locked tip90≈55 (tc175).
 /// tc177 TOP=4 without tip-glue flooded archive (tip90≈30). KEEP: SOLE_TIP=0 TOP=1.
 pub(crate) fn sole_tip_priority_enabled() -> bool {
-    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        match std::env::var("BLVM_IBD_SOLE_TIP_PRIORITY") {
-            Ok(v) => v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on"),
-            Err(_) => false,
-        }
-    })
+    policy::sole_tip_priority()
 }
 
 /// First `BLVM_IBD_PEERS` entry when sole tip-priority is on.
@@ -589,23 +580,13 @@ pub(crate) fn sole_tip_forced_owner() -> Option<String> {
 
 /// Shared latch for `BLVM_IBD_TOP_PEER_IN_FLIGHT` (assigner max_in_flight + sole workers).
 pub(crate) fn top_peer_in_flight_cap() -> usize {
-    latch_env!(usize, {
-        std::env::var("BLVM_IBD_TOP_PEER_IN_FLIGHT")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(2)
-            .clamp(1, 4)
-    })
+    policy::top_peer_in_flight()
 }
 
 /// Workers per peer under sole tip-priority. Matches sticky `max_in_flight` intent:
 /// TOP_PEER_IN_FLIGHT≥2 → 2 workers (tip+next overlap); else 1.
 pub(crate) fn sole_tip_workers_per_peer() -> usize {
-    if top_peer_in_flight_cap() >= 2 {
-        2
-    } else {
-        1
-    }
+    if top_peer_in_flight_cap() >= 2 { 2 } else { 1 }
 }
 
 /// Ahead cap during bulk catch-up past body tip. Env `BLVM_IBD_WAN_BULK_AHEAD` (default **2048**).
@@ -633,7 +614,7 @@ pub(crate) fn wan_bulk_tip_gap_ahead_cap() -> u64 {
         std::env::var("BLVM_IBD_WAN_BULK_TIP_GAP_AHEAD")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| wan_tip_gap_ahead_cap())
+            .unwrap_or_else(wan_tip_gap_ahead_cap)
             .clamp(128, 2048)
     })
 }
@@ -686,14 +667,13 @@ pub(crate) fn wan_ahead_policy(
 /// Manual undo of default-on — opt in: `BLVM_IBD_TIP_ADMIT_TIGHT=1` (archive fabric A/B).
 pub(crate) fn tip_admit_tight_enabled() -> bool {
     latch_env!(bool, {
-        match std::env::var("BLVM_IBD_TIP_ADMIT_TIGHT")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-        {
-            Some("1") | Some("true") | Some("on") | Some("yes") => true,
-            _ => false,
-        }
+        matches!(
+            std::env::var("BLVM_IBD_TIP_ADMIT_TIGHT")
+                .ok()
+                .as_deref()
+                .map(str::trim),
+            Some("1") | Some("true") | Some("on") | Some("yes")
+        )
     })
 }
 
@@ -850,7 +830,7 @@ fn defer_bridge_ahead_dispatch(
         return h > next_needed.saturating_add(wan_tip_dispatch_band());
     }
     if next_expected_missing {
-        let tight = window.min(64).max(16);
+        let tight = window.clamp(16, 64);
         return h > next_needed.saturating_add(tight);
     }
     gap_missing && h > next_needed.saturating_add(window)
@@ -971,7 +951,8 @@ pub(crate) fn evict_reorder_gap_pressure(
     }
 
     if evicted > 0 {
-        let total = memory::REORDER_EVICT_BLOCKS.fetch_add(evicted as u64, Ordering::Relaxed) + evicted as u64;
+        let total = memory::REORDER_EVICT_BLOCKS.fetch_add(evicted as u64, Ordering::Relaxed)
+            + evicted as u64;
         if total == evicted as u64 || total % 64 == 0 {
             warn!(
                 "[IBD_REORDER_EVICT] evicted {} block(s) (next_needed={}, reorder={}, limit={}, window={}, bridge_pending={}, bridge_max={}, gap_missing={}, total_evicted={})",
@@ -1013,8 +994,7 @@ fn prepare_coordinator_tip_handoff(
     if gap_missing || tip_in_feeder {
         return None;
     }
-    let in_bridge_pending =
-        ready_bridge.is_some_and(|b| b.pending_contains(next_needed));
+    let in_bridge_pending = ready_bridge.is_some_and(|b| b.pending_contains(next_needed));
     if in_bridge_pending || !reorder_buffer.contains_key(&next_needed) {
         return None;
     }
@@ -1122,7 +1102,7 @@ pub(crate) fn export_cost_scale_threshold_secs(target_secs: u64) -> f64 {
     // W175: live W174 restored last_export_wall_secs=81 under TARGET=300; old cap 90
     // treated that as "cheap" → BPS undercut first interval to 7890. Mid-chain piggyback
     // walls are routinely 80–200s — treat ≥60s as expensive.
-    target_secs.min(60).max(45) as f64
+    target_secs.clamp(45, 60) as f64
 }
 
 /// UTXO-count / export-duration scaled checkpoint interval (blocks between exports).
@@ -1163,15 +1143,10 @@ pub(crate) fn utxo_scaled_checkpoint_interval(
         // Grow interval with UTXO count (more UTXOs → rarer exports). The old
         // `BASE * BASE_UTXOS / count` formula *shrank* toward min as the set grew,
         // which is the opposite of export cost (W173: 28M→58M UTXOs, ~5k interval).
-        let scaled = (BASE_INTERVAL as u64)
-            .saturating_mul(last_utxo_count.max(1))
-            / BASE_UTXOS;
+        let scaled = (BASE_INTERVAL as u64).saturating_mul(last_utxo_count.max(1)) / BASE_UTXOS;
         (scaled as i32).max(BASE_INTERVAL)
     };
-    iv = iv.clamp(
-        durability.checkpoint_min_interval,
-        max_interval,
-    );
+    iv = iv.clamp(durability.checkpoint_min_interval, max_interval);
     let scale_threshold = export_cost_scale_threshold_secs(durability.checkpoint_target_secs);
     if last_export_secs >= scale_threshold && last_export_secs > 0.0 {
         let scale = (last_export_secs / scale_threshold).ceil() as i32;
@@ -1208,8 +1183,7 @@ pub(crate) fn adaptive_checkpoint_interval(
     if let Some(fixed) = durability.checkpoint_interval {
         return fixed;
     }
-    let utxo_iv =
-        utxo_scaled_checkpoint_interval(last_utxo_count, last_export_secs, durability);
+    let utxo_iv = utxo_scaled_checkpoint_interval(last_utxo_count, last_export_secs, durability);
     let scale_threshold = export_cost_scale_threshold_secs(durability.checkpoint_target_secs);
     if crate::node::parallel_ibd::memory::ibd_pressure_level_snapshot()
         >= crate::node::parallel_ibd::memory::PressureLevel::Critical
@@ -1217,9 +1191,7 @@ pub(crate) fn adaptive_checkpoint_interval(
         // Resume safety under memory pressure — but never force 500-block full exports
         // when each one costs 90–200s of disk (feeds OOM/reclaim storms).
         if last_export_secs >= scale_threshold {
-            return utxo_iv
-                .min(10_000)
-                .max(durability.checkpoint_min_interval);
+            return utxo_iv.min(10_000).max(durability.checkpoint_min_interval);
         }
         return durability.checkpoint_min_interval;
     }
@@ -1284,9 +1256,7 @@ pub(crate) fn should_advance_tip_on_skip_path(next_height: u64, effective_end_he
 #[inline]
 pub(crate) fn ibd_follow_tip_enabled() -> bool {
     match std::env::var("BLVM_IBD_FOLLOW_TIP") {
-        Ok(v) => {
-            !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("no"))
-        }
+        Ok(v) => !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("no")),
         Err(_) => false,
     }
 }
@@ -1350,9 +1320,9 @@ impl Drop for IbdNosyncGuard<'_> {
         }
     }
 }
+use dashmap::DashMap;
 use futures::stream::{FuturesUnordered, StreamExt};
 use hex;
-use dashmap::DashMap;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -1514,11 +1484,18 @@ impl ParallelIBDConfig {
             // from available RAM) so increasing the lookahead distance only helps on machines
             // where that pool is large enough to accommodate more in-flight prefetch jobs.
             .clamp(1, 512);
+        // Env wins (peel/Mode T: BLVM_IBD_MAX_BLOCKS_IN_TRANSIT=16). T1 toml-only
+        // dropped that and silently used 128 whenever `[ibd]` was missing.
         let max_blocks_in_transit = std::env::var("BLVM_IBD_MAX_BLOCKS_IN_TRANSIT")
             .ok()
             .and_then(|s| s.parse().ok())
+            .map(|n: usize| n.clamp(1, 512))
             .or_else(|| ibd_config.map(|c| c.max_blocks_in_transit_per_peer))
             .unwrap_or(128);
+        info!(
+            "IBD: max_blocks_in_transit_per_peer={} (env>toml>128)",
+            max_blocks_in_transit
+        );
         let headers_timeout = std::env::var("BLVM_IBD_HEADERS_TIMEOUT")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -1795,7 +1772,6 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
     let peer_blocks_semaphores_clone = peer_blocks_semaphores;
     let max_ahead_live_clone = max_ahead_live;
     let validation_height_clone = validation_height;
-    let confirmed_body_height = confirmed_body_height;
     let start_height = ibd_start_height; // for bootstrap detection (start == start_height)
 
     let mut chunks_completed = 0u64;
@@ -1876,13 +1852,13 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
         let blocks_sem = if start == 0 {
             None
         } else {
-            peer_blocks_semaphores_clone.get(&peer_id).map(|r| Arc::clone(&*r))
+            peer_blocks_semaphores_clone
+                .get(&peer_id)
+                .map(|r| Arc::clone(&*r))
         };
-        let validated_tip =
-            validation_height_clone.load(std::sync::atomic::Ordering::Relaxed);
+        let validated_tip = validation_height_clone.load(std::sync::atomic::Ordering::Relaxed);
         let resume_from =
-            download::resume_download_height(start, end, validated_tip)
-                .unwrap_or(start);
+            download::resume_download_height(start, end, validated_tip).unwrap_or(start);
         let outer_secs = download::worker_chunk_outer_deadline_secs(
             start,
             end,
@@ -1893,8 +1869,8 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
         // S1: cooperative outer deadline inside download_chunk flushes `received` before
         // abort. Safety-net timeout is outer+60s so a wedged select still dies; cooperative
         // path should almost always win (live: bare tokio::timeout dropped buffered blocks).
-        let outer_deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_secs(outer_secs);
+        let outer_deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(outer_secs);
         let safety_net_secs = outer_secs.saturating_add(60);
         let dl_result = match tokio::time::timeout(
             std::time::Duration::from_secs(safety_net_secs),
@@ -1955,9 +1931,7 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
                 }
                 #[cfg(feature = "profile")]
                 if block_count > 0
-                    && (chunks_completed == 0
-                        || chunks_completed % 10 == 0
-                        || block_count > 400)
+                    && (chunks_completed == 0 || chunks_completed % 10 == 0 || block_count > 400)
                 {
                     let remaining = assigner_clone.remaining_count();
                     blvm_protocol::profile_log!(
@@ -1992,12 +1966,14 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
             }
             Err(e) => {
                 let err_str = e.to_string();
-                let is_eviction = err_str.contains("evicted")
-                    && err_str.contains("NODE_NETWORK_LIMITED");
+                let is_eviction =
+                    err_str.contains("evicted") && err_str.contains("NODE_NETWORK_LIMITED");
                 if is_eviction {
                     tracing::debug!(
                         "Peer {} chunk {}-{}: eviction fast-fail — requeuing without backoff",
-                        peer_id, start, end
+                        peer_id,
+                        start,
+                        end
                     );
                     assigner_clone.requeue(start, end, Some(peer_id.clone()));
                     _guard.disarm();
@@ -2027,12 +2003,7 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
                 } else {
                     warn!(
                         "Peer {} failed chunk {}-{} ({}/{}): {} - will retry with different peer",
-                        peer_id,
-                        start,
-                        end,
-                        consecutive_failures,
-                        MAX_CONSECUTIVE_FAILURES,
-                        e
+                        peer_id, start, end, consecutive_failures, MAX_CONSECUTIVE_FAILURES, e
                     );
                 }
                 // W28c/W28d: tip-covering failure clears sticky owner and arms failover —
@@ -2057,7 +2028,8 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
                         }
                         // P1-H: on WAN gap, blacklist only connection/handshake hard-fails —
                         // soft tip timeouts rotate without 60s burn (live: 714095 ready=63 idle).
-                        let wan_gap = confirmed_body_height > 0 && tip_needed > confirmed_body_height;
+                        let wan_gap =
+                            confirmed_body_height > 0 && tip_needed > confirmed_body_height;
                         if wan_gap {
                             let connection_fail = err_str.contains("not connected")
                                 || err_str.contains("handshake not complete");
@@ -2079,10 +2051,8 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
                 // rotate to other peers instead of re-winning the same height immediately.
                 if err_str.contains("empty-witness") && num_peers_clone > 1 {
                     let blacklist_secs = 120u64;
-                    assigner_clone.blacklist_peer(
-                        &peer_id,
-                        std::time::Duration::from_secs(blacklist_secs),
-                    );
+                    assigner_clone
+                        .blacklist_peer(&peer_id, std::time::Duration::from_secs(blacklist_secs));
                     warn!(
                         "[IBD_EMPTY_WITNESS] peer {} blacklisted {}s after empty-witness abort",
                         peer_id, blacklist_secs
@@ -2104,9 +2074,7 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
                         assigner_clone.requeue_stall_gaps(gap_h, micro_exclude);
                     }
                 }
-                let exclude = if num_peers_clone > 1
-                    && assigner_clone.total_chunks() > 1
-                {
+                let exclude = if num_peers_clone > 1 && assigner_clone.total_chunks() > 1 {
                     Some(peer_id.clone())
                 } else {
                     if num_peers_clone == 1 {
@@ -2127,11 +2095,9 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
                 _guard.disarm();
                 assigner_clone.on_chunk_complete_range(&peer_id, start, end);
 
-                if num_peers_clone > 1
-                    && consecutive_failures >= MAX_CONSECUTIVE_FAILURES
-                {
-                    let all_timeouts = consecutive_timeout_failures
-                        >= MAX_CONSECUTIVE_TIMEOUT_FAILURES;
+                if num_peers_clone > 1 && consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    let all_timeouts =
+                        consecutive_timeout_failures >= MAX_CONSECUTIVE_TIMEOUT_FAILURES;
                     if all_timeouts {
                         if let (Ok(peer_sa), Some(net)) = (
                             peer_id.parse::<std::net::SocketAddr>(),
@@ -2163,9 +2129,7 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
                     continue;
                 }
 
-                if num_peers_clone == 1
-                    && consecutive_failures >= MAX_CONSECUTIVE_FAILURES
-                {
+                if num_peers_clone == 1 && consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                     warn!(
                         "Peer {} at {} consecutive failures (single-peer mode) — waiting for reconnect",
                         peer_id, consecutive_failures
@@ -2175,10 +2139,8 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
                     continue;
                 }
 
-                let backoff_secs =
-                    (1u64 << (consecutive_failures - 1).min(3)).min(8);
-                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs))
-                    .await;
+                let backoff_secs = (1u64 << (consecutive_failures - 1).min(3)).min(8);
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
             }
         }
     }
@@ -2227,11 +2189,21 @@ impl ParallelIBD {
     pub fn initialize_peers(&mut self, peer_ids: &[String]) {
         let peer_sem: DashMap<String, Arc<Semaphore>> = peer_ids
             .iter()
-            .map(|id| (id.clone(), Arc::new(Semaphore::new(self.config.max_concurrent_per_peer))))
+            .map(|id| {
+                (
+                    id.clone(),
+                    Arc::new(Semaphore::new(self.config.max_concurrent_per_peer)),
+                )
+            })
             .collect();
         let blocks_sem: DashMap<String, Arc<Semaphore>> = peer_ids
             .iter()
-            .map(|id| (id.clone(), Arc::new(Semaphore::new(self.config.max_blocks_in_transit_per_peer))))
+            .map(|id| {
+                (
+                    id.clone(),
+                    Arc::new(Semaphore::new(self.config.max_blocks_in_transit_per_peer)),
+                )
+            })
             .collect();
         self.peer_semaphores = Arc::new(peer_sem);
         self.peer_blocks_semaphores = Arc::new(blocks_sem);
@@ -2590,10 +2562,9 @@ impl ParallelIBD {
         // P1: cap WAN download workers to top-N scored peers. With max_ahead=512 and
         // chunk_size=32 only ~16 slots exist — 90 workers just amplify gap timeout storms.
         if wan_multi_peer {
-            let confirmed_probe =
-                probe_confirmed_body_height(&blockstore).unwrap_or(0);
-            let past_body_tip = confirmed_probe > 0
-                && start_height.saturating_sub(1) > confirmed_probe;
+            let confirmed_probe = probe_confirmed_body_height(&blockstore).unwrap_or(0);
+            let past_body_tip =
+                confirmed_probe > 0 && start_height.saturating_sub(1) > confirmed_probe;
             let cap = if past_body_tip {
                 ibd_wan_gap_active_peer_cap()
             } else {
@@ -2601,10 +2572,7 @@ impl ParallelIBD {
             };
             if filtered_peers.len() > cap {
                 let mut ranked = scored_peers.clone();
-                ranked.sort_by(|a, b| {
-                    b.1.partial_cmp(&a.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 ranked.truncate(cap);
                 filtered_peers = ranked.iter().map(|(p, _)| p.clone()).collect();
                 info!(
@@ -2645,11 +2613,7 @@ impl ParallelIBD {
             .iter()
             .map(|peer_id| {
                 if wan_multi_peer {
-                    if wan_dual {
-                        2
-                    } else {
-                        1
-                    }
+                    if wan_dual { 2 } else { 1 }
                 } else if sole_tip_pri {
                     // tc167 tip90≈54.4 with accidental spawn=clamp(2,6); spawn=1 (tc169)
                     // thinned tip90≈42. Keep tip-glue + max_in_flight=1 but allow the
@@ -2896,15 +2860,17 @@ impl ParallelIBD {
         memory::refresh_stale_emergency_pressure(coord_rss_budget_mb);
         let engine_will_run = self.config.utxo_engine;
         let ibd_path_reason = match std::env::var("BLVM_IBD_ENGINE") {
-            Ok(v) if v.trim() == "0"
-                || v.eq_ignore_ascii_case("false")
-                || v.eq_ignore_ascii_case("no") =>
+            Ok(v)
+                if v.trim() == "0"
+                    || v.eq_ignore_ascii_case("false")
+                    || v.eq_ignore_ascii_case("no") =>
             {
                 "BLVM_IBD_ENGINE=0"
             }
-            Ok(v) if v.trim() == "1"
-                || v.eq_ignore_ascii_case("true")
-                || v.eq_ignore_ascii_case("yes") =>
+            Ok(v)
+                if v.trim() == "1"
+                    || v.eq_ignore_ascii_case("true")
+                    || v.eq_ignore_ascii_case("yes") =>
             {
                 "BLVM_IBD_ENGINE=1"
             }
@@ -2965,8 +2931,7 @@ impl ParallelIBD {
                         .context("Failed to open IBD UTXO tree (engine legacy shell)")?
                 } else if let Some(ref root) = maybe_data_dir {
                     let utxo_store_dir = root.join(IBD_UTXO_STORE_SUBDIR);
-                    match crate::storage::database::create_ibd_utxo_standalone_db(&utxo_store_dir)
-                    {
+                    match crate::storage::database::create_ibd_utxo_standalone_db(&utxo_store_dir) {
                         Ok(standalone_db) => {
                             let standalone_tree = standalone_db.open_tree("ibd_utxos");
                             let standalone_non_empty = standalone_tree
@@ -2997,7 +2962,8 @@ impl ParallelIBD {
                                     warn!(
                                         "[IBD_UTXO_STORE] failed to remove stale standalone dir \
                                          {}: {} — continuing with potentially stale data",
-                                        utxo_store_dir.display(), e
+                                        utxo_store_dir.display(),
+                                        e
                                     );
                                 }
                                 // Re-open fresh (falls through to Case 3 below).
@@ -3022,9 +2988,9 @@ impl ParallelIBD {
                                              stale-wipe ({e}); falling back to main storage"
                                         );
                                         _ibd_utxo_standalone_db = None;
-                                        storage
-                                            .open_tree("ibd_utxos")
-                                            .context("Failed to open IBD UTXO tree (stale-wipe fallback)")?
+                                        storage.open_tree("ibd_utxos").context(
+                                            "Failed to open IBD UTXO tree (stale-wipe fallback)",
+                                        )?
                                     }
                                 }
                             } else if standalone_non_empty {
@@ -3041,8 +3007,7 @@ impl ParallelIBD {
                                 // Check if main storage has UTXO data (legacy partial IBD).
                                 let main_tree =
                                     storage.open_tree("ibd_utxos").context("open ibd_utxos")?;
-                                let main_non_empty =
-                                    main_tree.is_empty().unwrap_or(true) == false;
+                                let main_non_empty = !main_tree.is_empty().unwrap_or(true);
                                 if main_non_empty {
                                     // Case 2: legacy data in main storage — keep using it.
                                     // Migrating mid-IBD would require copying millions of entries.
@@ -3127,18 +3092,12 @@ impl ParallelIBD {
         {
             None
         } else {
-            let engine_path =
-                crate::config::ibd::ibd_engine_path(storage.data_dir().as_deref());
+            let engine_path = crate::config::ibd::ibd_engine_path(storage.data_dir().as_deref());
             if let Some(parent) = engine_path.parent() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!("create IBD engine directory {}", parent.display())
-                })?;
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create IBD engine directory {}", parent.display()))?;
             }
-            let stored_export = storage
-                .chain()
-                .get_engine_export_height()
-                .ok()
-                .flatten();
+            let stored_export = storage.chain().get_engine_export_height().ok().flatten();
             let export_override = crate::config::ibd::export_height_override_from_env();
             let (resolved_export, ignored_override) =
                 crate::config::ibd::resolve_engine_export_height(stored_export, export_override);
@@ -3163,16 +3122,14 @@ impl ParallelIBD {
             let segment_max_pre =
                 crate::storage::ibd_engine::engine_segment_max_height(&engine_path);
 
-            let mut was_dirty_at_open = false;
             // Wipe stale on-disk engine state on epoch mismatch or missing segments.
             // Do not wipe on resume solely because `.dirty` exists (SIGTERM leaves it set).
+            let dirty_path = crate::storage::ibd_engine::engine_dirty_flag_path(&engine_path);
+            let was_dirty_at_open = dirty_path.exists();
             {
                 let mut epoch_os = engine_path.as_os_str().to_owned();
                 epoch_os.push(".epoch");
                 let epoch_path = std::path::PathBuf::from(&epoch_os);
-                let dirty_path =
-                    crate::storage::ibd_engine::engine_dirty_flag_path(&engine_path);
-                was_dirty_at_open = dirty_path.exists();
                 let stored_epoch: Option<u64> = std::fs::read_to_string(&epoch_path)
                     .ok()
                     .and_then(|s| s.trim().parse().ok());
@@ -3224,9 +3181,7 @@ impl ParallelIBD {
                 info!(
                     "IBD engine: dirty shutdown — wipe + re-seed from checkpoint \
                      (export_h={}; prior segment_max={}; sidecar={:?})",
-                    checkpoint_height,
-                    segment_max_pre,
-                    sidecar_cl_pre,
+                    checkpoint_height, segment_max_pre, sidecar_cl_pre,
                 );
                 let _ = std::fs::remove_file(&engine_path);
                 crate::storage::ibd_engine::remove_contiguous_length_sidecar(&engine_path);
@@ -3298,9 +3253,9 @@ impl ParallelIBD {
                             engine_path.display()
                         )
                     })?;
-                    let mut ckpt_tree = storage.open_tree(ckpt_tree_name).with_context(|| {
-                        format!("open engine checkpoint tree {ckpt_tree_name}")
-                    })?;
+                    let mut ckpt_tree = storage
+                        .open_tree(ckpt_tree_name)
+                        .with_context(|| format!("open engine checkpoint tree {ckpt_tree_name}"))?;
 
                     if ckpt_tree.is_empty().unwrap_or(true) {
                         return Err(anyhow::anyhow!(
@@ -3322,11 +3277,8 @@ impl ParallelIBD {
                             "seed engine from {ckpt_tree_name} at checkpoint h={checkpoint_height}"
                         )
                     })?;
-                    let validation_tip_at_open = storage
-                        .chain()
-                        .get_engine_validation_tip()
-                        .ok()
-                        .flatten();
+                    let validation_tip_at_open =
+                        storage.chain().get_engine_validation_tip().ok().flatten();
                     let chain_tip_at_open = storage.chain().get_height().ok().flatten();
                     info!(
                         "IBD engine: resume from height {start_height} — re-seeded {n} UTXOs \
@@ -3374,9 +3326,9 @@ impl ParallelIBD {
                             engine_path.display()
                         )
                     })?;
-                    let mut ckpt_tree = storage.open_tree(ckpt_tree_name).with_context(|| {
-                        format!("open engine checkpoint tree {ckpt_tree_name}")
-                    })?;
+                    let mut ckpt_tree = storage
+                        .open_tree(ckpt_tree_name)
+                        .with_context(|| format!("open engine checkpoint tree {ckpt_tree_name}"))?;
 
                     if ckpt_tree.is_empty().unwrap_or(true) {
                         return Err(anyhow::anyhow!(
@@ -3398,11 +3350,8 @@ impl ParallelIBD {
                             "seed engine from {ckpt_tree_name} at checkpoint h={checkpoint_height}"
                         )
                     })?;
-                    let validation_tip_at_open = storage
-                        .chain()
-                        .get_engine_validation_tip()
-                        .ok()
-                        .flatten();
+                    let validation_tip_at_open =
+                        storage.chain().get_engine_validation_tip().ok().flatten();
                     let chain_tip_at_open = storage.chain().get_height().ok().flatten();
                     info!(
                         "IBD engine: resume from height {start_height} — re-seeded {n} UTXOs \
@@ -3480,18 +3429,20 @@ impl ParallelIBD {
         } else {
             prefetch_workers
         };
-        let (prefetch_input_tx_v2, gap_fill_tx_v2, ready_bridge, ready_rx, mut prefetch_join_handles) = {
+        let (
+            prefetch_input_tx_v2,
+            gap_fill_tx_v2,
+            ready_bridge,
+            ready_rx,
+            mut prefetch_join_handles,
+        ) = {
             let (out_tx, out_rx) =
                 crossbeam_channel::bounded::<ReadyItem>(max_prefetches_in_flight);
             let bridge = Arc::new(prefetch::OrderedReadyBridge::new(out_tx));
             if engine_direct_feed {
-                info!(
-                    "IBD engine: direct coordinator→feeder path (no prefetch worker threads)"
-                );
-                let (in_tx, _in_rx) =
-                    crossbeam_channel::bounded::<PrefetchWorkItemV2>(1);
-                let (gap_tx_v2, _gap_rx) =
-                    crossbeam_channel::bounded::<PrefetchWorkItemV2>(1);
+                info!("IBD engine: direct coordinator→feeder path (no prefetch worker threads)");
+                let (in_tx, _in_rx) = crossbeam_channel::bounded::<PrefetchWorkItemV2>(1);
+                let (gap_tx_v2, _gap_rx) = crossbeam_channel::bounded::<PrefetchWorkItemV2>(1);
                 (in_tx, gap_tx_v2, bridge, out_rx, Vec::new())
             } else {
                 let store = Arc::clone(&ibd_store_v2);
@@ -3534,8 +3485,8 @@ impl ParallelIBD {
         let mut download_handles = Vec::new();
         let num_peers = filtered_peers.len();
         let ibd_protocol_version = protocol.get_protocol_version();
-        let confirmed_body_height_at_start =
-            probe_confirmed_body_height(&blockstore).unwrap_or_else(|e| {
+        let confirmed_body_height_at_start = probe_confirmed_body_height(&blockstore)
+            .unwrap_or_else(|e| {
                 warn!("IBD: probe_confirmed_body_height failed: {e:#}");
                 0
             });
@@ -3548,8 +3499,7 @@ impl ParallelIBD {
         if confirmed_body_height_at_start == 0 {
             if let Ok(Some(header_max)) = blockstore.highest_stored_height() {
                 if header_max > 0 {
-                    let sparse_max =
-                        probe_highest_stored_body_height(&blockstore).unwrap_or(0);
+                    let sparse_max = probe_highest_stored_body_height(&blockstore).unwrap_or(0);
                     if sparse_max > 0 {
                         info!(
                             "IBD: sparse block bodies on disk up to height {} (header_max={}) \
@@ -3586,11 +3536,7 @@ impl ParallelIBD {
             // Synth bulk local-disk: single worker — dual workers raced the same tip span
             // (complete→clear→W28c reassign) and amplified the H6 DEDUP storm.
             let worker_count = if wan_multi_peer {
-                if sticky_dual_worker_enabled() {
-                    2
-                } else {
-                    1
-                }
+                if sticky_dual_worker_enabled() { 2 } else { 1 }
             } else if sole_tip_priority_enabled() {
                 // Match total_download_workers (tc167 tip90≈54.4 > tc169 spawn=1).
                 ((2.0 * priority) as usize).clamp(2, 6)
@@ -3611,7 +3557,9 @@ impl ParallelIBD {
                     .peer_semaphores
                     .get(&peer_id)
                     .map(|r| Arc::clone(&*r))
-                    .ok_or_else(|| anyhow::anyhow!("Peer {} not found in peer_semaphores", peer_id))?;
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Peer {} not found in peer_semaphores", peer_id)
+                    })?;
                 let ctx = IbdWorkerCtx {
                     peer_id: peer_id.clone(),
                     config: self.config.clone(),
@@ -3681,7 +3629,9 @@ impl ParallelIBD {
                             info!("[IBD] Peer watcher exiting: all chunks complete");
                             break;
                         }
-                        let Some(ref net) = network_for_watcher else { break; };
+                        let Some(ref net) = network_for_watcher else {
+                            break;
+                        };
                         let current_peers = net.peer_addresses_for_ibd();
                         let new_peers: Vec<String> = {
                             let evicted = net.ibd_evicted_ips.read().unwrap();
@@ -3706,12 +3656,10 @@ impl ParallelIBD {
                             // Spawning without register left ready>0 but ready_active_ok=0/0
                             // (wan10k-c4 freeze @438479: CHEESE + preferred=None forever).
                             assigner_for_watcher.register_download_worker(&peer_str);
-                            let chunk_sem =
-                                Arc::new(Semaphore::new(max_concurrent_for_watcher));
+                            let chunk_sem = Arc::new(Semaphore::new(max_concurrent_for_watcher));
                             let blocks_sem =
                                 Arc::new(Semaphore::new(max_blocks_transit_for_watcher));
-                            peer_sems_for_watcher
-                                .insert(peer_str.clone(), Arc::clone(&chunk_sem));
+                            peer_sems_for_watcher.insert(peer_str.clone(), Arc::clone(&chunk_sem));
                             peer_blocks_sems_for_watcher
                                 .insert(peer_str.clone(), Arc::clone(&blocks_sem));
 
@@ -3808,7 +3756,7 @@ impl ParallelIBD {
             .ok()
             .and_then(|s| s.parse().ok())
             .filter(|&n| n >= 32)
-            .unwrap_or_else(|| coord_buffer_limit.min(512).max(128));
+            .unwrap_or_else(|| coord_buffer_limit.clamp(128, 512));
         if wan_multi_peer {
             info!(
                 "Coordinator: WAN multi-peer reorder buffer={} blocks",
@@ -3829,7 +3777,7 @@ impl ParallelIBD {
                 bridge_pending_max, coord_buffer_limit
             );
         }
-        // Seq-1: When single peer (BLVM_IBD_SEQUENTIAL), blocks arrive in order; skip reorder_buffer.
+        // Seq-1: single peer (`num_peers == 1`) — blocks arrive in order; skip reorder_buffer.
         let sequential = num_peers == 1;
         if sequential {
             info!("Coordinator: sequential mode (single peer) — passthrough, no reorder buffer");
@@ -3878,9 +3826,7 @@ impl ParallelIBD {
                 info!(
                     "[IBD_SYNTH_WAN] pinned wan_body_tip={} (confirmed={}, sparse={}) — \
                      tip-crawl active while bodies load from snapshot",
-                    live_body_tip_for_coord,
-                    confirmed_body_height_at_start,
-                    sparse_local_body_max
+                    live_body_tip_for_coord, confirmed_body_height_at_start, sparse_local_body_max
                 );
             } else {
                 info!(
@@ -3925,15 +3871,14 @@ impl ParallelIBD {
             // W29: admit window is recomputed each loop (WAN tip crawl uses tight 64).
             let mut local_gap_miss_logged: rustc_hash::FxHashSet<u64> =
                 rustc_hash::FxHashSet::default();
-            let mut try_inject_local_gap =
-                |reorder_buffer: &mut std::collections::BTreeMap<
-                    u64,
-                    (SharedBlock, SharedWitnesses),
-                >,
-                 validation_height: u64,
-                 already_dispatched: &rustc_hash::FxHashSet<u64>,
-                 tip_in_pipeline: bool|
-                 -> bool {
+            let mut try_inject_local_gap = |reorder_buffer: &mut std::collections::BTreeMap<
+                u64,
+                (SharedBlock, SharedWitnesses),
+            >,
+                                            validation_height: u64,
+                                            already_dispatched: &rustc_hash::FxHashSet<u64>,
+                                            tip_in_pipeline: bool|
+             -> bool {
                 let inject = tokio::task::block_in_place(|| {
                     coordinator_inject_local_gap(
                         blockstore_for_coord.as_ref(),
@@ -3979,15 +3924,7 @@ impl ParallelIBD {
                 SharedWitnesses,
                 bool,
             )| {
-                let (
-                    _store,
-                    keys,
-                    tx_ids,
-                    h,
-                    block,
-                    witnesses,
-                    engine_mode,
-                ) = item;
+                let (_store, keys, tx_ids, h, block, witnesses, engine_mode) = item;
                 if engine_mode {
                     let bridge = ready_bridge_for_coord
                         .as_ref()
@@ -4028,15 +3965,7 @@ impl ParallelIBD {
                         .saturating_add(1)
                         == h;
                 tokio::task::block_in_place(|| {
-                    let item = (
-                        _store,
-                        keys,
-                        tx_ids,
-                        h,
-                        block,
-                        witnesses,
-                        false,
-                    );
+                    let item = (_store, keys, tx_ids, h, block, witnesses, false);
                     if tip_priority {
                         let item = match gap_fill_tx_v2_for_coord.try_send(item) {
                             Ok(()) => return,
@@ -4071,7 +4000,7 @@ impl ParallelIBD {
             // mid soft-retry → aborted deep tip pipes → owner tenure p50≈5s → ~4.5 blk/s.
             // Override via BLVM_IBD_COORD_STALL_SECS.
             let coord_stall_secs: u64 = if wan_multi_peer {
-                download_timeout_secs_for_coord.max(75).min(120)
+                download_timeout_secs_for_coord.clamp(75, 120)
             } else {
                 90
             };
@@ -4089,15 +4018,7 @@ impl ParallelIBD {
             let mut tip_crawl_logged_at: Option<std::time::Instant> = None;
             let mut a6m_check_at: Option<std::time::Instant> = None;
             let mut tip_nudge_last: Option<std::time::Instant> = None;
-            // Land E 2026-08-13: covering=0 + in_flight=0 stall clock (env-gated requeue).
-            let mut covering0_idle_since: Option<(u64, std::time::Instant)> = None;
-            // Soak4 072018Z: 33 fires / 2s storm @400600 → INVALID late. Once per height
-            // unless COOLDOWN_MS>0 (soak 9 leftover freeze @411665 after the one shot).
-            let mut covering0_fired_h: Option<u64> = None;
-            let mut covering0_last_fire: Option<std::time::Instant> = None;
-            let mut covering0_fire_n: u32 = 0;
-            let mut ibd_ready_refresh_at =
-                std::time::Instant::now() - Duration::from_secs(10);
+            let mut ibd_ready_refresh_at = std::time::Instant::now() - Duration::from_secs(10);
             let mut tip_follow_poll_at =
                 std::time::Instant::now() - Duration::from_secs(ibd_follow_tip_poll_secs());
             let mut tip_follow_headers_busy = false;
@@ -4174,8 +4095,7 @@ impl ParallelIBD {
                             .max(effective_end_live_for_coord.load(Ordering::Relaxed)),
                         next_needed,
                     );
-                    let admit_win =
-                        effective_gap_admit_window(wan_tip_crawl_early, bulk_early);
+                    let admit_win = effective_gap_admit_window(wan_tip_crawl_early, bulk_early);
                     let early_drain_t0 = std::time::Instant::now();
                     // W6/N14: release-side tip latch before channel drain / bulk admit.
                     if let Some((h, block, witnesses)) = tip_release::take_tip_release() {
@@ -4237,13 +4157,11 @@ impl ParallelIBD {
                     tip_follow_poll_at = std::time::Instant::now();
                     if let Some(ref net) = network_for_coord {
                         let follow = async {
-                            let Some(peer_tip) =
-                                net.get_highest_peer_start_height_async().await
+                            let Some(peer_tip) = net.get_highest_peer_start_height_async().await
                             else {
                                 return;
                             };
-                            let current_end =
-                                effective_end_live_for_coord.load(Ordering::Relaxed);
+                            let current_end = effective_end_live_for_coord.load(Ordering::Relaxed);
                             let stored_ht = blockstore_for_coord
                                 .highest_stored_height()
                                 .ok()
@@ -4283,16 +4201,12 @@ impl ParallelIBD {
                                 .ok()
                                 .flatten()
                                 .unwrap_or(stored_ht);
-                            if let Some(new_end) = tip_follow_new_effective_end(
-                                current_end,
-                                peer_tip,
-                                header_tip,
-                            ) {
-                                effective_end_live_for_coord
-                                    .store(new_end, Ordering::Release);
+                            if let Some(new_end) =
+                                tip_follow_new_effective_end(current_end, peer_tip, header_tip)
+                            {
+                                effective_end_live_for_coord.store(new_end, Ordering::Release);
                                 assigner_for_coord.set_ibd_end_height(new_end);
-                                let vh = validation_height_for_coord
-                                    .load(Ordering::Relaxed);
+                                let vh = validation_height_for_coord.load(Ordering::Relaxed);
                                 info!(
                                     "[IBD_TIP_FOLLOW] extended effective_end {} → {} \
                                      (vh={} peer_tip={} header_tip={})",
@@ -4311,8 +4225,7 @@ impl ParallelIBD {
                         }
                     }
                 }
-                let effective_end_now =
-                    effective_end_live_for_coord.load(Ordering::Relaxed);
+                let effective_end_now = effective_end_live_for_coord.load(Ordering::Relaxed);
                 if validation_height_for_coord.load(Ordering::Relaxed) >= effective_end_now {
                     info!(
                         "Coordinator: validation reached effective end height {} — stopping block dispatch",
@@ -4341,10 +4254,8 @@ impl ParallelIBD {
                         let live_body = live_body_tip_for_coord;
                         let vh = Arc::clone(&validation_height_for_coord);
                         let refresh = async move {
-                            let mut candidates: HashSet<String> = assigner
-                                .peer_ids_for_ibd_ready()
-                                .into_iter()
-                                .collect();
+                            let mut candidates: HashSet<String> =
+                                assigner.peer_ids_for_ibd_ready().into_iter().collect();
                             // Local-disk bulk stream: never call peer_addresses_for_ibd()
                             // (sync block_in_place → DNS/connect expansion). Vacuous
                             // "all limited" on empty TCP peers used to burn ~10s/loop and
@@ -4533,111 +4444,6 @@ impl ParallelIBD {
                             }
                         }
                     }
-                    // Land E 2026-08-13: 401/409 freeze is covering=0 + TIP_HOLE_AHEAD
-                    // cheese (ahead in reorder, tip H missing). NUDGE is gated on
-                    // true_body_gap; SLA is 25s (tip30 window is 30s). Stripe-32 FORCE
-                    // re-cheesed the hole (soak 12 @403747). W73 force is (H,H) only.
-                    // Default 0 = off (dens KEEP). Soak: 2000 + min_h=401000.
-                    let idle_ms: u64 = latch_env!(u64, {
-                        std::env::var("BLVM_IBD_COVERING0_IDLE_REQUEUE_MS")
-                            .ok()
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(0)
-                            .clamp(0, 30_000)
-                    });
-                    let min_h: u64 = latch_env!(u64, {
-                        std::env::var("BLVM_IBD_COVERING0_IDLE_MIN_H")
-                            .ok()
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(405_000)
-                    });
-                    // 0 = once-forever at a stuck height (KEEP / soak9 default).
-                    // Soak: 10000 — retry leftover freeze without soak4's 2s storm.
-                    let cooldown_ms: u64 = latch_env!(u64, {
-                        std::env::var("BLVM_IBD_COVERING0_IDLE_COOLDOWN_MS")
-                            .ok()
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(0)
-                            .clamp(0, 60_000)
-                    });
-                    let max_fires: u32 = if cooldown_ms == 0 { 1 } else { 4 };
-                    if covering0_fired_h.is_some_and(|h| h / 1000 != next_needed / 1000) {
-                        covering0_fired_h = None;
-                        covering0_last_fire = None;
-                        covering0_fire_n = 0;
-                    }
-                    if idle_ms > 0
-                        && wan_gap
-                        && assigner_for_coord.is_bootstrap_complete()
-                        && !tip_in_reorder_nudge
-                        && next_needed >= min_h
-                    {
-                        let (covering, ranges, busy) = assigner_for_coord.tip_flight_diag();
-                        // Empty pipe OR mute single cover (TIP_HOLE_AHEAD covering=1).
-                        // Deep in-flight stripe (ranges>1) is left alone. Progress clock
-                        // below refuses to fire while ≥32 BPS.
-                        let hole = (covering == 0 && ranges == 0 && busy == 0)
-                            || (covering <= 1 && ranges <= 1 && !tip_in_reorder_nudge);
-                        if hole {
-                            let fire = match covering0_idle_since {
-                                Some((h0, t))
-                                    if t.elapsed() >= Duration::from_millis(idle_ms) =>
-                                {
-                                    // Exact-height idle misses a 17–27 BPS crawl (height
-                                    // ticks every ~40ms). Fire when <32 BPS over the idle
-                                    // window (64 blocks / 2s). 250 BPS slides the origin.
-                                    let progressed = next_needed.saturating_sub(h0);
-                                    let crawl = progressed < 64;
-                                    if !crawl {
-                                        covering0_idle_since = Some((
-                                            next_needed,
-                                            std::time::Instant::now(),
-                                        ));
-                                    }
-                                    let n_ok = covering0_fire_n < max_fires;
-                                    let cd_ok = match covering0_last_fire {
-                                        None => true,
-                                        Some(_) if cooldown_ms == 0 => false,
-                                        Some(ft) => {
-                                            ft.elapsed()
-                                                >= Duration::from_millis(cooldown_ms)
-                                        }
-                                    };
-                                    crawl && n_ok && cd_ok
-                                }
-                                Some(_) => false,
-                                None => {
-                                    covering0_idle_since =
-                                        Some((next_needed, std::time::Instant::now()));
-                                    false
-                                }
-                            };
-                            if fire {
-                                assigner_for_coord
-                                    .requeue_stall_gaps_force(next_needed, None);
-                                let _ = assigner_for_coord.nudge_wan_tip_owner();
-                                covering0_fired_h = Some(next_needed);
-                                covering0_last_fire = Some(std::time::Instant::now());
-                                covering0_fire_n = covering0_fire_n.saturating_add(1);
-                                covering0_idle_since =
-                                    Some((next_needed, std::time::Instant::now()));
-                                warn!(
-                                    "[IBD_COVERING0_IDLE_REQUEUE] tip={} ready={} idle_ms={} min_h={} fires={}/{} cooldown_ms={} — force tip H (H,H) (pipe empty, tip not in reorder)",
-                                    next_needed,
-                                    assigner_for_coord.ibd_ready_peer_count(),
-                                    idle_ms,
-                                    min_h,
-                                    covering0_fire_n,
-                                    max_fires,
-                                    cooldown_ms
-                                );
-                            }
-                        } else {
-                            covering0_idle_since = None;
-                        }
-                    } else {
-                        covering0_idle_since = None;
-                    }
                 }
                 let dynamic_buffer_limit = coord_buffer_limit;
                 // W29: near-tip crawl uses tight admit (64); bulk catch-up uses deep admit;
@@ -4655,8 +4461,7 @@ impl ParallelIBD {
                         .max(effective_end_live_for_coord.load(Ordering::Relaxed)),
                     next_for_admit,
                 );
-                let admit_window =
-                    effective_gap_admit_window(wan_tip_crawl_now, bulk_catchup_now);
+                let admit_window = effective_gap_admit_window(wan_tip_crawl_now, bulk_catchup_now);
                 let coord_stall_effective_secs = if assigner_for_coord.is_bootstrap_complete() {
                     coord_stall_log_secs
                 } else {
@@ -4669,7 +4474,9 @@ impl ParallelIBD {
                     warn!(
                         "[IBD_CLIFF_PRE_BOOT] ms={} tip={} ch_len={} reorder={}",
                         cliff_iter_t0.elapsed().as_millis(),
-                        validation_height_for_coord.load(Ordering::Relaxed).saturating_add(1),
+                        validation_height_for_coord
+                            .load(Ordering::Relaxed)
+                            .saturating_add(1),
                         block_rx.len(),
                         reorder_buffer.len(),
                     );
@@ -4680,15 +4487,11 @@ impl ParallelIBD {
                     let val_h = validation_height_for_coord.load(Ordering::Relaxed);
                     let next_needed = val_h.saturating_add(1);
                     let gap_missing_coord = !reorder_buffer.contains_key(&next_needed);
-                    let feeder_len_early =
-                        IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed);
+                    let feeder_len_early = IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed);
                     let wan_tip_crawl_early = next_needed > live_body_tip_for_coord;
 
                     // W34j: log sustained feeder starvation with reorder runway.
-                    if wan_tip_crawl_early
-                        && feeder_len_early == 0
-                        && reorder_buffer.len() >= 8
-                    {
+                    if wan_tip_crawl_early && feeder_len_early == 0 && reorder_buffer.len() >= 8 {
                         let since = feeder_starve_since.get_or_insert_with(std::time::Instant::now);
                         if since.elapsed() >= Duration::from_secs(2) {
                             let should_log = feeder_starve_logged_at
@@ -4698,20 +4501,12 @@ impl ParallelIBD {
                                 feeder_starve_logged_at = Some(std::time::Instant::now());
                                 let tip_in = reorder_buffer.contains_key(&next_needed);
                                 let contig = reorder_contig_runway(&reorder_buffer, next_needed);
-                                let ahead_n =
-                                    reorder_ahead_buffered(&reorder_buffer, next_needed);
-                                let first_ah =
-                                    reorder_first_ahead(&reorder_buffer, next_needed);
-                                let holes_now =
-                                    IBD_TIP_BRIDGE_HOLES.load(Ordering::Relaxed);
+                                let ahead_n = reorder_ahead_buffered(&reorder_buffer, next_needed);
+                                let first_ah = reorder_first_ahead(&reorder_buffer, next_needed);
+                                let holes_now = IBD_TIP_BRIDGE_HOLES.load(Ordering::Relaxed);
                                 // FEEDER_STARVE implies feeder empty — tip not in feeder.
-                                let mode = tip_runway_mode(
-                                    tip_in,
-                                    contig,
-                                    ahead_n,
-                                    holes_now,
-                                    false,
-                                );
+                                let mode =
+                                    tip_runway_mode(tip_in, contig, ahead_n, holes_now, false);
                                 let (covering, flight_ranges, busy_peers) =
                                     assigner_for_coord.tip_flight_diag();
                                 warn!(
@@ -4792,21 +4587,15 @@ impl ParallelIBD {
                             tip_in_feeder_early,
                         )
                     {
-                        tip_inflight_since =
-                            Some((next_needed, std::time::Instant::now()));
+                        tip_inflight_since = Some((next_needed, std::time::Instant::now()));
                         if next_needed >= next_prefetch_height {
                             next_prefetch_height = next_needed + 1;
                         }
                         prepare_coord_dispatch_bufs(
-
                             coord_engine_mode,
-
                             &block,
-
                             &mut coord_tx_ids_buf,
-
                             &mut coord_keys_buf,
-
                         );
                         let store = &ibd_store_v2_for_coord;
                         let keys_owned = std::mem::take(&mut coord_keys_buf);
@@ -4888,11 +4677,9 @@ impl ParallelIBD {
                     // cap (default 256) so assigner cannot open a 4k prefetch window into the
                     // bridge (live: 680001 assigned at val≈675k → next_expected_missing thrash).
                     {
-                        let feeder_len =
-                            IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed);
+                        let feeder_len = IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed);
                         if feeder_len > 0 {
-                            feeder_nonempty_since
-                                .get_or_insert_with(std::time::Instant::now);
+                            feeder_nonempty_since.get_or_insert_with(std::time::Instant::now);
                         } else {
                             feeder_nonempty_since = None;
                         }
@@ -4903,8 +4690,8 @@ impl ParallelIBD {
                             && bridge_len >= bridge_pending_max
                             && (gap_missing_coord || feeder_len == 0);
                         // L1 local / W11 WAN ahead policy (proactive — do not wait for bridge-full).
-                        let local_body_ahead = next_needed <= live_body_tip_for_coord
-                            && live_body_tip_for_coord > 0;
+                        let local_body_ahead =
+                            next_needed <= live_body_tip_for_coord && live_body_tip_for_coord > 0;
                         let was_local_ahead = IBD_LOCAL_BODY_AHEAD.load(Ordering::Relaxed);
                         IBD_LOCAL_BODY_AHEAD.store(local_body_ahead, Ordering::Relaxed);
                         // W178: leaving local inject → WAN tip with cold peer scores.
@@ -4917,8 +4704,7 @@ impl ParallelIBD {
                         }
                         let ahead_cap = if local_body_ahead {
                             Some(("local", local_body_ahead_cap()))
-                        } else if next_needed > live_body_tip_for_coord
-                        {
+                        } else if next_needed > live_body_tip_for_coord {
                             // Past bodies tip: always bound WAN ahead. W76: feeder-empty tip
                             // starve uses the tip window even when wan_bulk_catchup (headers
                             // at network tip make bulk≈always-true mid-chain).
@@ -4983,11 +4769,7 @@ impl ParallelIBD {
                             if log_now {
                                 warn!(
                                     "[IBD_AHEAD_CLAMP] bridge_pending={} feeder={} gap_missing={} — max_ahead {} → {} (admit_window/floor)",
-                                    bridge_len,
-                                    feeder_len,
-                                    gap_missing_coord,
-                                    current,
-                                    clamp_to
+                                    bridge_len, feeder_len, gap_missing_coord, current, clamp_to
                                 );
                                 ahead_clamp_logged_at = Some(std::time::Instant::now());
                             }
@@ -5037,7 +4819,9 @@ impl ParallelIBD {
                     warn!(
                         "[IBD_CLIFF_BOOTSTRAP_BLK] ms={} tip={} reorder={}",
                         cliff_boot_t0.elapsed().as_millis(),
-                        validation_height_for_coord.load(Ordering::Relaxed).saturating_add(1),
+                        validation_height_for_coord
+                            .load(Ordering::Relaxed)
+                            .saturating_add(1),
                         reorder_buffer.len(),
                     );
                 }
@@ -5060,12 +4844,8 @@ impl ParallelIBD {
                         // reload from disk (same pattern as stall recovery). Do not clear
                         // *after* a successful inject — that caused the LOCAL_GAP re-inject storm.
                         dispatched.remove(&next_needed);
-                        let _ = try_inject_local_gap(
-                            &mut reorder_buffer,
-                            val_h,
-                            &dispatched,
-                            false,
-                        );
+                        let _ =
+                            try_inject_local_gap(&mut reorder_buffer, val_h, &dispatched, false);
                     }
                     let _ = emergency_drain_block_rx_for_gap(
                         &mut block_rx,
@@ -5137,7 +4917,9 @@ impl ParallelIBD {
                     warn!(
                         "[IBD_CLIFF_PRE_GAP] iter_ms={} tip={} ch_len={} reorder={}",
                         cliff_iter_t0.elapsed().as_millis(),
-                        validation_height_for_coord.load(Ordering::Relaxed).saturating_add(1),
+                        validation_height_for_coord
+                            .load(Ordering::Relaxed)
+                            .saturating_add(1),
                         block_rx.len(),
                         reorder_buffer.len(),
                     );
@@ -5167,8 +4949,7 @@ impl ParallelIBD {
                 {
                     let val_h = validation_height_for_coord.load(Ordering::Relaxed);
                     let next_needed = val_h.saturating_add(1);
-                    let effective_end_now =
-                        effective_end_live_for_coord.load(Ordering::Relaxed);
+                    let effective_end_now = effective_end_live_for_coord.load(Ordering::Relaxed);
                     if next_needed <= effective_end_now
                         && assigner_for_coord.is_bootstrap_complete()
                     {
@@ -5245,14 +5026,13 @@ impl ParallelIBD {
                                         && !in_bridge_pending
                                         && !tip_stage::tip_taken_by_validation(next_needed)
                                         && !tip_inflight
+                                        && bridge.rewind_cursor_to(next_needed)
                                     {
-                                        if bridge.rewind_cursor_to(next_needed) {
-                                            warn!(
-                                                "[IBD_TIP_REWIND] next_expected {} → {} (cursor ahead, tip absent from reorder+feeder+dispatched)",
-                                                n, next_needed
-                                            );
-                                            dispatched.remove(&next_needed);
-                                        }
+                                        warn!(
+                                            "[IBD_TIP_REWIND] next_expected {} → {} (cursor ahead, tip absent from reorder+feeder+dispatched)",
+                                            n, next_needed
+                                        );
+                                        dispatched.remove(&next_needed);
                                     }
                                 }
                             }
@@ -5283,9 +5063,7 @@ impl ParallelIBD {
                             if let Some(prev) = assigner_for_coord.rotate_tip_owner_on_sla() {
                                 // D4: WAN SLA cooloff must cover worker abort latency after rotate.
                                 let cooloff = std::time::Duration::from_secs(if wan_gap {
-                                    tip_stage::tip_sla_secs()
-                                        .saturating_add(30)
-                                        .clamp(60, 120)
+                                    tip_stage::tip_sla_secs().saturating_add(30).clamp(60, 120)
                                 } else {
                                     60
                                 });
@@ -5320,8 +5098,7 @@ impl ParallelIBD {
 
                         // Case B / W19/W26/W29b/W34a/W54: tip in reorder and not in feeder —
                         // always hand off (W54: feeder-depth gate deadlocked soft-resume).
-                        let feeder_len_case_b =
-                            IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed);
+                        let feeder_len_case_b = IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed);
                         let tip_in_feeder_case_b = {
                             let g = feeder_state_for_coord.0.lock();
                             g.0.get(next_needed).is_some()
@@ -5346,21 +5123,15 @@ impl ParallelIBD {
                                     tip_in_feeder_case_b,
                                 )
                             {
-                                tip_inflight_since =
-                                    Some((next_needed, std::time::Instant::now()));
+                                tip_inflight_since = Some((next_needed, std::time::Instant::now()));
                                 if next_needed >= next_prefetch_height {
                                     next_prefetch_height = next_needed + 1;
                                 }
                                 prepare_coord_dispatch_bufs(
-
                                     coord_engine_mode,
-
                                     &block,
-
                                     &mut coord_tx_ids_buf,
-
                                     &mut coord_keys_buf,
-
                                 );
                                 let store = &ibd_store_v2_for_coord;
                                 let keys_owned = std::mem::take(&mut coord_keys_buf);
@@ -5533,8 +5304,7 @@ impl ParallelIBD {
                                         .as_ref()
                                         .and_then(|b| b.next_expected());
                                     let one_ahead = bnext == Some(next_needed.saturating_add(1));
-                                    let taken =
-                                        tip_stage::tip_taken_by_validation(next_needed);
+                                    let taken = tip_stage::tip_taken_by_validation(next_needed);
                                     let ahead_age_ms = bridge_ahead_since
                                         .filter(|(h, _)| *h == next_needed)
                                         .map(|(_, t)| t.elapsed().as_millis())
@@ -5602,8 +5372,7 @@ impl ParallelIBD {
                                             || reorder_buffer.contains_key(&next_needed)
                                         {
                                             allow_requeue = false;
-                                        } else if let Some(ref bridge) = ready_bridge_for_coord
-                                        {
+                                        } else if let Some(ref bridge) = ready_bridge_for_coord {
                                             let _ = bridge.rewind_cursor_to(next_needed);
                                             dispatched.remove(&next_needed);
                                             bridge_ahead_since = None;
@@ -5624,9 +5393,6 @@ impl ParallelIBD {
                                         allow_requeue = false;
                                     } else if synthetic_wan::bulk_local_disk_stream() {
                                         allow_requeue = true; // inject only; no rewind
-                                    } else if tip_stage::tip_taken_by_validation(next_needed)
-                                    {
-                                        allow_requeue = false;
                                     } else {
                                         allow_requeue = false;
                                     }
@@ -5723,8 +5489,7 @@ impl ParallelIBD {
                                         admit_window,
                                     );
                                     if !drained && !reorder_buffer.contains_key(&next_needed) {
-                                        let (covering, _, _) =
-                                            assigner_for_coord.tip_flight_diag();
+                                        let (covering, _, _) = assigner_for_coord.tip_flight_diag();
                                         if covering == 0 {
                                             // W73: WAN tip holes need force (H,H) too — P0-B
                                             // non-force skip left genesis stuck at 262716.
@@ -5764,8 +5529,9 @@ impl ParallelIBD {
                 // W17: periodic tip-crawl diagnostics (WAN catchup). Surfaces bridge holes,
                 // tip covering, feeder starvation — the ~1 BPS signature from 2026-07-10 soak.
                 {
-                    let next_needed =
-                        validation_height_for_coord.load(Ordering::Relaxed).saturating_add(1);
+                    let next_needed = validation_height_for_coord
+                        .load(Ordering::Relaxed)
+                        .saturating_add(1);
                     let wan_tip_crawl = next_needed > live_body_tip_for_coord;
                     tip_stage::mark_needed(next_needed);
                     if wan_tip_crawl {
@@ -5774,15 +5540,13 @@ impl ParallelIBD {
                             .unwrap_or(true);
                         if should_log {
                             tip_crawl_logged_at = Some(std::time::Instant::now());
-                            let feeder_len =
-                                IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed);
+                            let feeder_len = IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed);
                             let max_ahead_now = max_ahead_live.load(Ordering::Relaxed);
                             let (covering, flight_ranges, busy_peers) =
                                 assigner_for_coord.tip_flight_diag();
                             IBD_TIP_COVERING.store(covering, Ordering::Relaxed);
                             IBD_TIP_IN_FLIGHT_RANGES.store(flight_ranges, Ordering::Relaxed);
-                            let (healthy, _raw, _) =
-                                assigner_for_coord.tip_flight_diag_healthy();
+                            let (healthy, _raw, _) = assigner_for_coord.tip_flight_diag_healthy();
                             let tip_in_reorder = reorder_buffer.contains_key(&next_needed);
                             IBD_TIP_IN_REORDER.store(tip_in_reorder, Ordering::Relaxed);
                             let tip_in_feeder = {
@@ -5790,12 +5554,10 @@ impl ParallelIBD {
                                 g.0.get(next_needed).is_some()
                             };
                             let gap_missing = !tip_in_reorder && !tip_in_feeder;
-                            let contig_runway =
-                                reorder_contig_runway(&reorder_buffer, next_needed);
+                            let contig_runway = reorder_contig_runway(&reorder_buffer, next_needed);
                             let ahead_buffered =
                                 reorder_ahead_buffered(&reorder_buffer, next_needed);
-                            let first_ahead =
-                                reorder_first_ahead(&reorder_buffer, next_needed);
+                            let first_ahead = reorder_first_ahead(&reorder_buffer, next_needed);
                             let (bridge_next, bridge_len, bridge_min, bridge_max, holes) =
                                 ready_bridge_for_coord
                                     .as_ref()
@@ -5961,13 +5723,10 @@ impl ParallelIBD {
                             .copied(),
                     );
                     let mut bridge_capped = false;
-                    let gap_missing_dispatch =
-                        !reorder_buffer.contains_key(&next_needed_dispatch);
-                    let next_expected_missing_dispatch =
-                        ready_bridge_for_coord.as_ref().is_some_and(|b| {
-                            b.next_expected()
-                                .is_some_and(|n| !b.pending_contains(n))
-                        });
+                    let gap_missing_dispatch = !reorder_buffer.contains_key(&next_needed_dispatch);
+                    let next_expected_missing_dispatch = ready_bridge_for_coord
+                        .as_ref()
+                        .is_some_and(|b| b.next_expected().is_some_and(|n| !b.pending_contains(n)));
                     let wan_tip_crawl_dispatch = next_needed_dispatch > live_body_tip_for_coord;
                     let bulk_catchup_dispatch = wan_bulk_catchup(
                         assigner_for_coord
@@ -5976,8 +5735,7 @@ impl ParallelIBD {
                         next_needed_dispatch,
                     );
                     // W34d/W34h: prioritize next 16 heights when feeder starved on WAN crawl.
-                    let feeder_len_dispatch =
-                        IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed);
+                    let feeder_len_dispatch = IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed);
                     let feeder_starved_dispatch =
                         wan_feeder_prefetch_starved(wan_tip_crawl_dispatch, feeder_len_dispatch);
                     if wan_tip_crawl_dispatch
@@ -5989,8 +5747,8 @@ impl ParallelIBD {
                                 W34_FEEDER_PREFETCH_TARGET,
                             ))
                     {
-                        let band_end = next_needed_dispatch
-                            .saturating_add(W34_FEEDER_PREFETCH_TARGET as u64);
+                        let band_end =
+                            next_needed_dispatch.saturating_add(W34_FEEDER_PREFETCH_TARGET as u64);
                         dispatch_heights_buf.sort_by_key(|h| {
                             if *h >= next_needed_dispatch && *h < band_end {
                                 *h - next_needed_dispatch
@@ -6053,15 +5811,10 @@ impl ParallelIBD {
                         // In engine mode skip key extraction: keys are unused by the engine
                         // validation path. Only tx_ids are needed for SpendSession::append.
                         prepare_coord_dispatch_bufs(
-
                             coord_engine_mode,
-
                             &block,
-
                             &mut coord_tx_ids_buf,
-
                             &mut coord_keys_buf,
-
                         );
                         let store = &ibd_store_v2_for_coord;
                         let keys_owned = std::mem::take(&mut coord_keys_buf);
@@ -6109,7 +5862,12 @@ impl ParallelIBD {
                         }
                         if !reorder_buffer.contains_key(&next_needed) {
                             dispatched.remove(&next_needed);
-                            let _ = try_inject_local_gap(&mut reorder_buffer, val_h, &dispatched, false);
+                            let _ = try_inject_local_gap(
+                                &mut reorder_buffer,
+                                val_h,
+                                &dispatched,
+                                false,
+                            );
                         }
                         // If the gap is now in reorder (inject or prior), dispatch it this
                         // iteration — do not sleep past a ready next_expected.
@@ -6124,15 +5882,10 @@ impl ParallelIBD {
                                             next_prefetch_height = next_needed + 1;
                                         }
                                         prepare_coord_dispatch_bufs(
-
                                             coord_engine_mode,
-
                                             &block,
-
                                             &mut coord_tx_ids_buf,
-
                                             &mut coord_keys_buf,
-
                                         );
                                         let store = &ibd_store_v2_for_coord;
                                         let keys_owned = std::mem::take(&mut coord_keys_buf);
@@ -6232,8 +5985,7 @@ impl ParallelIBD {
                     assigner_for_coord.set_tip_bridge_holes(holes);
                     missing
                 };
-                let next_needed_poll =
-                    validation_height_for_coord.load(Ordering::Relaxed) + 1;
+                let next_needed_poll = validation_height_for_coord.load(Ordering::Relaxed) + 1;
                 // Tip is "in pipeline" only when the body is actually present for handoff:
                 // bridge cursor AT tip **and** tip in pending, or **tip key** in feeder.
                 // W75 (live 344348): `bridge_next==tip` with `pending=0` is a *hole*, not
@@ -6279,8 +6031,7 @@ impl ParallelIBD {
                         .as_ref()
                         .and_then(|b| b.next_expected())
                         == Some(next_needed_poll);
-                    let feeder_empty =
-                        IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed) == 0;
+                    let feeder_empty = IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed) == 0;
                     (tip_in_reorder || bridge_waiting) && feeder_empty
                 };
                 // I3: gap already in-pipeline — drain block_rx non-blocking and tight-loop
@@ -6292,8 +6043,7 @@ impl ParallelIBD {
                 if gap_in_pipeline {
                     while let Ok((h, block, witnesses)) = block_rx.try_recv() {
                         total_received += 1;
-                        let next_needed =
-                            validation_height_for_coord.load(Ordering::Relaxed) + 1;
+                        let next_needed = validation_height_for_coord.load(Ordering::Relaxed) + 1;
                         if dispatched.contains(&h) {
                             dispatched.remove(&h);
                         }
@@ -6319,8 +6069,9 @@ impl ParallelIBD {
                 // A2/A3: WAN catch-up (past bodies-on-disk tip) uses a tighter gap poll so
                 // inject/requeue runs ~20 Hz instead of ~4 Hz (default 250ms).
                 let wan_catchup = {
-                    let next_needed =
-                        validation_height_for_coord.load(Ordering::Relaxed).saturating_add(1);
+                    let next_needed = validation_height_for_coord
+                        .load(Ordering::Relaxed)
+                        .saturating_add(1);
                     next_needed > confirmed_body_height_for_coord
                         && confirmed_body_height_for_coord > 0
                 };
@@ -6333,14 +6084,12 @@ impl ParallelIBD {
                 // reorder with a non-empty feeder, gap_poll=false and tip_handoff_urgent=false
                 // → old path waited coord_stall (90s) while Case C could not run; live cliff
                 // showed ~10s INJECT cadence (channel refill / TIP_RESERVE) instead.
-                let recv_wait = if gap_poll
-                    || tip_handoff_urgent
-                    || synthetic_wan::bulk_local_disk_stream()
-                {
-                    Duration::from_millis(gap_poll_ms)
-                } else {
-                    Duration::from_secs(coord_stall_effective_secs)
-                };
+                let recv_wait =
+                    if gap_poll || tip_handoff_urgent || synthetic_wan::bulk_local_disk_stream() {
+                        Duration::from_millis(gap_poll_ms)
+                    } else {
+                        Duration::from_secs(coord_stall_effective_secs)
+                    };
                 if synthetic_wan::bulk_local_disk_stream() {
                     static CLIFF_RECV_AT: std::sync::atomic::AtomicU64 =
                         std::sync::atomic::AtomicU64::new(0);
@@ -6365,8 +6114,7 @@ impl ParallelIBD {
                 }
                 // W25c: admit validation tip from block_rx before bulk recv_many parks.
                 if gap_poll {
-                    let next_needed =
-                        validation_height_for_coord.load(Ordering::Relaxed) + 1;
+                    let next_needed = validation_height_for_coord.load(Ordering::Relaxed) + 1;
                     let drained = drain_block_rx_tip_first(
                         &mut block_rx,
                         &mut reorder_buffer,
@@ -6475,7 +6223,8 @@ impl ParallelIBD {
                             );
                             coord_buffer_full_since = None;
                             let val_h = next_needed.saturating_sub(1);
-                            if try_inject_local_gap(&mut reorder_buffer, val_h, &dispatched, false) {
+                            if try_inject_local_gap(&mut reorder_buffer, val_h, &dispatched, false)
+                            {
                                 continue;
                             }
                             if reorder_buffer.contains_key(&next_needed) {
@@ -6548,7 +6297,7 @@ impl ParallelIBD {
                             let new_max = if coord_stall_count >= 4 {
                                 // Hard floor: one chunk per peer so workers can still make progress
                                 // on heights close to the stuck block.
-                                (chunk_size_for_ahead as u64).max(16)
+                                chunk_size_for_ahead.max(16)
                             } else if coord_stall_count >= 2 {
                                 max_ahead_blocks >> (coord_stall_count - 1)
                             } else {
@@ -6568,7 +6317,8 @@ impl ParallelIBD {
                         // and prefetch channel health (helps distinguish true validation stall
                         // from coordinator-reads-stale-height phantom stall).
                         if coord_stall_count % 10 == 0 {
-                            let vh_raw = validation_height_for_coord.load(std::sync::atomic::Ordering::SeqCst);
+                            let vh_raw = validation_height_for_coord
+                                .load(std::sync::atomic::Ordering::SeqCst);
                             warn!(
                                 "[IBD_COORD_DIAG] stall_count={} vh_seqcst={} next_needed_check={} dispatched_has_needed={} reorder_buf_len={} next_prefetch={}",
                                 coord_stall_count,
@@ -6622,15 +6372,10 @@ impl ParallelIBD {
                         // In engine mode skip key extraction: keys are unused by the engine
                         // validation path. Only tx_ids are needed for SpendSession::append.
                         prepare_coord_dispatch_bufs(
-
                             coord_engine_mode,
-
                             &block,
-
                             &mut coord_tx_ids_buf,
-
                             &mut coord_keys_buf,
-
                         );
                         let store = &ibd_store_v2_for_coord;
                         let keys_owned = std::mem::take(&mut coord_keys_buf);
@@ -6722,15 +6467,10 @@ impl ParallelIBD {
                         // In engine mode skip key extraction: keys are unused by the engine
                         // validation path. Only tx_ids are needed for SpendSession::append.
                         prepare_coord_dispatch_bufs(
-
                             coord_engine_mode,
-
                             &block,
-
                             &mut coord_tx_ids_buf,
-
                             &mut coord_keys_buf,
-
                         );
                         let store = &ibd_store_v2_for_coord;
                         let keys_owned = std::mem::take(&mut coord_keys_buf);
@@ -6819,13 +6559,10 @@ impl ParallelIBD {
                     );
                     let val_h_dispatch = validation_height_for_coord.load(Ordering::Relaxed);
                     let next_needed_dispatch = val_h_dispatch.saturating_add(1);
-                    let gap_missing_dispatch =
-                        !reorder_buffer.contains_key(&next_needed_dispatch);
-                    let next_expected_missing_dispatch =
-                        ready_bridge_for_coord.as_ref().is_some_and(|b| {
-                            b.next_expected()
-                                .is_some_and(|n| !b.pending_contains(n))
-                        });
+                    let gap_missing_dispatch = !reorder_buffer.contains_key(&next_needed_dispatch);
+                    let next_expected_missing_dispatch = ready_bridge_for_coord
+                        .as_ref()
+                        .is_some_and(|b| b.next_expected().is_some_and(|n| !b.pending_contains(n)));
                     let wan_tip_crawl_dispatch = next_needed_dispatch > live_body_tip_for_coord;
                     let bulk_catchup_dispatch = wan_bulk_catchup(
                         assigner_for_coord
@@ -6833,8 +6570,7 @@ impl ParallelIBD {
                             .max(effective_end_live_for_coord.load(Ordering::Relaxed)),
                         next_needed_dispatch,
                     );
-                    let feeder_len_dispatch =
-                        IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed);
+                    let feeder_len_dispatch = IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed);
                     let feeder_starved_dispatch =
                         wan_feeder_prefetch_starved(wan_tip_crawl_dispatch, feeder_len_dispatch);
                     if wan_tip_crawl_dispatch
@@ -6846,8 +6582,8 @@ impl ParallelIBD {
                                 W34_FEEDER_PREFETCH_TARGET,
                             ))
                     {
-                        let band_end = next_needed_dispatch
-                            .saturating_add(W34_FEEDER_PREFETCH_TARGET as u64);
+                        let band_end =
+                            next_needed_dispatch.saturating_add(W34_FEEDER_PREFETCH_TARGET as u64);
                         dispatch_heights_buf.sort_by_key(|h| {
                             if *h >= next_needed_dispatch && *h < band_end {
                                 *h - next_needed_dispatch
@@ -6897,15 +6633,10 @@ impl ParallelIBD {
                         // In engine mode skip key extraction: keys are unused by the engine
                         // validation path. Only tx_ids are needed for SpendSession::append.
                         prepare_coord_dispatch_bufs(
-
                             coord_engine_mode,
-
                             &block,
-
                             &mut coord_tx_ids_buf,
-
                             &mut coord_keys_buf,
-
                         );
                         let store = &ibd_store_v2_for_coord;
                         let keys_owned = std::mem::take(&mut coord_keys_buf);
@@ -7005,8 +6736,8 @@ impl ParallelIBD {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(40);
-            let budget_bytes = (total_ram_bytes * budget_pct / 100)
-                .saturating_sub(base_process_overhead_bytes);
+            let budget_bytes =
+                (total_ram_bytes * budget_pct / 100).saturating_sub(base_process_overhead_bytes);
             let max_utxos = budget_bytes / bytes_per_utxo_rss;
             let ram_safe_height = max_utxos / utxos_per_block;
 
@@ -7077,9 +6808,8 @@ impl ParallelIBD {
             .ok()
             .flatten()
             .unwrap_or(0);
-        let engine_resume_gap_replay = utxo_engine.is_some()
-            && start_height > 1
-            && engine_stored_export_height > 0;
+        let engine_resume_gap_replay =
+            utxo_engine.is_some() && start_height > 1 && engine_stored_export_height > 0;
         let engine_gap_export_defer_until = if engine_resume_gap_replay {
             engine_gap_export_defer_until_height(
                 start_height,
@@ -7104,9 +6834,7 @@ impl ParallelIBD {
             info!(
                 "[IBD_ENGINE_REPLAY] resume at h={} above local replay cap {} — periodic \
                  checkpoint export active from export_h={}",
-                start_height,
-                local_replay_max_height,
-                engine_stored_export_height,
+                start_height, local_replay_max_height, engine_stored_export_height,
             );
         }
         {
@@ -7115,10 +6843,10 @@ impl ParallelIBD {
                 validation_h: start_height,
                 start_height,
                 local_replay_max_height,
-                confirmed_body_height_at_start: confirmed_body_height_at_start,
+                confirmed_body_height_at_start,
                 sparse_local_body_max,
                 engine_export_height: engine_stored_export_height,
-                effective_end_height: effective_end_height,
+                effective_end_height,
             };
             info!(
                 "[IBD_PHASE] {:?} at startup (vh={}, local_replay_max={}, export_h={})",
@@ -7518,10 +7246,7 @@ impl ParallelIBD {
             // LMDB path without "EnvOpenOptions::open failed".
             let n = prefetch_join_handles.len();
             if n > 0 {
-                tracing::debug!(
-                    "[IBD_SHUTDOWN] joining {} prefetch worker thread(s)…",
-                    n
-                );
+                tracing::debug!("[IBD_SHUTDOWN] joining {} prefetch worker thread(s)…", n);
                 for h in prefetch_join_handles.drain(..) {
                     let _ = h.join();
                 }
@@ -7572,9 +7297,7 @@ impl ParallelIBD {
         // F-C2: catch durable chain_info tip up to validated height before Phase 3.
         // Skip-path validation can leave tip hundreds of blocks behind (already_persisted).
         if let Err(e) = storage.sync_chain_info_to_height(validated_through) {
-            warn!(
-                "[IBD_TIP_SYNC] sync_chain_info_to_height({validated_through}) failed: {e:#}"
-            );
+            warn!("[IBD_TIP_SYNC] sync_chain_info_to_height({validated_through}) failed: {e:#}");
         } else if let Ok(Some(tip)) = storage.chain().get_height() {
             if tip < validated_through {
                 warn!(
@@ -7582,10 +7305,7 @@ impl ParallelIBD {
                     tip, validated_through
                 );
             } else {
-                info!(
-                    "[IBD_TIP_SYNC] durable chain tip caught up to {}",
-                    tip
-                );
+                info!("[IBD_TIP_SYNC] durable chain tip caught up to {}", tip);
             }
         }
         // F-C3: refuse Phase 3 / Ok if durable tip still lags IBD end (export poison risk).
@@ -7630,10 +7350,7 @@ impl ParallelIBD {
                     match handle.await {
                         Ok(()) => joined += 1,
                         Err(e) => {
-                            debug!(
-                                "Download task for chunk {} ended: {}",
-                                chunk_start, e
-                            );
+                            debug!("Download task for chunk {} ended: {}", chunk_start, e);
                             joined += 1;
                         }
                     }
@@ -7695,12 +7412,8 @@ impl ParallelIBD {
                 .ok()
                 .and_then(|t| t.is_empty().ok().map(|e| !e))
                 .unwrap_or(false);
-            let path = crate::storage::ibd_engine::phase3_path(
-                export_h,
-                tip_u,
-                slot_h,
-                ckpt_nonempty,
-            );
+            let path =
+                crate::storage::ibd_engine::phase3_path(export_h, tip_u, slot_h, ckpt_nonempty);
             info!(
                 "IBD engine: Phase 3 path={path:?} export_h={export_h} tip={tip_u} \
                  active_ckpt={active_name} slot_h={slot_h} nonempty={ckpt_nonempty}"
@@ -7731,10 +7444,8 @@ impl ParallelIBD {
                     storage
                         .prepare_heed3_for_phase3_promote()
                         .context("prepare heed3 for Phase 3 catch-up")?;
-                    let write_slot =
-                        crate::storage::ibd_engine::ckpt_inactive_slot(active_slot);
-                    let write_name =
-                        crate::storage::ibd_engine::ckpt_tree_for_slot(write_slot);
+                    let write_slot = crate::storage::ibd_engine::ckpt_inactive_slot(active_slot);
+                    let write_name = crate::storage::ibd_engine::ckpt_tree_for_slot(write_slot);
                     info!(
                         "IBD engine: Phase 3 catch-up export {export_h} → {tip_u} into {write_name} \
                          (then promote; not a second full copy into ibd_utxos)"
@@ -7891,7 +7602,10 @@ impl ParallelIBD {
         ibd_utxo_lookup: Option<&dyn blvm_consensus::utxo_overlay::UtxoLookup>,
         ibd_block_outputs: Option<
             std::sync::Arc<
-                rustc_hash::FxHashMap<blvm_consensus::OutPoint, std::sync::Arc<blvm_consensus::UTXO>>,
+                rustc_hash::FxHashMap<
+                    blvm_consensus::OutPoint,
+                    std::sync::Arc<blvm_consensus::UTXO>,
+                >,
             >,
         >,
     ) -> Result<(
@@ -8427,21 +8141,21 @@ impl ParallelIBD {
                             use blvm_protocol::rayon::iter::IntoParallelRefIterator;
                             use blvm_protocol::rayon::prelude::*;
                             let witness_data_vec: Vec<(usize, Vec<u8>)> = chunk
-                                .par_iter()
-                                .enumerate()
-                                .filter_map(|(i, (_, witnesses, _, _))| {
-                                    if block_has_witness_data(witnesses) {
-                                        match bincode::serialize(witnesses.as_ref()) {
-                                            Ok(data) => Some(Ok((i, data))),
-                                            Err(e) => Some(Err(anyhow::anyhow!(
-                                                "Failed to serialize witnesses at chunk index {i}: {e}"
-                                            ))),
-                                        }
-                                    } else {
-                                        None
+                            .par_iter()
+                            .enumerate()
+                            .filter_map(|(i, (_, witnesses, _, _))| {
+                                if block_has_witness_data(witnesses) {
+                                    match bincode::serialize(witnesses.as_ref()) {
+                                        Ok(data) => Some(Ok((i, data))),
+                                        Err(e) => Some(Err(anyhow::anyhow!(
+                                            "Failed to serialize witnesses at chunk index {i}: {e}"
+                                        ))),
                                     }
-                                })
-                                .collect::<Result<Vec<_>>>()?;
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Result<Vec<_>>>()?;
 
                             let mut v = vec![None; chunk.len()];
                             for (i, data) in witness_data_vec {
@@ -8675,10 +8389,12 @@ impl ParallelIBD {
             // IBD flush cycle, causing 30–90 s stalls on single-writer LMDB backends.
             #[cfg(feature = "production")]
             {
-                let undo_entries: Vec<(&blvm_protocol::types::Hash, &blvm_consensus::reorganization::BlockUndoLog)> =
-                    (0..block_hashes.len())
-                        .map(|i| (&block_hashes[i], &chunk[i].3))
-                        .collect();
+                let undo_entries: Vec<(
+                    &blvm_protocol::types::Hash,
+                    &blvm_consensus::reorganization::BlockUndoLog,
+                )> = (0..block_hashes.len())
+                    .map(|i| (&block_hashes[i], &chunk[i].3))
+                    .collect();
                 blockstore.store_undo_logs_batch(&undo_entries)?;
             }
             #[cfg(not(feature = "production"))]
@@ -8741,1797 +8457,5 @@ impl ParallelIBD {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::VecDeque;
-
-    #[test]
-    fn a5_tip_admit_tight_aligns_ahead_cap_with_admit() {
-        // SAFETY: single-threaded test; env restored before exit.
-        unsafe {
-            std::env::remove_var("BLVM_IBD_TIP_ADMIT_TIGHT");
-            let (_, cap_default) = wan_ahead_policy(true, true, true, 2);
-            assert_eq!(
-                cap_default,
-                wan_bulk_tip_gap_ahead_cap(),
-                "default tip-starve ahead stays tip-gap cap (256)"
-            );
-            std::env::set_var("BLVM_IBD_TIP_ADMIT_TIGHT", "1");
-            let (kind, cap) = wan_ahead_policy(true, true, true, 2);
-            assert_eq!(kind, "wan_tip_tight");
-            assert_eq!(
-                cap,
-                wan_gap_admit_window(),
-                "TIGHT tip-starve ahead must match admit window (A5 KEEP; A6 tip-first REVERT)"
-            );
-            // Sole + GD_SLOW: do not deepen starve under wan_tip_tight.
-            tip_stage::test_seed_getdata_body_ewma(1_500, 32);
-            let (kind_sole, cap_sole) = wan_ahead_policy(true, true, true, 1);
-            assert_eq!(kind_sole, "wan_bulk_gap_sole");
-            assert_eq!(cap_sole, wan_bulk_tip_gap_ahead_cap());
-            tip_stage::test_reset_getdata_body_ewma();
-            std::env::remove_var("BLVM_IBD_TIP_ADMIT_TIGHT");
-        }
-    }
-
-    #[test]
-    fn a4_tip_admit_tight_opt_in_ignores_bulk_catchup() {
-        // SAFETY: single-threaded test; env restored before exit.
-        unsafe {
-            // Default (tight off): tip+bulk still selects bulk admit (pre-A4 public DNA).
-            std::env::remove_var("BLVM_IBD_TIP_ADMIT_TIGHT");
-            assert!(!tip_admit_tight_enabled());
-            assert_eq!(
-                effective_gap_admit_window(true, true),
-                wan_bulk_admit_window(),
-                "default tip+bulk must keep bulk admit until public confirm"
-            );
-            assert_eq!(
-                effective_gap_admit_window(true, false),
-                wan_gap_admit_window()
-            );
-            // Opt-in tight: tip crawl ignores bulk (archive fabric KEEP mech).
-            std::env::set_var("BLVM_IBD_TIP_ADMIT_TIGHT", "1");
-            assert!(tip_admit_tight_enabled());
-            assert_eq!(
-                effective_gap_admit_window(true, true),
-                wan_gap_admit_window(),
-                "TIP_ADMIT_TIGHT=1 must ignore bulk catchup"
-            );
-            std::env::remove_var("BLVM_IBD_TIP_ADMIT_TIGHT");
-            // Pre-tip / LOCAL_GAP path unchanged.
-            assert_eq!(effective_gap_admit_window(false, true), gap_admit_window());
-            assert_eq!(effective_gap_admit_window(false, false), gap_admit_window());
-        }
-    }
-
-    #[test]
-    fn c1f_tip_runway_mode_classifies_tip_hole_ahead() {
-        assert_eq!(
-            tip_runway_mode(false, 0, 64, 0, false),
-            "TIP_HOLE_AHEAD",
-            "holes=0 + ahead buffered + tip missing must not look like filled runway"
-        );
-        assert_eq!(tip_runway_mode(false, 0, 0, 0, false), "EMPTY_TIP");
-        assert_eq!(tip_runway_mode(true, 32, 0, 0, false), "FILLED_RUNWAY");
-        assert_eq!(tip_runway_mode(true, 8, 20, 12, false), "CHEESE");
-        // C1q: tip in feeder + ahead buffered = filled runway (not TIP_HOLE_AHEAD).
-        assert_eq!(
-            tip_runway_mode(false, 0, 64, 0, true),
-            "FILLED_RUNWAY",
-            "tip in feeder must not be classified as tip hole"
-        );
-    }
-
-    #[test]
-    fn tip_nudge_skips_healthy_handoff_shapes() {
-        // True TIP_HOLE_AHEAD / EMPTY_TIP — nudge allowed.
-        assert!(tip_nudge_true_body_gap(false, false, false, false));
-        // Healthy handoff: tip left reorder into feeder / bridge / validation.
-        assert!(
-            !tip_nudge_true_body_gap(false, true, false, false),
-            "tip in feeder must not TIP_NUDGE"
-        );
-        assert!(
-            !tip_nudge_true_body_gap(false, false, true, false),
-            "tip in bridge pending must not TIP_NUDGE"
-        );
-        assert!(
-            !tip_nudge_true_body_gap(false, false, false, true),
-            "tip_taken must not TIP_NUDGE (dens: covering thrash)"
-        );
-        assert!(
-            !tip_nudge_true_body_gap(true, false, false, false),
-            "tip in reorder needs no nudge"
-        );
-    }
-
-    #[test]
-    fn pinned_ibd_peers_skips_archive_dns_seed() {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap();
-        unsafe {
-            std::env::remove_var("BLVM_IBD_PEERS");
-        }
-        assert!(!skip_ibd_archive_dns_seed());
-        unsafe {
-            std::env::set_var("BLVM_IBD_PEERS", "127.0.0.1:18333");
-        }
-        assert!(skip_ibd_archive_dns_seed());
-        unsafe {
-            std::env::remove_var("BLVM_IBD_PEERS");
-        }
-    }
-
-    #[test]
-    fn c1f_reorder_contig_runway_counts_from_tip() {
-        use std::sync::Arc;
-        let mut reorder: std::collections::BTreeMap<u64, (SharedBlock, SharedWitnesses)> =
-            std::collections::BTreeMap::new();
-        let tip = 100u64;
-        // Tip hole, ahead present — contig=0, ahead=2
-        let dummy_block = Arc::new(Block {
-            header: BlockHeader {
-                version: 1,
-                timestamp: 1,
-                ..Default::default()
-            },
-            transactions: vec![].into(),
-        });
-        let dummy_w: SharedWitnesses = Arc::new(vec![]);
-        reorder.insert(tip + 2, (dummy_block.clone(), dummy_w.clone()));
-        reorder.insert(tip + 3, (dummy_block.clone(), dummy_w.clone()));
-        assert_eq!(reorder_contig_runway(&reorder, tip), 0);
-        assert_eq!(reorder_ahead_buffered(&reorder, tip), 2);
-        assert_eq!(reorder_first_ahead(&reorder, tip), Some(tip + 2));
-        // Fill tip..tip+1 → contiguous through tip+3 (already buffered).
-        reorder.insert(tip, (dummy_block.clone(), dummy_w.clone()));
-        reorder.insert(tip + 1, (dummy_block, dummy_w));
-        assert_eq!(reorder_contig_runway(&reorder, tip), 4);
-    }
-
-    /// Isolate tests from shell `BLVM_IBD_*` (e.g. left over from manual IBD runs).
-    fn with_ibd_env_cleared<F: FnOnce()>(f: F) {
-        let peers = std::env::var("BLVM_IBD_PEERS").ok();
-        let mode = std::env::var("BLVM_IBD_MODE").ok();
-        let wan_single = std::env::var("BLVM_IBD_WAN_SINGLE_PEER").ok();
-        unsafe {
-            std::env::remove_var("BLVM_IBD_PEERS");
-            std::env::remove_var("BLVM_IBD_MODE");
-            std::env::remove_var("BLVM_IBD_WAN_SINGLE_PEER");
-        }
-        f();
-        unsafe {
-            if let Some(v) = peers {
-                std::env::set_var("BLVM_IBD_PEERS", v);
-            } else {
-                std::env::remove_var("BLVM_IBD_PEERS");
-            }
-            if let Some(v) = mode {
-                std::env::set_var("BLVM_IBD_MODE", v);
-            } else {
-                std::env::remove_var("BLVM_IBD_MODE");
-            }
-            if let Some(v) = wan_single {
-                std::env::set_var("BLVM_IBD_WAN_SINGLE_PEER", v);
-            } else {
-                std::env::remove_var("BLVM_IBD_WAN_SINGLE_PEER");
-            }
-        }
-    }
-
-    /// N15: engine admit leaves tx_ids empty; legacy still fills.
-    #[test]
-    fn n15_prepare_coord_dispatch_defers_engine_txids() {
-        use blvm_protocol::{Transaction, TransactionOutput};
-        let block = Block {
-            header: BlockHeader {
-                version: 1,
-                timestamp: 1,
-                ..Default::default()
-            },
-            transactions: vec![Transaction {
-                version: 1,
-                inputs: blvm_protocol::tx_inputs![],
-                outputs: blvm_protocol::tx_outputs![TransactionOutput {
-                    value: 50,
-                    script_pubkey: vec![0x51],
-                }],
-                lock_time: 0,
-            }]
-            .into(),
-        };
-        let mut tx_ids = vec![[9u8; 32]];
-        let mut keys = vec![[1u8; 40]];
-        prepare_coord_dispatch_bufs(true, &block, &mut tx_ids, &mut keys);
-        assert!(tx_ids.is_empty(), "engine defer: no SHA on admit");
-        assert!(keys.is_empty());
-        // Validation-side fill matches non-empty hash count.
-        compute_tx_ids_only(&block, &mut tx_ids);
-        assert_eq!(tx_ids.len(), block.transactions.len());
-    }
-
-    #[test]
-    fn phase3_path_promotes_when_tip_ckpt_ready() {
-        use crate::storage::ibd_engine::{Phase3Finish, phase3_path};
-        assert_eq!(
-            phase3_path(957_950, 957_950, 957_950, true),
-            Phase3Finish::PromotedAlias
-        );
-    }
-
-    #[test]
-    fn phase3_path_catchup_when_export_lags_tip() {
-        use crate::storage::ibd_engine::{Phase3Finish, phase3_path};
-        // Live soak: export_h=880k, tip=957950, nonempty ckpt at 880k.
-        assert_eq!(
-            phase3_path(880_000, 957_950, 880_000, true),
-            Phase3Finish::CatchupThenAlias
-        );
-    }
-
-    #[test]
-    fn phase3_path_full_when_no_ckpt() {
-        use crate::storage::ibd_engine::{Phase3Finish, phase3_path};
-        assert_eq!(
-            phase3_path(0, 100_000, 0, false),
-            Phase3Finish::FullWatermarkExport
-        );
-    }
-
-    #[test]
-    fn export_isolation_inactive_when_export_not_running() {
-        // Regardless of env, isolation cannot be "active" without an in-flight export.
-        IBD_CHECKPOINT_EXPORT_ACTIVE.store(false, Ordering::Relaxed);
-        assert!(!export_isolation_active());
-    }
-
-    fn engine_gap_export_defer_until_height_cases() {
-        // Live zeus: wm=230k, start=230001, RAM replay cap=172791 < start → no defer.
-        assert_eq!(
-            engine_gap_export_defer_until_height(230_001, 172_791, 957_272),
-            0
-        );
-        // Active local replay window: defer through min(bodies, tip).
-        assert_eq!(
-            engine_gap_export_defer_until_height(230_001, 657_030, 957_272),
-            657_030
-        );
-        // Fresh start from genesis with RAM cap.
-        assert_eq!(
-            engine_gap_export_defer_until_height(1, 200_000, 500_000),
-            200_000
-        );
-    }
-
-    #[test]
-    fn bps_scaling_shrinks_interval_when_validation_is_slow() {
-        let d = crate::config::ibd::IbdEngineDurabilityConfig {
-            checkpoint_interval: None,
-            checkpoint_min_interval: 500,
-            checkpoint_max_interval: 50_000,
-            checkpoint_target_secs: 60,
-            muhash_persist_interval: 200,
-        };
-        // Cheap last export → BPS may shrink for resume tightness.
-        let utxo_iv = utxo_scaled_checkpoint_interval(640_068_968, 30.0, &d);
-        assert_eq!(utxo_iv, 80_000);
-        let slow_cap = bps_scaled_checkpoint_interval_cap(2.0, 60, 500, utxo_iv);
-        let mid_cap = bps_scaled_checkpoint_interval_cap(16.0, 60, 500, utxo_iv);
-        let fast_cap = bps_scaled_checkpoint_interval_cap(80.0, 60, 500, utxo_iv);
-        assert_eq!(slow_cap, 500, "2 bps × 60s = 120, clamped to min_interval 500");
-        assert_eq!(mid_cap, 960, "16 bps × 60s");
-        assert_eq!(fast_cap, 4800, "80 bps × 60s");
-        assert!(slow_cap < mid_cap && mid_cap < fast_cap && fast_cap < utxo_iv);
-        assert_eq!(
-            adaptive_checkpoint_interval(640_068_968, 30.0, 16.0, &d),
-            960,
-            "cheap export + slow BPS → resume-tight interval"
-        );
-    }
-
-    #[test]
-    fn w173_expensive_midchain_export_keeps_sparse_interval() {
-        // Live W173: TARGET_SECS=300, ~50M UTXOs, 90–208s piggyback walls, tip60~80–100.
-        // Old scaler: BASE*25M/count → ~5k, duration scale never fired (175 < 300),
-        // BPS min() kept ~5k → 10 full exports in ~26 min.
-        let d = crate::config::ibd::IbdEngineDurabilityConfig {
-            checkpoint_interval: None,
-            checkpoint_min_interval: 500,
-            checkpoint_max_interval: 50_000,
-            checkpoint_target_secs: 300,
-            muhash_persist_interval: 200,
-        };
-        let utxo_iv = utxo_scaled_checkpoint_interval(50_000_000, 175.0, &d);
-        assert_eq!(utxo_iv, 50_000, "≥40M UTXOs → high-UTXO ceiling");
-        let adaptive = adaptive_checkpoint_interval(50_000_000, 175.0, 80.0, &d);
-        assert_eq!(
-            adaptive, 50_000,
-            "expensive export must not be undercut by BPS×target (80×300=24k)"
-        );
-        // Below HIGH threshold: interval grows with UTXO count (never shrinks).
-        let early = utxo_scaled_checkpoint_interval(30_000_000, 100.0, &d);
-        assert!(
-            early >= 20_000,
-            "30M UTXOs + 100s export must stay sparse, got {early}"
-        );
-    }
-
-    #[test]
-    fn w175_restored_midchain_export_wall_counts_expensive() {
-        // Live W174: restored last_export_wall_secs=81, utxos≈25.6M, TARGET=300.
-        // Threshold was min(target,90)=90 → 81 treated cheap → BPS interval 7890.
-        let d = crate::config::ibd::IbdEngineDurabilityConfig {
-            checkpoint_interval: None,
-            checkpoint_min_interval: 500,
-            checkpoint_max_interval: 50_000,
-            checkpoint_target_secs: 300,
-            muhash_persist_interval: 200,
-        };
-        assert_eq!(export_cost_scale_threshold_secs(300), 60.0);
-        let adaptive = adaptive_checkpoint_interval(25_643_324, 81.0, 26.3, &d);
-        assert!(
-            adaptive >= 20_000,
-            "restored 81s wall must not be BPS-undercut to ~7.8k, got {adaptive}"
-        );
-    }
-
-    #[test]
-    fn aligned_checkpoint_height_steps_from_last_exported() {
-        // Live soak: export_h=880000, 80k global alignment missed 931k; relative 960 iv catches up.
-        assert_eq!(aligned_checkpoint_height(931_000, 880_000, 80_000), 880_000);
-        assert_eq!(aligned_checkpoint_height(931_000, 880_000, 960), 930_880);
-        assert_eq!(aligned_checkpoint_height(880_960, 880_000, 960), 880_960);
-        assert_eq!(aligned_checkpoint_height(880_959, 880_000, 960), 880_000);
-    }
-
-    #[test]
-    fn checkpoint_export_requires_validation_caught_up() {
-        // Live 2026-07-14: CL claimed 49716 while vh was ~5800 — must not export 40000.
-        assert!(!checkpoint_export_validation_caught_up(40_000, 5_800));
-        assert!(!checkpoint_export_validation_caught_up(40_000, 39_999));
-        assert!(checkpoint_export_validation_caught_up(40_000, 40_000));
-        assert!(checkpoint_export_validation_caught_up(40_000, 48_702));
-        assert!(!checkpoint_export_validation_caught_up(0, 100));
-    }
-
-    #[test]
-    fn w75_tip_gap_body_in_pipeline_requires_pending_or_feeder() {
-        // Live 344348: bridge_next==tip with pending=0 must fall through to Case C.
-        // W78: second arg is tip_in_feeder (bool), not feeder_len.
-        assert!(!tip_gap_body_in_pipeline(false, false));
-        assert!(tip_gap_body_in_pipeline(true, false));
-        assert!(tip_gap_body_in_pipeline(false, true));
-        assert!(tip_gap_body_in_pipeline(true, true));
-    }
-
-    #[test]
-    fn w78_feeder_len_alone_is_not_in_pipeline() {
-        // Live 381335: feeder=46 / gap_missing / bridge_next>>tip — must not short-circuit.
-        assert!(
-            !tip_gap_body_in_pipeline(false, false),
-            "occupancy without tip key must fall through to Case C / TIP_REWIND"
-        );
-    }
-
-    #[test]
-    fn w79_export_gate_steady_state_ok_and_stall_defers() {
-        // Live genesis→250k: gap_missing+feeder=0 forever under W75 → zero exports.
-        // Single test: shared atomics race if split across threads.
-        let prev_kill = std::env::var_os("BLVM_PROC_ANON_KILL_MB");
-        // SAFETY: test-only env mutation; restored below.
-        unsafe {
-            std::env::set_var("BLVM_PROC_ANON_KILL_MB", "999999999");
-        }
-        IBD_TIP_GAP_MISSING.store(true, Ordering::Relaxed);
-        IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-        IBD_FEEDER_BUFFER_CAP.store(128, Ordering::Relaxed);
-        IBD_VALIDATION_STALL_WALL_MS.store(0, Ordering::Relaxed);
-        tip_stage::clear_tip_ahead_soft_freeze();
-        tip_stage::mark_needed(9_000_001);
-        assert!(
-            export_start_gate_allows(),
-            "healthy WAN tip crawl must allow periodic checkpoint export"
-        );
-
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        IBD_VALIDATION_STALL_WALL_MS.store(now_ms, Ordering::Relaxed);
-        assert!(!export_start_gate_allows());
-        IBD_VALIDATION_STALL_WALL_MS.store(0, Ordering::Relaxed);
-        assert!(export_start_gate_allows());
-
-        IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
-        IBD_FEEDER_BUFFER_BLOCKS.store(64, Ordering::Relaxed);
-        // SAFETY: restore prior test env.
-        unsafe {
-            match prev_kill {
-                Some(v) => std::env::set_var("BLVM_PROC_ANON_KILL_MB", v),
-                None => std::env::remove_var("BLVM_PROC_ANON_KILL_MB"),
-            }
-        }
-    }
-
-    #[test]
-    fn w174_export_gate_defers_on_severe_tip_holes() {
-        let prev_kill = std::env::var_os("BLVM_PROC_ANON_KILL_MB");
-        unsafe {
-            std::env::set_var("BLVM_PROC_ANON_KILL_MB", "999999999");
-        }
-        IBD_VALIDATION_STALL_WALL_MS.store(0, Ordering::Relaxed);
-        tip_stage::clear_tip_ahead_soft_freeze();
-        tip_stage::mark_needed(9_000_002);
-        // Fresh mark_needed → awaiting≈0 so W176 awaiting≥5 path stays off.
-        IBD_TIP_GAP_MISSING.store(true, Ordering::Relaxed);
-        IBD_TIP_BRIDGE_HOLES.store(15, Ordering::Relaxed);
-        assert!(
-            export_start_gate_allows(),
-            "holes=15 must still allow export (W176 threshold 16)"
-        );
-        IBD_TIP_BRIDGE_HOLES.store(16, Ordering::Relaxed);
-        assert!(
-            !export_start_gate_allows(),
-            "holes≥16 + gap_missing must defer export (W176; was 32)"
-        );
-        IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
-        assert!(
-            export_start_gate_allows(),
-            "holes alone without gap_missing must not defer"
-        );
-        IBD_TIP_BRIDGE_HOLES.store(0, Ordering::Relaxed);
-        unsafe {
-            match prev_kill {
-                Some(v) => std::env::set_var("BLVM_PROC_ANON_KILL_MB", v),
-                None => std::env::remove_var("BLVM_PROC_ANON_KILL_MB"),
-            }
-        }
-    }
-
-    #[test]
-    fn w176_export_gate_defers_when_tip_already_awaiting() {
-        let prev_kill = std::env::var_os("BLVM_PROC_ANON_KILL_MB");
-        unsafe {
-            std::env::set_var("BLVM_PROC_ANON_KILL_MB", "999999999");
-        }
-        IBD_VALIDATION_STALL_WALL_MS.store(0, Ordering::Relaxed);
-        tip_stage::clear_tip_ahead_soft_freeze();
-        tip_stage::mark_needed(9_000_003);
-        tip_stage::test_backdate_awaiting_ms(6_000);
-        IBD_TIP_GAP_MISSING.store(true, Ordering::Relaxed);
-        IBD_TIP_BRIDGE_HOLES.store(0, Ordering::Relaxed);
-        assert!(
-            !export_start_gate_allows(),
-            "gap_missing + awaiting≥5s must defer export (W176)"
-        );
-        // Body landed → late-body freeze clears; gap_missing false → awaiting gate off.
-        tip_stage::mark_body(9_000_003);
-        IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
-        assert!(
-            export_start_gate_allows(),
-            "healthy tip (body landed, no gap) must allow export"
-        );
-        tip_stage::mark_needed(0);
-        unsafe {
-            match prev_kill {
-                Some(v) => std::env::set_var("BLVM_PROC_ANON_KILL_MB", v),
-                None => std::env::remove_var("BLVM_PROC_ANON_KILL_MB"),
-            }
-        }
-    }
-
-    #[test]
-    fn w177_export_gate_defers_during_local_body_ahead() {
-        let prev_kill = std::env::var_os("BLVM_PROC_ANON_KILL_MB");
-        unsafe {
-            std::env::set_var("BLVM_PROC_ANON_KILL_MB", "999999999");
-        }
-        IBD_VALIDATION_STALL_WALL_MS.store(0, Ordering::Relaxed);
-        tip_stage::clear_tip_ahead_soft_freeze();
-        IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
-        IBD_TIP_BRIDGE_HOLES.store(0, Ordering::Relaxed);
-        IBD_LOCAL_BODY_AHEAD.store(true, Ordering::Relaxed);
-        assert!(
-            !export_start_gate_allows(),
-            "local body ahead must defer export (W177 soft-resume)"
-        );
-        IBD_LOCAL_BODY_AHEAD.store(false, Ordering::Relaxed);
-        assert!(
-            export_start_gate_allows(),
-            "past body tip must allow export when tip healthy"
-        );
-        unsafe {
-            match prev_kill {
-                Some(v) => std::env::set_var("BLVM_PROC_ANON_KILL_MB", v),
-                None => std::env::remove_var("BLVM_PROC_ANON_KILL_MB"),
-            }
-        }
-    }
-
-    #[test]
-    fn ibd_block_flush_opts_default_enables_parallel_serialize() {
-        let opts = IbdBlockFlushOpts::default();
-        assert!(opts.parallel_serialize);
-        assert!(!opts.log_progress);
-    }
-
-    #[test]
-    fn ibd_block_flush_opts_shutdown_sync_is_serial_with_progress() {
-        let opts = IbdBlockFlushOpts::shutdown_sync();
-        assert!(!opts.parallel_serialize);
-        assert!(opts.log_progress);
-    }
-
-    #[test]
-    fn test_parallel_ibd_config_default() {
-        let config = ParallelIBDConfig::default();
-        assert!(config.num_workers > 0);
-        // chunk_size: 128 default, or BLVM_IBD_CHUNK_SIZE (16-2000) if set
-        assert!(
-            config.chunk_size >= 16 && config.chunk_size <= 2000,
-            "chunk_size={}",
-            config.chunk_size
-        );
-        assert_eq!(config.max_concurrent_per_peer, 64);
-    }
-
-    #[test]
-    fn empty_blvm_ibd_peers_env_allows_auto_lan() {
-        with_ibd_env_cleared(|| {
-            unsafe {
-                std::env::set_var("BLVM_IBD_PEERS", "");
-            }
-            let peers = vec!["192.168.2.100:8333".to_string(), "8.8.8.8:8333".to_string()];
-            let config = ParallelIBDConfig::resolve_for_session(None, 0, &peers);
-            assert_eq!(config.preferred_peers, vec!["192.168.2.100:8333"]);
-        });
-    }
-
-    #[test]
-    fn wan_multi_peer_keeps_all_peers_by_default() {
-        let peers = vec!["8.8.8.8:8333".to_string(), "1.1.1.1:8333".to_string()];
-        let out = ParallelIBDConfig::collapse_wan_only_download_peers(peers);
-        assert_eq!(out.len(), 2);
-    }
-
-    #[test]
-    fn collapse_keeps_multi_peer_when_lan_present() {
-        let peers = vec!["192.168.1.1:8333".to_string(), "8.8.8.8:8333".to_string()];
-        let out = ParallelIBDConfig::collapse_wan_only_download_peers(peers);
-        assert_eq!(out.len(), 2);
-    }
-
-    #[test]
-    fn resolve_wan_only_keeps_parallel_mode() {
-        with_ibd_env_cleared(|| {
-            let peers = vec!["8.8.8.8:8333".to_string(), "1.1.1.1:8333".to_string()];
-            let config = ParallelIBDConfig::resolve_for_session(None, 100_000, &peers);
-            assert_eq!(config.mode, "parallel");
-            assert!(config.preferred_peers.is_empty());
-            assert_eq!(config.min_peers_for_ibd(), 1);
-        });
-    }
-
-    #[test]
-    fn resolve_auto_prefers_lan_peers() {
-        with_ibd_env_cleared(|| {
-            let peers = vec!["192.168.2.100:8333".to_string(), "8.8.8.8:8333".to_string()];
-            let config = ParallelIBDConfig::resolve_for_session(None, 100_000, &peers);
-            assert_eq!(config.preferred_peers, vec!["192.168.2.100:8333"]);
-            assert_eq!(config.min_peers_for_ibd(), 1);
-        });
-    }
-
-    #[test]
-    fn filter_ibd_download_peers_falls_back_when_none_connected() {
-        let preferred = vec!["192.168.1.10:8333".to_string()];
-        let connected = vec!["8.8.8.8:8333".to_string(), "1.1.1.1:8333".to_string()];
-        let out = super::filter_ibd_download_peers(&preferred, connected.clone());
-        assert_eq!(out, connected);
-    }
-
-    #[test]
-    fn filter_ibd_download_peers_falls_back_when_only_one_preferred_connected() {
-        let preferred = vec![
-            "66.45.230.178:8333".to_string(),
-            "63.254.176.191:8333".to_string(),
-        ];
-        let connected = vec![
-            "66.45.230.178:8333".to_string(),
-            "172.105.25.248:8333".to_string(),
-            "99.56.151.125:8333".to_string(),
-        ];
-        let out = super::filter_ibd_download_peers(&preferred, connected.clone());
-        assert_eq!(out, connected);
-    }
-
-    #[test]
-    fn filter_ibd_download_peers_matches_host_without_port() {
-        let preferred = vec!["192.168.1.10".to_string(), "192.168.1.11".to_string()];
-        let connected = vec![
-            "192.168.1.10:8333".to_string(),
-            "192.168.1.11:8333".to_string(),
-            "8.8.8.8:8333".to_string(),
-        ];
-        let out = super::filter_ibd_download_peers(&preferred, connected);
-        assert_eq!(
-            out,
-            vec![
-                "192.168.1.10:8333".to_string(),
-                "192.168.1.11:8333".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn resolve_fresh_chain_keeps_parallel_mode() {
-        with_ibd_env_cleared(|| {
-            let peers = vec!["192.168.1.1:8333".to_string()];
-            let config = ParallelIBDConfig::resolve_for_session(None, 0, &peers);
-            assert_eq!(config.mode, "parallel");
-        });
-    }
-
-    #[test]
-    fn test_create_chunks() {
-        let config = ParallelIBDConfig {
-            chunk_size: 100,
-            ..Default::default()
-        };
-        let ibd = ParallelIBD::new(config);
-        let peer_ids = vec!["peer1".to_string(), "peer2".to_string()];
-
-        let chunks = ibd.create_chunks(0, 250, &peer_ids, None);
-
-        // Bootstrap chunk is always ≥128 blocks so 99 and 100 are in same chunk (stall fix)
-        assert_eq!(chunks.len(), 3); // 0-127, 128-227, 228-250
-        assert_eq!(chunks[0].start_height, 0);
-        assert_eq!(
-            chunks[0].end_height, 127,
-            "Bootstrap chunk must include 99 and 100"
-        );
-        assert_eq!(chunks[1].start_height, 128);
-        assert_eq!(chunks[1].end_height, 227);
-        assert_eq!(chunks[2].start_height, 228);
-        assert_eq!(chunks[2].end_height, 250);
-
-        // Note: With weighted assignment, peer selection depends on scores
-        // All peers have equal score (1.0) by default, so they get equal chunks
-        // Just verify all chunks have a valid peer assigned
-        for chunk in &chunks {
-            assert!(
-                peer_ids.contains(&chunk.peer_id),
-                "Chunk should be assigned to a valid peer, got: {}",
-                chunk.peer_id
-            );
-        }
-    }
-
-    /// Ensures bootstrap chunk includes both block 99 and 100 — prevents stall at 99.
-    #[test]
-    fn test_bootstrap_chunk_includes_99_and_100() {
-        let config = ParallelIBDConfig {
-            chunk_size: 16, // Small chunk_size would normally put 99/100 in different chunks
-            ..Default::default()
-        };
-        let ibd = ParallelIBD::new(config);
-        let peer_ids = vec!["peer1".to_string()];
-        let chunks = ibd.create_chunks(0, 500, &peer_ids, None);
-        assert!(!chunks.is_empty(), "Must have at least one chunk");
-        let bootstrap = &chunks[0];
-        assert!(
-            bootstrap.end_height >= 100,
-            "Bootstrap chunk must include block 100 (end={})",
-            bootstrap.end_height
-        );
-        assert!(
-            bootstrap.start_height <= 99,
-            "Bootstrap chunk must include block 99 (start={})",
-            bootstrap.start_height
-        );
-    }
-
-    // Regression: chunk queue must drain in height order (FIFO). Vec::pop would yield highest
-    // heights first and break sequential validation.
-
-    #[test]
-    fn test_work_queue_fifo_order_not_lifo() {
-        // Queue uses VecDeque::pop_front — lowest-height chunk leaves first.
-
-        // Simulate the work queue as created in sync_parallel
-        let chunks: Vec<(u64, u64, Option<String>)> = vec![
-            (0u64, 99u64, None),
-            (100u64, 199u64, None),
-            (200u64, 299u64, None),
-            (931000u64, 931099u64, None),
-        ];
-
-        let mut work_queue: VecDeque<(u64, u64, Option<String>)> = chunks.into_iter().collect();
-
-        // Verify FIFO order (first chunk in = first chunk out)
-        let (s, e, _) = work_queue.pop_front().unwrap();
-        assert_eq!((s, e), (0, 99), "First chunk should be (0, 99)");
-
-        let (s, e, _) = work_queue.pop_front().unwrap();
-        assert_eq!((s, e), (100, 199), "Second chunk should be (100, 199)");
-
-        let (s, e, _) = work_queue.pop_front().unwrap();
-        assert_eq!((s, e), (200, 299), "Third chunk should be (200, 299)");
-
-        let (s, e, _) = work_queue.pop_front().unwrap();
-        assert_eq!(
-            (s, e),
-            (931000, 931099),
-            "Fourth chunk should be the high-height chunk"
-        );
-    }
-
-    #[test]
-    fn test_vec_pop_is_lifo_bug() {
-        // Vec::pop takes from the end — wrong order if used as a download work queue.
-
-        let mut vec_queue: Vec<(u64, u64)> = vec![(0, 99), (100, 199), (200, 299)];
-
-        let popped = vec_queue.pop().unwrap();
-        assert_eq!(
-            popped,
-            (200, 299),
-            "Vec::pop() returns LAST element (LIFO behavior)"
-        );
-    }
-
-    #[test]
-    fn test_vecdeque_pop_front_is_fifo_correct() {
-        let mut deque_queue: VecDeque<(u64, u64, Option<String>)> =
-            VecDeque::from(vec![(0, 99, None), (100, 199, None), (200, 299, None)]);
-
-        let (s, e, _) = deque_queue.pop_front().unwrap();
-        assert_eq!(
-            (s, e),
-            (0, 99),
-            "VecDeque::pop_front() returns FIRST element (FIFO behavior)"
-        );
-    }
-
-    #[test]
-    fn test_failed_chunk_requeue_excludes_failing_peer() {
-        // Verify that failed chunks are re-queued with exclude_peer so a DIFFERENT peer retries.
-        // Same peer retrying would likely fail again (e.g. disconnected).
-
-        let mut work_queue: VecDeque<(u64, u64, Option<String>)> =
-            VecDeque::from(vec![(100, 199, None), (200, 299, None)]);
-
-        // Simulate peer "flaky:8333" failing chunk 0-99 - re-queue with exclude
-        work_queue.push_front((0, 99, Some("flaky:8333".to_string())));
-
-        let (start, end, exclude) = work_queue.pop_front().unwrap();
-        assert_eq!((start, end), (0, 99));
-        assert_eq!(exclude.as_deref(), Some("flaky:8333"));
-        // Worker for flaky:8333 would skip this; worker for other peer would take it
-    }
-
-    // ============================================================
-    // Chunk Creation Order Tests
-    // ============================================================
-
-    #[test]
-    fn test_chunks_created_in_ascending_height_order() {
-        let config = ParallelIBDConfig {
-            chunk_size: 1000,
-            ..Default::default()
-        };
-        let ibd = ParallelIBD::new(config);
-        let peer_ids = vec!["peer1".to_string()];
-
-        let chunks = ibd.create_chunks(0, 10000, &peer_ids, None);
-
-        // Verify chunks are in ascending order
-        for i in 1..chunks.len() {
-            assert!(
-                chunks[i].start_height > chunks[i - 1].start_height,
-                "Chunk {} start ({}) should be > chunk {} start ({})",
-                i,
-                chunks[i].start_height,
-                i - 1,
-                chunks[i - 1].start_height
-            );
-            assert!(
-                chunks[i].start_height == chunks[i - 1].end_height + 1,
-                "Chunk {} start ({}) should immediately follow chunk {} end ({})",
-                i,
-                chunks[i].start_height,
-                i - 1,
-                chunks[i - 1].end_height
-            );
-        }
-
-        // First chunk must start at 0
-        assert_eq!(
-            chunks[0].start_height, 0,
-            "First chunk must start at height 0"
-        );
-    }
-
-    #[test]
-    fn test_create_chunks_covers_full_range() {
-        let config = ParallelIBDConfig {
-            chunk_size: 500,
-            ..Default::default()
-        };
-        let ibd = ParallelIBD::new(config);
-        let peer_ids = vec!["peer1".to_string(), "peer2".to_string()];
-
-        let start = 0u64;
-        let end = 935000u64; // Approximate mainnet height
-        let chunks = ibd.create_chunks(start, end, &peer_ids, None);
-
-        // First chunk starts at start
-        assert_eq!(chunks.first().unwrap().start_height, start);
-
-        // Last chunk ends at or after end
-        assert!(chunks.last().unwrap().end_height >= end);
-
-        // No gaps between chunks
-        for i in 1..chunks.len() {
-            assert_eq!(
-                chunks[i].start_height,
-                chunks[i - 1].end_height + 1,
-                "Gap detected between chunk {} and {}",
-                i - 1,
-                i
-            );
-        }
-    }
-
-    // ============================================================
-    // Checkpoint Tests
-    // ============================================================
-
-    #[test]
-    fn test_mainnet_checkpoints_exist() {
-        assert_ne!(
-            checkpoints::MAINNET_CHECKPOINTS.len(),
-            0,
-            "Checkpoints should be defined"
-        );
-    }
-
-    #[test]
-    fn test_mainnet_checkpoints_start_at_genesis() {
-        let (height, _hash) = checkpoints::MAINNET_CHECKPOINTS[0];
-        assert_eq!(
-            height, 0,
-            "First checkpoint should be genesis block (height 0)"
-        );
-    }
-
-    #[test]
-    fn test_mainnet_checkpoints_in_ascending_order() {
-        for i in 1..checkpoints::MAINNET_CHECKPOINTS.len() {
-            let (prev_height, _) = checkpoints::MAINNET_CHECKPOINTS[i - 1];
-            let (curr_height, _) = checkpoints::MAINNET_CHECKPOINTS[i];
-            assert!(
-                curr_height > prev_height,
-                "Checkpoint {} (height {}) should be > checkpoint {} (height {})",
-                i,
-                curr_height,
-                i - 1,
-                prev_height
-            );
-        }
-    }
-
-    #[test]
-    fn test_mainnet_genesis_hash() {
-        // Verify the genesis block hash is correct
-        let (height, hash) = checkpoints::MAINNET_CHECKPOINTS[0];
-        assert_eq!(height, 0);
-
-        assert_eq!(
-            hash,
-            blvm_protocol::GENESIS_BLOCK_HASH_INTERNAL,
-            "Genesis block hash should match"
-        );
-    }
-
-    // ============================================================
-    // Configuration Tests
-    // ============================================================
-
-    #[test]
-    fn test_config_chunk_size_reasonable() {
-        let config = ParallelIBDConfig::default();
-        // 16 = Core-like minimum, 128 = default, 2000 = max (BLVM_IBD_CHUNK_SIZE override)
-        assert!(
-            config.chunk_size >= 16 && config.chunk_size <= 2000,
-            "chunk_size={}",
-            config.chunk_size
-        );
-    }
-
-    #[test]
-    fn test_config_timeout_reasonable() {
-        let config = ParallelIBDConfig::default();
-        // Timeout should accommodate slow peers and large blocks
-        assert!(
-            config.download_timeout_secs >= 30,
-            "Timeout too short for large blocks"
-        );
-        assert!(
-            config.download_timeout_secs <= 300,
-            "Timeout too long, will stall on dead peers"
-        );
-    }
-
-    #[test]
-    fn checkpoint_export_exits_on_validation_height_even_if_ckpt_lagging() {
-        // Live hang: cl=957000, interval-aligned ckpt stuck at 880000, end=957804.
-        assert!(checkpoint_export_thread_should_exit(957804, 957000, 957804, 880000));
-        assert!(checkpoint_export_thread_should_exit(957804, 0, 957804, 0));
-        assert!(!checkpoint_export_thread_should_exit(957000, 957000, 957804, 880000));
-    }
-
-    #[test]
-    fn checkpoint_export_exits_on_contiguous_length_or_ckpt() {
-        assert!(checkpoint_export_thread_should_exit(0, 957804, 957804, 0));
-        assert!(checkpoint_export_thread_should_exit(0, 957000, 957804, 957804));
-        assert!(!checkpoint_export_thread_should_exit(0, 957000, 957804, 880000));
-        assert!(checkpoint_export_thread_should_exit(0, 0, 0, 0)); // end_h<=0
-    }
-
-    #[test]
-    fn tip_skip_advances_near_effective_end_without_1000_boundary() {
-        // Live: tip stuck 957632..957804 with no %1000 in range.
-        assert!(should_advance_tip_on_skip_path(957632, 957804));
-        assert!(should_advance_tip_on_skip_path(957804, 957804));
-        assert!(should_advance_tip_on_skip_path(957000, 957804)); // %1000
-        // Far from end and not on 1000 boundary:
-        assert!(!should_advance_tip_on_skip_path(900001, 957804));
-        assert!(!should_advance_tip_on_skip_path(0, 100));
-    }
-
-    #[test]
-    fn tip_follow_extends_when_peer_advances() {
-        assert_eq!(tip_follow_new_effective_end(957_850, 957_900, 957_900), Some(957_900));
-        assert_eq!(tip_follow_new_effective_end(957_850, 957_900, 957_870), Some(957_870));
-        assert_eq!(tip_follow_new_effective_end(957_900, 957_850, 957_900), None);
-        assert_eq!(tip_follow_new_effective_end(957_850, 957_850, 957_900), None);
-    }
-
-    #[test]
-    fn emergency_drain_block_rx_admits_gap_height_only() {
-        use blvm_protocol::{Block, BlockHeader};
-        use std::sync::Arc;
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        let block = Arc::new(Block {
-            header: BlockHeader::default(),
-            transactions: Default::default(),
-        });
-        let w: SharedWitnesses = Arc::new(vec![]);
-        tx.try_send((100u64, Arc::clone(&block), Arc::clone(&w)))
-            .unwrap();
-        tx.try_send((102u64, Arc::clone(&block), Arc::clone(&w)))
-            .unwrap();
-
-        let mut reorder: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
-        let mut total = 0u64;
-        assert!(!emergency_drain_block_rx_for_gap(
-            &mut rx, &mut reorder, 101, 16, 64, &mut total, 0, 256
-        ));
-        assert_eq!(reorder.len(), 1);
-        assert!(reorder.contains_key(&102));
-
-        assert!(emergency_drain_block_rx_for_gap(
-            &mut rx, &mut reorder, 102, 16, 64, &mut total, 0, 256
-        ));
-        assert!(emergency_gap_admission_unblocked(&reorder, 102, 16));
-    }
-
-    #[test]
-    fn emergency_gap_admission_requires_present_height() {
-        let mut reorder: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
-        assert!(!emergency_gap_admission_unblocked(&reorder, 1, 16));
-    }
-
-    #[test]
-    fn emergency_gap_admission_requires_buffer_headroom() {
-        use blvm_protocol::{Block, BlockHeader};
-        use std::sync::Arc;
-
-        let block = Arc::new(Block {
-            header: BlockHeader::default(),
-            transactions: Default::default(),
-        });
-        let w: SharedWitnesses = Arc::new(vec![]);
-        let mut reorder: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
-        for h in 1..=16u64 {
-            reorder.insert(h, (Arc::clone(&block), Arc::clone(&w)));
-        }
-        assert!(!emergency_may_bulk_recv(&reorder, 16));
-        assert!(emergency_has_gap_block(&reorder, 1));
-        assert!(!emergency_gap_admission_unblocked(&reorder, 1, 16));
-    }
-
-    #[test]
-    fn insert_reorder_gap_aware_drops_far_ahead_when_gap_missing() {
-        use blvm_protocol::{Block, BlockHeader};
-        use std::sync::Arc;
-
-        let block = Arc::new(Block {
-            header: BlockHeader::default(),
-            transactions: Default::default(),
-        });
-        let w: SharedWitnesses = Arc::new(vec![]);
-        let mut reorder: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
-        let next_needed = 100u64;
-        let limit = 64usize;
-        let window = 16u64;
-        // W29: gap_missing always enforces the window (not only at half-full).
-        // Near-gap heights within window are admitted.
-        for h in (next_needed + 1)..=(next_needed + window) {
-            assert!(insert_reorder_gap_aware(
-                &mut reorder,
-                h,
-                Arc::clone(&block),
-                Arc::clone(&w),
-                next_needed,
-                limit,
-                window,
-                0, // bridge check disabled
-            ));
-        }
-        assert_eq!(reorder.len(), window as usize);
-        // Far ahead beyond window must drop even with small buffer (W29 always-throttle).
-        assert!(!insert_reorder_gap_aware(
-            &mut reorder,
-            next_needed + window + 1,
-            Arc::clone(&block),
-            Arc::clone(&w),
-            next_needed,
-            limit,
-            window,
-            0,
-        ));
-        // Gap height always admitted.
-        assert!(insert_reorder_gap_aware(
-            &mut reorder,
-            next_needed,
-            Arc::clone(&block),
-            Arc::clone(&w),
-            next_needed,
-            limit,
-            window,
-            0,
-        ));
-        // Once gap present (and bridge not full), far ahead is admitted again.
-        assert!(insert_reorder_gap_aware(
-            &mut reorder,
-            next_needed + window + 50,
-            Arc::clone(&block),
-            Arc::clone(&w),
-            next_needed,
-            limit,
-            window,
-            0,
-        ));
-    }
-
-    /// Phase 0b.2 / rbitcoin request-vs-receive: throttle *new* far-ahead admit; do not
-    /// clear already-buffered near-gap heights, and tip (`h == next_needed`) still enqueues.
-    /// See docs/RBITCOIN_VS_BLVM_IBD_ARCHITECTURE.md § Request-vs-receive.
-    #[test]
-    fn admit_throttle_preserves_already_buffered_near_gap() {
-        use blvm_protocol::{Block, BlockHeader};
-        use std::sync::Arc;
-
-        let block = Arc::new(Block {
-            header: BlockHeader::default(),
-            transactions: Default::default(),
-        });
-        let w: SharedWitnesses = Arc::new(vec![]);
-        let mut reorder: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
-        let next_needed = 100u64;
-        let limit = 64usize;
-        let window = 16u64;
-
-        // Already-received / buffered near-gap (gap itself still missing → throttle on).
-        let buffered: Vec<u64> = ((next_needed + 1)..=(next_needed + 8)).collect();
-        for &h in &buffered {
-            assert!(insert_reorder_gap_aware(
-                &mut reorder,
-                h,
-                Arc::clone(&block),
-                Arc::clone(&w),
-                next_needed,
-                limit,
-                window,
-                0,
-            ));
-        }
-        assert_eq!(reorder.len(), buffered.len());
-
-        // New far-ahead assign/admit refused under gap_missing throttle.
-        assert!(!insert_reorder_gap_aware(
-            &mut reorder,
-            next_needed + window + 40,
-            Arc::clone(&block),
-            Arc::clone(&w),
-            next_needed,
-            limit,
-            window,
-            0,
-        ));
-
-        // Already-buffered heights must remain (throttle ≠ refuse already-received).
-        for &h in &buffered {
-            assert!(
-                reorder.contains_key(&h),
-                "throttle must not clear already-buffered h={h}"
-            );
-        }
-        assert_eq!(reorder.len(), buffered.len());
-
-        // Tip / gap height still enqueues while far-ahead is throttled.
-        assert!(insert_reorder_gap_aware(
-            &mut reorder,
-            next_needed,
-            Arc::clone(&block),
-            Arc::clone(&w),
-            next_needed,
-            limit,
-            window,
-            0,
-        ));
-        assert!(reorder.contains_key(&next_needed));
-
-        // Dispatch side: tip is never deferred even when WAN tip crawl + gap missing.
-        assert!(
-            !defer_bridge_ahead_dispatch(
-                next_needed,
-                next_needed,
-                true,  // gap_missing
-                true,  // next_expected_missing
-                window,
-                true,  // wan_tip_crawl
-                false,
-                false,
-            ),
-            "tip height must still dispatch while far-ahead is deferred"
-        );
-        assert!(
-            defer_bridge_ahead_dispatch(
-                next_needed + 1,
-                next_needed,
-                true,
-                true,
-                window,
-                true,
-                false,
-                false,
-            ),
-            "far-ahead deferred under tip-missing WAN crawl"
-        );
-    }
-
-    #[test]
-    fn insert_reorder_gap_aware_s2b_drops_when_bridge_full_even_if_gap_present() {
-        use blvm_protocol::{Block, BlockHeader};
-        use std::sync::Arc;
-
-        let block = Arc::new(Block {
-            header: BlockHeader::default(),
-            transactions: Default::default(),
-        });
-        let w: SharedWitnesses = Arc::new(vec![]);
-        let mut reorder: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
-        let next_needed = 100u64;
-        let limit = 64usize;
-        let window = 16u64;
-        let bridge_max = 512usize;
-
-        // Gap present in reorder.
-        reorder.insert(next_needed, (Arc::clone(&block), Arc::clone(&w)));
-        // Fill to half capacity with near-gap heights.
-        for h in (next_needed + 1)..=(next_needed + 31) {
-            assert!(insert_reorder_gap_aware(
-                &mut reorder,
-                h,
-                Arc::clone(&block),
-                Arc::clone(&w),
-                next_needed,
-                limit,
-                window,
-                bridge_max,
-            ));
-        }
-        assert!(reorder.len() >= limit / 2);
-
-        // Simulate bridge at cap (S2b).
-        memory::BRIDGE_PENDING_COUNT.store(bridge_max as u64, Ordering::Relaxed);
-        assert!(
-            !insert_reorder_gap_aware(
-                &mut reorder,
-                next_needed + window + 1,
-                Arc::clone(&block),
-                Arc::clone(&w),
-                next_needed,
-                limit,
-                window,
-                bridge_max,
-            ),
-            "S2b: far-ahead must drop when bridge is full even if gap is present"
-        );
-        // Gap height still admitted.
-        assert!(insert_reorder_gap_aware(
-            &mut reorder,
-            next_needed,
-            Arc::clone(&block),
-            Arc::clone(&w),
-            next_needed,
-            limit,
-            window,
-            bridge_max,
-        ));
-        // Near-window still admitted.
-        assert!(insert_reorder_gap_aware(
-            &mut reorder,
-            next_needed + window,
-            Arc::clone(&block),
-            Arc::clone(&w),
-            next_needed,
-            limit,
-            window,
-            bridge_max,
-        ));
-        memory::BRIDGE_PENDING_COUNT.store(0, Ordering::Relaxed);
-    }
-
-    #[test]
-    fn emergency_drain_s2a_uses_coordinator_admit_limit() {
-        use blvm_protocol::{Block, BlockHeader};
-        use std::sync::Arc;
-
-        let block = Arc::new(Block {
-            header: BlockHeader::default(),
-            transactions: Default::default(),
-        });
-        let w: SharedWitnesses = Arc::new(vec![]);
-        let mut reorder: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
-        let next_needed = 100u64;
-        for h in 101..=120u64 {
-            reorder.insert(h, (Arc::clone(&block), Arc::clone(&w)));
-        }
-        assert_eq!(reorder.len(), 20);
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        tx.try_send((200u64, Arc::clone(&block), Arc::clone(&w)))
-            .unwrap();
-
-        let mut total = 0u64;
-        // len=20 < half(32) of coordinator admit_limit=64 — far-ahead must admit.
-        emergency_drain_block_rx_for_gap(
-            &mut rx,
-            &mut reorder,
-            next_needed,
-            16,
-            64,
-            &mut total,
-            0,
-            256,
-        );
-        assert!(
-            reorder.contains_key(&200),
-            "S2a: far-ahead should admit when reorder is below half of coordinator limit"
-        );
-    }
-
-    #[test]
-    fn evict_reorder_gap_pressure_prunes_stale_and_far_ahead() {
-        use blvm_protocol::{Block, BlockHeader};
-        use std::sync::Arc;
-
-        let block = Arc::new(Block {
-            header: BlockHeader::default(),
-            transactions: Default::default(),
-        });
-        let w: SharedWitnesses = Arc::new(vec![]);
-        let mut reorder: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
-        let next_needed = 100u64;
-        let limit = 64usize;
-        let window = 16u64;
-
-        reorder.insert(90, (Arc::clone(&block), Arc::clone(&w)));
-        for h in (next_needed + 1)..=(next_needed + 32) {
-            reorder.insert(h, (Arc::clone(&block), Arc::clone(&w)));
-        }
-        for h in (next_needed + window + 1)..=(next_needed + 50) {
-            reorder.insert(h, (Arc::clone(&block), Arc::clone(&w)));
-        }
-        assert!(reorder.len() >= limit / 2);
-        assert!(reorder.contains_key(&90));
-        assert!(!reorder.contains_key(&next_needed));
-
-        let evicted = evict_reorder_gap_pressure(&mut reorder, next_needed, limit, window, 0);
-        assert!(evicted > 0);
-        assert!(!reorder.contains_key(&90), "stale heights below next_needed pruned");
-        assert!(
-            !reorder.contains_key(&(next_needed + 50)),
-            "far-ahead beyond window evicted"
-        );
-        assert!(
-            reorder.contains_key(&(next_needed + window)),
-            "near-window heights preserved"
-        );
-        assert!(reorder.len() < limit / 2 + window as usize + 1);
-    }
-
-    #[test]
-    fn evict_reorder_s2e_deeper_target_when_bridge_full() {
-        use blvm_protocol::{Block, BlockHeader};
-        use std::sync::Arc;
-
-        let block = Arc::new(Block {
-            header: BlockHeader::default(),
-            transactions: Default::default(),
-        });
-        let w: SharedWitnesses = Arc::new(vec![]);
-        let mut reorder: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
-        let next_needed = 100u64;
-        let limit = 2000usize;
-        let window = 256u64;
-        // Gap present so W29 gap-missing eviction does not fire — isolate S2e bridge_full path.
-        reorder.insert(next_needed, (Arc::clone(&block), Arc::clone(&w)));
-        // Fill to the old pressure_target (half-64 = 936) with far-ahead heights.
-        for h in (next_needed + window + 1)..(next_needed + window + 1 + 936) {
-            reorder.insert(h, (Arc::clone(&block), Arc::clone(&w)));
-        }
-        assert_eq!(reorder.len(), 937);
-        // Without bridge_full: at pressure_target → no eviction (gap present).
-        assert_eq!(
-            evict_reorder_gap_pressure(&mut reorder, next_needed, limit, window, 0),
-            0,
-            "at half-64 with bridge empty + gap present: no-op"
-        );
-        // S2e: simulate bridge at cap → deeper target (half/4 = 500).
-        memory::BRIDGE_PENDING_COUNT.store(512, Ordering::Relaxed);
-        let evicted = evict_reorder_gap_pressure(&mut reorder, next_needed, limit, window, 512);
-        memory::BRIDGE_PENDING_COUNT.store(0, Ordering::Relaxed);
-        assert!(
-            evicted >= 1,
-            "S2e must evict when bridge_full even at old pressure_target (evicted={evicted})"
-        );
-        assert!(
-            reorder.len() < 937,
-            "reorder must shrink below 937 under bridge_full"
-        );
-    }
-
-    #[test]
-    fn w29_evict_reorder_to_window_when_gap_missing() {
-        use blvm_protocol::{Block, BlockHeader};
-        use std::sync::Arc;
-
-        let block = Arc::new(Block {
-            header: BlockHeader::default(),
-            transactions: Default::default(),
-        });
-        let w: SharedWitnesses = Arc::new(vec![]);
-        let mut reorder: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
-        let next_needed = 100u64;
-        let window = 64u64;
-        // Tip missing; fill far ahead past window (live W28d signature).
-        for h in (next_needed + 1)..=(next_needed + 270) {
-            reorder.insert(h, (Arc::clone(&block), Arc::clone(&w)));
-        }
-        assert_eq!(reorder.len(), 270);
-        let mut total = 0usize;
-        for _ in 0..16 {
-            let n = evict_reorder_gap_pressure(&mut reorder, next_needed, 2000, window, 0);
-            if n == 0 {
-                break;
-            }
-            total += n;
-        }
-        assert!(total > 0, "W29 must evict far-ahead while gap_missing");
-        let ceiling = next_needed + window;
-        assert!(
-            reorder.keys().next_back().copied().unwrap_or(0) <= ceiling
-                || reorder.len() <= (window as usize) + 8,
-            "reorder must shrink toward window (len={}, max={:?})",
-            reorder.len(),
-            reorder.keys().next_back()
-        );
-    }
-
-    #[test]
-    fn evict_reorder_gap_pressure_noop_when_gap_present_and_bridge_empty() {
-        use blvm_protocol::{Block, BlockHeader};
-        use std::sync::Arc;
-
-        let block = Arc::new(Block {
-            header: BlockHeader::default(),
-            transactions: Default::default(),
-        });
-        let w: SharedWitnesses = Arc::new(vec![]);
-        let mut reorder: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
-        let next_needed = 100u64;
-        reorder.insert(next_needed, (Arc::clone(&block), Arc::clone(&w)));
-        for h in 150..=200u64 {
-            reorder.insert(h, (Arc::clone(&block), Arc::clone(&w)));
-        }
-        let before = reorder.len();
-        let evicted = evict_reorder_gap_pressure(&mut reorder, next_needed, 64, 16, 0);
-        assert_eq!(evicted, 0);
-        assert_eq!(reorder.len(), before);
-    }
-
-    #[test]
-    fn defer_bridge_ahead_dispatch_blocks_far_ahead_when_gap_missing() {
-        let next = 100u64;
-        let window = 16u64;
-        assert!(!defer_bridge_ahead_dispatch(next,
-            next,
-            true,
-            false,
-            window,
-            false,
-            false,
-            false));
-        assert!(defer_bridge_ahead_dispatch(next + window + 1,
-            next,
-            true,
-            false,
-            window,
-            false,
-            false,
-            false));
-        assert!(!defer_bridge_ahead_dispatch(next + window + 1,
-            next,
-            false,
-            false,
-            window,
-            false,
-            false,
-            false));
-    }
-
-    #[test]
-    fn defer_bridge_ahead_dispatch_tight_band_when_next_expected_missing() {
-        let next = 100u64;
-        let window = 256u64;
-        // Gap height always allowed.
-        assert!(!defer_bridge_ahead_dispatch(next,
-            next,
-            false,
-            true,
-            window,
-            false,
-            false,
-            false));
-        // Inside tight band (≤64) still allowed.
-        assert!(!defer_bridge_ahead_dispatch(next + 32,
-            next,
-            false,
-            true,
-            window,
-            false,
-            false,
-            false));
-        // Past tight band deferred even if reorder has the gap.
-        assert!(defer_bridge_ahead_dispatch(next + 65,
-            next,
-            false,
-            true,
-            window,
-            false,
-            false,
-            false));
-    }
-
-    #[test]
-    fn defer_bridge_ahead_w17_wan_tip_crawl_defers_all_ahead() {
-        let next = 685470u64;
-        let window = 256u64;
-        // Tip always allowed.
-        assert!(!defer_bridge_ahead_dispatch(next,
-            next,
-            true,
-            true,
-            window,
-            true,
-            false,
-            false));
-        // Tip missing from reorder+bridge → defer all ahead (W17 hole-fill guard).
-        assert!(defer_bridge_ahead_dispatch(next + 1,
-            next,
-            true,
-            true,
-            window,
-            true,
-            false,
-            false));
-        assert!(defer_bridge_ahead_dispatch(next + 32,
-            next,
-            true,
-            true,
-            window,
-            true,
-            false,
-            false));
-        // Tip present in reorder → allow contiguous band (W18), defer past band.
-        assert!(!defer_bridge_ahead_dispatch(next + 32,
-            next,
-            false,
-            false,
-            window,
-            true,
-            false,
-            false));
-        assert!(defer_bridge_ahead_dispatch(next + 65,
-            next,
-            false,
-            false,
-            window,
-            true,
-            false,
-            false));
-        // Local / non-WAN still allows near-ahead under prior L2 rules.
-        assert!(!defer_bridge_ahead_dispatch(next + 32,
-            next,
-            false,
-            true,
-            window,
-            false,
-            false,
-            false));
-    }
-
-    #[test]
-    fn defer_bridge_ahead_w57_never_hole_fill_when_tip_missing() {
-        let next = 100u64;
-        let window = 256u64;
-        // W17/W57: gap + next_expected missing → defer ALL ahead (even feeder-starved).
-        assert!(defer_bridge_ahead_dispatch(next + 32,
-            next,
-            true,
-            true,
-            window,
-            true,
-            false,
-            false));
-        assert!(defer_bridge_ahead_dispatch(next + 32,
-            next,
-            true,
-            true,
-            window,
-            true,
-            true,
-            false));
-        // Tip present in reorder (gap_missing=false) — W18 band still allows near-ahead.
-        assert!(!defer_bridge_ahead_dispatch(next + 32,
-            next,
-            false,
-            true,
-            window,
-            true,
-            true,
-            false));
-        assert!(defer_bridge_ahead_dispatch(next + 65,
-            next,
-            false,
-            true,
-            window,
-            true,
-            true,
-            false));
-    }
-
-    #[test]
-    fn defer_bridge_ahead_w58_bulk_still_defers_when_tip_missing() {
-        let next = 60_000u64;
-        let window = 256u64;
-        // W58: bulk + tip nowhere → W17 (no hole-fill). Old bulk path allowed tip+32.
-        assert!(defer_bridge_ahead_dispatch(
-            next + 32,
-            next,
-            true,
-            true,
-            window,
-            true,
-            false,
-            true
-        ));
-        assert!(defer_bridge_ahead_dispatch(
-            next + 1,
-            next,
-            true,
-            true,
-            window,
-            true,
-            false,
-            true
-        ));
-        // Tip itself still admitted.
-        assert!(!defer_bridge_ahead_dispatch(
-            next,
-            next,
-            true,
-            true,
-            window,
-            true,
-            false,
-            true
-        ));
-        // Bulk + tip present in reorder (gap_missing=false): multi-peer tight band.
-        assert!(!defer_bridge_ahead_dispatch(
-            next + 32,
-            next,
-            false,
-            true,
-            window,
-            true,
-            false,
-            true
-        ));
-        assert!(defer_bridge_ahead_dispatch(
-            next + 65,
-            next,
-            false,
-            true,
-            window,
-            true,
-            false,
-            true
-        ));
-    }
-
-    #[test]
-    fn wan_bulk_catchup_threshold() {
-        assert!(!wan_bulk_catchup(0, 60_000));
-        assert!(!wan_bulk_catchup(60_100, 60_000)); // only 100 ahead
-        assert!(wan_bulk_catchup(70_000, 60_000)); // ≥2048
-        assert!(wan_bulk_catchup(900_000, 60_000));
-    }
-
-    #[test]
-    fn w76_wan_ahead_policy_feeder_starve_uses_tip_window_even_when_bulk() {
-        // Mid-chain: headers at network tip ⇒ bulk=true always; feeder empty must not
-        // keep the old 1024 bulk-gap window (live tip never in bridge @ ~350k).
-        let (kind, cap) = wan_ahead_policy(true, true, true, 2);
-        assert_eq!(kind, "wan_bulk_gap");
-        assert_eq!(cap, wan_bulk_tip_gap_ahead_cap());
-        assert_eq!(cap, wan_tip_gap_ahead_cap(), "W76 default bulk-gap == tip ahead");
-        let (kind2, cap2) = wan_ahead_policy(false, true, true, 2);
-        assert_eq!(kind2, "wan_tip");
-        assert_eq!(cap2, wan_bulk_tip_gap_ahead_cap());
-        let (kind3, cap3) = wan_ahead_policy(true, false, false, 2);
-        assert_eq!(kind3, "wan_bulk");
-        assert_eq!(cap3, wan_bulk_ahead_cap());
-    }
-
-    #[test]
-    fn reorder_has_feeder_prefetch_band_detects_near_blocks() {
-        use blvm_protocol::{Block, BlockHeader};
-        use std::sync::Arc;
-
-        let block = Arc::new(Block {
-            header: BlockHeader::default(),
-            transactions: Default::default(),
-        });
-        let w: SharedWitnesses = Arc::new(vec![]);
-        let mut reorder: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
-        let next = 1000u64;
-        assert!(!reorder_has_feeder_prefetch_band(&reorder, next, 16));
-        reorder.insert(next + 8, (Arc::clone(&block), Arc::clone(&w)));
-        assert!(reorder_has_feeder_prefetch_band(&reorder, next, 16));
-        reorder.clear();
-        reorder.insert(next + 20, (Arc::clone(&block), Arc::clone(&w)));
-        assert!(!reorder_has_feeder_prefetch_band(&reorder, next, 16));
-    }
-
-    #[test]
-    fn evict_reorder_gap_pressure_runs_when_one_below_half() {
-        use blvm_protocol::{Block, BlockHeader};
-        use std::sync::Arc;
-
-        let block = Arc::new(Block {
-            header: BlockHeader::default(),
-            transactions: Default::default(),
-        });
-        let w: SharedWitnesses = Arc::new(vec![]);
-        let mut reorder: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
-        let next_needed = 526_335u64;
-        let limit = 2000usize;
-        let window = 256u64;
-        for h in (next_needed + 1)..=(next_needed + 999) {
-            reorder.insert(h, (Arc::clone(&block), Arc::clone(&w)));
-        }
-        assert_eq!(reorder.len(), 999);
-
-        let evicted = evict_reorder_gap_pressure(&mut reorder, next_needed, limit, window, 512);
-        assert!(evicted > 0, "must evict when reorder=999 and gap_missing under production limits");
-        assert!(
-            reorder.len() < 999,
-            "eviction must shrink below treadmill equilibrium, got {}",
-            reorder.len()
-        );
-    }
-
-    #[test]
-    fn evict_reorder_gap_pressure_batch_caps_at_32_per_tick() {
-        use blvm_protocol::{Block, BlockHeader};
-        use std::sync::Arc;
-
-        let block = Arc::new(Block {
-            header: BlockHeader::default(),
-            transactions: Default::default(),
-        });
-        let w: SharedWitnesses = Arc::new(vec![]);
-        let mut reorder: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
-        let next_needed = 100u64;
-        let limit = 128usize;
-        let window = 8u64;
-        for h in (next_needed + window + 1)..=(next_needed + 200) {
-            reorder.insert(h, (Arc::clone(&block), Arc::clone(&w)));
-        }
-        let before = reorder.len();
-        let evicted = evict_reorder_gap_pressure(&mut reorder, next_needed, limit, window, 0);
-        assert_eq!(evicted, 32, "S2d: batch eviction capped at 32 per coordinator tick");
-        assert_eq!(reorder.len(), before - 32);
-        assert!(reorder.len() >= limit / 2);
-    }
-
-    #[test]
-    fn w54_tip_handoff_ignores_feeder_depth_when_tip_stranded() {
-        use blvm_protocol::{Block, BlockHeader};
-        use rustc_hash::FxHashSet;
-        use std::sync::Arc;
-
-        let block = Arc::new(Block {
-            header: BlockHeader::default(),
-            transactions: Default::default(),
-        });
-        let w: SharedWitnesses = Arc::new(vec![]);
-        let mut reorder: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
-        let mut dispatched = FxHashSet::default();
-        let next_needed = 428_344u64;
-        reorder.insert(next_needed, (Arc::clone(&block), Arc::clone(&w)));
-
-        // Pre-W54: feeder_len > 16 returned None and left tip stranded under soft-resume.
-        let out = prepare_coordinator_tip_handoff(
-            next_needed,
-            false,
-            383,
-            false,
-            &mut reorder,
-            &mut dispatched,
-            None,
-            256,
-            512,
-            true,
-            false,
-        );
-        assert!(out.is_some(), "W54: stranded tip must hand off with feeder=383");
-        assert!(!reorder.contains_key(&next_needed));
-        assert!(dispatched.contains(&next_needed));
-
-        reorder.insert(next_needed, (Arc::clone(&block), Arc::clone(&w)));
-        let blocked = prepare_coordinator_tip_handoff(
-            next_needed,
-            false,
-            0,
-            false,
-            &mut reorder,
-            &mut dispatched,
-            None,
-            256,
-            512,
-            true,
-            true, // already in feeder
-        );
-        assert!(blocked.is_none(), "must not re-handoff tip already in feeder");
-        assert!(reorder.contains_key(&next_needed));
-    }
-}
+#[path = "mod_tests.rs"]
+mod tests;

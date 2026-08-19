@@ -92,7 +92,10 @@ impl NetworkManager {
     pub async fn discover_archive_peers_from_dns(&self) -> Result<usize> {
         use crate::network::dns_seeds;
         let seeds = dns_seeds::MAINNET_ARCHIVE_DNS_SEEDS;
-        info!("IBD: seeding full-history (archive) peers from {} filtered DNS seeds", seeds.len());
+        info!(
+            "IBD: seeding full-history (archive) peers from {} filtered DNS seeds",
+            seeds.len()
+        );
         let addresses = dns_seeds::resolve_dns_seeds(seeds, 8333, 1000).await;
         let count = addresses.len();
         {
@@ -101,7 +104,10 @@ impl NetworkManager {
                 db.add_address_from_dns_seed(addr);
             }
         }
-        info!("IBD: discovered {} archive-node addresses from x1-filtered DNS seeds", count);
+        info!(
+            "IBD: discovered {} archive-node addresses from x1-filtered DNS seeds",
+            count
+        );
         Ok(count)
     }
 
@@ -246,22 +252,27 @@ impl NetworkManager {
             let db = self.address_database().read().await;
             if db.count_fresh_non_limited() < needed {
                 drop(db);
-                warn!(
-                    "IBD: address DB has fewer than {} non-limited addresses — \
-                     running DNS seed re-discovery to find full-history peers",
-                    needed
-                );
-                // Use archive seeds (x1. prefix = NODE_NETWORK filter) first; they return only
-                // full-history nodes. Fall back to regular seeds only if archive seeds fail or
-                // return nothing — regular seeds return mostly pruned nodes which get immediately
-                // evicted as NODE_NETWORK_LIMITED, draining the DB in a tight loop.
-                let archive_count = self.discover_archive_peers_from_dns().await.unwrap_or(0);
-                if archive_count == 0 {
-                    let (net_name, port) =
-                        crate::network::protocol::ProtocolParser::dns_seed_network();
-                    let _ = self
-                        .discover_peers_from_dns(net_name, port, &Default::default())
-                        .await;
+                // Unit tests construct an empty in-memory DB. Do not hit mainnet archive DNS
+                // (`connect_peers_from_database_empty_returns_zero`).
+                #[cfg(not(test))]
+                {
+                    warn!(
+                        "IBD: address DB has fewer than {} non-limited addresses — \
+                         running DNS seed re-discovery to find full-history peers",
+                        needed
+                    );
+                    // Use archive seeds (x1. prefix = NODE_NETWORK filter) first; they return only
+                    // full-history nodes. Fall back to regular seeds only if archive seeds fail or
+                    // return nothing — regular seeds return mostly pruned nodes which get immediately
+                    // evicted as NODE_NETWORK_LIMITED, draining the DB in a tight loop.
+                    let archive_count = self.discover_archive_peers_from_dns().await.unwrap_or(0);
+                    if archive_count == 0 {
+                        let (net_name, port) =
+                            crate::network::protocol::ProtocolParser::dns_seed_network();
+                        let _ = self
+                            .discover_peers_from_dns(net_name, port, &Default::default())
+                            .await;
+                    }
                 }
             }
         }
@@ -293,9 +304,7 @@ impl NetworkManager {
         use futures::StreamExt as _;
         let mut stream = futures::stream::FuturesUnordered::new();
         for socket in sockets {
-            stream.push(async move {
-                (socket, self.connect_to_peer(socket).await)
-            });
+            stream.push(async move { (socket, self.connect_to_peer(socket).await) });
         }
 
         let mut connected = 0;

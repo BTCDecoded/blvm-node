@@ -385,7 +385,7 @@ pub struct NetworkTimingConfig {
 }
 
 fn default_target_peer_count() -> usize {
-    32
+    8
 }
 
 fn default_peer_connection_delay() -> u64 {
@@ -407,12 +407,27 @@ fn default_max_addresses_from_dns() -> usize {
 impl Default for NetworkTimingConfig {
     fn default() -> Self {
         Self {
-            target_outbound_peers: 32,
+            target_outbound_peers: 8,
             peer_connection_delay_seconds: 2,
             addr_relay_min_interval_seconds: 8640,
             max_addresses_per_addr_message: 1000,
             max_addresses_from_dns: 100,
         }
+    }
+}
+
+impl NetworkTimingConfig {
+    /// TOML `target_peer_count`, default **8** (Bitcoin Core–aligned).
+    /// Override at runtime with `BLVM_TARGET_OUTBOUND_PEERS` (e.g. Zeus IBD soak).
+    pub fn effective_target_outbound_peers(&self) -> usize {
+        if let Ok(v) = std::env::var("BLVM_TARGET_OUTBOUND_PEERS") {
+            if let Ok(n) = v.trim().parse::<usize>() {
+                if n > 0 {
+                    return n;
+                }
+            }
+        }
+        self.target_outbound_peers
     }
 }
 

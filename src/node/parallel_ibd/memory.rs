@@ -275,12 +275,8 @@ pub(crate) static GAP_STREAM_DEDUP_HEIGHT: AtomicU64 = AtomicU64::new(0);
 pub(crate) fn bump_gap_stream_dedup(h: u64) {
     let mut cur = GAP_STREAM_DEDUP_HEIGHT.load(Ordering::Relaxed);
     while h > cur {
-        match GAP_STREAM_DEDUP_HEIGHT.compare_exchange(
-            cur,
-            h,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
+        match GAP_STREAM_DEDUP_HEIGHT.compare_exchange(cur, h, Ordering::Relaxed, Ordering::Relaxed)
+        {
             Ok(_) => break,
             Err(actual) => cur = actual,
         }
@@ -312,7 +308,7 @@ pub(crate) fn sync_reorder_buffer_stats(
 ) {
     use super::types::estimate_block_bytes;
     let mut bytes = 0u64;
-    for (_, (block, witnesses)) in reorder_buffer {
+    for (block, witnesses) in reorder_buffer.values() {
         bytes += estimate_block_bytes(block.as_ref(), witnesses.as_ref()) as u64;
     }
     BLOCK_BUFFER_COUNT.store(reorder_buffer.len() as u64, Ordering::Relaxed);
@@ -374,7 +370,7 @@ fn jemalloc_stats_snapshot() -> Option<JemallocStatsSnap> {
         let mut sz = std::mem::size_of::<usize>();
         let epoch: usize = 1;
         let _ = _rjem_mallctl(
-            b"epoch\0".as_ptr() as *const i8,
+            c"epoch".as_ptr(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             &epoch as *const usize as *mut c_void,
@@ -382,7 +378,7 @@ fn jemalloc_stats_snapshot() -> Option<JemallocStatsSnap> {
         );
         let mut allocated: usize = 0;
         let _ = _rjem_mallctl(
-            b"stats.allocated\0".as_ptr() as *const i8,
+            c"stats.allocated".as_ptr(),
             &mut allocated as *mut usize as *mut c_void,
             &mut sz,
             std::ptr::null_mut(),
@@ -390,7 +386,7 @@ fn jemalloc_stats_snapshot() -> Option<JemallocStatsSnap> {
         );
         let mut retained: usize = 0;
         let _ = _rjem_mallctl(
-            b"stats.retained\0".as_ptr() as *const i8,
+            c"stats.retained".as_ptr(),
             &mut retained as *mut usize as *mut c_void,
             &mut sz,
             std::ptr::null_mut(),
@@ -398,7 +394,7 @@ fn jemalloc_stats_snapshot() -> Option<JemallocStatsSnap> {
         );
         let mut mapped: usize = 0;
         let _ = _rjem_mallctl(
-            b"stats.mapped\0".as_ptr() as *const i8,
+            c"stats.mapped".as_ptr(),
             &mut mapped as *mut usize as *mut c_void,
             &mut sz,
             std::ptr::null_mut(),
@@ -406,7 +402,7 @@ fn jemalloc_stats_snapshot() -> Option<JemallocStatsSnap> {
         );
         let mut resident: usize = 0;
         let _ = _rjem_mallctl(
-            b"stats.resident\0".as_ptr() as *const i8,
+            c"stats.resident".as_ptr(),
             &mut resident as *mut usize as *mut c_void,
             &mut sz,
             std::ptr::null_mut(),
@@ -415,7 +411,7 @@ fn jemalloc_stats_snapshot() -> Option<JemallocStatsSnap> {
         let mut opt_retain: bool = false;
         let mut bsz = std::mem::size_of::<bool>();
         let _ = _rjem_mallctl(
-            b"opt.retain\0".as_ptr() as *const i8,
+            c"opt.retain".as_ptr(),
             &mut opt_retain as *mut bool as *mut c_void,
             &mut bsz,
             std::ptr::null_mut(),
@@ -424,7 +420,7 @@ fn jemalloc_stats_snapshot() -> Option<JemallocStatsSnap> {
         let mut background_thread: bool = false;
         bsz = std::mem::size_of::<bool>();
         let _ = _rjem_mallctl(
-            b"background_thread\0".as_ptr() as *const i8,
+            c"background_thread".as_ptr(),
             &mut background_thread as *mut bool as *mut c_void,
             &mut bsz,
             std::ptr::null_mut(),
@@ -433,7 +429,7 @@ fn jemalloc_stats_snapshot() -> Option<JemallocStatsSnap> {
         let mut narenas: u32 = 0;
         let mut nsz = std::mem::size_of::<u32>();
         let _ = _rjem_mallctl(
-            b"arenas.narenas\0".as_ptr() as *const i8,
+            c"arenas.narenas".as_ptr(),
             &mut narenas as *mut u32 as *mut c_void,
             &mut nsz,
             std::ptr::null_mut(),
@@ -502,7 +498,7 @@ pub(crate) fn maybe_purge_jemalloc_retained(reason: &str) -> bool {
         rcs.push((
             "dirty_decay".into(),
             _rjem_mallctl(
-                b"arenas.dirty_decay_ms\0".as_ptr() as *const i8,
+                c"arenas.dirty_decay_ms".as_ptr(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 &mut decay_ms as *mut isize as *mut c_void,
@@ -512,7 +508,7 @@ pub(crate) fn maybe_purge_jemalloc_retained(reason: &str) -> bool {
         rcs.push((
             "muzzy_decay".into(),
             _rjem_mallctl(
-                b"arenas.muzzy_decay_ms\0".as_ptr() as *const i8,
+                c"arenas.muzzy_decay_ms".as_ptr(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 &mut decay_ms as *mut isize as *mut c_void,
@@ -684,7 +680,7 @@ pub(crate) fn maybe_madvise_data_mdb_keep_tail(file_backed_mb: u64, reason: &str
     };
     use std::io::BufRead;
     let mut ranges: Vec<(usize, usize)> = Vec::new();
-    for line in std::io::BufReader::new(maps).lines().flatten() {
+    for line in std::io::BufReader::new(maps).lines().map_while(Result::ok) {
         if !line.contains("data.mdb") {
             continue;
         }
@@ -695,10 +691,8 @@ pub(crate) fn maybe_madvise_data_mdb_keep_tail(file_backed_mb: u64, reason: &str
         let (Some(s), Some(e)) = (parts.next(), parts.next()) else {
             continue;
         };
-        let (Ok(start), Ok(end)) = (
-            usize::from_str_radix(s, 16),
-            usize::from_str_radix(e, 16),
-        ) else {
+        let (Ok(start), Ok(end)) = (usize::from_str_radix(s, 16), usize::from_str_radix(e, 16))
+        else {
             continue;
         };
         if end > start {
@@ -868,7 +862,6 @@ fn proc_parse_meminfo_into(s: &str, snap: &mut MemorySnapshot) {
     }
 }
 
-#[cfg(target_os = "linux")]
 /// Return anonymous RSS (`RssAnon`) from `/proc/self/status`, falling back to `VmRSS`
 /// when `RssAnon` is unavailable (Linux < 4.5 or non-Linux).  Callers that budget against
 /// anonymous memory (UTXO cache, pending ops) should use this rather than raw `VmRSS` so
@@ -1139,9 +1132,7 @@ impl MemoryGuard {
 
     /// RAM headroom reserved inside the RSS envelope for storage-engine pipeline buffers.
     /// RocksDB block cache + WBM dominate; heed3/LMDB uses mmap and smaller txn buffers.
-    pub(crate) fn pipeline_reserve_mb(
-        backend: crate::storage::database::DatabaseBackend,
-    ) -> u64 {
+    pub(crate) fn pipeline_reserve_mb(backend: crate::storage::database::DatabaseBackend) -> u64 {
         use crate::storage::database::DatabaseBackend;
         match backend {
             DatabaseBackend::RocksDB => ROCKSDB_PIPELINE_RESERVE_MB,
@@ -1172,11 +1163,7 @@ impl MemoryGuard {
                 // 200 blocks × ~300 KB = ~60 MB per transaction → ~10–15 s per flush.
                 // Same join frequency, 4× shorter stalls, 4× less channel backpressure.
                 // Override via BLVM_IBD_STORAGE_FLUSH_INTERVAL.
-                if total_gb >= 16 {
-                    200
-                } else {
-                    100
-                }
+                if total_gb >= 16 { 200 } else { 100 }
             }
             DatabaseBackend::RocksDB | DatabaseBackend::TidesDB => {
                 if total_gb >= 32 {
@@ -1263,18 +1250,18 @@ impl MemoryGuard {
             let from_avail = avail_mb.saturating_sub(os_reserve);
             return from_total.min(from_avail.max(2048)).max(2048);
         }
-        let os_reserve_pct: u64 = if total_mb >= 32 * 1024 {
-            25
-        } else {
-            22
-        };
+        let os_reserve_pct: u64 = if total_mb >= 32 * 1024 { 25 } else { 22 };
         let os_reserve = (total_mb * os_reserve_pct / 100).max(2816);
         let from_spare = avail_mb.saturating_sub(os_reserve);
         let cap_pct = match workload {
             // 25% on large Shared machines: leaves room for co-tenants (LLM, IDE, etc.).
             // 35% on smaller machines where blvm is likely the dominant workload.
             WorkloadClass::Shared => {
-                if total_mb >= 32 * 1024 { 25 } else { 35 }
+                if total_mb >= 32 * 1024 {
+                    25
+                } else {
+                    35
+                }
             }
             WorkloadClass::Dedicated => unreachable!("handled above"),
         };
@@ -1444,7 +1431,8 @@ impl MemoryGuard {
             };
             tracing::debug!(
                 "MemoryGuard: reusing latched workload={:?} (available={}MB; latch prevents oscillation)",
-                wc, available_mb
+                wc,
+                available_mb
             );
             wc
         } else {
@@ -1453,22 +1441,28 @@ impl MemoryGuard {
                 tracing::warn!(
                     "MemoryGuard: swap is >85% full at startup ({}/{} MB free) — \
                      overriding workload to Dedicated to avoid cache surge on restart",
-                    startup_swap_free_mb, startup_swap_total_mb
+                    startup_swap_free_mb,
+                    startup_swap_total_mb
                 );
                 WorkloadClass::Dedicated
             } else {
                 Self::detect_workload_class(total_mb, available_mb, ctx.ibd_dedicated)
             };
             // Store in latch so subsequent catch-up cycles reuse this class.
-            WORKLOAD_CLASS_LATCH.store(if wc == WorkloadClass::Dedicated { 1 } else { 0 }, Ordering::Relaxed);
+            WORKLOAD_CLASS_LATCH.store(
+                if wc == WorkloadClass::Dedicated { 1 } else { 0 },
+                Ordering::Relaxed,
+            );
             tracing::info!(
                 "MemoryGuard: workload class latched as {:?} for this process (available={}MB, swap={}/{}MB free)",
-                wc, available_mb, startup_swap_free_mb, startup_swap_total_mb
+                wc,
+                available_mb,
+                startup_swap_free_mb,
+                startup_swap_total_mb
             );
             wc
         };
-        let auto_rss_budget_mb =
-            Self::compute_rss_budget_mb_auto(total_mb, available_mb, workload);
+        let auto_rss_budget_mb = Self::compute_rss_budget_mb_auto(total_mb, available_mb, workload);
         let mut rss_budget_mb_raw = Self::compute_rss_budget_mb(total_mb, available_mb, workload);
 
         // No swap: kernel cannot page out under pressure — cap envelope to ~42% of MemAvailable
@@ -1652,16 +1646,18 @@ impl MemoryGuard {
         //   freeDB updates atomically without hitting the page-reclamation cliff.
         //
         // Overrideable via BLVM_IBD_DEFER_CHECKPOINT_INTERVAL for benchmarking.
-        let defer_checkpoint_interval_base =
-            if matches!(ctx.storage_backend, crate::storage::database::DatabaseBackend::Heed3) {
-                200u64
-            } else if total_gb >= 64 {
-                10_000
-            } else if total_gb >= 32 {
-                2_000
-            } else {
-                25_000
-            };
+        let defer_checkpoint_interval_base = if matches!(
+            ctx.storage_backend,
+            crate::storage::database::DatabaseBackend::Heed3
+        ) {
+            200u64
+        } else if total_gb >= 64 {
+            10_000
+        } else if total_gb >= 32 {
+            2_000
+        } else {
+            25_000
+        };
         // Floor lowered from 100 to 20: per-block UTXO churn grows substantially with chain
         // height (SegWit-era blocks carry far more ops than early blocks), so a fixed
         // 200-block interval that was safe at low heights can produce multi-million-op
@@ -2409,7 +2405,11 @@ impl MemoryGuard {
         // Safety: the MemAvailable checks above still catch true system-wide pressure. The anon-RSS
         // check is a process-specific signal to detect runaway heap growth that MemAvailable might
         // not show immediately (e.g. if other processes are evicted first to make room).
-        let r_for_pct = if snap.rss_anon_mb > 0 { snap.rss_anon_mb } else { r };
+        let r_for_pct = if snap.rss_anon_mb > 0 {
+            snap.rss_anon_mb
+        } else {
+            r
+        };
 
         // On large-RAM machines, full swap is still an OOM signal: the kernel has exhausted
         // its eviction reservoir and any further anonymous allocation will trigger OOM kill.
@@ -2446,8 +2446,11 @@ impl MemoryGuard {
         // Exit sys_swap pressure once swap is below 85%.
         let sys_swap_full_dn = snap.swap_total_mb >= 1024 && swap_pct >= 85;
 
-        let emerg_up = (a > 0 && a < avail_emerg_up) || r_for_pct > t * rss_emerg_pct_up / 100 || swap_emerg_up;
-        let crit_up = (a > 0 && a < avail_crit_up) || r_for_pct > t * rss_crit_pct_up / 100 || swap_crit_up;
+        let emerg_up = (a > 0 && a < avail_emerg_up)
+            || r_for_pct > t * rss_emerg_pct_up / 100
+            || swap_emerg_up;
+        let crit_up =
+            (a > 0 && a < avail_crit_up) || r_for_pct > t * rss_crit_pct_up / 100 || swap_crit_up;
         // sys_swap_full elevates minimum to Critical so blvm doesn't grow RSS further when
         // the system has no eviction reservoir. If available RAM is very large (>32 GB
         // headroom) only Elevated is applied — the machine has enough RAM even without swap.
@@ -2465,11 +2468,19 @@ impl MemoryGuard {
         let sys_swap_elev_dn = sys_swap_full_dn && a < 32 * 1024;
         let sys_swap_crit = sys_swap_full && a < 32 * 1024;
         let sys_swap_crit_dn = sys_swap_full_dn && a < 32 * 1024;
-        let elev_up = (a > 0 && a < avail_elev_up) || r_for_pct > t * rss_elev_pct_up / 100 || sys_swap_elev;
+        let elev_up =
+            (a > 0 && a < avail_elev_up) || r_for_pct > t * rss_elev_pct_up / 100 || sys_swap_elev;
         let crit_up = crit_up || sys_swap_crit;
-        let emerg_dn = (a == 0 || a >= avail_emerg_dn) && r_for_pct <= t * rss_emerg_pct_dn / 100 && !swap_emerg_dn;
-        let crit_dn = (a == 0 || a >= avail_crit_dn) && r_for_pct <= t * rss_crit_pct_dn / 100 && !swap_crit_dn && !sys_swap_crit_dn;
-        let elev_dn = (a == 0 || a >= avail_elev_dn) && r_for_pct <= t * rss_elev_pct_dn / 100 && !sys_swap_elev_dn;
+        let emerg_dn = (a == 0 || a >= avail_emerg_dn)
+            && r_for_pct <= t * rss_emerg_pct_dn / 100
+            && !swap_emerg_dn;
+        let crit_dn = (a == 0 || a >= avail_crit_dn)
+            && r_for_pct <= t * rss_crit_pct_dn / 100
+            && !swap_crit_dn
+            && !sys_swap_crit_dn;
+        let elev_dn = (a == 0 || a >= avail_elev_dn)
+            && r_for_pct <= t * rss_elev_pct_dn / 100
+            && !sys_swap_elev_dn;
 
         match current {
             PressureLevel::Emergency => {
@@ -2983,10 +2994,10 @@ pub(crate) fn c2_working_set_track_ok(verdict: MemReportAccountedVerdict) -> boo
 #[cfg(test)]
 mod memory_tier_tests {
     use super::{
-        c2_working_set_track_ok, classify_mem_report_accounted, ibd_pressure_is_emergency,
-        ibd_pressure_level_snapshot, publish_ibd_pressure, reset_ibd_pressure_on_session_end,
-        MemoryGuard, MemReportAccountedVerdict, WorkloadClass, ROCKSDB_PIPELINE_RESERVE_MB,
-        emergency_entry_anon_mb, stale_emergency_step_down_level, PressureLevel,
+        MemReportAccountedVerdict, MemoryGuard, PressureLevel, ROCKSDB_PIPELINE_RESERVE_MB,
+        WorkloadClass, c2_working_set_track_ok, classify_mem_report_accounted,
+        emergency_entry_anon_mb, ibd_pressure_is_emergency, ibd_pressure_level_snapshot,
+        publish_ibd_pressure, reset_ibd_pressure_on_session_end, stale_emergency_step_down_level,
     };
     use crate::storage::database::DatabaseBackend;
 
@@ -3043,7 +3054,10 @@ mod memory_tier_tests {
 
     #[test]
     fn heed3_pipeline_reserve_and_flush_interval() {
-        assert_eq!(MemoryGuard::pipeline_reserve_mb(DatabaseBackend::Heed3), 512);
+        assert_eq!(
+            MemoryGuard::pipeline_reserve_mb(DatabaseBackend::Heed3),
+            512
+        );
         assert_eq!(
             MemoryGuard::pipeline_reserve_mb(DatabaseBackend::RocksDB),
             ROCKSDB_PIPELINE_RESERVE_MB

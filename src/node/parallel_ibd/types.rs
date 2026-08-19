@@ -102,9 +102,13 @@ pub fn estimate_block_bytes(block: &Block, witnesses: &[Vec<Witness>]) -> usize 
             // Heap for overflow inputs/outputs beyond SmallVec inline capacity (>2).
             let overflow = if tx.inputs.len() > 2 {
                 (tx.inputs.len() - 2) * 72
-            } else { 0 } + if tx.outputs.len() > 2 {
+            } else {
+                0
+            } + if tx.outputs.len() > 2 {
                 (tx.outputs.len() - 2) * 32
-            } else { 0 };
+            } else {
+                0
+            };
             struct_inline + script_heap + overflow
         })
         .sum();
@@ -114,7 +118,10 @@ pub fn estimate_block_bytes(block: &Block, witnesses: &[Vec<Witness>]) -> usize 
         .flat_map(|tw| tw.iter())
         .map(|stack_item_vec| {
             // Vec<Vec<u8>> = 24B header + per element (24B header + data)
-            24 + stack_item_vec.iter().map(|elem| 24 + elem.len()).sum::<usize>()
+            24 + stack_item_vec
+                .iter()
+                .map(|elem| 24 + elem.len())
+                .sum::<usize>()
         })
         .sum();
     (base + tx_bytes + wit_bytes).max(200)

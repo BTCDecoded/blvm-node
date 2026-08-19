@@ -4,13 +4,13 @@
 //! Use to restore 400287 into hotpath-400k `ckpt_a` while keeping 300287 in `ckpt_b`.
 //!
 //! ```bash
-//! cargo run --example fill_empty_ckpt_slot --profile release-fast --features production,heed3 -- \
+//! cargo run --example fill_empty_ckpt_slot --profile release-fast --features production,heed3,ibd-dev -- \
 //!   $DATADIR/blvm-adapt-bodies-400-500 $DATADIR/blvm-hotpath-400k 0
 //! ```
 
-use anyhow::{bail, Context};
-use blvm_node::storage::ibd_engine::ckpt_tree_for_slot;
+use anyhow::{Context, bail};
 use blvm_node::storage::Storage;
+use blvm_node::storage::ibd_engine::ckpt_tree_for_slot;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -60,9 +60,7 @@ fn main() -> anyhow::Result<()> {
     let other_len = dst.open_tree(other_name)?.len().unwrap_or(0);
     let dst_tree = dst.open_tree(dst_tree_name)?;
     let before_len = dst_tree.len()?;
-    println!(
-        "DST before: {dst_tree_name} len={before_len}; keeping {other_name} len={other_len}"
-    );
+    println!("DST before: {dst_tree_name} len={before_len}; keeping {other_name} len={other_len}");
     if before_len != 0 {
         bail!("{dst_tree_name} is not empty (len={before_len}) — refusing overwrite");
     }
@@ -104,7 +102,8 @@ fn main() -> anyhow::Result<()> {
 
     // Point active export at the restored slot; do not touch other slot height/tree.
     dst.chain().force_set_engine_ckpt_slot(dst_slot)?;
-    dst.chain().set_engine_ckpt_slot_height(dst_slot, export_h)?;
+    dst.chain()
+        .set_engine_ckpt_slot_height(dst_slot, export_h)?;
     dst.chain().force_set_engine_export_height(export_h)?;
     dst.chain()
         .force_set_engine_export_utxo_count(utxo_count.unwrap_or(copied as u64))?;

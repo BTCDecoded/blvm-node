@@ -749,7 +749,7 @@ impl BlockStore {
         #[cfg(not(feature = "block-compression"))]
         let block_data = data;
         // `block-compression` yields `Vec<u8>`; otherwise `&[u8]` — both AsRef<[u8]>.
-        let block: Block = bincode::deserialize(block_data.as_ref())?;
+        let block: Block = bincode::deserialize(block_data)?;
         Ok(block)
     }
 
@@ -762,7 +762,7 @@ impl BlockStore {
                 return Ok(Some(data));
             }
         }
-        Ok(self.blocks.get(hash.as_slice())?)
+        self.blocks.get(hash.as_slice())
     }
 
     /// W5: one wire deser when body is a wire blob; else bincode body + witness tree.

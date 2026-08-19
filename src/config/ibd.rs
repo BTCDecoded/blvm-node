@@ -156,6 +156,8 @@ pub struct IbdConfig {
     #[serde(default = "default_ibd_utxo_prefetch_lookahead")]
     pub utxo_prefetch_lookahead: u64,
 
+    /// Per-peer GetData window. Env `BLVM_IBD_MAX_BLOCKS_IN_TRANSIT` overrides TOML.
+    /// Must stay ≥ `chunk_size`. Mode T bench sets 16; product default is 128.
     #[serde(default = "default_ibd_max_blocks_in_transit")]
     pub max_blocks_in_transit_per_peer: usize,
 
@@ -186,14 +188,13 @@ fn default_utxo_engine() -> bool {
 /// or rewind UTXO watermarks via zero-peer local replay.
 pub fn ibd_serve_only() -> bool {
     latch_env!(bool, {
-        match std::env::var("BLVM_SERVE_ONLY")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-        {
-            Some("1") | Some("true") | Some("on") | Some("yes") => true,
-            _ => false,
-        }
+        matches!(
+            std::env::var("BLVM_SERVE_ONLY")
+                .ok()
+                .as_deref()
+                .map(str::trim),
+            Some("1") | Some("true") | Some("on") | Some("yes")
+        )
     })
 }
 
@@ -212,11 +213,7 @@ pub fn getdata_serve_pipe_depth() -> usize {
                 return n.clamp(1, 8);
             }
         }
-        if ibd_serve_only() {
-            4
-        } else {
-            1
-        }
+        if ibd_serve_only() { 4 } else { 1 }
     })
 }
 
@@ -372,10 +369,7 @@ pub fn ibd_engine_path(data_dir: Option<&std::path::Path>) -> std::path::PathBuf
     if let Some(dd) = data_dir {
         return dd.join("ibd_engine").join("utxo_table.bin");
     }
-    std::env::temp_dir().join(format!(
-        "blvm_ibd_engine_{}.bin",
-        std::process::id()
-    ))
+    std::env::temp_dir().join(format!("blvm_ibd_engine_{}.bin", std::process::id()))
 }
 
 fn default_ibd_chunk_size() -> u64 {
@@ -562,6 +556,7 @@ mod ibd_engine_config_tests {
     use super::*;
 
     fn with_env<F: FnOnce()>(key: &str, val: Option<&str>, f: F) {
+        let _ibd_guard = crate::ibd_test_lock::guard();
         let prev = std::env::var(key).ok();
         unsafe {
             match val {
@@ -578,6 +573,7 @@ mod ibd_engine_config_tests {
         }
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ibd_serve_only_env() {
         with_env("BLVM_SERVE_ONLY", None, || {
@@ -594,6 +590,7 @@ mod ibd_engine_config_tests {
         });
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn getdata_serve_pipe_depth_serve_only_and_cap() {
         with_env("BLVM_GETDATA_SERVE_PIPE", None, || {
@@ -608,10 +605,15 @@ mod ibd_engine_config_tests {
             assert_eq!(getdata_serve_pipe_depth(), 2);
         });
         with_env("BLVM_GETDATA_SERVE_PIPE", Some("64"), || {
-            assert_eq!(getdata_serve_pipe_depth(), 8, "A4 cap — never honor 64 fanout");
+            assert_eq!(
+                getdata_serve_pipe_depth(),
+                8,
+                "A4 cap — never honor 64 fanout"
+            );
         });
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ibd_engine_enabled_config_default_true() {
         assert!(IbdConfig::default().utxo_engine);
@@ -621,6 +623,7 @@ mod ibd_engine_config_tests {
         })));
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ibd_engine_enabled_env_overrides_config() {
         with_env("BLVM_IBD_ENGINE", Some("0"), || {
@@ -637,6 +640,7 @@ mod ibd_engine_config_tests {
         });
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ibd_engine_durability_defaults() {
         with_env("BLVM_IBD_CHECKPOINT_MIN_INTERVAL", None, || {
@@ -646,6 +650,7 @@ mod ibd_engine_config_tests {
         });
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ibd_engine_durability_env_overrides() {
         with_env("BLVM_IBD_CHECKPOINT_INTERVAL", Some("200"), || {
@@ -657,6 +662,7 @@ mod ibd_engine_config_tests {
         });
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn ibd_engine_path_uses_data_dir() {
         with_env("BLVM_IBD_ENGINE_PATH", None, || {
@@ -668,6 +674,7 @@ mod ibd_engine_config_tests {
         });
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn resolve_export_ignores_override_below_stored() {
         // Live poison: stale shell OVERRIDE=640000 while durable ckpt is at 720000.
@@ -676,6 +683,7 @@ mod ibd_engine_config_tests {
         assert_eq!(ignored, Some(640_000));
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn resolve_export_honors_override_at_or_above_stored() {
         // Pin when metadata matches ckpt content.
@@ -688,6 +696,7 @@ mod ibd_engine_config_tests {
         assert_eq!(ignored, None);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn resolve_export_override_only_when_no_stored() {
         let (h, ignored) = resolve_engine_export_height(None, Some(640_000));

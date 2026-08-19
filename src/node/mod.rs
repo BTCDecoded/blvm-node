@@ -790,98 +790,98 @@ impl Node {
         // later export) — otherwise seed loads the active tip ckpt and skips the band.
         // Serve-only archives must not rewrite watermarks / export pins.
         if !serve_only {
-        if let Ok(v) = std::env::var("BLVM_IBD_FORCE_RESUME_HEIGHT") {
-            if let Ok(h) = v.trim().parse::<u64>() {
-                if h > 0 {
-                    let mut slot_note = String::new();
-                    let active = self.storage.chain().get_engine_ckpt_slot().unwrap_or(0);
-                    let mut chosen: Option<u8> = None;
-                    for slot in [0u8, 1u8] {
-                        if self
-                            .storage
-                            .chain()
-                            .get_engine_ckpt_slot_height(slot)
-                            .ok()
-                            == Some(h)
-                        {
-                            chosen = Some(slot);
-                            break;
+            if let Ok(v) = std::env::var("BLVM_IBD_FORCE_RESUME_HEIGHT") {
+                if let Ok(h) = v.trim().parse::<u64>() {
+                    if h > 0 {
+                        let mut slot_note = String::new();
+                        let active = self.storage.chain().get_engine_ckpt_slot().unwrap_or(0);
+                        let mut chosen: Option<u8> = None;
+                        for slot in [0u8, 1u8] {
+                            if self.storage.chain().get_engine_ckpt_slot_height(slot).ok()
+                                == Some(h)
+                            {
+                                chosen = Some(slot);
+                                break;
+                            }
                         }
-                    }
-                    if chosen.is_none() {
-                        // Slot-height metadata may be missing on the inactive tree; if the
-                        // active export is ahead of `h`, prefer the other non-empty slot.
-                        let active_export = self
-                            .storage
-                            .chain()
-                            .get_engine_export_height()
-                            .ok()
-                            .flatten()
-                            .unwrap_or(0);
-                        if active_export > h {
-                            let other = active ^ 1;
-                            let other_name =
-                                crate::storage::ibd_engine::ckpt_tree_for_slot(other);
-                            if let Ok(tree) = self.storage.open_tree(other_name) {
-                                if !tree.is_empty().unwrap_or(true) {
-                                    chosen = Some(other);
+                        if chosen.is_none() {
+                            // Slot-height metadata may be missing on the inactive tree; if the
+                            // active export is ahead of `h`, prefer the other non-empty slot.
+                            let active_export = self
+                                .storage
+                                .chain()
+                                .get_engine_export_height()
+                                .ok()
+                                .flatten()
+                                .unwrap_or(0);
+                            if active_export > h {
+                                let other = active ^ 1;
+                                let other_name =
+                                    crate::storage::ibd_engine::ckpt_tree_for_slot(other);
+                                if let Ok(tree) = self.storage.open_tree(other_name) {
+                                    if !tree.is_empty().unwrap_or(true) {
+                                        chosen = Some(other);
+                                    }
                                 }
                             }
                         }
-                    }
-                    if let Some(slot) = chosen {
-                        if let Err(e) = self.storage.chain().force_set_engine_ckpt_slot(slot) {
-                            warn!("[IBD_FORCE_RESUME] force_set_engine_ckpt_slot({slot}): {e:#}");
-                        } else {
-                            let _ = self.storage.chain().set_engine_ckpt_slot_height(slot, h);
-                            // Tip export left chain_info.utxo_count at the *newer* rung;
-                            // seed refuses unless expected count matches the prior-rung tree.
-                            let tree_name =
-                                crate::storage::ibd_engine::ckpt_tree_for_slot(slot);
-                            if let Ok(tree) = self.storage.open_tree(tree_name) {
-                                if let Ok(n) = tree.len() {
-                                    if n > 0 {
-                                        let _ = self
-                                            .storage
-                                            .chain()
-                                            .force_set_engine_export_utxo_count(n as u64);
-                                        slot_note = format!(
-                                            " ckpt_slot={slot} (was {active}) utxo_count={n}"
-                                        );
+                        if let Some(slot) = chosen {
+                            if let Err(e) = self.storage.chain().force_set_engine_ckpt_slot(slot) {
+                                warn!(
+                                    "[IBD_FORCE_RESUME] force_set_engine_ckpt_slot({slot}): {e:#}"
+                                );
+                            } else {
+                                let _ = self.storage.chain().set_engine_ckpt_slot_height(slot, h);
+                                // Tip export left chain_info.utxo_count at the *newer* rung;
+                                // seed refuses unless expected count matches the prior-rung tree.
+                                let tree_name =
+                                    crate::storage::ibd_engine::ckpt_tree_for_slot(slot);
+                                if let Ok(tree) = self.storage.open_tree(tree_name) {
+                                    if let Ok(n) = tree.len() {
+                                        if n > 0 {
+                                            let _ = self
+                                                .storage
+                                                .chain()
+                                                .force_set_engine_export_utxo_count(n as u64);
+                                            slot_note = format!(
+                                                " ckpt_slot={slot} (was {active}) utxo_count={n}"
+                                            );
+                                        } else {
+                                            slot_note = format!(" ckpt_slot={slot} (was {active})");
+                                        }
                                     } else {
-                                        slot_note =
-                                            format!(" ckpt_slot={slot} (was {active})");
+                                        slot_note = format!(" ckpt_slot={slot} (was {active})");
                                     }
                                 } else {
                                     slot_note = format!(" ckpt_slot={slot} (was {active})");
                                 }
-                            } else {
-                                slot_note = format!(" ckpt_slot={slot} (was {active})");
                             }
                         }
-                    }
-                    match (
-                        self.storage.chain().force_set_ibd_utxo_watermark(h),
-                        self.storage.chain().force_set_engine_export_height(h),
-                        self.storage.chain().force_set_engine_validation_tip(h),
-                    ) {
-                        (Ok(()), Ok(()), Ok(())) => {
-                            warn!(
-                                "[IBD_FORCE_RESUME] pinned watermark/export/validation_tip → {} \
+                        match (
+                            self.storage.chain().force_set_ibd_utxo_watermark(h),
+                            self.storage.chain().force_set_engine_export_height(h),
+                            self.storage.chain().force_set_engine_validation_tip(h),
+                        ) {
+                            (Ok(()), Ok(()), Ok(())) => {
+                                warn!(
+                                    "[IBD_FORCE_RESUME] pinned watermark/export/validation_tip → {} \
                                  (BLVM_IBD_FORCE_RESUME_HEIGHT){}",
-                                h, slot_note
-                            );
-                        }
-                        (e1, e2, e3) => {
-                            warn!(
-                                "[IBD_FORCE_RESUME] failed to pin height {}: wm={:?} export={:?} tip={:?}",
-                                h, e1.err(), e2.err(), e3.err()
-                            );
+                                    h, slot_note
+                                );
+                            }
+                            (e1, e2, e3) => {
+                                warn!(
+                                    "[IBD_FORCE_RESUME] failed to pin height {}: wm={:?} export={:?} tip={:?}",
+                                    h,
+                                    e1.err(),
+                                    e2.err(),
+                                    e3.err()
+                                );
+                            }
                         }
                     }
                 }
             }
-        }
         } // !serve_only — skip FORCE_RESUME watermark rewrite
 
         // Determine the effective resume point. Two heights matter:
@@ -955,9 +955,7 @@ impl Node {
                 if let Some(h) = self.network.get_highest_peer_start_height_async().await {
                     if h > synced_tip {
                         target_height = h.max(synced_tip);
-                        info!(
-                            "[START_COMPONENTS] peer start_height={h} after Version wait"
-                        );
+                        info!("[START_COMPONENTS] peer start_height={h} after Version wait");
                         break;
                     }
                 }
@@ -1243,6 +1241,7 @@ impl Node {
                 Arc::clone(&module_router),
             );
             crate::module::pipeline::install_block_pipeline(Arc::clone(&module_router));
+            crate::module::pipeline::install_pipeline_network(Arc::clone(&self.network));
 
             // Note: Payment state machine will be set after payment processor initialization
             // We'll update it via Arc::get_mut if possible, or store it separately
@@ -1705,7 +1704,7 @@ impl Node {
         // Get target peer count from config
         let default_timing = crate::config::NetworkTimingConfig::default();
         let timing_config = config.network_timing.as_ref().unwrap_or(&default_timing);
-        let target_peer_count = timing_config.target_outbound_peers;
+        let target_peer_count = timing_config.effective_target_outbound_peers();
 
         // Initialize peer connections
         if let Err(e) = self
@@ -1857,10 +1856,9 @@ impl Node {
                     if let Some(data_dir) = self.storage.data_dir() {
                         let engine_path =
                             crate::config::ibd::ibd_engine_path(Some(data_dir.as_path()));
-                        let dirty = crate::storage::ibd_engine::engine_dirty_flag_path(
-                            &engine_path,
-                        )
-                        .exists();
+                        let dirty =
+                            crate::storage::ibd_engine::engine_dirty_flag_path(&engine_path)
+                                .exists();
                         if dirty {
                             info!(
                                 "[IBD_RESUME] engine .dirty set — resume from export_h={} \
@@ -1908,9 +1906,8 @@ impl Node {
                     );
                     // Same wipe path as watermark > tip, plus engine files / ckpt trees.
                     if let Some(data_dir) = self.storage.data_dir() {
-                        let utxo_store_dir = data_dir.join(
-                            crate::storage::database::IBD_UTXO_STORE_SUBDIR,
-                        );
+                        let utxo_store_dir =
+                            data_dir.join(crate::storage::database::IBD_UTXO_STORE_SUBDIR);
                         if utxo_store_dir.exists() {
                             let _ = std::fs::remove_dir_all(&utxo_store_dir);
                         }
@@ -1941,7 +1938,10 @@ impl Node {
                         let _ = tree.clear();
                     }
                     let _ = self.storage.chain().force_set_ibd_utxo_watermark(0);
-                    let _ = self.storage.chain().force_reset_engine_checkpoint_metadata();
+                    let _ = self
+                        .storage
+                        .chain()
+                        .force_reset_engine_checkpoint_metadata();
                     let _ = self.storage.flush();
                     0
                 } else if durable_watermark > chain_tip {
@@ -1980,14 +1980,14 @@ impl Node {
                     // Wipe the standalone ibd_utxo_store directory (contains UTXOs that are
                     // inconsistent above chain_tip). The main heed3/ block store is untouched.
                     if let Some(data_dir) = self.storage.data_dir() {
-                        let utxo_store_dir = data_dir.join(
-                            crate::storage::database::IBD_UTXO_STORE_SUBDIR,
-                        );
+                        let utxo_store_dir =
+                            data_dir.join(crate::storage::database::IBD_UTXO_STORE_SUBDIR);
                         if utxo_store_dir.exists() {
                             if let Err(e) = std::fs::remove_dir_all(&utxo_store_dir) {
                                 warn!(
                                     "[IBD_RESUME] failed to remove {}: {} — continuing anyway",
-                                    utxo_store_dir.display(), e
+                                    utxo_store_dir.display(),
+                                    e
                                 );
                             } else {
                                 info!(
@@ -2006,7 +2006,11 @@ impl Node {
                     }
                     // Stale engine export height (e.g. 460k) would otherwise claim a checkpoint
                     // that no longer matches the wiped UTXO state / block tip.
-                    if let Err(e) = self.storage.chain().force_reset_engine_checkpoint_metadata() {
+                    if let Err(e) = self
+                        .storage
+                        .chain()
+                        .force_reset_engine_checkpoint_metadata()
+                    {
                         warn!("[IBD_RESUME] force_reset_engine_checkpoint_metadata failed: {e}");
                     }
                     let _ = self.storage.flush();

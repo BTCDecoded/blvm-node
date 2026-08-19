@@ -69,7 +69,8 @@ impl FeederBuffer {
     /// The fixed 400 KB/block estimate underestimates post-SegWit blocks by 4–10×.
     pub(crate) fn total_bytes_estimate(&self) -> usize {
         use crate::node::parallel_ibd::types::estimate_block_bytes;
-        self.shards.iter()
+        self.shards
+            .iter()
             .flat_map(|m| m.values())
             .map(|(blk, wit, ..)| estimate_block_bytes(blk, wit))
             .sum()

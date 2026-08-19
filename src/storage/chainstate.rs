@@ -600,8 +600,10 @@ impl ChainState {
         self.set_engine_ckpt_slot_height(slot, height)?;
         self.chain_info
             .insert(b"ibd_engine_export_utxo_count", &utxo_count.to_be_bytes())?;
-        self.chain_info
-            .insert(b"ibd_engine_export_wall_secs", &export_wall_secs.to_be_bytes())?;
+        self.chain_info.insert(
+            b"ibd_engine_export_wall_secs",
+            &export_wall_secs.to_be_bytes(),
+        )?;
         self.chain_info
             .insert(b"ibd_engine_export_muhash", muhash_running.as_slice())?;
         Ok(())
@@ -620,9 +622,7 @@ impl ChainState {
         self.chain_info
             .insert(b"ibd_engine_export_utxo_count", &0u64.to_be_bytes())?;
         let _ = self.chain_info.remove(b"ibd_engine_export_muhash");
-        let _ = self
-            .chain_info
-            .remove(b"ibd_engine_validation_tip");
+        let _ = self.chain_info.remove(b"ibd_engine_validation_tip");
         Ok(())
     }
 

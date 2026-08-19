@@ -27,9 +27,7 @@ pub(crate) fn offer_tip_release(
     block: SharedBlock,
     witnesses: SharedWitnesses,
 ) -> Option<u64> {
-    let mut g = TIP_RELEASE_LATCH
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut g = TIP_RELEASE_LATCH.lock().unwrap_or_else(|e| e.into_inner());
     let prev = g.as_ref().map(|(h, _, _)| *h);
     *g = Some((height, block, witnesses));
     prev
@@ -55,9 +53,7 @@ pub(crate) fn tip_release_holds(height: u64) -> bool {
 /// Test/helpers: clear latch between unit cases.
 #[cfg(test)]
 pub(crate) fn clear_tip_release_for_test() {
-    *TIP_RELEASE_LATCH
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = None;
+    *TIP_RELEASE_LATCH.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 #[cfg(test)]

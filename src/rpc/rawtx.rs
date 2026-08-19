@@ -1063,6 +1063,32 @@ impl RawTxRpc {
                     .as_ref()
                     .and_then(|m| m.get_transaction_witnesses(&txid_array));
                 Self::format_getrawtransaction_response(&tx, witnesses.as_deref(), verbose)
+            } else if let Some((block_hash, height)) =
+                crate::module::pipeline::try_lookup_block_for_txids(&[txid.to_string()])
+            {
+                if let Ok(Some(block)) = storage.blocks().get_block(&block_hash) {
+                    let (block, witnesses) =
+                        crate::module::pipeline::try_rehydrate_block_for_consensus(
+                            height,
+                            block_hash,
+                            block,
+                            Vec::new(),
+                        );
+                    use blvm_protocol::block::calculate_tx_id;
+                    if let Some((idx, tx)) = block
+                        .transactions
+                        .iter()
+                        .enumerate()
+                        .find(|(_, tx)| calculate_tx_id(tx) == txid_array)
+                    {
+                        let w = witnesses.get(idx).cloned();
+                        Self::format_getrawtransaction_response(tx, w.as_deref(), verbose)
+                    } else {
+                        Err(RpcError::tx_not_found(""))
+                    }
+                } else {
+                    Err(RpcError::tx_not_found(""))
+                }
             } else {
                 Err(RpcError::tx_not_found(""))
             }
@@ -1293,6 +1319,7 @@ impl RawTxRpc {
         if let Some(ref storage) = self.storage {
             // Find block containing the transactions
             let mut block: Option<blvm_protocol::Block> = None;
+            let mut resolved_height: Option<u64> = None;
             let tip_height = storage.chain().get_height()?.unwrap_or(0);
 
             if let Some(blockhash_str) = blockhash_opt {
@@ -1305,6 +1332,23 @@ impl RawTxRpc {
                 let mut blockhash_array = [0u8; 32];
                 blockhash_array.copy_from_slice(&blockhash_bytes);
                 if let Ok(Some(b)) = storage.blocks().get_block(&blockhash_array) {
+                    resolved_height = storage
+                        .blocks()
+                        .get_height_by_hash(&blockhash_array)
+                        .ok()
+                        .flatten();
+                    block = Some(b);
+                }
+            } else if let Some((hash, height)) =
+                crate::module::pipeline::try_lookup_block_for_txids(
+                    &txids
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect::<Vec<_>>(),
+                )
+            {
+                if let Ok(Some(b)) = storage.blocks().get_block(&hash) {
+                    resolved_height = Some(height);
                     block = Some(b);
                 }
             } else {
@@ -1321,6 +1365,7 @@ impl RawTxRpc {
                                     .iter()
                                     .any(|tid| tid.as_str() == Some(txid_hex.as_str()))
                                 {
+                                    resolved_height = Some(h);
                                     block = Some(b);
                                     break;
                                 }
@@ -1337,8 +1382,20 @@ impl RawTxRpc {
                 use crate::rpc::merkle_block::MerkleBlock;
                 use blvm_protocol::block::calculate_tx_id;
 
-                let tx_hashes: Vec<[u8; 32]> =
-                    block.transactions.iter().map(calculate_tx_id).collect();
+                let block_hash = storage.blocks().get_block_hash(&block);
+                let height = resolved_height.or_else(|| {
+                    storage
+                        .blocks()
+                        .get_height_by_hash(&block_hash)
+                        .ok()
+                        .flatten()
+                });
+                // Unknown height (orphan / not in index): do not invent 0 for the module.
+                let tx_hashes: Vec<[u8; 32]> = height
+                    .and_then(|h| {
+                        crate::module::pipeline::try_get_canonical_txids(h, block_hash)
+                    })
+                    .unwrap_or_else(|| block.transactions.iter().map(calculate_tx_id).collect());
 
                 let requested: std::collections::HashSet<String> = txids
                     .iter()

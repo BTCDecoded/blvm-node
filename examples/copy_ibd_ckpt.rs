@@ -6,13 +6,15 @@
 //! Both dirs must be stopped (no blvm holding the LMDB lock).
 //!
 //! ```bash
-//! cargo run --example copy_ibd_ckpt --release --features production,heed3 -- \
+//! cargo run --example copy_ibd_ckpt --release --features production,heed3,ibd-dev -- \
 //!   $DATADIR/blvm-hotpath-400k $DATADIR/blvm-hotpath-500k
 //! ```
+//!
+//! Requires `--features production,heed3,ibd-dev`.
 
-use anyhow::{bail, Context};
-use blvm_node::storage::ibd_engine::{ckpt_tree_for_slot, CKPT_TREE_A, CKPT_TREE_B};
+use anyhow::{Context, bail};
 use blvm_node::storage::Storage;
+use blvm_node::storage::ibd_engine::{CKPT_TREE_A, CKPT_TREE_B, ckpt_tree_for_slot};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -61,9 +63,7 @@ fn main() -> anyhow::Result<()> {
     let before_h = dst.chain().get_engine_export_height()?;
     let before_count = dst.chain().get_engine_export_utxo_count()?;
     let before_slot = dst.chain().get_engine_ckpt_slot()?;
-    println!(
-        "DST before: export_h={before_h:?} slot={before_slot} utxo_count={before_count:?}"
-    );
+    println!("DST before: export_h={before_h:?} slot={before_slot} utxo_count={before_count:?}");
 
     // Clear both ping-pong slots so freelist can absorb the rewrite; write into slot 0.
     for name in [CKPT_TREE_A, CKPT_TREE_B] {

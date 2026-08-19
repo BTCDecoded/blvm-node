@@ -63,23 +63,27 @@ fn lmdb_madvise_for_path(env_path: &Path) {
     let target_str = target.to_string_lossy().into_owned();
 
     let rss_before = rss_kb();
-    let Ok(maps) = std::fs::File::open("/proc/self/maps") else { return };
+    let Ok(maps) = std::fs::File::open("/proc/self/maps") else {
+        return;
+    };
     let mut evicted_ranges: usize = 0;
     let mut evicted_bytes: usize = 0;
-    for line in std::io::BufReader::new(maps).lines().flatten() {
+    for line in std::io::BufReader::new(maps).lines().map_while(Result::ok) {
         // Format: "addr_start-addr_end perms offset dev ino pathname"
         // Only match the exact target path.
         if !line.ends_with(target_str.as_str()) {
             continue;
         }
-        let Some(range) = line.split_whitespace().next() else { continue };
+        let Some(range) = line.split_whitespace().next() else {
+            continue;
+        };
         let mut parts = range.splitn(2, '-');
-        let (Some(s), Some(e)) = (parts.next(), parts.next()) else { continue };
-        let (Ok(start), Ok(end)) = (
-            usize::from_str_radix(s, 16),
-            usize::from_str_radix(e, 16),
-        ) else {
-            continue
+        let (Some(s), Some(e)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let (Ok(start), Ok(end)) = (usize::from_str_radix(s, 16), usize::from_str_radix(e, 16))
+        else {
+            continue;
         };
         if end <= start {
             continue;
@@ -140,13 +144,16 @@ fn lmdb_madvise_dontneed(env_path: &Path) {
         if avail_gb >= threshold_gb {
             tracing::debug!(
                 "[MADVISE] skip (MemAvailable={}GB >= threshold={}GB)",
-                avail_gb, threshold_gb
+                avail_gb,
+                threshold_gb
             );
             return;
         }
         tracing::info!(
             "[MADVISE] threshold triggered (MemAvailable={}GB < {}GB), evicting {:?}",
-            avail_gb, threshold_gb, env_path.file_name().unwrap_or_default()
+            avail_gb,
+            threshold_gb,
+            env_path.file_name().unwrap_or_default()
         );
         lmdb_madvise_for_path(env_path);
     }
@@ -366,7 +373,9 @@ impl Heed3Database {
                         "[HEED3] data.mdb is {}% of the LMDB map limit ({}/{} MB). \
                          LMDB writes will freeze when the map is exhausted. \
                          Set a larger map via BLVM_HEED3_MAP_SIZE_MB or [storage.heed3] map_size_mb.",
-                        pct, file_mb, map_size_mb,
+                        pct,
+                        file_mb,
+                        map_size_mb,
                     );
                 }
             }
@@ -432,11 +441,7 @@ impl Heed3Database {
             #[cfg(all(target_os = "linux", feature = "libc"))]
             {
                 let p = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-                if p > 0 {
-                    p as usize
-                } else {
-                    4096usize
-                }
+                if p > 0 { p as usize } else { 4096usize }
             }
             #[cfg(not(all(target_os = "linux", feature = "libc")))]
             {
@@ -544,7 +549,10 @@ fn resolve_heed3_map_size_mb(
     dbcache_mb: usize,
 ) -> usize {
     if let Some(mb) = map_size_mb_override {
-        tracing::info!("[HEED3] map_size {} MB from caller override (auto-tune skipped)", mb);
+        tracing::info!(
+            "[HEED3] map_size {} MB from caller override (auto-tune skipped)",
+            mb
+        );
         return apply_existing_mdb_headroom(mb, Some(data_dir));
     }
     if let Some(mb) = std::env::var("BLVM_HEED3_MAP_SIZE_MB")
@@ -683,7 +691,7 @@ fn disk_free_mb_for_path(path: Option<&std::path::Path>) -> u64 {
             // SAFETY: rc == 0 guarantees the struct was fully written.
             let st = unsafe { st.assume_init() };
             // f_bavail: blocks available to unprivileged callers; f_frsize: fragment size.
-            let free_bytes = (st.f_bavail as u64).saturating_mul(st.f_frsize as u64);
+            let free_bytes = st.f_bavail.saturating_mul(st.f_frsize);
             return free_bytes / (1024 * 1024);
         }
         0
@@ -736,14 +744,20 @@ impl Database for Heed3Database {
     fn set_ibd_nosync(&self, enable: bool) -> crate::storage::database::Result<()> {
         let (flags, mode) = (
             EnvFlags::NO_SYNC,
-            if enable { FlagSetMode::Enable } else { FlagSetMode::Disable },
+            if enable {
+                FlagSetMode::Enable
+            } else {
+                FlagSetMode::Disable
+            },
         );
         // SAFETY: MDB_NOSYNC only affects durability guarantees, not memory safety.
         // We restore normal sync before IBD completion via flush().
         unsafe { self.env.set_flags(flags, mode) }.context("heed3 set_flags(NO_SYNC) failed")?;
         if !enable {
             // Sync everything that was written without fsync.
-            self.env.force_sync().context("heed3 force_sync (after nosync disable) failed")?;
+            self.env
+                .force_sync()
+                .context("heed3 force_sync (after nosync disable) failed")?;
         }
         Ok(())
     }
@@ -889,7 +903,9 @@ impl Tree for Heed3Tree {
         // In NOSYNC mode every commit skips fdatasync. force_sync flushes all
         // pending writes to disk so callers (watermark checkpoints, IBD teardown)
         // can trust durability.
-        self.env.force_sync().context("heed3 flush_to_disk force_sync failed")?;
+        self.env
+            .force_sync()
+            .context("heed3 flush_to_disk force_sync failed")?;
         // After fdatasync, release LMDB mmap pages from RSS via madvise(MADV_DONTNEED).
         // fadvise alone is insufficient because it only marks pages as evictable in the
         // kernel's page cache — it cannot evict pages still reachable via a live mmap.
@@ -953,10 +969,7 @@ impl Heed3Tree {
             self.db
                 .put_with_flags(&mut wtxn, PutFlags::APPEND, key, value)
                 .with_context(|| {
-                    format!(
-                        "heed3 MDB_APPEND put failed at op {} (keys not globally sorted?)",
-                        count
-                    )
+                    format!("heed3 MDB_APPEND put failed at op {count} (keys not globally sorted?)")
                 })?;
             count += 1;
         }
@@ -986,8 +999,7 @@ impl Heed3Tree {
                 .put_with_flags(&mut wtxn, PutFlags::APPEND, &key, &value)
                 .with_context(|| {
                     format!(
-                        "heed3 MDB_APPEND stream put failed at op {} (keys not globally sorted?)",
-                        count
+                        "heed3 MDB_APPEND stream put failed at op {count} (keys not globally sorted?)"
                     )
                 })?;
             count += 1;
