@@ -258,6 +258,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, builds]
     env:
       RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
+      BLVM_SECP256K1_NO_GPU: "1"
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&

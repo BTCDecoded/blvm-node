@@ -1339,14 +1339,12 @@ impl RawTxRpc {
                         .flatten();
                     block = Some(b);
                 }
-            } else if let Some((hash, height)) =
-                crate::module::pipeline::try_lookup_block_for_txids(
-                    &txids
-                        .iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect::<Vec<_>>(),
-                )
-            {
+            } else if let Some((hash, height)) = crate::module::pipeline::try_lookup_block_for_txids(
+                &txids
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect::<Vec<_>>(),
+            ) {
                 if let Ok(Some(b)) = storage.blocks().get_block(&hash) {
                     resolved_height = Some(height);
                     block = Some(b);
@@ -1392,9 +1390,7 @@ impl RawTxRpc {
                 });
                 // Unknown height (orphan / not in index): do not invent 0 for the module.
                 let tx_hashes: Vec<[u8; 32]> = height
-                    .and_then(|h| {
-                        crate::module::pipeline::try_get_canonical_txids(h, block_hash)
-                    })
+                    .and_then(|h| crate::module::pipeline::try_get_canonical_txids(h, block_hash))
                     .unwrap_or_else(|| block.transactions.iter().map(calculate_tx_id).collect());
 
                 let requested: std::collections::HashSet<String> = txids

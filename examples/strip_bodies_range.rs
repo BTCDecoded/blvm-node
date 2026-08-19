@@ -9,10 +9,9 @@ use std::path::PathBuf;
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
-    let data_dir = PathBuf::from(
-        args.next()
-            .context("usage: strip_bodies_range DATA_DIR START_HEIGHT END_HEIGHT (needs --features ibd-dev)")?,
-    );
+    let data_dir = PathBuf::from(args.next().context(
+        "usage: strip_bodies_range DATA_DIR START_HEIGHT END_HEIGHT (needs --features ibd-dev)",
+    )?);
     let start: u64 = args.next().context("missing START")?.parse()?;
     let end: u64 = args.next().context("missing END")?.parse()?;
     anyhow::ensure!(end >= start, "END < START");
