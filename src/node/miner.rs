@@ -444,6 +444,10 @@ pub struct MiningCoordinator {
     storage: Option<std::sync::Arc<crate::storage::Storage>>,
     /// Protocol engine for connecting mined blocks
     protocol: Option<std::sync::Arc<blvm_protocol::BitcoinProtocolEngine>>,
+    /// Optional module event bus (NewBlock / BlockMined after a connect).
+    event_publisher: Option<std::sync::Arc<crate::node::event_publisher::EventPublisher>>,
+    /// Shared Commons GBT slot (empty = dummy single-output coinbase).
+    commons_gbt: crate::rpc::mining::CommonsGbtSlot,
 }
 
 impl MiningCoordinator {
@@ -458,6 +462,8 @@ impl MiningCoordinator {
             mempool,
             storage,
             protocol: None,
+            event_publisher: None,
+            commons_gbt: crate::rpc::mining::CommonsGbtSlot::default(),
         }
     }
 
@@ -480,6 +486,8 @@ impl MiningCoordinator {
             mempool,
             storage,
             protocol: None,
+            event_publisher: None,
+            commons_gbt: crate::rpc::mining::CommonsGbtSlot::default(),
         }
     }
 
@@ -489,6 +497,18 @@ impl MiningCoordinator {
         protocol: std::sync::Arc<blvm_protocol::BitcoinProtocolEngine>,
     ) {
         self.protocol = Some(protocol);
+    }
+
+    pub fn set_event_publisher(
+        &mut self,
+        publisher: Option<std::sync::Arc<crate::node::event_publisher::EventPublisher>>,
+    ) {
+        self.event_publisher = publisher;
+    }
+
+    /// Share the RPC Commons GBT slot so a find pays the notebook.
+    pub fn set_commons_gbt_slot(&mut self, slot: crate::rpc::mining::CommonsGbtSlot) {
+        self.commons_gbt = slot;
     }
 
     /// Start the mining coordinator
@@ -576,17 +596,39 @@ impl MiningCoordinator {
             .transaction_selector
             .select_transactions(&*self.mempool as &dyn MempoolProvider, &utxo_set);
 
-        // Create coinbase transaction with subsidy + fees
+        // Commons outputs when the module is issuing work; else the dummy single payout.
         let coinbase_tx = self
-            .create_coinbase_transaction(height + 1, &transactions, &utxo_set)
+            .create_coinbase_for_template(height + 1, &transactions, &utxo_set)
             .await?;
 
         // Build transaction list (coinbase first)
         let mut all_transactions = vec![coinbase_tx];
         all_transactions.extend(transactions);
 
-        // Calculate merkle root from transactions (we own all_transactions, so we can mutate it)
-        use blvm_protocol::mining::calculate_merkle_root;
+        use blvm_protocol::mining::{
+            append_witness_commitment_from_nested, calculate_merkle_root,
+        };
+        let mut coinbase = all_transactions[0].clone();
+        let probe = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                timestamp: 0,
+                bits: 0,
+                nonce: 0,
+            },
+            transactions: all_transactions.clone().into_boxed_slice(),
+        };
+        let nested = self.build_witnesses_for_block(&probe, &utxo_set).map_err(|e| {
+            anyhow::anyhow!("mempool witnesses unavailable: {e}")
+        })?;
+        append_witness_commitment_from_nested(
+            &mut coinbase,
+            &mut all_transactions,
+            Some(&nested),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to append witness commitment: {e}"))?;
         let merkle_root = calculate_merkle_root(&all_transactions)
             .map_err(|e| anyhow::anyhow!("Failed to calculate merkle root: {}", e))?;
 
@@ -615,6 +657,74 @@ impl MiningCoordinator {
         );
 
         Ok(template)
+    }
+
+    /// Commons payouts when bound; otherwise the dummy single-output coinbase.
+    async fn create_coinbase_for_template(
+        &self,
+        height: u64,
+        selected_transactions: &[Transaction],
+        utxo_set: &blvm_protocol::UtxoSet,
+    ) -> Result<Transaction> {
+        if let Some(caller) = self.commons_gbt.get() {
+            match caller.fetch_commons_gbt_outputs().await {
+                Ok(Some(outs)) if !outs.is_empty() => {
+                    return self.create_commons_coinbase(
+                        height,
+                        selected_transactions,
+                        utxo_set,
+                        outs,
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(anyhow::anyhow!("{}", e.message));
+                }
+            }
+        }
+        self.create_coinbase_transaction(height, selected_transactions, utxo_set)
+            .await
+    }
+
+    fn create_commons_coinbase(
+        &self,
+        height: u64,
+        selected_transactions: &[Transaction],
+        utxo_set: &blvm_protocol::UtxoSet,
+        outputs: Vec<(i64, Vec<u8>)>,
+    ) -> Result<Transaction> {
+        use blvm_protocol::ConsensusProof;
+        use blvm_protocol::mining::{create_coinbase_with_outputs, fit_payouts_to_reward};
+
+        let consensus = ConsensusProof::new();
+        let subsidy = consensus.get_block_subsidy(height);
+        let total_fees: i64 = selected_transactions
+            .iter()
+            .map(|tx| self.mempool.calculate_transaction_fee(tx, utxo_set) as i64)
+            .sum();
+        let fitted = fit_payouts_to_reward(&outputs, subsidy, total_fees)
+            .map_err(|e| anyhow::anyhow!("commons payout fit: {e}"))?;
+        create_coinbase_with_outputs(height, &Self::bip34_coinbase_script(height), &fitted)
+            .map_err(|e| anyhow::anyhow!("commons coinbase: {e}"))
+    }
+
+    fn bip34_coinbase_script(height: u64) -> Vec<u8> {
+        let h = height.min(u64::from(u32::MAX));
+        let mut height_bytes = Vec::new();
+        let mut x = h;
+        while x > 0 {
+            height_bytes.push((x & 0xff) as u8);
+            x >>= 8;
+        }
+        if height_bytes.is_empty() {
+            height_bytes.push(0);
+        }
+        let mut script_sig = vec![height_bytes.len() as u8];
+        script_sig.extend(height_bytes);
+        if script_sig.len() < 2 {
+            script_sig = vec![0x01, 0x00];
+        }
+        script_sig
     }
 
     /// Create coinbase transaction with subsidy + fees
@@ -652,21 +762,7 @@ impl MiningCoordinator {
 
         // 4. Create coinbase transaction (BIP34 height in scriptSig; BIP54: lock_time = height - 13, sequence != 0xffffffff)
         let lock_time = height.saturating_sub(13);
-        let h = height.min(u64::from(u32::MAX));
-        let mut height_bytes = Vec::new();
-        let mut x = h;
-        while x > 0 {
-            height_bytes.push((x & 0xff) as u8);
-            x >>= 8;
-        }
-        if height_bytes.is_empty() {
-            height_bytes.push(0);
-        }
-        let mut script_sig = vec![height_bytes.len() as u8];
-        script_sig.extend(height_bytes);
-        if script_sig.len() < 2 {
-            script_sig = vec![0x01, 0x00];
-        }
+        let script_sig = Self::bip34_coinbase_script(height);
         Ok(Transaction {
             version: 1,
             inputs: vec![blvm_protocol::TransactionInput {
@@ -738,6 +834,9 @@ impl MiningCoordinator {
         let witnesses = self.build_witnesses_for_block(&block, &utxo)?;
 
         let mut coord = crate::node::sync::SyncCoordinator::new();
+        if let Some(ep) = &self.event_publisher {
+            coord.set_event_publisher(Some(std::sync::Arc::clone(ep)));
+        }
         let accepted = coord.connect_mined_block(
             storage.blocks().as_ref(),
             protocol.as_ref(),
@@ -753,6 +852,13 @@ impl MiningCoordinator {
         }
 
         info!("Mined block connected at height {connect_height}");
+        if let Some(ep) = &self.event_publisher {
+            let block_hash = storage.blocks().get_block_hash(&block);
+            ep.publish_new_block(&block, &block_hash, connect_height)
+                .await;
+            ep.publish_block_mined(&block_hash, connect_height, None)
+                .await;
+        }
         Ok(())
     }
 
@@ -1420,6 +1526,11 @@ mod tests {
         let block = template.unwrap();
         assert_eq!(block.header.version, 1);
         assert!(!block.transactions.is_empty()); // Should have coinbase + mempool tx
+        let cb = &block.transactions[0];
+        assert!(cb.outputs.len() >= 2, "payout plus BIP141 commitment");
+        let last = cb.outputs.last().unwrap();
+        assert_eq!(last.value, 0);
+        assert_eq!(last.script_pubkey[0], 0x6a);
     }
 
     #[tokio::test]
@@ -1620,6 +1731,24 @@ mod tests {
             coordinator.mempool.get_transaction_witnesses(&txid),
             Some(vec![witness_stack])
         );
+
+        let cb = block.transactions[0].clone();
+        let spend_tx = block.transactions[1].clone();
+        let mut empty_cb = cb.clone();
+        let mut empty_txs = vec![cb.clone(), spend_tx.clone()];
+        blvm_protocol::mining::append_witness_commitment(&mut empty_cb, &mut empty_txs).unwrap();
+        let mut real_cb = cb.clone();
+        let mut real_txs = vec![cb, spend_tx];
+        blvm_protocol::mining::append_witness_commitment_from_nested(
+            &mut real_cb,
+            &mut real_txs,
+            Some(&witnesses),
+        )
+        .unwrap();
+        assert_ne!(
+            empty_cb.outputs.last().unwrap().script_pubkey,
+            real_cb.outputs.last().unwrap().script_pubkey
+        );
     }
 
     #[tokio::test]
@@ -1703,6 +1832,69 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn generate_template_refuses_missing_mempool_witnesses() {
+        use blvm_protocol::{OutPoint, TransactionInput, TransactionOutput, UTXO};
+        use sha2::{Digest, Sha256};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        fn p2wsh_scriptpubkey(witness_script: &[u8]) -> Vec<u8> {
+            let hash = Sha256::digest(witness_script);
+            let mut spk = vec![blvm_protocol::opcodes::OP_0, 0x20];
+            spk.extend_from_slice(&hash);
+            spk
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(crate::storage::Storage::new(temp_dir.path()).unwrap());
+        let witness_script = vec![0x51];
+        let funding_hash = [0xcd; 32];
+        let outpoint = OutPoint {
+            hash: funding_hash,
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 100_000,
+            script_pubkey: p2wsh_scriptpubkey(&witness_script).into(),
+            height: 0,
+            is_coinbase: false,
+        };
+        storage.utxos().add_utxo(&outpoint, &utxo).unwrap();
+
+        let spend = Transaction {
+            version: 2,
+            inputs: vec![TransactionInput {
+                prevout: outpoint,
+                script_sig: vec![],
+                sequence: 0xfffffffe,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 90_000,
+                script_pubkey: vec![0x51],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let mut mempool_manager = crate::node::mempool::MempoolManager::new();
+        assert!(
+            mempool_manager.add_transaction(spend).unwrap(),
+            "tx must enter mempool"
+        );
+        let mut coordinator =
+            MiningCoordinator::new(Arc::new(mempool_manager), Some(storage));
+
+        let err = coordinator
+            .generate_block_template()
+            .await
+            .expect_err("missing witnesses must refuse the template");
+        assert!(
+            err.to_string().contains("mempool witnesses unavailable"),
+            "unexpected error: {err}"
+        );
+    }
+
     /// REV-TN-04: template → mine → `submit_block` → `connect_mined_block` on regtest storage.
     #[tokio::test]
     async fn test_submit_block_connects_regtest() {
@@ -1731,6 +1923,11 @@ mod tests {
             .await
             .expect("block template");
         assert_eq!(template.transactions.len(), 1, "coinbase only");
+        let cb = &template.transactions[0];
+        assert!(
+            cb.outputs.last().is_some_and(|o| o.value == 0 && o.script_pubkey.first() == Some(&0x6a)),
+            "mined template coinbase must carry BIP141 commitment"
+        );
         // BIP90: post-genesis blocks need version ≥ 4 (same as `generatetoaddress` RPC path).
         template.header.version = 4;
 
@@ -1751,5 +1948,69 @@ mod tests {
             .unwrap()
             .expect("height after connect");
         assert_eq!(height, 1, "mined block extends chain from genesis");
+    }
+
+    struct HoldCommons;
+
+    #[async_trait::async_trait]
+    impl crate::rpc::mining::CommonsGbtCaller for HoldCommons {
+        async fn fetch_commons_gbt_outputs(
+            &self,
+        ) -> crate::rpc::errors::RpcResult<Option<Vec<(i64, Vec<u8>)>>> {
+            Err(crate::rpc::errors::RpcError::internal_error(
+                "commons pool holding; not issuing work",
+            ))
+        }
+    }
+
+    struct ScriptCommons;
+
+    #[async_trait::async_trait]
+    impl crate::rpc::mining::CommonsGbtCaller for ScriptCommons {
+        async fn fetch_commons_gbt_outputs(
+            &self,
+        ) -> crate::rpc::errors::RpcResult<Option<Vec<(i64, Vec<u8>)>>> {
+            Ok(Some(vec![(0, vec![0x51])]))
+        }
+    }
+
+    #[tokio::test]
+    async fn commons_hold_refuses_miner_template() {
+        let mempool = std::sync::Arc::new(crate::node::mempool::MempoolManager::new());
+        let mut coordinator = MiningCoordinator::new(mempool, None);
+        let slot = crate::rpc::mining::CommonsGbtSlot::default();
+        slot.set(std::sync::Arc::new(HoldCommons));
+        coordinator.set_commons_gbt_slot(slot);
+
+        let err = coordinator
+            .generate_block_template()
+            .await
+            .expect_err("hold must refuse a template");
+        assert!(
+            err.to_string().contains("holding"),
+            "unexpected miner error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn commons_outputs_appear_in_miner_coinbase() {
+        let mempool = std::sync::Arc::new(crate::node::mempool::MempoolManager::new());
+        let mut coordinator = MiningCoordinator::new(mempool, None);
+        let slot = crate::rpc::mining::CommonsGbtSlot::default();
+        slot.set(std::sync::Arc::new(ScriptCommons));
+        coordinator.set_commons_gbt_slot(slot);
+
+        let template = coordinator
+            .generate_block_template()
+            .await
+            .expect("template");
+        let cb = &template.transactions[0];
+        assert_eq!(cb.outputs[0].script_pubkey, vec![0x51]);
+        assert!(
+            cb.outputs
+                .last()
+                .is_some_and(|o| o.value == 0 && o.script_pubkey.first() == Some(&0x6a)),
+            "BIP141 still appended after Commons payouts"
+        );
     }
 }

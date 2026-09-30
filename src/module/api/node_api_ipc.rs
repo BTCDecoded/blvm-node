@@ -136,6 +136,15 @@ impl NodeApiIpc {
                 MessageType::SendStratumV2MessageToPeer
             }
             RequestPayload::GetBlockTemplate { .. } => MessageType::GetBlockTemplate,
+            RequestPayload::GetBlockTemplateWithOutputs { .. } => {
+                MessageType::GetBlockTemplateWithOutputs
+            }
+            RequestPayload::GetBlockTemplateDeclared { .. } => {
+                MessageType::GetBlockTemplateDeclared
+            }
+            RequestPayload::SubmitMempoolTransaction { .. } => {
+                MessageType::SubmitMempoolTransaction
+            }
             RequestPayload::SubmitBlock { .. } => MessageType::SubmitBlock,
             RequestPayload::QueueReceivedBlock { .. } => MessageType::QueueReceivedBlock,
             RequestPayload::MergeBlockServeDenylist { .. } => MessageType::MergeBlockServeDenylist,
@@ -975,6 +984,69 @@ impl NodeAPI for NodeApiIpc {
         .await
     }
 
+    async fn get_block_template_with_outputs(
+        &self,
+        rules: Vec<String>,
+        coinbase_script: Option<Vec<u8>>,
+        coinbase_outputs: Vec<(i64, Vec<u8>)>,
+    ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError> {
+        self.request(
+            RequestPayload::GetBlockTemplateWithOutputs {
+                rules,
+                coinbase_script,
+                coinbase_outputs,
+            },
+            |payload| match payload {
+                ResponsePayload::BlockTemplate(template) => Ok(template),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn get_block_template_declared(
+        &self,
+        rules: Vec<String>,
+        coinbase_script: Option<Vec<u8>>,
+        coinbase_outputs: Vec<(i64, Vec<u8>)>,
+        declared_txids: Vec<Hash>,
+    ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError> {
+        self.request(
+            RequestPayload::GetBlockTemplateDeclared {
+                rules,
+                coinbase_script,
+                coinbase_outputs,
+                declared_txids,
+            },
+            |payload| match payload {
+                ResponsePayload::BlockTemplate(template) => Ok(template),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn submit_mempool_transaction(
+        &self,
+        tx: Transaction,
+        witnesses: Option<Vec<blvm_protocol::Witness>>,
+    ) -> Result<bool, ModuleError> {
+        self.request(
+            RequestPayload::SubmitMempoolTransaction { tx, witnesses },
+            |payload| match payload {
+                ResponsePayload::MempoolTransactionSubmitted(added) => Ok(added),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
     async fn submit_block(
         &self,
         block: Block,
@@ -1184,6 +1256,35 @@ mod tests {
                 coinbase_address: None,
             }),
             MessageType::GetBlockTemplate
+        ));
+        assert!(matches!(
+            NodeApiIpc::payload_to_message_type(&RequestPayload::GetBlockTemplateWithOutputs {
+                rules: vec!["segwit".into()],
+                coinbase_script: None,
+                coinbase_outputs: vec![(50, vec![0x51])],
+            }),
+            MessageType::GetBlockTemplateWithOutputs
+        ));
+        assert!(matches!(
+            NodeApiIpc::payload_to_message_type(&RequestPayload::GetBlockTemplateDeclared {
+                rules: vec!["segwit".into()],
+                coinbase_script: None,
+                coinbase_outputs: vec![(50, vec![0x51])],
+                declared_txids: vec![],
+            }),
+            MessageType::GetBlockTemplateDeclared
+        ));
+        assert!(matches!(
+            NodeApiIpc::payload_to_message_type(&RequestPayload::SubmitMempoolTransaction {
+                tx: Transaction {
+                    version: 1,
+                    inputs: vec![].into(),
+                    outputs: vec![].into(),
+                    lock_time: 0,
+                },
+                witnesses: None,
+            }),
+            MessageType::SubmitMempoolTransaction
         ));
         assert!(matches!(
             NodeApiIpc::payload_to_message_type(&RequestPayload::BanPeer {

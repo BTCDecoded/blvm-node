@@ -499,6 +499,54 @@ pub trait NodeAPI: Send + Sync {
         coinbase_address: Option<String>,
     ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError>;
 
+    /// Multi-output coinbase template (Commons Pool / Stage 3a).
+    ///
+    /// Default: not implemented so older mocks and published callers keep
+    /// compiling. The live node fits subsidy+fees and appends BIP141.
+    /// Does not bind a Bitcoin header (H8).
+    async fn get_block_template_with_outputs(
+        &self,
+        _rules: Vec<String>,
+        _coinbase_script: Option<Vec<u8>>,
+        _coinbase_outputs: Vec<(i64, Vec<u8>)>,
+    ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError> {
+        Err(ModuleError::OperationError(
+            "get_block_template_with_outputs is not implemented for this NodeAPI".to_string(),
+        ))
+    }
+
+    /// Stage 3b: miner-declared mempool subset + Commons outputs.
+    ///
+    /// Default: not implemented so older mocks keep compiling.
+    /// Empty `declared_txids` is coinbase-only. Stratum calls this and
+    /// falls back to `get_block_template` if the mock/pin lacks it.
+    async fn get_block_template_declared(
+        &self,
+        _rules: Vec<String>,
+        _coinbase_script: Option<Vec<u8>>,
+        _coinbase_outputs: Vec<(i64, Vec<u8>)>,
+        _declared_txids: Vec<Hash>,
+    ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError> {
+        Err(ModuleError::OperationError(
+            "get_block_template_declared is not implemented for this NodeAPI".to_string(),
+        ))
+    }
+
+    /// Submit a parsed transaction to the node mempool (JD ProvideMissing).
+    ///
+    /// `Ok(true)` = added. `Ok(false)` = already in the mempool. Policy or
+    /// consensus reject is `Err`. Default: not implemented so older mocks
+    /// compile. Does not invent a second mempool.
+    async fn submit_mempool_transaction(
+        &self,
+        _tx: Transaction,
+        _witnesses: Option<Vec<blvm_protocol::Witness>>,
+    ) -> Result<bool, ModuleError> {
+        Err(ModuleError::OperationError(
+            "submit_mempool_transaction is not implemented for this NodeAPI".to_string(),
+        ))
+    }
+
     /// Submit a solved block
     ///
     /// Submits a fully solved block to the network.

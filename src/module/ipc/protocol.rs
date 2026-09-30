@@ -159,6 +159,12 @@ pub enum MessageType {
     Event,
     /// Error response
     Error,
+    /// Multi-output GBT (Commons Pool). Added at end so existing variant indices stay put.
+    GetBlockTemplateWithOutputs,
+    /// Stage 3b declared-txid GBT. Added at end so existing variant indices stay put.
+    GetBlockTemplateDeclared,
+    /// JD ProvideMissing → mempool (`SendTransactions`). Added at end.
+    SubmitMempoolTransaction,
 }
 
 /// Request message from module to node
@@ -364,6 +370,23 @@ pub enum RequestPayload {
     RegisterCliSpec {
         spec: CliSpec,
     },
+    GetBlockTemplateWithOutputs {
+        rules: Vec<String>,
+        coinbase_script: Option<Vec<u8>>,
+        coinbase_outputs: Vec<(i64, Vec<u8>)>,
+    },
+    /// Stage 3b: named mempool txids in order. Empty list is coinbase-only.
+    GetBlockTemplateDeclared {
+        rules: Vec<String>,
+        coinbase_script: Option<Vec<u8>>,
+        coinbase_outputs: Vec<(i64, Vec<u8>)>,
+        declared_txids: Vec<Hash>,
+    },
+    /// Parsed Bitcoin tx + optional witness stacks. Already-in-mempool is ok.
+    SubmitMempoolTransaction {
+        tx: Transaction,
+        witnesses: Option<Vec<blvm_protocol::Witness>>,
+    },
 }
 
 /// CLI spec for module commands (JSON-serializable structure)
@@ -539,6 +562,8 @@ pub enum ResponsePayload {
     TxServeDenylistSnapshot(TxServeDenylistSnapshot),
     /// Sync coordinator status for modules (`traits::SyncStatus`).
     NodeSyncStatus(SyncStatus),
+    /// `true` = added, `false` = already present.
+    MempoolTransactionSubmitted(bool),
 }
 
 /// Event message from node to subscribed modules

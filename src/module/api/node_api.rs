@@ -349,6 +349,175 @@ impl NodeApiImpl {
     fn calculate_difficulty_from_bits_helper(&self, bits: u64) -> f64 {
         blvm_protocol::pow::difficulty_from_bits(bits).unwrap_or(1.0)
     }
+
+    /// Parse `commons_get_coinbase_outputs`. `None` = do not use Commons.
+    /// Holding is an error so GBT does not issue a node-default coinbase.
+    pub(crate) fn commons_gbt_outputs(
+        v: &serde_json::Value,
+    ) -> Result<Option<Vec<(i64, Vec<u8>)>>, ModuleError> {
+        crate::rpc::commons_gbt::commons_gbt_outputs(v)
+    }
+
+    async fn try_commons_gbt_outputs(&self) -> Result<Option<Vec<(i64, Vec<u8>)>>, ModuleError> {
+        if self
+            .is_module_available("blvm-commons-pool")
+            .await
+            .ok()
+            != Some(true)
+        {
+            return Ok(None);
+        }
+        let raw = match self
+            .call_module(
+                Some("blvm-commons-pool"),
+                "commons_get_coinbase_outputs",
+                vec![],
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => return Ok(None),
+        };
+        let v: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| {
+            ModuleError::OperationError(format!("commons outputs json: {e}"))
+        })?;
+        Self::commons_gbt_outputs(&v)
+    }
+
+    /// Build a GBT-style template. `coinbase_outputs` uses
+    /// `create_block_template_with_outputs` (subsidy+fees + BIP141).
+    /// `None` is one output at value 0 so fit tops up the address to the reward.
+    /// `declared_txids` is Stage 3b: resolve named txs and error if any vanish.
+    fn build_block_template(
+        &self,
+        coinbase_script: Option<Vec<u8>>,
+        coinbase_address: Option<String>,
+        coinbase_outputs: Option<Vec<(i64, Vec<u8>)>>,
+        declared_txids: Option<&[Hash]>,
+    ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError> {
+        let height = self
+            .storage
+            .chain()
+            .get_height()
+            .map_err(|e| ModuleError::op_err("Failed to get height", e))?
+            .ok_or_else(|| {
+                ModuleError::OperationError(module_error_msg::CHAIN_NOT_INITIALIZED.to_string())
+            })?;
+
+        let prev_header = self
+            .storage
+            .chain()
+            .get_tip_header()
+            .map_err(|e| ModuleError::op_err("Failed to get tip header", e))?
+            .ok_or_else(|| {
+                ModuleError::OperationError(module_error_msg::NO_CHAIN_TIP.to_string())
+            })?;
+
+        let prev_headers = if let Ok(recent) = self.storage.blocks().get_recent_headers(2016) {
+            if recent.len() >= 2 {
+                recent
+            } else {
+                let mut headers = Vec::new();
+                if let Ok(Some(current_height)) = self.storage.chain().get_height() {
+                    for h in 0..=current_height.min(2015) {
+                        if let Ok(Some(hash)) = self.storage.blocks().get_hash_by_height(h) {
+                            if let Ok(Some(header)) = self.storage.blocks().get_header(&hash) {
+                                headers.push(header);
+                            }
+                        }
+                    }
+                }
+                headers
+            }
+        } else {
+            Vec::new()
+        };
+
+        let mempool_manager = self.mempool_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+        let mempool_txs = mempool_manager.get_transactions();
+
+        let utxo_set = self
+            .storage
+            .utxos()
+            .get_all_utxos()
+            .map_err(|e| ModuleError::op_err("Failed to get UTXO set", e))?;
+
+        let coinbase_script_bytes = coinbase_script.unwrap_or_default();
+        let address_bytes = coinbase_address
+            .map(|a| {
+                a.strip_prefix("hex:")
+                    .map(|h| hex::decode(h).unwrap_or_default())
+                    .unwrap_or_else(|| a.into_bytes())
+            })
+            .unwrap_or_default();
+
+        let outputs: Vec<(i64, Vec<u8>)> = match coinbase_outputs {
+            Some(outs) if !outs.is_empty() => outs,
+            Some(_) => {
+                return Err(ModuleError::OperationError(
+                    "coinbase_outputs must not be empty".to_string(),
+                ));
+            }
+            None => vec![(0, address_bytes)],
+        };
+
+        let network = consensus_network_from_storage(&self.storage);
+        if let Some(ids) = declared_txids {
+            let declared = blvm_protocol::mining::resolve_declared_txs(&mempool_txs, ids)
+                .map_err(|e| ModuleError::op_err("Declared tx resolve failed", e))?;
+            let mempool_witnesses = crate::rpc::mining::mempool_witnesses_for_template(
+                Some(mempool_manager.as_ref()),
+                &utxo_set,
+                &declared,
+            )
+            .map_err(ModuleError::OperationError)?;
+            return blvm_protocol::mining::create_block_template_declared(
+                &utxo_set,
+                &declared,
+                ids,
+                height,
+                &prev_header,
+                &prev_headers,
+                &coinbase_script_bytes,
+                &outputs,
+                network,
+                Some(&mempool_witnesses),
+            )
+            .map_err(|e| ModuleError::op_err("Template creation failed", e));
+        }
+        let mempool_witnesses = crate::rpc::mining::mempool_witnesses_for_template(
+            Some(mempool_manager.as_ref()),
+            &utxo_set,
+            &mempool_txs,
+        )
+        .map_err(ModuleError::OperationError)?;
+        blvm_protocol::mining::create_block_template_with_outputs(
+            &utxo_set,
+            &mempool_txs,
+            height,
+            &prev_header,
+            &prev_headers,
+            &coinbase_script_bytes,
+            &outputs,
+            network,
+            Some(&mempool_witnesses),
+        )
+        .map_err(|e| ModuleError::op_err("Template creation failed", e))
+    }
+}
+
+#[async_trait]
+impl crate::rpc::mining::CommonsGbtCaller for NodeApiImpl {
+    async fn fetch_commons_gbt_outputs(
+        &self,
+    ) -> crate::rpc::errors::RpcResult<Option<Vec<(i64, Vec<u8>)>>> {
+        match self.try_commons_gbt_outputs().await {
+            Ok(v) => Ok(v),
+            Err(e) => Err(crate::rpc::errors::RpcError::internal_error(e.to_string())),
+        }
+    }
 }
 
 #[async_trait]
@@ -1527,7 +1696,7 @@ impl NodeAPI for NodeApiImpl {
             .as_ref()
             .or_else(|| self.current_module_id_for_api.as_ref())
             .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
+            .unwrap_or_else(|| "blvm".to_string());
 
         router
             .route_call(&caller_module_id, target_module_id, method, &params)
@@ -1862,102 +2031,70 @@ impl NodeAPI for NodeApiImpl {
 
     async fn get_block_template(
         &self,
-        rules: Vec<String>,
+        _rules: Vec<String>,
         coinbase_script: Option<Vec<u8>>,
         coinbase_address: Option<String>,
     ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError> {
-        // Get current height
-        let height = self
-            .storage
-            .chain()
-            .get_height()
-            .map_err(|e| ModuleError::op_err("Failed to get height", e))?
-            .ok_or_else(|| {
-                ModuleError::OperationError(module_error_msg::CHAIN_NOT_INITIALIZED.to_string())
-            })?;
+        let commons = self.try_commons_gbt_outputs().await?;
+        self.build_block_template(coinbase_script, coinbase_address, commons, None)
+    }
 
-        // Get tip header
-        let prev_header = self
-            .storage
-            .chain()
-            .get_tip_header()
-            .map_err(|e| ModuleError::op_err("Failed to get tip header", e))?
-            .ok_or_else(|| {
-                ModuleError::OperationError(module_error_msg::NO_CHAIN_TIP.to_string())
-            })?;
+    async fn get_block_template_with_outputs(
+        &self,
+        _rules: Vec<String>,
+        coinbase_script: Option<Vec<u8>>,
+        coinbase_outputs: Vec<(i64, Vec<u8>)>,
+    ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError> {
+        self.build_block_template(coinbase_script, None, Some(coinbase_outputs), None)
+    }
 
-        // Get headers for difficulty adjustment
-        let prev_headers = if let Ok(recent) = self.storage.blocks().get_recent_headers(2016) {
-            if recent.len() >= 2 {
-                recent
-            } else {
-                // Fallback: get headers by height
-                let mut headers = Vec::new();
-                if let Ok(Some(current_height)) = self.storage.chain().get_height() {
-                    for h in 0..=current_height.min(2015) {
-                        if let Ok(Some(hash)) = self.storage.blocks().get_hash_by_height(h) {
-                            if let Ok(Some(header)) = self.storage.blocks().get_header(&hash) {
-                                headers.push(header);
-                            }
-                        }
-                    }
-                }
-                headers
-            }
-        } else {
-            Vec::new()
-        };
+    async fn get_block_template_declared(
+        &self,
+        _rules: Vec<String>,
+        coinbase_script: Option<Vec<u8>>,
+        coinbase_outputs: Vec<(i64, Vec<u8>)>,
+        declared_txids: Vec<Hash>,
+    ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError> {
+        self.build_block_template(
+            coinbase_script,
+            None,
+            Some(coinbase_outputs),
+            Some(&declared_txids),
+        )
+    }
 
-        // Get mempool transactions
-        let mempool_manager = self.mempool_manager.as_ref().ok_or_else(|| {
+    async fn submit_mempool_transaction(
+        &self,
+        tx: Transaction,
+        witnesses: Option<Vec<blvm_protocol::Witness>>,
+    ) -> Result<bool, ModuleError> {
+        use blvm_protocol::block::calculate_tx_id;
+        let mempool = self.mempool_manager.as_ref().ok_or_else(|| {
             ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
         })?;
-        let mempool_txs = mempool_manager.get_transactions();
-
-        // Get UTXO set
-        let utxo_set = self
+        let txid = calculate_tx_id(&tx);
+        if mempool.get_transaction(&txid).is_some() {
+            return Ok(false);
+        }
+        if self
             .storage
-            .utxos()
-            .get_all_utxos()
-            .map_err(|e| ModuleError::op_err("Failed to get UTXO set", e))?;
-
-        // Convert coinbase script/address to ByteString
-        // Support "hex:" prefix for raw script bytes (e.g. from DATUM pool payout)
-        let coinbase_script_bytes = coinbase_script.unwrap_or_default();
-        let coinbase_address_bytes = coinbase_address
-            .map(|a| {
-                a.strip_prefix("hex:")
-                    .map(|h| hex::decode(h).unwrap_or_default())
-                    .unwrap_or_else(|| a.into_bytes())
-            })
-            .unwrap_or_default();
-
-        // Use formally verified consensus function (same as RPC getblocktemplate)
-        let network = consensus_network_from_storage(&self.storage);
-        let mempool_witnesses: Vec<Option<Vec<blvm_protocol::segwit::Witness>>> = {
-            use blvm_protocol::block::calculate_tx_id;
-            mempool_txs
-                .iter()
-                .map(|tx| {
-                    let txid = calculate_tx_id(tx);
-                    mempool_manager.get_transaction_witnesses(&txid)
-                })
-                .collect()
-        };
-        let template = blvm_protocol::mining::create_block_template(
-            &utxo_set,
-            &mempool_txs,
-            height,
-            &prev_header,
-            &prev_headers,
-            &coinbase_script_bytes,
-            &coinbase_address_bytes,
-            network,
-            Some(&mempool_witnesses),
-        )
-        .map_err(|e| ModuleError::op_err("Template creation failed", e))?;
-
-        Ok(template)
+            .transactions()
+            .has_transaction(&txid)
+            .unwrap_or(false)
+        {
+            return Err(ModuleError::OperationError(format!(
+                "transaction {} already in chain",
+                hex::encode(txid)
+            )));
+        }
+        match mempool.add_transaction_with_witness(tx, witnesses) {
+            Ok(true) => Ok(true),
+            Ok(false) => Err(ModuleError::OperationError(format!(
+                "transaction {} rejected by mempool policy",
+                hex::encode(txid)
+            ))),
+            Err(e) => Err(ModuleError::op_err("Failed to add transaction to mempool", e)),
+        }
     }
 
     async fn merge_block_serve_denylist(&self, block_hashes: &[Hash]) -> Result<(), ModuleError> {
@@ -2181,3 +2318,29 @@ impl NodeAPI for NodeApiImpl {
 // Safety: NodeApiImpl is safe to share across threads (Sync) because internal mutable state
 // uses Arc/RwLock/Mutex as appropriate; any non-`Sync` types are only touched via these primitives.
 unsafe impl Sync for NodeApiImpl {}
+
+#[cfg(test)]
+mod commons_gbt_tests {
+    use super::*;
+
+    #[test]
+    fn holding_refuses_gbt_outputs() {
+        let v = serde_json::json!({
+            "issue_work": false,
+            "outputs": [{"script": "51", "value_sats": 1}]
+        });
+        assert!(NodeApiImpl::commons_gbt_outputs(&v).is_err());
+    }
+
+    #[test]
+    fn parses_commons_scripts() {
+        let v = serde_json::json!({
+            "issue_work": true,
+            "outputs": [{"script": "51", "value_sats": 5}]
+        });
+        let outs = NodeApiImpl::commons_gbt_outputs(&v).unwrap().unwrap();
+        assert_eq!(outs.len(), 1);
+        assert_eq!(outs[0].0, 5);
+        assert_eq!(outs[0].1, vec![0x51]);
+    }
+}

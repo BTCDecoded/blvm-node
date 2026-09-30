@@ -32,11 +32,38 @@ use blvm_protocol::{
     ConsensusProof, ValidationResult,
     types::{BlockHeader, ByteString, Natural, Transaction, UtxoSet},
 };
+use async_trait::async_trait;
 use hex;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tracing::{debug, warn};
+
+/// Late-bound Commons GBT source. Shared across JSON-RPC and REST `MiningRpc` copies.
+#[derive(Clone, Default)]
+pub struct CommonsGbtSlot {
+    inner: Arc<std::sync::RwLock<Option<Arc<dyn CommonsGbtCaller>>>>,
+}
+
+impl CommonsGbtSlot {
+    /// Install the caller used by `getblocktemplate` when Commons is loaded.
+    pub fn set(&self, caller: Arc<dyn CommonsGbtCaller>) {
+        *self.inner.write().unwrap_or_else(|e| e.into_inner()) = Some(caller);
+    }
+
+    pub(crate) fn get(&self) -> Option<Arc<dyn CommonsGbtCaller>> {
+        self.inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+
+/// Fetches Commons coinbase outputs for GBT. Hold must be an error.
+#[async_trait]
+pub trait CommonsGbtCaller: Send + Sync {
+    async fn fetch_commons_gbt_outputs(&self) -> RpcResult<Option<Vec<(i64, Vec<u8>)>>>;
+}
 
 /// Mining RPC methods with dependencies
 pub struct MiningRpc {
@@ -52,6 +79,8 @@ pub struct MiningRpc {
     network_manager: Option<Arc<NetworkManager>>,
     /// Protocol engine (required for `generatetoaddress` regtest mining).
     protocol_engine: Option<Arc<BitcoinProtocolEngine>>,
+    /// Shared Commons GBT slot (empty = node-default coinbase).
+    commons_gbt: CommonsGbtSlot,
 }
 
 impl MiningRpc {
@@ -64,6 +93,7 @@ impl MiningRpc {
             event_publisher: None,
             network_manager: None,
             protocol_engine: None,
+            commons_gbt: CommonsGbtSlot::default(),
         }
     }
 
@@ -76,7 +106,14 @@ impl MiningRpc {
             event_publisher: None,
             network_manager: None,
             protocol_engine: None,
+            commons_gbt: CommonsGbtSlot::default(),
         }
+    }
+
+    /// Share the manager's Commons GBT slot (JSON-RPC and REST must see the same bind).
+    pub fn with_commons_gbt(mut self, slot: CommonsGbtSlot) -> Self {
+        self.commons_gbt = slot;
+        self
     }
 
     /// Set event publisher for BlockMined, BlockTemplateUpdated
@@ -95,6 +132,30 @@ impl MiningRpc {
     pub fn with_protocol_engine(mut self, engine: Arc<BitcoinProtocolEngine>) -> Self {
         self.protocol_engine = Some(engine);
         self
+    }
+
+    /// Commons outputs when the module is issuing work. `None` = use the caller address.
+    async fn try_commons_gbt_outputs(&self) -> RpcResult<Option<Vec<(i64, ByteString)>>> {
+        let Some(caller) = self.commons_gbt.get() else {
+            return Ok(None);
+        };
+        match caller.fetch_commons_gbt_outputs().await? {
+            Some(outs) if !outs.is_empty() => {
+                Ok(Some(outs.into_iter().map(|(v, s)| (v, s.into())).collect()))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Commons outputs when bound; otherwise one 0-value output at `fallback` (fit tops up).
+    async fn resolve_gbt_outputs(
+        &self,
+        fallback: ByteString,
+    ) -> RpcResult<Vec<(i64, ByteString)>> {
+        Ok(self
+            .try_commons_gbt_outputs()
+            .await?
+            .unwrap_or_else(|| vec![(0, fallback)]))
     }
 
     /// Get mining information
@@ -227,8 +288,8 @@ impl MiningRpc {
     ///
     /// Params: [template_request (optional)]
     ///
-    /// Uses formally verified blvm-consensus::mining::create_block_template() function
-    /// which has spec-lock verification ensuring correctness per Orange Paper Section 12.4
+    /// Uses `create_block_template_with_outputs` (subsidy+fees + BIP141).
+    /// Spec-locked single-output `create_block_template` is unchanged.
     pub async fn get_block_template(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getblocktemplate");
 
@@ -263,18 +324,19 @@ impl MiningRpc {
         let coinbase_script = self.extract_coinbase_script(params).unwrap_or_default();
         let coinbase_address = self.extract_coinbase_address(params).unwrap_or_default();
 
-        // 5. Use formally verified function from blvm-consensus
-        // This function has spec-lock verification for block template completeness
         let network = self.consensus_network_from_storage();
-        let mempool_witnesses = self.build_mempool_witnesses_for_template(&mempool_txs)?;
-        let template = match self.consensus.create_block_template(
+        let mempool_witnesses = self.build_mempool_witnesses_for_template(&utxo_set, &mempool_txs)?;
+        // Commons outputs when the module is loaded; else value 0 tops up the caller address.
+        // Hold is an error so GBT does not issue a node-default coinbase.
+        let outputs = self.resolve_gbt_outputs(coinbase_address).await?;
+        let template = match self.consensus.create_block_template_with_outputs(
             &utxo_set,
             &mempool_txs,
             template_block_height,
             &prev_header,
             &prev_headers,
             &coinbase_script,
-            &coinbase_address,
+            &outputs,
             network,
             Some(&mempool_witnesses),
         ) {
@@ -313,7 +375,12 @@ impl MiningRpc {
             ));
         };
 
-        self.template_to_json_rpc(&template, template_block_height, &tip_hash)
+        self.template_to_json_rpc(
+            &template,
+            template_block_height,
+            &tip_hash,
+            Self::client_wants_coinbasetxn(params),
+        )
     }
 
     /// Convert BlockTemplate to JSON-RPC format
@@ -322,6 +389,7 @@ impl MiningRpc {
         template: &blvm_protocol::mining::BlockTemplate,
         height: Natural,
         tip_hash: &blvm_protocol::Hash,
+        include_coinbasetxn: bool,
     ) -> RpcResult<Value> {
         // BIP22/ckpool: hash of the block we build on top of (current chain tip).
         let prev_hash_hex = crate::storage::hashing::hash_to_rpc_hex(tip_hash);
@@ -350,8 +418,8 @@ impl MiningRpc {
         // Get minimum time (median time + 1)
         let min_time = self.get_min_time(height);
 
-        Ok(json!({
-            "capabilities": ["proposal"],
+        let mut body = json!({
+            "capabilities": ["proposal", "coinbasetxn"],
             "version": template.header.version as i32,
             "rules": rules,
             "vbavailable": {},
@@ -373,7 +441,20 @@ impl MiningRpc {
             "curtime": template.timestamp,
             "bits": bits_hex,
             "height": template.height
-        }))
+        });
+        if include_coinbasetxn {
+            let data = hex::encode(serialize_transaction(&template.coinbase_tx));
+            body["coinbasetxn"] = json!({ "data": data });
+        }
+        Ok(body)
+    }
+
+    fn client_wants_coinbasetxn(params: &Value) -> bool {
+        params
+            .get(0)
+            .and_then(|r| r.get("capabilities"))
+            .and_then(|c| c.as_array())
+            .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some("coinbasetxn")))
     }
 
     // Helper methods - access chainstate and mempool
@@ -463,21 +544,11 @@ impl MiningRpc {
     /// Per-mempool-tx witness stacks aligned with `get_mempool_transactions` ordering.
     fn build_mempool_witnesses_for_template(
         &self,
+        utxo_set: &UtxoSet,
         mempool_txs: &[Transaction],
     ) -> RpcResult<Vec<Option<Vec<Witness>>>> {
-        use blvm_protocol::block::calculate_tx_id;
-
-        let Some(ref mempool) = self.mempool else {
-            return Ok(mempool_txs.iter().map(|_| None).collect());
-        };
-
-        Ok(mempool_txs
-            .iter()
-            .map(|tx| {
-                let txid = calculate_tx_id(tx);
-                mempool.get_transaction_witnesses(&txid)
-            })
-            .collect())
+        mempool_witnesses_for_template(self.mempool.as_deref(), utxo_set, mempool_txs)
+            .map_err(RpcError::internal_error)
     }
 
     /// Calculate difficulty from bits (compact target format).
@@ -859,23 +930,50 @@ impl MiningRpc {
 
             let coinbase_script = Self::regtest_coinbase_script_sig(connect_height);
 
-            let mut block = self
-                .consensus
-                .create_new_block_with_time(
-                    &utxo,
-                    &[],
-                    connect_height,
-                    &prev_header,
-                    &prev_headers,
-                    &coinbase_script,
-                    &coinbase_address,
-                    current_timestamp(),
-                    ConsensusNetwork::Regtest,
-                    None,
-                )
-                .map_err(|e| {
-                    RpcError::internal_error(format!("generatetoaddress: template failed: {e}"))
-                })?;
+            let mut block = if let Some(outputs) = self.try_commons_gbt_outputs().await? {
+                let template = self
+                    .consensus
+                    .create_block_template_with_outputs(
+                        &utxo,
+                        &[],
+                        connect_height,
+                        &prev_header,
+                        &prev_headers,
+                        &coinbase_script,
+                        &outputs,
+                        ConsensusNetwork::Regtest,
+                        None,
+                    )
+                    .map_err(|e| {
+                        RpcError::internal_error(format!("generatetoaddress: template failed: {e}"))
+                    })?;
+                let mut txs = Vec::with_capacity(1 + template.transactions.len());
+                txs.push(template.coinbase_tx);
+                txs.extend(template.transactions);
+                let mut block = blvm_protocol::Block {
+                    header: template.header,
+                    transactions: txs.into_boxed_slice(),
+                };
+                block.header.timestamp = current_timestamp();
+                block
+            } else {
+                self.consensus
+                    .create_new_block_with_time(
+                        &utxo,
+                        &[],
+                        connect_height,
+                        &prev_header,
+                        &prev_headers,
+                        &coinbase_script,
+                        &coinbase_address,
+                        current_timestamp(),
+                        ConsensusNetwork::Regtest,
+                        None,
+                    )
+                    .map_err(|e| {
+                        RpcError::internal_error(format!("generatetoaddress: template failed: {e}"))
+                    })?
+            };
             block.header.version = 4;
 
             let (mined, result) = self.consensus.mine_block(block, max_tries).map_err(|e| {
@@ -1205,4 +1303,57 @@ impl Default for MiningRpc {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn spends_witness_utxo(tx: &Transaction, utxo_set: &UtxoSet) -> bool {
+    use blvm_consensus::witness::{
+        extract_witness_program, extract_witness_version, validate_witness_program_length,
+    };
+    tx.inputs.iter().any(|input| {
+        utxo_set.get(&input.prevout).is_some_and(|utxo| {
+            let script = utxo.script_pubkey.as_ref().to_vec();
+            extract_witness_version(&script)
+                .and_then(|version| {
+                    extract_witness_program(&script, version).map(|program| (version, program))
+                })
+                .is_some_and(|(version, program)| validate_witness_program_length(&program, version))
+        })
+    })
+}
+
+/// `Some(stacks)` when the mempool has them. `None` is a legacy empty-stack.
+/// A witness spend without stored stacks is an error (no stale BIP141).
+pub(crate) fn mempool_witnesses_for_template(
+    mempool: Option<&MempoolManager>,
+    utxo_set: &UtxoSet,
+    mempool_txs: &[Transaction],
+) -> Result<Vec<Option<Vec<Witness>>>, String> {
+    use blvm_protocol::block::calculate_tx_id;
+
+    mempool_txs
+        .iter()
+        .map(|tx| {
+            let txid = calculate_tx_id(tx);
+            if let Some(mp) = mempool {
+                if let Some(wits) = mp.get_transaction_witnesses(&txid) {
+                    if wits.len() != tx.inputs.len() {
+                        return Err(format!(
+                            "witness count {} != input count {} for tx {}",
+                            wits.len(),
+                            tx.inputs.len(),
+                            hex::encode(txid)
+                        ));
+                    }
+                    return Ok(Some(wits));
+                }
+            }
+            if spends_witness_utxo(tx, utxo_set) {
+                return Err(format!(
+                    "missing mempool witnesses for witness spend tx {}",
+                    hex::encode(txid)
+                ));
+            }
+            Ok(None)
+        })
+        .collect()
 }

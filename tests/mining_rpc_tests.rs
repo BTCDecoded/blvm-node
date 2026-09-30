@@ -1,7 +1,9 @@
 //! Unit tests for Mining RPC methods
 
+use async_trait::async_trait;
 use blvm_node::node::mempool::MempoolManager;
-use blvm_node::rpc::mining::MiningRpc;
+use blvm_node::rpc::errors::RpcResult;
+use blvm_node::rpc::mining::{CommonsGbtCaller, CommonsGbtSlot, MiningRpc};
 use blvm_node::storage::Storage;
 use blvm_protocol::serialization::serialize_transaction;
 use blvm_protocol::{OutPoint, UTXO};
@@ -215,6 +217,33 @@ async fn test_calculate_coinbase_value() {
 
     let coinbase_value = template.get("coinbasevalue").unwrap().as_u64().unwrap();
     assert_eq!(coinbase_value, 5000000000);
+}
+
+#[tokio::test]
+async fn test_getblocktemplate_coinbasetxn_has_bip141_commitment() {
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
+    let mempool = Arc::new(MempoolManager::new());
+    let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
+
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
+
+    let params = serde_json::json!([{
+        "capabilities": ["coinbasetxn"],
+        "rules": ["segwit"]
+    }]);
+    let template = expect_block_template(&mining, &params).await;
+    assert_eq!(template.get("coinbasevalue").unwrap().as_u64().unwrap(), 5_000_000_000);
+    let data = template
+        .get("coinbasetxn")
+        .and_then(|c| c.get("data"))
+        .and_then(|d| d.as_str())
+        .expect("coinbasetxn.data");
+    let raw = hex::decode(data).expect("coinbase hex");
+    assert!(
+        raw.windows(6).any(|w| w == [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed]),
+        "fitted coinbase must include BIP141 commitment"
+    );
 }
 
 #[tokio::test]
@@ -472,5 +501,147 @@ async fn test_getblocktemplate_mempool_witness_available_for_template() {
     assert_eq!(
         entries[0].get("txid").unwrap().as_str().unwrap(),
         hex::encode(txid)
+    );
+}
+
+struct HoldCommons;
+
+#[async_trait]
+impl CommonsGbtCaller for HoldCommons {
+    async fn fetch_commons_gbt_outputs(&self) -> RpcResult<Option<Vec<(i64, Vec<u8>)>>> {
+        Err(blvm_node::rpc::errors::RpcError::internal_error(
+            "commons pool holding; not issuing work",
+        ))
+    }
+}
+
+struct ScriptCommons;
+
+#[async_trait]
+impl CommonsGbtCaller for ScriptCommons {
+    async fn fetch_commons_gbt_outputs(&self) -> RpcResult<Option<Vec<(i64, Vec<u8>)>>> {
+        Ok(Some(vec![(0, vec![0x51])]))
+    }
+}
+
+#[tokio::test]
+async fn commons_hold_refuses_rpc_gbt() {
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
+    let mempool = Arc::new(MempoolManager::new());
+    let slot = CommonsGbtSlot::default();
+    slot.set(Arc::new(HoldCommons));
+    let mining = MiningRpc::with_dependencies(storage.clone(), mempool).with_commons_gbt(slot);
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
+
+    let err = mining
+        .get_block_template(&serde_json::json!([]))
+        .await
+        .expect_err("hold must refuse GBT");
+    assert!(
+        err.message.contains("holding"),
+        "unexpected GBT error: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn commons_outputs_appear_in_rpc_coinbasetxn() {
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
+    let mempool = Arc::new(MempoolManager::new());
+    let slot = CommonsGbtSlot::default();
+    slot.set(Arc::new(ScriptCommons));
+    let mining = MiningRpc::with_dependencies(storage.clone(), mempool).with_commons_gbt(slot);
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
+
+    let template = expect_block_template(
+        &mining,
+        &serde_json::json!([{
+            "capabilities": ["coinbasetxn"],
+            "rules": ["segwit"]
+        }]),
+    )
+    .await;
+    let data = template
+        .get("coinbasetxn")
+        .and_then(|c| c.get("data"))
+        .and_then(|d| d.as_str())
+        .expect("coinbasetxn.data");
+    assert!(
+        data.contains("51"),
+        "Commons OP_TRUE script missing from coinbase: {data}"
+    );
+}
+
+#[tokio::test]
+async fn getblocktemplate_refuses_missing_mempool_witnesses() {
+    use blvm_protocol::opcodes::OP_1;
+    use blvm_protocol::{TransactionInput, TransactionOutput};
+    use sha2::{Digest, Sha256};
+
+    fn p2wsh_scriptpubkey(witness_script: &[u8]) -> Vec<u8> {
+        let hash = Sha256::digest(witness_script);
+        let mut spk = vec![blvm_protocol::opcodes::OP_0, 0x20];
+        spk.extend_from_slice(&hash);
+        spk
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
+    let mempool = Arc::new(MempoolManager::new());
+    let mining = MiningRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool));
+    setup_mining_chain(&storage, MINING_RPC_CHAIN_BLOCKS).unwrap();
+    patch_storage_chain_network_regtest(storage.as_ref()).unwrap();
+
+    let funding_hash = [0x59u8; 32];
+    let witness_script = vec![OP_1];
+    storage
+        .utxos()
+        .add_utxo(
+            &OutPoint {
+                hash: funding_hash,
+                index: 0,
+            },
+            &UTXO {
+                value: 100_000,
+                script_pubkey: p2wsh_scriptpubkey(&witness_script).into(),
+                height: 0,
+                is_coinbase: false,
+            },
+        )
+        .unwrap();
+
+    let tx = blvm_protocol::Transaction {
+        version: 2,
+        inputs: vec![TransactionInput {
+            prevout: OutPoint {
+                hash: funding_hash,
+                index: 0,
+            },
+            script_sig: vec![],
+            sequence: 0xfffffffe,
+        }]
+        .into(),
+        outputs: vec![TransactionOutput {
+            value: 90_000,
+            script_pubkey: vec![OP_1],
+        }]
+        .into(),
+        lock_time: 0,
+    };
+    assert!(
+        mempool.add_transaction(tx).expect("add without witness"),
+        "tx must enter mempool"
+    );
+
+    let err = mining
+        .get_block_template(&serde_json::json!([]))
+        .await
+        .expect_err("missing witnesses must refuse GBT");
+    assert!(
+        err.message.contains("missing mempool witnesses"),
+        "unexpected GBT error: {}",
+        err.message
     );
 }

@@ -482,6 +482,45 @@ impl ModuleApiHub {
                     .await?;
                 ResponsePayload::BlockTemplate(template)
             }
+            RequestPayload::GetBlockTemplateWithOutputs {
+                rules,
+                coinbase_script,
+                coinbase_outputs,
+            } => {
+                let template = self
+                    .node_api
+                    .get_block_template_with_outputs(
+                        rules.clone(),
+                        coinbase_script.clone(),
+                        coinbase_outputs.clone(),
+                    )
+                    .await?;
+                ResponsePayload::BlockTemplate(template)
+            }
+            RequestPayload::GetBlockTemplateDeclared {
+                rules,
+                coinbase_script,
+                coinbase_outputs,
+                declared_txids,
+            } => {
+                let template = self
+                    .node_api
+                    .get_block_template_declared(
+                        rules.clone(),
+                        coinbase_script.clone(),
+                        coinbase_outputs.clone(),
+                        declared_txids.clone(),
+                    )
+                    .await?;
+                    ResponsePayload::BlockTemplate(template)
+            }
+            RequestPayload::SubmitMempoolTransaction { tx, witnesses } => {
+                let added = self
+                    .node_api
+                    .submit_mempool_transaction(tx.clone(), witnesses.clone())
+                    .await?;
+                ResponsePayload::MempoolTransactionSubmitted(added)
+            }
             RequestPayload::SubmitBlock { block } => {
                 let result = self.node_api.submit_block(block.clone()).await?;
                 ResponsePayload::SubmitBlockResult(result)
@@ -639,6 +678,11 @@ impl ModuleApiHub {
             RequestPayload::CheckTransactionInMempool { .. } => "check_transaction_in_mempool",
             RequestPayload::GetFeeEstimate { .. } => "get_fee_estimate",
             RequestPayload::GetBlockTemplate { .. } => "get_block_template",
+            RequestPayload::GetBlockTemplateWithOutputs { .. } => {
+                "get_block_template_with_outputs"
+            }
+            RequestPayload::GetBlockTemplateDeclared { .. } => "get_block_template_declared",
+            RequestPayload::SubmitMempoolTransaction { .. } => "submit_mempool_transaction",
             RequestPayload::SubmitBlock { .. } => "submit_block",
             RequestPayload::QueueReceivedBlock { .. } => "queue_received_block",
             RequestPayload::MergeBlockServeDenylist { .. } => "merge_block_serve_denylist",

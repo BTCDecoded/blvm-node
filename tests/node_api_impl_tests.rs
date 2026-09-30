@@ -290,6 +290,33 @@ async fn test_node_api_get_block_template_with_chain() {
         .unwrap();
     assert_eq!(template.coinbase_tx.version, 1);
     assert!(template.height >= 2015);
+    assert!(
+        template.coinbase_tx.outputs.len() >= 2,
+        "subsidy output plus BIP141 commitment"
+    );
+    let last = template.coinbase_tx.outputs.last().unwrap();
+    assert_eq!(last.value, 0);
+    assert_eq!(last.script_pubkey[0], 0x6a);
+}
+
+#[tokio::test]
+async fn test_node_api_get_block_template_with_outputs() {
+    let (_dir, storage) = storage_with_long_chain();
+    let mempool = Arc::new(MempoolManager::new());
+    let api = NodeApiImpl::with_dependencies(storage, None, None, Some(mempool), None);
+    let template = api
+        .get_block_template_with_outputs(
+            vec!["segwit".into()],
+            None,
+            vec![(10, vec![0x51]), (20, vec![0x52])],
+        )
+        .await
+        .unwrap();
+    assert!(template.coinbase_tx.outputs.len() >= 3);
+    assert_eq!(template.coinbase_tx.outputs[1].script_pubkey, vec![0x52]);
+    let last = template.coinbase_tx.outputs.last().unwrap();
+    assert_eq!(last.value, 0);
+    assert_eq!(last.script_pubkey[0], 0x6a);
 }
 
 #[tokio::test(flavor = "multi_thread")]

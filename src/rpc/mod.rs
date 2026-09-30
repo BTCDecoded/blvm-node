@@ -12,6 +12,7 @@ pub mod mempool;
 pub mod merkle_block;
 pub mod methods;
 pub mod mining;
+pub mod commons_gbt;
 
 pub mod network;
 pub mod params;
@@ -98,6 +99,8 @@ pub struct RpcManager {
     module_manager: Option<Arc<tokio::sync::Mutex<ModuleManager>>>,
     /// Protocol engine for mining RPC (`generatetoaddress` on regtest).
     protocol_engine: Option<Arc<BitcoinProtocolEngine>>,
+    /// Shared late-bind so JSON-RPC and REST `MiningRpc` copies see Commons GBT.
+    commons_gbt: mining::CommonsGbtSlot,
     /// Allow binding a non-loopback address without an auth_manager.
     /// Defaults to `false` — startup fails if a public bind is attempted without auth.
     /// Set to `true` only in controlled environments (e.g. isolated test networks).
@@ -109,6 +112,7 @@ pub struct RpcManager {
 impl RpcManager {
     /// Create a new RPC manager with TCP only (standard compatible)
     pub fn new(server_addr: SocketAddr) -> Self {
+        let commons_gbt = mining::CommonsGbtSlot::default();
         Self {
             server_addr,
             quinn_addr: None,
@@ -116,8 +120,9 @@ impl RpcManager {
             rest_api_addr: None,
             blockchain_rpc: blockchain::BlockchainRpc::new(),
             network_rpc: network::NetworkRpc::new(),
-            mining_rpc: mining::MiningRpc::new(),
+            mining_rpc: mining::MiningRpc::new().with_commons_gbt(commons_gbt.clone()),
             control_rpc: control::ControlRpc::new(),
+            commons_gbt,
             storage: None,
             metrics: None,
             profiler: None,
@@ -175,6 +180,16 @@ impl RpcManager {
     /// Set module manager for load/unload/reload RPC methods
     pub fn set_module_manager(&mut self, module_manager: Arc<tokio::sync::Mutex<ModuleManager>>) {
         self.module_manager = Some(module_manager);
+    }
+
+    /// Late-bind Commons GBT after `NodeApiImpl` exists (RPC may already be running).
+    pub fn set_commons_gbt(&self, caller: Arc<dyn mining::CommonsGbtCaller>) {
+        self.commons_gbt.set(caller);
+    }
+
+    /// Same slot JSON-RPC / REST / the built-in miner must share.
+    pub fn commons_gbt_slot(&self) -> mining::CommonsGbtSlot {
+        self.commons_gbt.clone()
     }
 
     /// Set request timeout config (storage/network/rpc timeouts from config)
@@ -301,7 +316,8 @@ impl RpcManager {
     ) -> Self {
         // Update all RPC handlers with dependencies
         self.mining_rpc =
-            mining::MiningRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool));
+            mining::MiningRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool))
+                .with_commons_gbt(self.commons_gbt.clone());
         self.blockchain_rpc = blockchain::BlockchainRpc::with_dependencies(Arc::clone(&storage));
         // Note: mempool_rpc is created later in with_dependencies_auth_and_metrics if needed
         // This early creation was unused - removed to avoid warning
@@ -392,6 +408,7 @@ impl RpcManager {
     /// Create a new RPC manager with both TCP and QUIC transports
     #[cfg(feature = "quinn")]
     pub fn with_quinn(tcp_addr: SocketAddr, quinn_addr: SocketAddr) -> Self {
+        let commons_gbt = mining::CommonsGbtSlot::default();
         Self {
             server_addr: tcp_addr,
             quinn_addr: Some(quinn_addr),
@@ -401,7 +418,8 @@ impl RpcManager {
             rest_api_shutdown_tx: None,
             blockchain_rpc: blockchain::BlockchainRpc::new(),
             network_rpc: network::NetworkRpc::new(),
-            mining_rpc: mining::MiningRpc::new(),
+            mining_rpc: mining::MiningRpc::new().with_commons_gbt(commons_gbt.clone()),
+            commons_gbt,
             metrics: None,
             profiler: None,
             control_rpc: control::ControlRpc::new(),
@@ -525,7 +543,8 @@ impl RpcManager {
             let mining = Arc::new({
                 let mut m =
                     mining::MiningRpc::with_dependencies(Arc::clone(storage), Arc::clone(mempool))
-                        .with_event_publisher(self.event_publisher.clone());
+                        .with_event_publisher(self.event_publisher.clone())
+                        .with_commons_gbt(self.commons_gbt.clone());
                 if let Some(ref pe) = self.protocol_engine {
                     m = m.with_protocol_engine(Arc::clone(pe));
                 }
@@ -729,7 +748,8 @@ impl RpcManager {
                         Arc::clone(storage),
                         Arc::clone(mempool),
                     )
-                    .with_event_publisher(self.event_publisher.clone());
+                    .with_event_publisher(self.event_publisher.clone())
+                    .with_commons_gbt(self.commons_gbt.clone());
                     if let Some(ref pe) = self.protocol_engine {
                         m = m.with_protocol_engine(Arc::clone(pe));
                     }

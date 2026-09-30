@@ -154,6 +154,7 @@ impl Node {
             Some(Arc::clone(&storage_arc)),
         );
         mining_coordinator.set_protocol_engine(Arc::clone(&protocol_arc));
+        mining_coordinator.set_commons_gbt_slot(rpc.commons_gbt_slot());
         let metrics = metrics_arc;
         let profiler = profiler_arc;
 
@@ -1247,6 +1248,10 @@ impl Node {
             // We'll update it via Arc::get_mut if possible, or store it separately
 
             let mut node_api = Arc::new(node_api_impl);
+            // RPC may already be running; slot is shared with the live MiningRpc copies.
+            self.rpc.set_commons_gbt(
+                Arc::clone(&node_api) as Arc<dyn crate::rpc::mining::CommonsGbtCaller>
+            );
             let socket_path = self
                 .config_sub(|c| c.modules.as_ref())
                 .map(|mc| PathBuf::from(&mc.socket_dir).join("node.sock"))
@@ -1590,6 +1595,10 @@ impl Node {
                 self.sync_coordinator
                     .set_event_publisher(Some(Arc::clone(event_publisher)));
                 info!("Event publisher set on sync coordinator");
+
+                self.mining_coordinator
+                    .set_event_publisher(Some(Arc::clone(event_publisher)));
+                info!("Event publisher set on mining coordinator");
 
                 // Publish ConfigLoaded event for modules to react to node configuration
                 // This allows modules like blvm-governance to configure themselves based on node config

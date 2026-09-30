@@ -1398,6 +1398,51 @@ impl ModuleIpcServer {
                     ResponsePayload::BlockTemplate(template),
                 ))
             }
+            RequestPayload::GetBlockTemplateWithOutputs {
+                rules,
+                coinbase_script,
+                coinbase_outputs,
+            } => {
+                let template = node_api
+                    .get_block_template_with_outputs(
+                        rules.clone(),
+                        coinbase_script.clone(),
+                        coinbase_outputs.clone(),
+                    )
+                    .await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::BlockTemplate(template),
+                ))
+            }
+            RequestPayload::GetBlockTemplateDeclared {
+                rules,
+                coinbase_script,
+                coinbase_outputs,
+                declared_txids,
+            } => {
+                let template = node_api
+                    .get_block_template_declared(
+                        rules.clone(),
+                        coinbase_script.clone(),
+                        coinbase_outputs.clone(),
+                        declared_txids.clone(),
+                    )
+                    .await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::BlockTemplate(template),
+                ))
+            }
+            RequestPayload::SubmitMempoolTransaction { tx, witnesses } => {
+                let added = node_api
+                    .submit_mempool_transaction(tx.clone(), witnesses.clone())
+                    .await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::MempoolTransactionSubmitted(added),
+                ))
+            }
             RequestPayload::SubmitBlock { block } => {
                 let result = node_api.submit_block(block.clone()).await?;
                 Ok(ResponseMessage::success(
