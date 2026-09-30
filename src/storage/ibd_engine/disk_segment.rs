@@ -138,23 +138,143 @@ fn disk_parallel_pread_from_env() -> bool {
 
 const PARALLEL_PREAD_MIN_RANGES: usize = 8;
 
-/// F19: cap merged DiskIndex pread span (KiB). Empty/0 = unlimited (legacy glue).
+/// F19: cap merged DiskIndex pread span (KiB). Empty/unset/`0` = unlimited (legacy glue).
+///
+/// dest-bc 660k HOTPATH is **not** F19 glue: `preads≈cands` (6374 vs 6698) at 251 KiB
+/// average — each candidate's directory bucket is already that wide. F19 never shrinks a
+/// single `[lo,hi)`. July F19 HOLD used 4096 KiB and did not move the tip wall. The later-
+/// height lever is `directory_prefix_bits` max 20 (mega-seg buckets), not a default cap.
+/// `BLVM_IBD_DISK_PREAD_MAX_KB=64` remains opt-in for true adjacent-bucket glue.
+pub(crate) const DISK_PREAD_MAX_KB_DEFAULT: u64 = 0;
+
 /// Adjacent directory buckets are still coalesced until the merged entry span would
 /// exceed this many KiB; a single candidate's `[lo,hi)` is never shrunk.
-fn disk_pread_max_kb_from_env() -> u64 {
+pub(crate) fn disk_pread_max_kb_from_env() -> u64 {
     std::env::var("BLVM_IBD_DISK_PREAD_MAX_KB")
         .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0)
+        .and_then(|s| {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                t.parse().ok()
+            }
+        })
+        .unwrap_or(DISK_PREAD_MAX_KB_DEFAULT)
 }
 
-fn disk_pread_max_entries() -> usize {
+pub(crate) fn disk_pread_max_entries() -> usize {
     let kb = disk_pread_max_kb_from_env();
     if kb == 0 {
         return usize::MAX;
     }
     let bytes = kb.saturating_mul(1024);
     (bytes as usize / OutputKV::SIZE).max(1)
+}
+
+/// R-342: single-candidate directory buckets wider than this many KiB are resolved with
+/// a page-wise binary search ([`probe_narrow`]) instead of one whole-bucket `pread`.
+/// Default **64**; `0` disables (legacy whole-bucket read). Env `BLVM_IBD_DISK_PROBE_KB`.
+///
+/// The directory prefix is the first 4 bytes of the txid, so every output of one
+/// transaction lands in one bucket regardless of `prefix_bits`. 2015 fan-out transactions
+/// (thousands of outputs) make 200–440 KiB buckets: R-341 `[IBD_HOTPATH]` at 340–370k read
+/// 14–32 MB per block in 400–670 preads averaging 35–47 KiB, `max_pread_kb` 166–437, and
+/// the cold ones were the engine tail (h=358000 `disk_ms=308`). A probe reads
+/// `log2(bucket/page)` 4 KiB pages plus a ≤ 5-page window, so a 400 KiB bucket costs
+/// ~7 × 4 KiB + 20 KiB instead of 400 KiB.
+pub(crate) const DISK_PROBE_KB_DEFAULT: u64 = 64;
+
+pub(crate) fn disk_probe_min_entries() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let kb = std::env::var("BLVM_IBD_DISK_PROBE_KB")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(DISK_PROBE_KB_DEFAULT);
+        if kb == 0 {
+            return usize::MAX;
+        }
+        ((kb.saturating_mul(1024)) as usize / OutputKV::SIZE).max(1)
+    })
+}
+
+/// Entries per probe page (4 KiB of `OutputKV`).
+pub(crate) const PROBE_PAGE_ENTRIES: usize = 4096 / OutputKV::SIZE;
+
+/// R-345: probing `k` candidates costs about `k × (log2(pages) + 3)` page reads
+/// (binary search + a ≤ 3-page window); true when that is under the span's own page count.
+pub(crate) fn probe_cheaper_than_span(k: usize, span_entries: usize, page: usize) -> bool {
+    let page = page.max(1);
+    let pages = span_entries / page + 1;
+    let per = (usize::BITS - pages.leading_zeros()) as usize + 3;
+    k.saturating_mul(per) < pages
+}
+
+/// Page-wise binary search inside one sorted bucket `[lo, hi)`.
+///
+/// `read_page(a, b)` returns the first and last key of entries `[a, b)` (`a < b`). Returns a
+/// sub-range that contains every entry whose key equals `key`, assuming a run of equal keys
+/// never exceeds `page` entries (a UTXO key has at most a few Add/Delete entries per segment).
+/// Invariant kept per step: entries below the range are `< key`, entries above are `> key`.
+/// The result is padded by one page on each side so a run straddling a page edge is whole.
+pub(crate) fn probe_narrow<F>(
+    lo: usize,
+    hi: usize,
+    page: usize,
+    key: &[u8; 36],
+    mut read_page: F,
+) -> anyhow::Result<(usize, usize)>
+where
+    F: FnMut(usize, usize) -> anyhow::Result<([u8; 36], [u8; 36])>,
+{
+    let page = page.max(1);
+    let (mut a, mut b) = (lo, hi);
+    while b.saturating_sub(a) > 3 * page {
+        // Page-aligned relative to `a`; `(b - a) / 2 >= 1.5 page` so `mid > a` and `mid < b`.
+        let mid = a + ((b - a) / 2 / page) * page;
+        let mid_end = (mid + page).min(b);
+        let (first, last) = read_page(mid, mid_end)?;
+        if last < *key {
+            a = mid_end;
+        } else if first > *key {
+            b = mid;
+        } else {
+            a = mid;
+            b = mid_end;
+            break;
+        }
+    }
+    Ok((a.saturating_sub(page).max(lo), b.saturating_add(page).min(hi)))
+}
+
+/// Coalesce sorted candidate `[lo, hi)` spans into pread ranges.
+///
+/// Merge while the next span overlaps or abuts and the combined entry count is
+/// `≤ max_entries`. A single span is never shrunk. `usize::MAX` is unlimited.
+/// Returns `(lo, hi, ci, cj)` covering `sorted_lo_hi[ci..cj]`.
+pub(crate) fn coalesce_pread_spans(
+    sorted_lo_hi: &[(usize, usize)],
+    max_entries: usize,
+) -> Vec<(usize, usize, usize, usize)> {
+    let mut out = Vec::new();
+    let mut ci = 0;
+    while ci < sorted_lo_hi.len() {
+        let read_lo = sorted_lo_hi[ci].0;
+        let mut read_hi = sorted_lo_hi[ci].1;
+        let mut cj = ci + 1;
+        while cj < sorted_lo_hi.len() && sorted_lo_hi[cj].0 <= read_hi {
+            let new_hi = read_hi.max(sorted_lo_hi[cj].1);
+            if new_hi.saturating_sub(read_lo) > max_entries {
+                break;
+            }
+            read_hi = new_hi;
+            cj += 1;
+        }
+        out.push((read_lo, read_hi, ci, cj));
+        ci = cj;
+    }
+    out
 }
 
 fn advise_willneed_range(file: &File, byte_offset: u64, byte_count: usize) {
@@ -805,18 +925,19 @@ impl DiskSegment {
     ///
     /// Unlike `write`, this never accumulates all entries in RAM. Peak memory:
     ///   - write buffer: `WRITER_CHUNK × OutputKV::SIZE` (≈ 448 KB)
-    ///   - bloom filter: `~12 bits × capacity` (≈ 300 MB for 200 M entries)
-    ///   - directory:    `≤ 256 KB`
+    ///   - bloom filter: `~12 bits × actual entries` (built on pass 2 — dest-bc pair
+    ///     GC survivors must not inherit a 20M `capacity` bloom)
+    ///   - directory:    `≤ 4 MB` (20-bit prefix; dest-bc mega segs)
     ///
     /// After streaming all entries, the file header is updated in-place and the directory
     /// is built with a second sequential pass — O(N) time, O(buckets) memory.
     ///
-    /// `capacity` should be an upper bound on the number of entries that will be written
-    /// (used to size the bloom filter; over-provisioning is safe but wastes memory).
+    /// `capacity` is an upper bound from the caller (compact chunk). Bloom is sized
+    /// to the **actual** write count on pass 2 (dest-bc pair GC).
     pub fn write_from_iter<I>(
         seg_dir: &Path,
         idx: usize,
-        capacity: usize,
+        _capacity: usize,
         iter: I,
     ) -> anyhow::Result<Self>
     where
@@ -828,7 +949,6 @@ impl DiskSegment {
 
         // ── Pass 1: stream entries to file ───────────────────────────────────
         let t_pass1 = std::time::Instant::now();
-        let mut filter = BloomFilter::new_for_capacity(capacity);
         let mut entry_count = 0u64;
         let mut min_height = i32::MAX;
         let mut max_height = i32::MIN;
@@ -848,7 +968,6 @@ impl DiskSegment {
 
             let mut write_buf: Vec<u8> = Vec::with_capacity(WRITER_CHUNK * OutputKV::SIZE);
             for entry in iter {
-                filter.insert(&entry.key);
                 if entry.height < min_height {
                     min_height = entry.height;
                 }
@@ -882,9 +1001,9 @@ impl DiskSegment {
         } // file closed here
         ACC_WRITE_PASS1_MS.with(|c| c.set(t_pass1.elapsed().as_millis() as u64));
 
-        // ── Pass 2: build directory (streaming, O(buckets) memory) ───────────
+        // ── Pass 2: directory + bloom sized to actual n (not caller capacity) ─
         let t_dir = std::time::Instant::now();
-        let directory = {
+        let (directory, filter) = {
             let file = OpenOptions::new().read(true).open(&tmp_path)?;
             let mut reader = SegmentReader {
                 file: Arc::new(file),
@@ -893,7 +1012,7 @@ impl DiskSegment {
                 file_offset: HEADER_SIZE,
                 file_end: HEADER_SIZE + entry_count * OutputKV::SIZE as u64,
             };
-            Directory::build_streaming(&mut reader, entry_count as usize)?
+            Directory::build_streaming_with_bloom(&mut reader, entry_count as usize)?
         };
         ACC_WRITE_DIR_MS.with(|c| c.set(t_dir.elapsed().as_millis() as u64));
 
@@ -1000,27 +1119,17 @@ impl DiskSegment {
                 candidates.sort_unstable_by_key(|c| c.lo);
 
                 let max_entries = disk_pread_max_entries();
-                let mut ci = 0;
-                while ci < candidates.len() {
-                    let read_lo = candidates[ci].lo;
-                    let mut read_hi = candidates[ci].hi;
-                    let mut cj = ci + 1;
-                    while cj < candidates.len() && candidates[cj].lo <= read_hi {
-                        let new_hi = read_hi.max(candidates[cj].hi);
-                        if new_hi.saturating_sub(read_lo) > max_entries {
-                            break;
-                        }
-                        read_hi = new_hi;
-                        cj += 1;
-                    }
-                    let hi = read_hi.min(self.entry_count);
+                let spans: Vec<(usize, usize)> =
+                    candidates.iter().map(|c| (c.lo, c.hi)).collect();
+                for (read_lo, read_hi, span_ci, span_cj) in
+                    coalesce_pread_spans(&spans, max_entries)
+                {
                     ranges.push(Range {
                         lo: read_lo,
-                        hi,
-                        ci,
-                        cj,
+                        hi: read_hi.min(self.entry_count),
+                        ci: span_ci,
+                        cj: span_cj,
                     });
-                    ci = cj;
                 }
                 if bucket_willneed_from_env() {
                     for r in ranges.iter() {
@@ -1050,8 +1159,24 @@ impl DiskSegment {
 
                 let parallel =
                     disk_parallel_pread_from_env() && ranges.len() >= PARALLEL_PREAD_MIN_RANGES;
+                // R-342: single fat bucket → page probe. R-345: also glued multi-candidate
+                // ranges when the candidates are sparse in the span — a block spending k
+                // outputs of one fan-out tx glues k buckets into one 200–440 KiB read; R-344
+                // 360k+ still read 8–24 MB/block with `cands − preads` negative. Probe each
+                // candidate while the probe cost (k × (log2 pages + 3) pages) stays under the
+                // span in pages; denser spends read the whole bucket once, which is cheaper.
+                let probe_min = disk_probe_min_entries();
+                let probe_ok = |r: &Range| {
+                    if parallel || r.hi - r.lo <= probe_min {
+                        return false;
+                    }
+                    let k = r.cj - r.ci;
+                    k == 1 || probe_cheaper_than_span(k, r.hi - r.lo, PROBE_PAGE_ENTRIES)
+                };
                 for r in ranges.iter() {
-                    note_pread((r.hi - r.lo) * OutputKV::SIZE);
+                    if !probe_ok(r) {
+                        note_pread((r.hi - r.lo) * OutputKV::SIZE);
+                    }
                 }
                 #[cfg(feature = "rayon")]
                 if parallel {
@@ -1077,6 +1202,39 @@ impl DiskSegment {
                 TLS_BUCKET.with(|bucket_cell| {
                     let mut bucket = bucket_cell.borrow_mut();
                     for r in ranges.iter() {
+                        if probe_ok(r) {
+                            // R-342/R-345: fat bucket(s) — page-wise probe per candidate.
+                            for c in &candidates[r.ci..r.cj] {
+                                let (clo, chi) = (c.lo.max(r.lo), c.hi.min(r.hi));
+                                if clo >= chi {
+                                    continue;
+                                }
+                                let (nlo, nhi) = probe_narrow(
+                                    clo,
+                                    chi,
+                                    PROBE_PAGE_ENTRIES,
+                                    &c.key,
+                                    |a, b| {
+                                        self.read_bucket_into(a, b, &mut bucket)?;
+                                        note_pread((b - a) * OutputKV::SIZE);
+                                        let first = bucket.first().map(|e| e.key);
+                                        let last = bucket.last().map(|e| e.key);
+                                        match (first, last) {
+                                            (Some(f), Some(l)) => Ok((f, l)),
+                                            _ => anyhow::bail!(
+                                                "DiskSegment probe: empty page {}..{}",
+                                                a,
+                                                b
+                                            ),
+                                        }
+                                    },
+                                )?;
+                                self.read_bucket_into(nlo, nhi, &mut bucket)?;
+                                note_pread((nhi - nlo) * OutputKV::SIZE);
+                                resolve_key_in_slice(&bucket, &c.key, c.idx, ids, since, before);
+                            }
+                            continue;
+                        }
                         self.read_bucket_into(r.lo, r.hi, &mut bucket)?;
                         for c in &candidates[r.ci..r.cj] {
                             let sub_lo = c.lo.saturating_sub(r.lo);
@@ -1245,5 +1403,369 @@ impl SegmentReader {
         let e = self.buf[self.buf_pos];
         self.buf_pos += 1;
         Ok(Some(e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::types::{OutputId, OutputKV};
+
+    fn key_at(i: usize) -> [u8; 36] {
+        let mut k = [0u8; 36];
+        // Directory prefix is the first 4 bytes of the txid. Put the index in k[0]
+        // so 8192 sorted keys spread across ~128 prefixes (~64 entries / ~4 KiB).
+        k[0] = (i / 32) as u8;
+        k[1] = (i % 32) as u8;
+        k[2..6].copy_from_slice(&(i as u32).to_be_bytes());
+        k
+    }
+
+    /// dest-bc 660k: `preads≈cands` — F19 cannot shrink one directory `[lo,hi)`.
+    #[test]
+    fn dest_bc_single_directory_bucket_is_never_shrunk_by_f19() {
+        let kv = OutputKV::SIZE;
+        let dest_bc_avg = (250 * 1024) / kv;
+        let cap_64 = ((64 * 1024) / kv).max(1);
+        let spans = [(0, dest_bc_avg)];
+        let capped = coalesce_pread_spans(&spans, cap_64);
+        assert_eq!(capped.len(), 1);
+        assert_eq!(
+            capped[0].1.saturating_sub(capped[0].0),
+            dest_bc_avg,
+            "F19 must not shrink a single dest-bc-sized directory bucket"
+        );
+    }
+
+    /// dest-bc 660k: adjacent directory buckets glued into ~250 KiB (avg) / 1755 KiB (max).
+    #[test]
+    fn dest_bc_660k_pread_glue_splits_under_64kib_cap() {
+        let kv = OutputKV::SIZE;
+        let dest_bc_avg_entries = (250 * 1024) / kv; // ~4571
+        let cap_64 = ((64 * 1024) / kv).max(1);
+        assert!(dest_bc_avg_entries > cap_64);
+
+        // Directory buckets are ~80 entries (~4 KiB). dest-bc glue is chaining them.
+        let piece = 80usize;
+        let n = dest_bc_avg_entries / piece;
+        let spans: Vec<(usize, usize)> = (0..n)
+            .map(|i| (i * piece, (i + 1) * piece))
+            .collect();
+        let unlimited = coalesce_pread_spans(&spans, usize::MAX);
+        assert_eq!(unlimited.len(), 1);
+        assert_eq!(unlimited[0].0, 0);
+        assert_eq!(unlimited[0].1, n * piece);
+        assert!(
+            unlimited[0].1.saturating_sub(unlimited[0].0) > cap_64,
+            "unlimited dest-bc glue must exceed F19 64 KiB"
+        );
+
+        let capped = coalesce_pread_spans(&spans, cap_64);
+        assert!(
+            capped.len() >= 3,
+            "64 KiB cap must split dest-bc 250 KiB glue, got {} ranges",
+            capped.len()
+        );
+        for (lo, hi, _, _) in &capped {
+            assert!(hi.saturating_sub(*lo) <= cap_64);
+        }
+
+        // dest-bc max_pread_kb=1755: 4 KiB buckets chained vs 64 KiB.
+        let max_entries = (1755 * 1024) / kv;
+        let n_max = max_entries / piece;
+        let chain: Vec<(usize, usize)> = (0..n_max)
+            .map(|i| (i * piece, (i + 1) * piece))
+            .collect();
+        let unlimited_max = coalesce_pread_spans(&chain, usize::MAX);
+        assert_eq!(unlimited_max.len(), 1);
+        let capped_max = coalesce_pread_spans(&chain, cap_64);
+        assert!(
+            capped_max.len() >= 10,
+            "1755 KiB dest-bc max must split into many 64 KiB ranges, got {}",
+            capped_max.len()
+        );
+        for (lo, hi, _, _) in &capped_max {
+            assert!(hi.saturating_sub(*lo) <= cap_64);
+        }
+    }
+
+    #[test]
+    fn dest_ba_660k_15kib_avg_stays_one_pread_under_64kib() {
+        let kv = OutputKV::SIZE;
+        let dest_ba_avg = (15 * 1024) / kv; // ~274
+        let cap_64 = ((64 * 1024) / kv).max(1);
+        let spans = [(0, 80), (80, dest_ba_avg)];
+        let capped = coalesce_pread_spans(&spans, cap_64);
+        assert_eq!(
+            capped.len(),
+            1,
+            "dest-ba 660k 15 KiB average must still coalesce under 64 KiB"
+        );
+    }
+
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn disk_pread_max_kb_default_unlimited_zero_unlimited() {
+        unsafe {
+            std::env::remove_var("BLVM_IBD_DISK_PREAD_MAX_KB");
+            assert_eq!(disk_pread_max_kb_from_env(), 0);
+            assert_eq!(disk_pread_max_entries(), usize::MAX);
+            std::env::set_var("BLVM_IBD_DISK_PREAD_MAX_KB", "");
+            assert_eq!(disk_pread_max_kb_from_env(), 0);
+            std::env::set_var("BLVM_IBD_DISK_PREAD_MAX_KB", "0");
+            assert_eq!(disk_pread_max_kb_from_env(), 0);
+            std::env::set_var("BLVM_IBD_DISK_PREAD_MAX_KB", "64");
+            assert_eq!(disk_pread_max_kb_from_env(), 64);
+            std::env::remove_var("BLVM_IBD_DISK_PREAD_MAX_KB");
+        }
+    }
+
+    /// Real segment: many evenly-spaced keys glue into one huge pread when unlimited;
+    /// 64 KiB cap splits bytes but still resolves every id.
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn dest_bc_pread_cap_still_resolves_glued_keys() {
+        unsafe {
+            std::env::remove_var("BLVM_IBD_DISK_MMAP");
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::set_var("BLVM_IBD_DISK_PREAD_MAX_KB", "0");
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        const N: usize = 8192;
+        let entries: Vec<OutputKV> = (0..N)
+            .map(|i| OutputKV::new_add(key_at(i), 100, 1000 + i as u64))
+            .collect();
+        let seg = DiskSegment::write_from_slice(tmp.path(), 0, (100, 100), &entries)
+            .expect("write_from_slice");
+        // ~100 keys across the first ~4.5k entries (~250 KiB of OutputKV).
+        let query_idx: Vec<usize> = (0..100).map(|i| i * 45).filter(|&i| i < N).collect();
+        let keys: Vec<_> = query_idx.iter().map(|&i| key_at(i)).collect();
+
+        reset_disk_io_stats();
+        let mut ids = vec![OutputId::MAX; keys.len()];
+        seg.batch_lookup(&keys, &mut ids, 0, 200).expect("unlimited");
+        let (preads_unlim, kb_unlim, max_unlim, _, _) = take_disk_io_stats();
+        for (j, &i) in query_idx.iter().enumerate() {
+            assert_eq!(ids[j], 1000 + i as u64, "unlimited miss at {i}");
+        }
+        assert!(
+            kb_unlim >= 200,
+            "dest-bc-shaped unlimited glue should read hundreds of KiB, got {kb_unlim}"
+        );
+
+        unsafe {
+            std::env::set_var("BLVM_IBD_DISK_PREAD_MAX_KB", "64");
+        }
+        reset_disk_io_stats();
+        let mut ids_cap = vec![OutputId::MAX; keys.len()];
+        seg.batch_lookup(&keys, &mut ids_cap, 0, 200).expect("capped");
+        let (preads_cap, _kb_cap, max_cap, _, _) = take_disk_io_stats();
+        for (j, &i) in query_idx.iter().enumerate() {
+            assert_eq!(ids_cap[j], 1000 + i as u64, "capped miss at {i}");
+        }
+        assert!(
+            preads_cap >= preads_unlim,
+            "64 KiB cap must not issue fewer preads ({preads_cap} vs unlimited {preads_unlim})"
+        );
+        assert!(
+            max_cap <= 64,
+            "capped max_pread_kb must be ≤64, got {max_cap} (unlimited max {max_unlim})"
+        );
+
+        unsafe {
+            std::env::remove_var("BLVM_IBD_DISK_PREAD_MAX_KB");
+        }
+        std::mem::forget(tmp);
+    }
+
+    /// dest-bc pair GC writes `capacity=COMPACT_MAX` (20M) even when survivors are
+    /// 2M. Bloom must be sized to the actual write count, not the caller cap.
+    #[test]
+    fn dest_bc_write_from_iter_bloom_sized_to_actual_not_cap() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let entries: Vec<OutputKV> = (0u16..200)
+            .map(|i| {
+                let mut k = [0u8; 36];
+                k[..2].copy_from_slice(&i.to_be_bytes());
+                OutputKV::new_add(k, 1, u64::from(i))
+            })
+            .collect();
+        let fat = BloomFilter::new_for_capacity(20_000).mem_bytes();
+        let seg = DiskSegment::write_from_iter(tmp.path(), 0, 20_000, entries.into_iter())
+            .expect("write_from_iter");
+        assert!(
+            seg.ram_bytes() < fat,
+            "bloom must match 200 entries, not 20k cap: ram={} fat={fat}",
+            seg.ram_bytes()
+        );
+        let mut k = [0u8; 36];
+        k[..2].copy_from_slice(&0u16.to_be_bytes());
+        let mut ids = [OutputId::MAX];
+        seg.batch_lookup(&[k], &mut ids, 0, 10).expect("lookup");
+        assert_eq!(ids[0], 0);
+        std::mem::forget(tmp);
+    }
+
+    /// R-342: `probe_narrow` returns a window holding every equal-key entry, for every key
+    /// position (including runs straddling page edges) and for absent keys.
+    #[test]
+    fn r342_probe_narrow_contains_every_equal_key_run() {
+        let page = 7usize;
+        // Sorted keys with runs of 1–3 equal entries; k[0..4] fixed (one directory bucket).
+        let mut keys: Vec<[u8; 36]> = Vec::new();
+        for v in 0..600u32 {
+            let mut k = [0u8; 36];
+            k[0..4].copy_from_slice(&0xAB_CD_EF_01u32.to_be_bytes());
+            k[32..36].copy_from_slice(&(v * 3).to_be_bytes());
+            for _ in 0..(1 + (v % 3) as usize) {
+                keys.push(k);
+            }
+        }
+        let n = keys.len();
+        let mut reads = 0usize;
+        for v in 0..700u32 {
+            let mut key = [0u8; 36];
+            key[0..4].copy_from_slice(&0xAB_CD_EF_01u32.to_be_bytes());
+            key[32..36].copy_from_slice(&(v * 3 - (v % 2) * 1).to_be_bytes()); // half absent
+            let (lo, hi) = probe_narrow(0, n, page, &key, |a, b| {
+                reads += 1;
+                assert!(a < b && b <= n, "page {a}..{b}");
+                Ok((keys[a], keys[b - 1]))
+            })
+            .expect("probe");
+            assert!(lo <= hi && hi <= n);
+            let first = keys.partition_point(|k| *k < key);
+            let last = keys.partition_point(|k| *k <= key);
+            if first < last {
+                assert!(lo <= first && last <= hi, "run {first}..{last} not in {lo}..{hi} v={v}");
+            }
+            assert!(hi - lo <= 5 * page, "window too wide {}", hi - lo);
+        }
+        assert!(reads <= 700 * 8, "too many page reads {reads}");
+    }
+
+    /// R-342: a fan-out transaction's bucket (one txid prefix, 8000 vouts ≈ 437 KiB) is
+    /// resolved through page probes: correct id, ≤ 64 KiB read per lookup, Delete honoured,
+    /// absent key stays MAX.
+    #[test]
+    fn r342_fat_bucket_probe_resolves_with_small_preads() {
+        unsafe {
+            std::env::remove_var("BLVM_IBD_DISK_MMAP");
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_DISK_PREAD_MAX_KB");
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        const N: usize = 8000;
+        let fat_key = |vout: u32| {
+            let mut k = [0u8; 36];
+            k[0..4].copy_from_slice(&0x7F_00_00_01u32.to_be_bytes());
+            k[4..8].copy_from_slice(&0xDE_AD_BE_EFu32.to_be_bytes());
+            k[32..36].copy_from_slice(&vout.to_be_bytes());
+            k
+        };
+        let mut entries: Vec<OutputKV> = (0..N as u32)
+            .map(|v| OutputKV::new_add(fat_key(v), 100, 5000 + v as u64))
+            .collect();
+        // vout 4242 spent in the same segment at a later height: Add then Delete.
+        entries.push(OutputKV::new_delete(fat_key(4242), 150));
+        // Some ordinary keys in other buckets.
+        for i in 0..2000usize {
+            entries.push(OutputKV::new_add(key_at(i), 100, 1000 + i as u64));
+        }
+        entries.sort();
+        let seg = DiskSegment::write_from_slice(tmp.path(), 0, (100, 150), &entries)
+            .expect("write_from_slice");
+        assert!(
+            disk_probe_min_entries() < N,
+            "default probe threshold (64 KiB) must be below the fat bucket"
+        );
+
+        for &vout in &[0u32, 1, 4000, 4241, 4243, 7998, 7999] {
+            reset_disk_io_stats();
+            let mut ids = vec![OutputId::MAX; 1];
+            seg.batch_lookup(&[fat_key(vout)], &mut ids, 0, 200).expect("lookup");
+            let (preads, kb, max_kb, cands, _) = take_disk_io_stats();
+            assert_eq!(ids[0], 5000 + vout as u64, "vout {vout}");
+            assert_eq!(cands, 1);
+            assert!(kb <= 64, "vout {vout}: read {kb} KiB in {preads} preads (max {max_kb})");
+            assert!(preads >= 2, "vout {vout}: expected page probes, got {preads} preads");
+        }
+        // Spent in-segment → DELETED sentinel.
+        let mut ids = vec![OutputId::MAX; 1];
+        seg.batch_lookup(&[fat_key(4242)], &mut ids, 0, 200).expect("lookup");
+        assert_eq!(ids[0], OUTPUT_ID_DELETED);
+        // Height window excludes the Delete → the Add is visible.
+        let mut ids = vec![OutputId::MAX; 1];
+        seg.batch_lookup(&[fat_key(4242)], &mut ids, 0, 120).expect("lookup");
+        assert_eq!(ids[0], 5000 + 4242);
+        // Absent vout (bloom may pass) → stays MAX.
+        let mut ids = vec![OutputId::MAX; 1];
+        seg.batch_lookup(&[fat_key(9_000_000)], &mut ids, 0, 200).expect("lookup");
+        assert_eq!(ids[0], OutputId::MAX);
+        // Ordinary small bucket still resolves.
+        let mut ids = vec![OutputId::MAX; 1];
+        seg.batch_lookup(&[key_at(777)], &mut ids, 0, 200).expect("lookup");
+        assert_eq!(ids[0], 1000 + 777);
+        std::mem::forget(tmp);
+    }
+
+    /// R-345: k candidates in one fat bucket (a block spending 6 outputs of one fan-out tx)
+    /// are glued into one range; each is probed, total read stays far under the bucket.
+    #[test]
+    #[serial_test::serial(ibd)]
+    fn r345_glued_fat_bucket_probes_each_candidate() {
+        unsafe {
+            std::env::remove_var("BLVM_IBD_DISK_MMAP");
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_DISK_PREAD_MAX_KB");
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        const N: usize = 8000;
+        let fat_key = |vout: u32| {
+            let mut k = [0u8; 36];
+            k[0..4].copy_from_slice(&0x7F_00_00_02u32.to_be_bytes());
+            k[4..8].copy_from_slice(&0xCA_FE_BA_BEu32.to_be_bytes());
+            k[32..36].copy_from_slice(&vout.to_be_bytes());
+            k
+        };
+        let mut entries: Vec<OutputKV> = (0..N as u32)
+            .map(|v| OutputKV::new_add(fat_key(v), 100, 7000 + v as u64))
+            .collect();
+        for i in 0..2000usize {
+            entries.push(OutputKV::new_add(key_at(i), 100, 1000 + i as u64));
+        }
+        entries.sort();
+        let seg = DiskSegment::write_from_slice(tmp.path(), 1, (100, 100), &entries)
+            .expect("write_from_slice");
+        let vouts: Vec<u32> = (0..6u32).map(|i| i * 1301 % N as u32).collect();
+        let keys: Vec<_> = vouts.iter().map(|&v| fat_key(v)).collect();
+        reset_disk_io_stats();
+        let mut ids = vec![OutputId::MAX; keys.len()];
+        seg.batch_lookup(&keys, &mut ids, 0, 200).expect("lookup");
+        let (preads, kb, max_kb, cands, _) = take_disk_io_stats();
+        for (j, &v) in vouts.iter().enumerate() {
+            assert_eq!(ids[j], 7000 + v as u64, "vout {v}");
+        }
+        assert_eq!(cands, 6);
+        let bucket_kb = (N * OutputKV::SIZE / 1024) as u64;
+        assert!(
+            kb < bucket_kb,
+            "6 probed candidates read {kb} KiB in {preads} preads (bucket {bucket_kb} KiB)"
+        );
+        assert!(preads >= 6 * 3, "each candidate probed: {preads} preads");
+        assert!(max_kb <= 24, "probe window max {max_kb} KiB");
+        // 400 candidates in the same bucket (dense) → whole-bucket read is cheaper; still correct.
+        let vouts2: Vec<u32> = (0..400u32).map(|i| i * 17 % N as u32).collect();
+        let keys2: Vec<_> = vouts2.iter().map(|&v| fat_key(v)).collect();
+        reset_disk_io_stats();
+        let mut ids2 = vec![OutputId::MAX; keys2.len()];
+        seg.batch_lookup(&keys2, &mut ids2, 0, 200).expect("lookup dense");
+        let (preads2, _kb2, _, cands2, _) = take_disk_io_stats();
+        for (j, &v) in vouts2.iter().enumerate() {
+            assert_eq!(ids2[j], 7000 + v as u64, "dense vout {v}");
+        }
+        assert_eq!(cands2, 400);
+        assert_eq!(preads2, 1, "dense candidates fall back to one whole-bucket read");
+        std::mem::forget(tmp);
     }
 }

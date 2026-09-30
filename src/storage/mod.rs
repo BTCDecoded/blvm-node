@@ -832,7 +832,7 @@ impl Storage {
         };
         // Try full block body first (provides header + validates body is intact).
         let header_opt = if let Some(block) = self.blockstore.get_block(&tip_hash)? {
-            Some(block.header)
+            Some(block.header.clone())
         } else {
             // Body was pruned or lost — try the separately-stored recent header index.
             // IBD stores headers independently so this is available even after pruning.

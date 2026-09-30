@@ -164,6 +164,11 @@ impl PeerManager {
         &self.peers
     }
 
+    /// Sum `bytes_recv` across connected peers (IBD CRAWL Mbps, try_lock path).
+    pub(crate) fn total_bytes_recv(&self) -> u64 {
+        self.peers.values().map(|p| p.bytes_recv()).sum()
+    }
+
     /// Internal access for mutable iteration (used by NetworkManager)
     pub(crate) fn peers_mut(&mut self) -> &mut HashMap<TransportAddr, peer::Peer> {
         &mut self.peers

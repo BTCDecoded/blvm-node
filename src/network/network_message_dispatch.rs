@@ -447,6 +447,11 @@ async fn handle_peer_disconnected(nm: &NetworkManager, addr: TransportAddr) {
     // The periodic task used to bail out when `current_peers >= min_peers`, so a LAN node could
     // stay gone while many WAN peers kept the count high.
     if let TransportAddr::Tcp(sock) = addr {
+        // R-243: same cancel as handshake PeerDisconnected. Without this, RST
+        // of the covering hero leaves GetData oneshots parked (R-242 @186264).
+        nm.cancel_pending_block_requests_for_disconnected_peer(sock)
+            .await;
+        crate::node::parallel_ibd::ibd_peer_gone(&sock.to_string());
         let persistent = nm.get_persistent_peers().await;
         if persistent.contains(&sock) {
             let mut q = nm.peer_reconnection_queue().lock().await;

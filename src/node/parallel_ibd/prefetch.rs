@@ -71,10 +71,31 @@ pub(crate) struct OrderedReadyBridge {
 }
 
 #[cfg(feature = "production")]
+/// WAN tip crawl: how many heights above `next_needed` the bridge keeps when the front is
+/// missing (`BLVM_IBD_WAN_BRIDGE_TIGHT_KEEP`, default 128). R-340: also the dispatch band on
+/// the `bulk_catchup` path, so the coordinator never hands the bridge blocks it will evict
+/// (R-339: 1466 evictions × 32 blocks reloaded from disk and re-parsed).
+#[inline(never)]
+pub(crate) fn wan_bridge_tight_keep() -> u64 {
+    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("BLVM_IBD_WAN_BRIDGE_TIGHT_KEEP")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(128)
+            .clamp(32, 512)
+    })
+}
+
 struct OrderedReadyInner {
     /// Next height we may emit to `out` (set on first `coordinator_will_send_height`).
     next_expected: Option<u64>,
     pending: BTreeMap<u64, ReadyItem>,
+    /// R-338: heights dropped by far-ahead eviction since the last
+    /// [`OrderedReadyBridge::take_evicted_heights`]. The coordinator clears them from its
+    /// `dispatched` set so the disk-reload chain can re-inject them (otherwise each is
+    /// reloaded one per 250 ms poll — the "~4 blk/s" crawl).
+    evicted_lost: Vec<u64>,
 }
 
 #[cfg(feature = "production")]
@@ -91,6 +112,7 @@ impl OrderedReadyBridge {
             inner: Mutex::new(OrderedReadyInner {
                 next_expected: None,
                 pending: BTreeMap::new(),
+                evicted_lost: Vec::new(),
             }),
             out,
             feeder: Mutex::new(None),
@@ -386,6 +408,32 @@ impl OrderedReadyBridge {
         None
     }
 
+    /// R-260: leftover inject succeeded and H is not in flight. Put H in the feeder
+    /// even when `next_expected` already walked to H+1 (`try_emit` would skip).
+    /// Fat ≥200 is exclusive GetData of H — a different clock.
+    pub(crate) fn force_emit_tip_to_feeder(
+        &self,
+        item: ReadyItem,
+        feeder: &super::feeder::FeederState,
+    ) {
+        let h = item.0;
+        let mut g = self
+            .inner
+            .lock()
+            .expect("OrderedReadyBridge mutex poisoned");
+        if feeder.0.lock().0.get(h).is_some() {
+            g.next_expected = Some(h.saturating_add(1));
+            g.pending.remove(&h);
+            sync_bridge_pending_count(&g);
+            return;
+        }
+        Self::insert_ready_into_feeder(feeder, item);
+        g.next_expected = Some(h.saturating_add(1));
+        g.pending.remove(&h);
+        Self::flush_contiguous_to_feeder(feeder, &mut g);
+        sync_bridge_pending_count(&g);
+    }
+
     fn insert_ready_into_feeder(feeder: &super::feeder::FeederState, item: ReadyItem) {
         let (hh, b, w, keys, u, tx_ids, spec_adds) = item;
         let est = super::types::estimate_block_bytes(b.as_ref(), w.as_ref());
@@ -399,6 +447,7 @@ impl OrderedReadyBridge {
             fg.2 = fg.2.saturating_add(est);
             super::IBD_FEEDER_BUFFER_BLOCKS.store(fg.0.len(), Ordering::Relaxed);
             super::tip_stage::mark_feeder(hh);
+            super::feeder_miss::note_feeder_insert(hh);
             // N13: wake only for tip / empty→nonempty (not every ahead insert).
             was_empty || hh == wait_tip || wait_tip == 0
         };
@@ -447,6 +496,7 @@ impl OrderedReadyBridge {
                 fg.0.insert(hh, (b, w, keys, u, tx_ids, spec_adds, est));
                 fg.2 = fg.2.saturating_add(est);
                 super::tip_stage::mark_feeder(hh);
+                super::feeder_miss::note_feeder_insert(hh);
                 if hh == wait_tip {
                     should_wake = true;
                 }
@@ -473,6 +523,16 @@ impl OrderedReadyBridge {
     }
 
     /// Whether `h` is buffered in the bridge pending map (dispatched, not yet released to feeder).
+    /// R-338: drain heights lost to far-ahead eviction (see `OrderedReadyInner::evicted_lost`).
+    #[inline(never)]
+    pub(crate) fn take_evicted_heights(&self) -> Vec<u64> {
+        let mut g = self
+            .inner
+            .lock()
+            .expect("OrderedReadyBridge mutex poisoned");
+        std::mem::take(&mut g.evicted_lost)
+    }
+
     pub(crate) fn pending_contains(&self, h: u64) -> bool {
         self.inner
             .lock()
@@ -654,11 +714,7 @@ impl OrderedReadyBridge {
             pending_max
         };
         let tight_keep = if wan_tip_crawl {
-            std::env::var("BLVM_IBD_WAN_BRIDGE_TIGHT_KEEP")
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(128)
-                .clamp(32, 512)
+            wan_bridge_tight_keep()
         } else {
             window.saturating_div(4).clamp(16, 64)
         };
@@ -673,7 +729,11 @@ impl OrderedReadyBridge {
         let mut to_evict: Vec<u64> = g
             .pending
             .keys()
-            .filter(|&&h| h > ceiling && g.next_expected != Some(h))
+            .filter(|&&h| {
+                h > ceiling
+                    && g.next_expected != Some(h)
+                    && !super::lookahead_height_reserved(h)
+            })
             .copied()
             .collect();
         let under_min = g.pending.len() < min_pending;
@@ -739,6 +799,7 @@ impl OrderedReadyBridge {
         let far_evicted = to_evict.len();
         for h in to_evict {
             g.pending.remove(&h);
+            g.evicted_lost.push(h);
         }
         evicted += far_evicted;
         if far_evicted > 0 {

@@ -90,6 +90,56 @@ fn hard_trim_never_drops_tip_adjacent_need() {
     assert_eq!(tip_only.len(), 3);
 }
 
+/// R-98: LEAD=8192 warehouse sat in `received` and hard-trim deleted it
+/// (persist window 64). Reserved heights must survive like tip-adjacent.
+#[serial_test::serial(ibd)]
+#[test]
+fn r99_hard_trim_skips_reserved_far() {
+    use blvm_protocol::{Block, BlockHeader, Transaction, TransactionOutput};
+    use crate::node::parallel_ibd::{publish_lookahead_reserved, test_clear_lookahead_reserved};
+
+    test_clear_lookahead_reserved();
+    let dummy = || -> (SharedBlock, SharedWitnesses) {
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                timestamp: 1,
+                ..Default::default()
+            },
+            transactions: vec![Transaction {
+                version: 1,
+                inputs: blvm_protocol::tx_inputs![],
+                outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                    value: 50,
+                    script_pubkey: vec![0x51],
+                }],
+                lock_time: 0,
+            }]
+            .into(),
+        };
+        (Arc::new(block), Arc::new(vec![vec![]]))
+    };
+
+    let need = 100u64;
+    publish_lookahead_reserved(vec![(need + 50, need + 200)]);
+    let mut received: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
+    for h in [need, need + 1, need + 50, need + 200] {
+        received_put(&mut received, h, dummy());
+    }
+    let forced = hard_trim_download_received_far_ahead(&mut received, need, 1);
+    assert_eq!(forced, 1, "only unreserved far drops");
+    assert!(received.contains_key(&need), "keep tip");
+    assert!(
+        received.contains_key(&(need + 50)) && received.contains_key(&(need + 200)),
+        "reserved warehouse must survive hard-trim"
+    );
+    assert!(
+        !received.contains_key(&(need + 1)),
+        "unreserved far still drops"
+    );
+    test_clear_lookahead_reserved();
+}
+
 #[serial_test::serial(ibd)]
 #[test]
 fn soft_outer_extend_requires_gap_streams() {
@@ -480,6 +530,33 @@ fn w110_tip_covering_fail_is_mute_matches_empty_rotate() {
     assert!(!tip_covering_fail_is_mute(
         "tip-enter walk-in abort: keeping sticky owner"
     ));
+    assert!(
+        !chunk_fail_counts_toward_blacklist(
+            "tip-enter walk-in: aborting chunk 294144-294175 for tip owner reassign"
+        ),
+        "walk-in must not 3/3-blacklist the 594 BPS hero"
+    );
+    assert!(
+        !chunk_fail_counts_toward_blacklist("headers must be downloaded first"),
+        "header lag is an assign bug"
+    );
+    assert!(
+        chunk_fail_counts_toward_blacklist(
+            "Block timeout for gap height 280993 after 5s - chunk needs retry"
+        ),
+        "real tip-gap timeout still strikes"
+    );
+    assert!(
+        cheese_h_timeout_err("tip-gap timeout cap: gap 148449 waited 5s in chunk 148449-148449"),
+        "dest-ap cheese H timeout is the no-strike err half"
+    );
+    assert!(cheese_h_timeout_err(
+        "Block download stalled (no first block in 5s)"
+    ));
+    assert!(
+        !cheese_h_timeout_err("PIPE_FILL mute: no network body in 3000ms (chunk 304697-304824)"),
+        "PIPE_FILL mute stays P1e, not cheese-H no-strike"
+    );
     assert!(!tip_covering_fail_is_mute(
         "Peer disconnected during chunk download"
     ));
@@ -523,17 +600,12 @@ fn c1_tip_hole_grow_on_delivery_deepens_to_cap() {
             d = tip_hole_grow_on_delivery(d);
         }
         assert_eq!(d, grow_cap, "repeated grow must hit tip_hole_grow_cap");
-        // C1d warm default off — hot/cold both use grow_cap unless WARM=1.
-        // C1n: without warm EWMA, effective == cold.
+        // C1d: hot streamer may take min(128, pipe). Test pipe default 32 → hot==cold.
         let cold = tip_hole_grow_cap_for_peer(false);
         assert_eq!(cold, grow_cap);
-        if tip_hole_warm_enabled() {
-            let warm = tip_hole_grow_cap_for_peer(true);
-            assert!(warm >= grow_cap);
-            assert!(warm <= pipe_cap);
-        } else {
-            assert_eq!(tip_hole_grow_cap_for_peer(true), grow_cap);
-        }
+        let hot = tip_hole_grow_cap_for_peer(true);
+        assert!(hot >= cold);
+        assert!(hot <= pipe_cap.max(cold));
     } else {
         assert_eq!(tip_hole_grow_on_delivery(start), pipe_cap);
     }
@@ -612,6 +684,21 @@ fn c1u_gd_slow_arms_and_clamps_fill_cap() {
         tip_hole_gd_slow_next_depth(32),
         8,
         "multi-peer legacy cliff unchanged"
+    );
+    // B1: global mute must not clamp a peer with no samples (dest-an 201447).
+    assert!(
+        !tip_hole_gd_slow_for_peer("104.194.10.62:8333"),
+        "no peer samples → not slow"
+    );
+    super::super::tip_stage::test_seed_getdata_body_ewma_peer("100.33.2.76:8333", 5_000, 32);
+    assert!(
+        tip_hole_gd_slow_for_peer("100.33.2.76:8333"),
+        "mute's own EWMA still clamps that mute"
+    );
+    super::super::tip_stage::test_seed_getdata_body_ewma_peer("104.194.10.62:8333", 200, 32);
+    assert!(
+        !tip_hole_gd_slow_for_peer("104.194.10.62:8333"),
+        "hero's own EWMA stays fast while global is mute"
     );
     // Mid-band: release floor (cold deepen OK) but keep no-FAST (death spiral).
     unsafe {
@@ -1202,4 +1289,44 @@ fn h5_received_clone_keeps_tip_keyed() {
     assert!(Arc::ptr_eq(&cloned.0, &block));
     let _taken = received_take(&mut received, 300_288).expect("take");
     assert!(received_clone(&received, 300_288).is_none());
+}
+
+#[test]
+fn hang_93063_tip_enter_reason_is_c1j_ahead() {
+    // Archive wan-650k-hf-93k-hang: take 93063-93063 at 01:28:41.964 while
+    // [IBD_C1J_ABORT] 01:28:41.000 said tip=92963. C1j is start > next_needed.
+    assert_eq!(
+        tip_enter_abort_reason(false, true, 93063, 93063, 92963),
+        "c1j_ahead"
+    );
+    // Once apply sits on 93063, C1j is false (start > next is false).
+    assert_eq!(
+        tip_enter_abort_reason(false, true, 93063, 93063, 93063),
+        "walk_in_other"
+    );
+}
+
+/// R-153/R-155 leftover: node `win_mbps` is global. This names who owns the bytes.
+/// Cache feeds fat mute-hold (not a seat).
+#[serial_test::serial(ibd)]
+#[test]
+fn peer_recv_window_names_fat_farmer() {
+    test_reset_download_bytes();
+    let mut prev = HashMap::new();
+    test_note_download_block_bytes("sticky", 1_000_000);
+    test_note_download_block_bytes("farm", 9_000_000);
+    let (sticky_mbps, top, top_mbps) = download_peer_recv_window("sticky", &mut prev, 1.0);
+    assert_eq!(top, "farm");
+    assert!(
+        top_mbps > sticky_mbps * 4.0,
+        "farm {top_mbps:.1} should dwarf sticky {sticky_mbps:.1}"
+    );
+    assert_eq!(download_bytes_for_peer("farm"), 9_000_000);
+    assert_eq!(download_cached_recv_mbps("farm"), Some(top_mbps));
+    // Second window: no new bytes → zeros, prev settled.
+    let (s2, top2, t2) = download_peer_recv_window("sticky", &mut prev, 1.0);
+    assert_eq!(top2, "-");
+    assert_eq!(s2, 0.0);
+    assert_eq!(t2, 0.0);
+    test_reset_download_bytes();
 }

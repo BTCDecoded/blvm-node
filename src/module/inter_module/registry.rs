@@ -126,6 +126,19 @@ impl ModuleApiRegistry {
         routing.get(method_name).cloned()
     }
 
+    /// Non-blocking probe: `Some(false)` when no module routes `method_name` (safe to skip the
+    /// call entirely), `Some(true)` when one does, `None` when the routing table is write-locked
+    /// right now (caller must fall back to the async path). Never blocks the calling thread, so
+    /// it is safe from synchronous hot paths that run on tokio worker threads (R-350: the IBD
+    /// per-block `filter_block_*` hooks parked every runtime worker for 6 s while the spawned
+    /// lookup could not be scheduled — 1.3 blocks/s with zero modules loaded).
+    pub fn method_registered_now(&self, method_name: &str) -> Option<bool> {
+        match self.method_routing.try_read() {
+            Ok(routing) => Some(routing.contains_key(method_name)),
+            Err(_) => None,
+        }
+    }
+
     /// List all registered modules
     pub async fn list_modules(&self) -> Vec<String> {
         let apis = self.apis.read().await;

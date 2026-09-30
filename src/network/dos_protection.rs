@@ -236,6 +236,21 @@ impl DosProtectionManager {
         allowed
     }
 
+    /// R-357: rate check for **our own outbound** connect attempts. Throttles like
+    /// [`check_connection`](Self::check_connection) but records **no violation**, so an
+    /// outbound target can never be auto-banned for how often *we* dialled it. Live
+    /// 2026-09-29 (R-356): a remote that evicted our fresh inbound every 1–2 s (full
+    /// node, newest-inbound eviction) plus our immediate reconnect tripped 10 attempts /
+    /// 60 s, and `connect_to_peer` banned **11 of our most productive IBD peers** for 3600 s
+    /// (98.82.198.99 had served 2027 chunks, 35.186.186.240 1328) between 200k and 300k —
+    /// the roster fell 20 peers under the previous run and 250–300k lost 8 MB/s of wire.
+    /// The violation counter and auto-ban are for inbound floods; outbound dial rate is
+    /// our own behaviour.
+    pub async fn check_outbound_connection(&self, ip: IpAddr) -> bool {
+        let mut limiter = self.connection_rate_limiter.lock().await;
+        limiter.check_connection(ip)
+    }
+
     /// Check if message queue is within limits
     pub async fn check_message_queue_size(&self, current_size: usize) -> bool {
         if current_size > self.max_message_queue_size {
@@ -414,6 +429,28 @@ mod tests {
             dos.check_connection(ip).await; // 4th rejected (violation)
         }
 
+        assert!(dos.should_auto_ban(ip).await);
+    }
+
+    #[tokio::test]
+    async fn r357_outbound_dial_rate_throttles_but_never_bans_the_target() {
+        // R-356 shape: limit 10 / 60 s, a remote that drops us every second, immediate
+        // reconnect. 30 dials → 20 throttled, zero violations, no auto-ban.
+        let dos = DosProtectionManager::new(10, 60, 1000, 100);
+        let ip: IpAddr = "98.82.198.99".parse().unwrap();
+        let mut allowed = 0;
+        for _ in 0..30 {
+            if dos.check_outbound_connection(ip).await {
+                allowed += 1;
+            }
+        }
+        assert_eq!(allowed, 10, "outbound dials are still throttled to the window");
+        assert!(!dos.should_auto_ban(ip).await, "our own dial rate must not ban the peer");
+        assert_eq!(dos.get_dos_metrics().await.connection_rate_violations, 0);
+        // The inbound path is unchanged: the same IP flooding us still accrues violations.
+        for _ in 0..3 {
+            dos.check_connection(ip).await;
+        }
         assert!(dos.should_auto_ban(ip).await);
     }
 }

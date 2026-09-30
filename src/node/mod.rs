@@ -1689,8 +1689,11 @@ impl Node {
             }
         };
 
-        // Get port from network address
-        let port = self.network_addr.port();
+        // Outbound / DNS / LAN scan use the network P2P port, not listen_addr.
+        // Listen 8334 (second dest) must still dial Bitcoin peers on 8333.
+        // R-66 dest-dead: every connect was :8334 → 0 peers. Archive DNS already
+        // hardcodes 8333 (`discover_archive_peers_from_dns`).
+        let port = crate::network::protocol::ProtocolParser::dns_seed_network().1;
 
         // Use config if available, otherwise use defaults
         let default_config = NodeConfig {

@@ -153,6 +153,13 @@ fn run_ibd_retire_loop_with_commitment(
                 let cap = max_pending_ops.load(Ordering::Relaxed);
                 let over_cap = pending_len > cap;
                 if level >= PressureLevel::Critical || over_cap {
+                    if level >= PressureLevel::Critical {
+                        memory::log_pressure_behavior(
+                            "utxo_evict",
+                            "aggressive",
+                            &format!("pending={pending_len} cap={cap}"),
+                        );
+                    }
                     let evictable = store.len().saturating_sub(store.protected_len());
                     if evictable >= IBD_EMERGENCY_EVICT_MIN_UNPROTECTED {
                         store.evict_aggressive_for_rss();
@@ -473,6 +480,13 @@ fn run_ibd_retire_loop_no_commitment(
                 let cap = max_pending_ops.load(Ordering::Relaxed);
                 let over_cap = pending_len > cap;
                 if level >= PressureLevel::Critical || over_cap {
+                    if level >= PressureLevel::Critical {
+                        memory::log_pressure_behavior(
+                            "utxo_evict",
+                            "aggressive",
+                            &format!("pending={pending_len} cap={cap}"),
+                        );
+                    }
                     let evictable = store.len().saturating_sub(store.protected_len());
                     if evictable >= IBD_EMERGENCY_EVICT_MIN_UNPROTECTED {
                         store.evict_aggressive_for_rss();

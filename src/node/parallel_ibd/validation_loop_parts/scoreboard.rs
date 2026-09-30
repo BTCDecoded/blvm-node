@@ -798,10 +798,21 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // unbounded() so dispatcher never blocks on a slow worker; the in-flight cap enforces backpressure.
     let (valjob_tx, valjob_rx) = crossbeam_channel::unbounded::<ValidateJob>();
     let (valres_tx, valres_rx) = crossbeam_channel::unbounded::<ValidateResult>();
+    // R-359: per-block MuHash subs arrive here after the result; folded in height order by
+    // `muhash_folder` so the running accumulator is always "exactly blocks ≤ folded_through".
+    let (muhash_tx, muhash_rx) =
+        crossbeam_channel::unbounded::<super::muhash_fold::MuHashSub>();
+    let mut muhash_folder = super::muhash_fold::InOrderMuHashFolder::new(start_height);
+    let muhash_fold_active =
+        utxo_engine.is_some() && crate::config::ibd::ibd_engine_muhash_enabled();
     let use_async_engine_append = utxo_engine.is_some() && async_engine_append_enabled();
-    /// Drop closes the append queue first, then joins `ibd-engine-append` (all exit paths).
+    /// Drop closes the queue first, then joins the `ibd-engine-prep` threads and
+    /// `ibd-engine-append` (all exit paths).
     struct EngineAppendPipeline {
         tx: Option<crossbeam_channel::Sender<EngineAppendJob>>,
+        /// R-360: `true` when `tx` feeds the prep pool (orchestrator skips txid + outcache).
+        prep_deferred: bool,
+        prep_handles: Vec<JoinHandle<()>>,
         handle: Option<JoinHandle<()>>,
     }
     impl EngineAppendPipeline {
@@ -810,6 +821,11 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         }
         fn close_and_join(&mut self) {
             drop(self.tx.take());
+            for h in self.prep_handles.drain(..) {
+                if let Err(e) = h.join() {
+                    warn!("IBD engine prep join error: {:?}", e);
+                }
+            }
             if let Some(h) = self.handle.take() {
                 if let Err(e) = h.join() {
                     warn!("IBD engine append join error: {:?}", e);
@@ -827,10 +843,35 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         let (append_tx, append_rx) = crossbeam_channel::unbounded::<EngineAppendJob>();
         let vjob_tx = valjob_tx.clone();
         let vres_tx = valres_tx.clone();
+        let prep_threads = engine_prep_threads();
+        let append_first_height = start_height;
         let join = std::thread::Builder::new()
             .name("ibd-engine-append".into())
             .spawn(move || {
-                while let Ok(job) = append_rx.recv() {
+                // R-360: jobs may arrive out of height order from the prep pool; append is
+                // serial and in order, so reassemble on `next_h` (same contract the MuHash
+                // folder relies on: dispatch heights are contiguous from `start_height`).
+                let mut queue: InOrderJobs<EngineAppendJob> = InOrderJobs::new(append_first_height);
+                'recv: while let Ok(job) = append_rx.recv() {
+                    let job_h = job.height;
+                    if let Err((expected, job)) = queue.push(job_h, job) {
+                        let _ = vres_tx.send(ValidateResult {
+                            height: job_h,
+                            result: Err(anyhow::anyhow!(
+                                "IBD engine append: height {} below next expected {}",
+                                job_h,
+                                expected
+                            )),
+                            undo_log: blvm_consensus::reorganization::BlockUndoLog::new(),
+                            bip30_post: job.bip30_index,
+                            elapsed: Duration::ZERO,
+                            view_build_ms: 0,
+                            engine_append_ms: 0,
+                            engine_complete_ms: 0,
+                        });
+                        break 'recv;
+                    }
+                    while let Some(job) = queue.pop_ready() {
                     let t_append = Instant::now();
                     match SpendSession::append(
                         Arc::clone(&job.db),
@@ -856,7 +897,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                 }))
                                 .is_err()
                             {
-                                break;
+                                break 'recv;
                             }
                         }
                         Err(e) => {
@@ -872,31 +913,95 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                 view_build_ms: 0,
                                 engine_append_ms: t_append.elapsed().as_millis() as u64,
                                 engine_complete_ms: 0,
-                                block_muhash: None,
                             });
                             // Stop accepting further appends; orchestrator will see the error
                             // via in-order collect and tear down.
-                            break;
+                            break 'recv;
                         }
                     }
+                    } // while queue.pop_ready()
+                }
+                if queue.pending_len() > 0 {
+                    warn!(
+                        "IBD engine append: exiting with {} job(s) pending (next_h={})",
+                        queue.pending_len(),
+                        queue.next_height()
+                    );
                 }
             })
             .expect("spawn IBD engine append thread");
         info!("IBD: async engine append thread enabled (opt out BLVM_IBD_ASYNC_ENGINE_APPEND=0)");
+        // R-360: prep pool. The orchestrator sends to `prep_tx`; each prep thread fills
+        // `tx_ids` (serial SHA256d on its own thread — no rayon, see
+        // `compute_block_tx_ids_into`) and the output cache, then forwards to the append
+        // thread. Parallel across blocks, so the serial stages are back to
+        // max(orchestrator drain, append) instead of dispatch + drain.
+        let (front_tx, prep_handles) = if prep_threads > 0 {
+            let (prep_tx, prep_rx) = crossbeam_channel::unbounded::<EngineAppendJob>();
+            let mut handles = Vec::with_capacity(prep_threads);
+            for i in 0..prep_threads {
+                let rx = prep_rx.clone();
+                let out = append_tx.clone();
+                handles.push(
+                    std::thread::Builder::new()
+                        .name(format!("ibd-engine-prep-{i}"))
+                        .spawn(move || {
+                            while let Ok(mut job) = rx.recv() {
+                                if job.prep_deferred {
+                                    let t_prep = Instant::now();
+                                    job.ibd_block_outputs = engine_prep_deferred(
+                                        job.block_arc.as_ref(),
+                                        job.height,
+                                        blvm_consensus::block::get_assume_valid_height(),
+                                        &mut job.tx_ids,
+                                    );
+                                    crate::node::parallel_ibd::ms_breakdown::note_engine_prep_us(
+                                        t_prep.elapsed().as_micros() as u64,
+                                    );
+                                }
+                                if out.send(job).is_err() {
+                                    break;
+                                }
+                            }
+                        })
+                        .expect("spawn IBD engine prep thread"),
+                );
+            }
+            drop(append_tx);
+            info!(
+                "IBD: engine prep pool enabled: {} thread(s) (BLVM_IBD_PREP_THREADS, 0 = prep on orchestrator)",
+                prep_threads
+            );
+            (prep_tx, handles)
+        } else {
+            (append_tx, Vec::new())
+        };
         EngineAppendPipeline {
-            tx: Some(append_tx),
+            tx: Some(front_tx),
+            prep_deferred: prep_threads > 0,
+            prep_handles,
             handle: Some(join),
         }
     } else {
         EngineAppendPipeline {
             tx: None,
+            prep_deferred: false,
+            prep_handles: Vec::new(),
             handle: None,
         }
+    };
+    // R-361: last-reference deallocation of validated blocks moves to `ibd-drop`.
+    let mut deferred_dropper = if deferred_drop_enabled() {
+        info!("IBD: deferred block drop enabled (ibd-drop thread; opt out BLVM_IBD_DEFERRED_DROP=0)");
+        DeferredDropper::spawn()
+    } else {
+        DeferredDropper::disabled()
     };
     let mut _validate_workers: Vec<JoinHandle<()>> = Vec::with_capacity(n_validate_workers);
     for i in 0..n_validate_workers {
         let rx = valjob_rx.clone();
         let tx = valres_tx.clone();
+        let mh = muhash_tx.clone();
         let pi = Arc::clone(&parallel_ibd);
         let bs = Arc::clone(&blockstore);
         let pr = Arc::clone(&protocol);
@@ -906,12 +1011,15 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         _validate_workers.push(
             std::thread::Builder::new()
                 .name(format!("ibd-validate-{i}"))
-                .spawn(move || run_validation_worker_shared(rx, tx, pi, bs, pr, st, lr, mpo))
+                .spawn(move || {
+                    run_validation_worker_shared(rx, tx, mh, pi, bs, pr, st, lr, mpo)
+                })
                 .expect("spawn IBD validate worker"),
         );
     }
     drop(valjob_rx); // workers hold all live Receiver clones; dropping the prototype lets shutdown propagate
     drop(valres_tx); // workers (+ optional append thread) hold live Sender clones
+    drop(muhash_tx); // workers hold the live sub senders; orchestrator keeps only muhash_rx
     // ────────────────────────────────────────────────────────────────────────
 
     // ────────────────────────────────────────────────────────────────────────
@@ -1531,6 +1639,12 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         let sbs_total = blvm_protocol::types::SBS_SHARED_TOTAL.load(Ordering::Relaxed);
                         let arc_blk_created   = blvm_protocol::types::ARC_BLOCK_CREATED.load(Ordering::Relaxed);
                         let arc_bh_created    = blvm_protocol::types::ARC_BLOCKHEADER_CREATED.load(Ordering::Relaxed);
+                        let block_live = blvm_protocol::types::BLOCK_LIVE.load(Ordering::Relaxed);
+                        let large_tx_slice_live =
+                            blvm_protocol::types::LARGE_TX_SLICE_LIVE.load(Ordering::Relaxed);
+                        let large_tx_slice_mb =
+                            blvm_protocol::types::LARGE_TX_SLICE_BYTES.load(Ordering::Relaxed)
+                                / (1024 * 1024);
                         let block_flush_inflight = block_flush_in_flight_w.load(Ordering::Relaxed);
                         // Weak ref check: did the sample block at BLOCK_SAMPLE_HEIGHT get freed?
                         let sample_block_alive = SAMPLE_BLOCK_WEAK
@@ -1552,13 +1666,13 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                              inflight len={inflight_n} cap={inflight_cap} table~{inflight_table_mb}MB arc~{inflight_arc_mb}MB | \
                              pending={pending_n} ~{pending_est_mb}MB recently_acc={recently_acc_n} | \
                              pending_blocks_flush={pb_count} ~{pb_bytes_mb}MB | \
-                             reorder={reorder_count} ~{reorder_bytes_mb}MB bridge_pending={bridge_pending} ~{bridge_est_mb}MB gap_flush_on_abort={} dl_received={} | \
+                             reorder={reorder_count} ~{reorder_bytes_mb}MB bridge_pending={bridge_pending} ~{bridge_est_mb}MB gap_flush_on_abort={} dl_received={} block_tx_len={} | \
                              staged={staged_n} ~{staged_est_kb}KB feeder={feeder_n} ~{feeder_est_kb}KB | \
                              engine_append in_place={engine_in_place} slow={engine_slow} slow_pct={engine_slow_pct}% contention={engine_contention} contention_pct={engine_contention_pct}% | \
                              ENGINE_MEM index={}MB compacter_inflight={}MB tail={}MB total={}MB table_file={}MB | \
                              AGE_DETAIL {age_detail_str} {disk_detail_str} | \
                              sz_kv={sz_kv} sz_utxo={sz_utxo} sz_arc_utxo={sz_arc_utxo} | \
-                             LIVE_COUNTERS MemoryRun={mr_live}(total={mr_total}) OutputDetail={od_live}(total={od_total}) BlockOutputs={bo_live} SBS_Shared_live={sbs_live}(total={sbs_total}) ArcBlock_created={arc_blk_created} ArcBlockHdr_created={arc_bh_created} block_flush_inflight={block_flush_inflight} sample_block_{BLOCK_SAMPLE_HEIGHT}_alive={sample_block_alive} | \
+                             LIVE_COUNTERS MemoryRun={mr_live}(total={mr_total}) OutputDetail={od_live}(total={od_total}) BlockOutputs={bo_live} SBS_Shared_live={sbs_live}(total={sbs_total}) ArcBlock_created={arc_blk_created} ArcBlockHdr_created={arc_bh_created} Block_live={block_live} large_tx_slice={large_tx_slice_live}(~{large_tx_slice_mb}MB) block_flush_inflight={block_flush_inflight} sample_block_{BLOCK_SAMPLE_HEIGHT}_alive={sample_block_alive} | \
                              accounted~{accounted_total_mb}MB (index={}MB compacter={}MB tail={}MB pipeline={}MB utxocache={}MB) \
                              UNEXPLAINED_ANON={unexplained_mb}MB pipeline_buffers~{pipeline_buffers_mb}MB adjusted_unexplained={adjusted_unexplained_mb}MB (post_rayon={post_rayon_unexplained_mb}MB) | \
                              top_regions: {top_anon}",
@@ -1566,6 +1680,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             mi_virtual_mb, mi_rss_mb, mi_virtual_mb.saturating_sub(mi_rss_mb),
                             gap_flush_on_abort,
                             memory::DOWNLOAD_RECEIVED_BLOCKS.load(Ordering::Relaxed),
+                            memory::BLOCK_TX_LEN.load(Ordering::Relaxed),
                             engine_index_mb, engine_compacter_mb, engine_tail_mb, engine_total_mb, table_file_mb,
                             engine_index_mb, engine_compacter_mb, engine_tail_mb, feeder_mb + staged_mb, accounted_mb,
                         );
@@ -2125,6 +2240,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             && in_flight.len() < pipeline_depth_live
             && staged_now < staged_dispatch_cap
         {
+            super::feeder_miss::publish_orch_want(next_validation_height);
             // IBD range is [start_height, effective_end_height] inclusive. After validating
             // effective_end_height, next_validation_height advances to end+1 — do not wait on
             // the feeder for a block that was never assigned or downloaded.
@@ -2189,6 +2305,56 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     }
                     // N13: publish tip so ahead inserts skip Condvar notify.
                     super::IBD_FEEDER_WAIT_TIP.store(next_validation_height, Ordering::Relaxed);
+                    super::feeder_miss::note_needed(next_validation_height);
+                    drop(guard);
+                    // One height from the body store. Do not hold the feeder lock across heed3.
+                    // store_absent → miss → WaitFeeder as before. Not inject-2048.
+                    if utxo_engine.is_some() && super::local_block::store_apply_enabled() {
+                        if let Ok(Some((arc_b, w))) = super::local_block::leftover_stall_try_load(
+                            blockstore.as_ref(),
+                            next_validation_height,
+                            protocol.get_protocol_version(),
+                        ) {
+                            let est = super::types::estimate_block_bytes(arc_b.as_ref(), w.as_ref());
+                            super::local_block::note_store_apply(next_validation_height);
+                            super::tip_stage::mark_taken_from_feeder(next_validation_height);
+                            break Some((
+                                next_validation_height,
+                                arc_b,
+                                w,
+                                Vec::new(),
+                                super::prefetch::engine_empty_prefetch_arc(),
+                                Vec::new(),
+                                super::prefetch::engine_empty_spec_adds(),
+                                est,
+                            ));
+                        }
+                    }
+                    let mut guard = feeder_state.0.lock();
+                    if let Some((arc_b, w, input_keys, u, tx_ids, spec_adds, est_bytes)) =
+                        guard.0.remove(next_validation_height)
+                    {
+                        super::tip_stage::mark_taken_from_feeder(next_validation_height);
+                        guard.2 = guard.2.saturating_sub(est_bytes);
+                        let (_pruned, freed) = guard.0.prune_below(next_validation_height);
+                        guard.2 = guard.2.saturating_sub(freed);
+                        super::IBD_FEEDER_BUFFER_BLOCKS
+                            .store(guard.0.len(), std::sync::atomic::Ordering::Relaxed);
+                        feeder_state.1.notify_one();
+                        break Some((
+                            next_validation_height,
+                            arc_b,
+                            w,
+                            input_keys,
+                            u,
+                            tx_ids,
+                            spec_adds,
+                            est_bytes,
+                        ));
+                    }
+                    if guard.1 && guard.0.is_empty() {
+                        break None;
+                    }
                     let wait_start = std::time::Instant::now();
                     super::ms_breakdown::wall_enter(super::ms_breakdown::WallState::WaitFeeder);
                     let wait = feeder_state.1.wait_for(&mut guard, feeder_wait_timeout);
@@ -2205,6 +2371,14 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             feeder_now, holes, contig, await_ms, gd_ms, pressure, failover,
                         );
                         super::ms_breakdown::note_wait_feeder_binder(binder, wait_ms);
+                        maybe_log_tip_hole_anatomy(
+                            next_validation_height,
+                            wait_ms,
+                            binder,
+                            feeder_now,
+                            holes,
+                            contig,
+                        );
                     }
                     #[cfg(feature = "profile")]
                     if ibd_profile && wait_ms >= 1 {
@@ -2324,21 +2498,50 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     }
                 }
             } else {
-                // Non-blocking: grab lookahead block only if already in feeder.
+                // Non-blocking: feeder first, then one store load of H.
                 let next_h = next_validation_height;
-                let mut guard = feeder_state.0.lock();
-                guard
-                    .0
-                    .remove(next_h)
-                    .map(|(arc_b, w, ik, u, tx_ids, spec_adds, est_bytes)| {
-                        // W59: latch take under feeder lock before unlock (rewind race).
-                        super::tip_stage::mark_taken_from_feeder(next_h);
-                        guard.2 = guard.2.saturating_sub(est_bytes);
-                        feeder_state.1.notify_one();
-                        super::IBD_FEEDER_BUFFER_BLOCKS
-                            .store(guard.0.len(), std::sync::atomic::Ordering::Relaxed);
-                        (next_h, arc_b, w, ik, u, tx_ids, spec_adds, est_bytes)
-                    })
+                let from_feeder = {
+                    let mut guard = feeder_state.0.lock();
+                    guard.0.remove(next_h).map(
+                        |(arc_b, w, ik, u, tx_ids, spec_adds, est_bytes)| {
+                            super::tip_stage::mark_taken_from_feeder(next_h);
+                            guard.2 = guard.2.saturating_sub(est_bytes);
+                            feeder_state.1.notify_one();
+                            super::IBD_FEEDER_BUFFER_BLOCKS
+                                .store(guard.0.len(), std::sync::atomic::Ordering::Relaxed);
+                            (next_h, arc_b, w, ik, u, tx_ids, spec_adds, est_bytes)
+                        },
+                    )
+                };
+                from_feeder.or_else(|| {
+                    if utxo_engine.is_some() && super::local_block::store_apply_enabled() {
+                        super::local_block::leftover_stall_try_load(
+                            blockstore.as_ref(),
+                            next_h,
+                            protocol.get_protocol_version(),
+                        )
+                        .ok()
+                        .flatten()
+                        .map(|(arc_b, w)| {
+                            let est =
+                                super::types::estimate_block_bytes(arc_b.as_ref(), w.as_ref());
+                            super::local_block::note_store_apply(next_h);
+                            super::tip_stage::mark_taken_from_feeder(next_h);
+                            (
+                                next_h,
+                                arc_b,
+                                w,
+                                Vec::new(),
+                                super::prefetch::engine_empty_prefetch_arc(),
+                                Vec::new(),
+                                super::prefetch::engine_empty_spec_adds(),
+                                est,
+                            )
+                        })
+                    } else {
+                        None
+                    }
+                })
             };
 
             let (
@@ -2351,17 +2554,36 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 spec_adds_d,
                 feeder_est_bytes_d,
             ) = match block_tuple_opt {
-                None => break,
+                None => {
+                    if !shutdown_now && next_validation_height <= effective_end_height() {
+                        super::feeder_miss::on_fill_short(
+                            blockstore.as_ref(),
+                            next_validation_height,
+                            in_flight.len(),
+                            pipeline_depth_live,
+                            super::IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed),
+                            false,
+                        );
+                    }
+                    break;
+                }
                 Some(t) => t,
             };
             super::ms_breakdown::wall_enter(super::ms_breakdown::WallState::Dispatch);
             // N15: engine admit defers serial txid SHA — fill before append / output cache.
-            if tx_ids_precomputed_d.is_empty() {
+            // R-359: timed (`disp_txid_sum`) — this is serial SHA256d of the whole block on the
+            // orchestrator thread.
+            // R-360: with the prep pool the SHA and the output cache run there instead
+            // (`prep_deferred`), off the orchestrator's serial per-block path.
+            let prep_deferred = engine_append.prep_deferred;
+            let t_disp_txid = std::time::Instant::now();
+            if tx_ids_precomputed_d.is_empty() && !prep_deferred {
                 crate::storage::disk_utxo::compute_tx_ids_only(
                     block_arc_d.as_ref(),
                     &mut tx_ids_precomputed_d,
                 );
             }
+            let disp_txid_us = t_disp_txid.elapsed().as_micros() as u64;
             super::tip_stage::finish_validated(h);
             if blocks_synced == 0 && in_flight.is_empty() {
                 info!("Validation: first block received, height {}", h);
@@ -2512,7 +2734,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             // I2: pre-build output Arc map only on the assume-valid fast path (skip_signatures).
             // Above assume_valid_height connect_block builds locally when needed; skipping here
             // avoids N in-flight pipeline jobs each holding a full per-block output cache.
-            let ibd_block_outputs = if h < blvm_consensus::block::get_assume_valid_height() {
+            let t_disp_outcache = std::time::Instant::now();
+            let ibd_block_outputs = if !prep_deferred
+                && h < blvm_consensus::block::get_assume_valid_height()
+            {
                 Some(Arc::new(build_block_output_utxo_cache(
                     block_arc_d.as_ref(),
                     tx_ids_precomputed_d.as_slice(),
@@ -2521,6 +2746,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             } else {
                 None
             };
+            super::ms_breakdown::note_dispatch_split_us(
+                disp_txid_us,
+                t_disp_outcache.elapsed().as_micros() as u64,
+            );
 
             let job_send = if let Some(ref db) = utxo_engine {
                 if let Some(append_tx) = engine_append.sender() {
@@ -2537,6 +2766,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             best_header_chainwork: header_chainwork_for_job,
                             cached_network_time,
                             ibd_block_outputs: ibd_block_outputs.clone(),
+                            prep_deferred,
                         })
                         .map_err(|_| ())
                 } else {
@@ -2619,6 +2849,20 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             });
             next_validation_height = h + 1;
         } // end dispatch while
+        if !shutdown_now
+            && in_flight.len() < pipeline_depth_live
+            && next_validation_height <= effective_end_height()
+            && staged_now >= staged_dispatch_cap
+        {
+            super::feeder_miss::on_fill_short(
+                blockstore.as_ref(),
+                next_validation_height,
+                in_flight.len(),
+                pipeline_depth_live,
+                super::IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed),
+                true,
+            );
+        }
 
         // Terminate when feeder is exhausted, the validation pipeline is empty, AND the
         // retire thread has processed all staged blocks. Checking staged_count prevents:
@@ -2687,11 +2931,14 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             pending_results.insert(vres.height, vres);
         }
         let collect_head_ready = pending_results.contains_key(&next_process_h);
-        super::ms_breakdown::note_collect_outcome(collect_head_ready);
+        // Occupancy 4-arg (d758fd7b): ready / in_flight / pending / at_depth. Not the catch-up.
+        super::ms_breakdown::note_collect_outcome(
+            collect_head_ready,
+            in_flight.len(),
+            pending_results.len(),
+            in_flight.len() >= pipeline_depth_live,
+        );
         // Blocking wait until we have the result for the front-of-queue entry.
-        // Use a timeout so the watchdog and feeder stall counters can observe a frozen pipeline
-        // (a plain blocking recv() would wedge the loop indefinitely if the worker for
-        // `next_process_h` panicked or the block was never dispatched to a worker).
         const VALRES_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
         const VALRES_STUCK_LIMIT: std::time::Duration = std::time::Duration::from_secs(600); // 10 min
         let mut valres_wait_start = std::time::Instant::now();
@@ -2823,17 +3070,26 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 );
             }
         }
-        if let Some(sub) = vres.block_muhash {
-            let mut g = ibd_muhash_accumulator.lock();
-            *g = std::mem::take(&mut *g).multiply(&sub);
+        // R-359: fold whatever MuHash subs have arrived, in height order (non-blocking).
+        if muhash_fold_active {
+            muhash_fold_ready(&mut muhash_folder, &muhash_rx, &ibd_muhash_accumulator);
         }
         // Gap replay defers checkpoint export to tip — advance GC fence periodically so
         // disk/memory compactions can cancel spent pairs (otherwise GC'd 0 merges stall BPS).
-        if utxo_engine.is_some() {
-            if let Some(until) = engine_gap_export_defer_until {
-                if next_height < until && next_height > 0 && next_height % 10_000 == 0 {
-                    crate::storage::ibd_engine::advance_gc_fence_to(next_height as i32);
-                }
+        // R-352: the same applies between sparse periodic exports (100k apart): let the
+        // fence follow validation whenever no export scan is running, so spends after the
+        // last export stay GC-able and the cold journal does not force exports back to 10k.
+        if utxo_engine.is_some() && next_height > 0 && next_height % 10_000 == 0 {
+            let gap_replay = engine_gap_export_defer_until.is_some_and(|until| next_height < until);
+            if gap_replay {
+                crate::storage::ibd_engine::advance_gc_fence_to(next_height as i32);
+            } else {
+                let export_active = crate::node::parallel_ibd::IBD_CHECKPOINT_EXPORT_ACTIVE
+                    .load(std::sync::atomic::Ordering::Acquire);
+                crate::storage::ibd_engine::advance_gc_fence_between_exports(
+                    next_height as i32,
+                    export_active,
+                );
             }
         }
         if let Some(ref dur) = engine_durability {
@@ -2841,6 +3097,23 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 let gap_replay =
                     engine_gap_export_defer_until.is_some_and(|until| next_height < until);
                 if !gap_replay {
+                    // R-359 barrier: the persisted running state must be exactly blocks ≤ h.
+                    if muhash_fold_active {
+                        if let Err(e) = muhash_fold_through(
+                            &mut muhash_folder,
+                            &muhash_rx,
+                            &ibd_muhash_accumulator,
+                            next_height,
+                        ) {
+                            return match retire_thread_shutdown(
+                                &mut _retire_dispatcher,
+                                &retire_err,
+                            ) {
+                                Ok(()) => Err(e),
+                                Err(e2) => Err(e2),
+                            };
+                        }
+                    }
                     let running = ibd_muhash_accumulator.lock().serialize_running_state();
                     if let Err(e) = storage_clone
                         .chain()
@@ -2851,7 +3124,6 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         );
                     }
                 }
-                // Validation tip is informational; persist less often during gap replay.
                 let persist_tip = !gap_replay || next_height % 10_000 == 0;
                 if persist_tip {
                     if let Err(e) = storage_clone
@@ -2873,6 +3145,9 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         );
         // vres.result carries only Option<UtxoDelta> — tx ids are not propagated.
         let validation_result = vres.result;
+        // R-361: the undo log either rides into `pending_blocks` (flush path) or goes to the
+        // `ibd-drop` thread with the block (skip path) — never freed on this thread.
+        let mut undo_log_opt = Some(vres.undo_log);
 
         #[cfg(feature = "profile")]
         let ibd_log_this_height =
@@ -3038,14 +3313,18 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 // Skip writing blocks already on disk (contiguous replay cap or sparse per-height
                 // body). Re-serializing into heed3 during local gap replay caused redundant heap
                 // alloc + LMDB write pressure when probe_confirmed_body_height returned 0.
+                // R-360: timed (`drain_skipchk_sum`) — header hash + LMDB body probe per block.
+                let t_drain_skipchk = std::time::Instant::now();
                 let block_hash = blockstore.get_block_hash(block_arc.as_ref());
                 let already_persisted = super::local_block::should_skip_block_store_write(
                     blockstore.as_ref(),
                     next_height,
                     &block_hash,
                     local_replay_max_height,
+                    0,
                 )
                 .unwrap_or(false);
+                let drain_skipchk_us = t_drain_skipchk.elapsed().as_micros() as u64;
                 if next_height == local_replay_max_height + 1 && local_replay_max_height > 0 {
                     info!(
                         "IBD: local replay complete at height {} — resuming block store writes \
@@ -3080,7 +3359,9 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         block_arc,
                         Arc::clone(&witnesses_storage),
                         next_height,
-                        vres.undo_log,
+                        undo_log_opt
+                            .take()
+                            .unwrap_or_else(blvm_consensus::reorganization::BlockUndoLog::new),
                     ));
                     pending_blocks_count_atomic.store(pending_blocks.len(), Ordering::Relaxed);
                     pending_blocks_bytes_atomic
@@ -3149,6 +3430,23 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         );
                     }
                 }
+                // R-361: `entry.block_arc` is the last reference on the skip path (and a
+                // harmless extra one on the flush path). Its deallocation — thousands of tx /
+                // script vectors — was the drain residual. Hand it, the witnesses and the
+                // undo log to `ibd-drop`; the channel push is the only cost left here.
+                {
+                    let item = DeferredDrop {
+                        block: Arc::clone(&entry.block_arc),
+                        witnesses: Arc::clone(&entry.witnesses_storage),
+                        undo_log: undo_log_opt.take(),
+                    };
+                    // Release this scope's refs first so the dropper's clones are the last
+                    // ones (`entry` has no reads after this point). When the dropper is off,
+                    // `send` drops `item` inline — the R-360 behaviour.
+                    drop(witnesses_storage);
+                    drop(entry);
+                    let _ = deferred_dropper.send(item);
+                }
                 recent_headers_buf.push_back(header_rc);
                 if recent_headers_buf.len() > 11 {
                     recent_headers_buf.pop_front();
@@ -3156,6 +3454,9 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
                 // Update shared validation height (allows download workers to track progress)
                 validation_height.store(next_height, Ordering::Relaxed);
+                if next_height == 190_000 || next_height == 199_000 {
+                    super::feeder_miss::dump_dist(true);
+                }
 
                 // Pure-function variants: pressure-scaled values from the captured base + budget.
                 // No `mem_mtx` acquisition on the per-block hot path.
@@ -3173,6 +3474,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 let flush_by_pressure_bytes = byte_cap.is_some_and(|cap| {
                     pending_storage_bytes >= cap && pending_blocks.len() >= pressure_min_blocks
                 });
+                // R-360: timed (`drain_flush_sum`) — reap + decide + spawn of the block flush.
+                let t_drain_flush = std::time::Instant::now();
                 // Non-blocking reap: collect any completed flush handles so we
                 // don't join on the hot path. Errors are propagated immediately.
                 {
@@ -3334,6 +3637,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 } else {
                     (0, 0)
                 };
+                super::ms_breakdown::note_drain_split_us(
+                    drain_skipchk_us,
+                    t_drain_flush.elapsed().as_micros() as u64,
+                );
                 if !skip_storage && pending_blocks.is_empty() && flush_ms > 0 {
                     debug!(
                         "Started async flush ({} blocks, interval_live={}, pressure={:?}, by_bytes={}, {} in flight)",
@@ -3561,7 +3868,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             } else {
                 f64::INFINITY
             };
+            // `buffer` is feeder occupancy only. Ahead parked in OrderedReadyBridge
+            // (`bridge_pending`) is invisible here — B-1 printed buffer:0 with bridge p50=37.
             let buffer_size = feeder_state.0.lock().0.len();
+            let bridge_pending = memory::BRIDGE_PENDING_COUNT.load(Ordering::Relaxed);
 
             // Show recent window as primary (current throughput); global avg as secondary context.
             let rate_str = if blocks_synced < 100 {
@@ -3572,12 +3882,13 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 format!("{average_rate:.1} blocks/s")
             };
             info!(
-                "IBD: {} / {} ({:.1}%) - {} - buffer: {} - ETA: {:.0}s",
+                "IBD: {} / {} ({:.1}%) - {} - buffer: {} - bridge: {} - ETA: {:.0}s",
                 next_height,
                 effective_end_height(),
                 (next_height as f64 / effective_end_height() as f64) * 100.0,
                 rate_str,
                 buffer_size,
+                bridge_pending,
                 eta
             );
             super::ms_breakdown::maybe_emit(next_height, false);
@@ -3772,10 +4083,29 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // Close append queue + join before dropping valjob_tx so in-flight appends can enqueue.
     engine_append.close_and_join();
     drop(valjob_tx);
+    // R-361: drain the deferred-drop queue before the workers are joined (frees are cheap;
+    // this only guarantees no block outlives the loop).
+    deferred_dropper.close_and_join();
     for worker in _validate_workers {
         if let Err(e) = worker.join() {
             warn!("IBD validate worker join error: {:?}", e);
         }
+    }
+    // R-359 barrier: every drained block's MuHash sub is in `muhash_rx` now (all worker
+    // senders are gone). Fold through the last drained height before any accumulator read.
+    if muhash_fold_active {
+        let last_drained = validation_height.load(Ordering::Relaxed);
+        muhash_fold_through(
+            &mut muhash_folder,
+            &muhash_rx,
+            &ibd_muhash_accumulator,
+            last_drained,
+        )?;
+        info!(
+            "IBD shutdown: MuHash folded through h={} (pending={})",
+            muhash_folder.folded_through(),
+            muhash_folder.pending_len()
+        );
     }
     info!("IBD shutdown: validation workers joined; stopping retire thread");
     // Signal retire thread to finish, then take any last flush and join UTXO workers.

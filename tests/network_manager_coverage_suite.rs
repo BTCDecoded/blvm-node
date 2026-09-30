@@ -48,6 +48,14 @@ async fn network_manager_headers_and_block_request_queues() {
     assert!(nm.complete_headers_request(peer, vec![header.clone()]));
     assert!(headers_rx.try_recv().is_ok());
 
+    // Timeout drops rx; leftover tx must not steal the next Headers (R-48 640k).
+    drop(nm.register_headers_request(peer));
+    let mut live_rx = nm.register_headers_request(peer);
+    assert_eq!(nm.pending_headers_count(peer), 2);
+    assert!(nm.complete_headers_request(peer, vec![header.clone()]));
+    assert!(live_rx.try_recv().is_ok());
+    assert_eq!(nm.pending_headers_count(peer), 0);
+
     let mut block_rx = nm.register_block_request(peer, [0xcd; 32]);
     let block = blvm_protocol::Block {
         header,

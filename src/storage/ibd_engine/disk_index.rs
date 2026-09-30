@@ -27,8 +27,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Default merge fan-in: compact when this many segments have accumulated.
 ///
 /// With fan-in = 8, the index holds at most ~8 segments in steady state:
-/// after the 8th push, the 8 oldest are merged into one (with GC), reducing count to 1.
+/// after the 8th push, the 8 oldest are merged (with GC) and written as one or
+/// more chunks of `COMPACT_MAX_ENTRIES` (default 20M — dest-bc mega-seg cap).
 /// Each subsequent push brings it to 2, 3, … up to 8, then compacts again.
+///
+/// R-268 358k: export GC'd then two spills left **5** overlapping segs. Background
+/// compact required `len >= fan_in` so 5 sat; dest-bc checkpoint compact had
+/// already collapsed to 1–2 (`cands ≈ 130 × segs`). After `GC'd>0`, compact the
+/// mid-band `[stall_split_min, fan_in)` too. HP-M4: 1–3 segs still do not fold.
 ///
 /// Memory bound: 8 bloom filters in RAM at ~8 MB each ≈ 64 MB max disk-tier overhead.
 /// Lookup bound: O(8) pread64 calls per block instead of O(all-time evictions).
@@ -72,6 +78,89 @@ fn spill_max_entries_from_env() -> usize {
         .unwrap_or(0)
 }
 
+/// dest-bc 650k: fan-in of 8 packed ~300M-entry megas (251 KiB directory buckets,
+/// 3570 ms / 1.6 GiB HOTPATH). dest-ba same height kept ~15 KiB buckets across 5–8
+/// smaller segs (33 ms / 31 MiB). HP-M4 `SPILL_MAX_ENTRIES` REVERT was spill-time
+/// split (more cold segs at 300–400k tip). This cap is **compact-output only**.
+/// `0` = unlimited (legacy one mega). Default 20M ≈ dest-ba / HotPin-min shape.
+pub(crate) const COMPACT_MAX_ENTRIES_DEFAULT: usize = 20_000_000;
+
+pub(crate) fn compact_max_entries_from_env() -> usize {
+    std::env::var("BLVM_IBD_COMPACT_MAX_ENTRIES")
+        .ok()
+        .and_then(|s| {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                t.parse().ok()
+            }
+        })
+        .unwrap_or(COMPACT_MAX_ENTRIES_DEFAULT)
+}
+
+/// Which cold segs a background/export compact pass merges.
+enum CompactScope {
+    /// Oldest `fan_in` cold segs (steady-state 20M chunks).
+    FanIn,
+    /// Every cold seg (checkpoint last pass / 1→1 tee). Writes output.
+    AllCold,
+    /// dest-bc 144G: k-way GC merge for the piggyback sink, **no** combined write.
+    /// AllCold of leftover 20M chunks after mega drain is still ENOSPC (67G extra).
+    TeeScan,
+    /// dest-bc megas: oldest oversized + last oversized (eat 300M files; do not
+    /// pair a mega with a trailing 20M spill — dest-bc Deletes live in later
+    /// megas). If only one mega exists, pair oldest + that mega (or mega + newest
+    /// when the mega is already cold[0]) so old Adds still GC (dest-bc 144G).
+    OldestAndNewest,
+}
+
+/// Inputs for `[IBD_FANIN_PHOTOCOPY_SKIP]` — count-neutral FanIn that cannot GC.
+struct FaninPhotocopySkip {
+    n_in: usize,
+    entries: usize,
+    cap: usize,
+    out_chunks: usize,
+    fence: i32,
+    last_fence: i32,
+    min_h: i32,
+}
+
+/// Peak extra disk for an AllCold write: dest-ba-like leftover (≤`fan_in` × 20M).
+fn checkpoint_allcold_write_ok(cold_len: usize, cold_entries: usize, fan: usize, max: usize) -> bool {
+    if cold_len <= fan {
+        return true;
+    }
+    if max == 0 {
+        return cold_len <= fan;
+    }
+    cold_entries <= max.saturating_mul(fan.max(1))
+}
+
+/// Indices into a cold-seg entry-count list for [`CompactScope::OldestAndNewest`].
+fn stall_pair_indices(entry_counts: &[usize], max: usize) -> Option<(usize, usize)> {
+    let n = entry_counts.len();
+    if n < 2 {
+        return None;
+    }
+    let Some(oi) = entry_counts.iter().position(|&c| max > 0 && c > max) else {
+        return Some((0, n - 1));
+    };
+    let last_over = entry_counts
+        .iter()
+        .rposition(|&c| max > 0 && c > max)
+        .expect("oi exists");
+    if oi == last_over {
+        if oi == 0 {
+            Some((0, n - 1))
+        } else {
+            Some((0, oi))
+        }
+    } else {
+        Some((oi, last_over))
+    }
+}
+
 fn height_range_of_entries(entries: &[OutputKV]) -> Option<(i32, i32)> {
     let mut min_h = i32::MAX;
     let mut max_h = i32::MIN;
@@ -87,6 +176,20 @@ fn height_range_of_entries(entries: &[OutputKV]) -> Option<(i32, i32)> {
 }
 
 static LAST_COMPACT_FINISH: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+static TEST_MAX_COMPACT_WRITE_INPUT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_COMPACT_WRITE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+fn note_compact_write_input(n: usize) {
+    let _ = n;
+    #[cfg(test)]
+    {
+        TEST_MAX_COMPACT_WRITE_INPUT.fetch_max(n, Ordering::Relaxed);
+        TEST_COMPACT_WRITE_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 pub struct DiskIndex {
     /// Segments oldest-to-newest. New segments are pushed to the back.
@@ -108,6 +211,10 @@ pub struct DiskIndex {
     /// GC fence applied by the last successful `compact_for_checkpoint_sync` pass.
     /// Used to skip redundant re-compaction when segment count is already 1.
     last_checkpoint_compact_fence: AtomicI32,
+    /// GC fence observed at the last background FanIn that actually ran.
+    /// `i32::MIN` = no fan-in yet. Used with [`Self::fanin_photocopy_skip`] so a
+    /// stuck fence cannot schedule an 8→8 rewrite of at-cap chunks.
+    last_fanin_gc_fence: AtomicI32,
 }
 
 /// RAII: holds `spill_write_busy` for the duration of a segment file write.
@@ -203,6 +310,7 @@ impl DiskIndex {
                 async_spill_busy: AtomicBool::new(false),
                 spill_write_busy: AtomicBool::new(false),
                 last_checkpoint_compact_fence: AtomicI32::new(-1),
+                last_fanin_gc_fence: AtomicI32::new(i32::MIN),
             },
             max_height,
         ))
@@ -640,6 +748,12 @@ impl DiskIndex {
         self.segments.read().len()
     }
 
+    /// Cold (non-HotPin) journal entries across on-disk segments.
+    /// Slice A: TeeScan input is this sum; 313M returned, 448M was still scanning at SIGKILL.
+    pub fn cold_entry_count(&self) -> u64 {
+        self.cold_len_and_entries().1 as u64
+    }
+
     /// Segments eligible for fan-in merge (not currently HotPinned).
     ///
     /// S2 keep-seed HotPin was destroyed by fan-in merging the seed into a ~590M cold
@@ -652,13 +766,61 @@ impl DiskIndex {
             .count()
     }
 
+    fn cold_len_and_entries(&self) -> (usize, usize) {
+        let r = self.segments.read();
+        let mut n = 0usize;
+        let mut entries = 0usize;
+        for s in r.iter() {
+            if s.has_hot_body() {
+                continue;
+            }
+            n += 1;
+            entries += s.entry_count;
+        }
+        (n, entries)
+    }
+
+    fn has_oversized_cold(&self) -> bool {
+        let max = compact_max_entries_from_env();
+        if max == 0 {
+            return false;
+        }
+        let fan = disk_fan_in_from_env();
+        // HP-M4: 1–3 segs must not fold. dest-bc 9 megas @666k is n≥fan_in — still fold
+        // pairs (do not 8-way 300M files; peak extra disk).
+        if self.compactable_count() < Self::stall_split_min_compactable(fan) {
+            return false;
+        }
+        self.oldest_oversized_cold(max).is_some()
+    }
+
+    /// dest-bc sat at 5–7 megas (`fan_in=8` never fired). Do **not** fold a lone
+    /// mega spill at 1–3 segs — that is HP-M4 (REVERT, 300–400k tip).
+    fn stall_split_min_compactable(fan_in: usize) -> usize {
+        fan_in.div_ceil(2).max(2)
+    }
+
+    /// Oldest cold (non-HotPin) segment larger than `max` — dest-bc 7-mega stall.
+    fn oldest_oversized_cold(&self, max: usize) -> Option<Arc<DiskSegment>> {
+        self.segments
+            .read()
+            .iter()
+            .find(|s| !s.has_hot_body() && s.entry_count > max)
+            .cloned()
+    }
+
     /// Kick segment compaction on a dedicated thread so age-tier merge workers stay free.
     ///
-    /// No-op if below fan-in, within the min interval, or another compact is already running.
+    /// dest-bc 660k sat at 7 megas (`fan_in=8` never fired). Stall-band oversized
+    /// cold folds **oldest oversized + last oversized** (GC + 20M cap). Peak extra
+    /// disk is two segs — take-all of dest-bc 144G would ENOSPC on 65G free.
+    /// HP-M4: 1–3 stay.
     pub fn compact_oldest_async(self: &Arc<Self>) {
         let fan_in = disk_fan_in_from_env();
         let len = self.compactable_count();
-        if len < fan_in {
+        let oversize = self.has_oversized_cold();
+        // HP-M4: 1–3 stay. Mid-band [stall_min, fan_in) is R-268 358k (5 segs).
+        if !oversize && len < Self::stall_split_min_compactable(fan_in) {
             return;
         }
         let now = SystemTime::now()
@@ -666,7 +828,11 @@ impl DiskIndex {
             .unwrap_or_default()
             .as_secs();
         let last = LAST_COMPACT_FINISH.load(Ordering::Relaxed);
-        if len < fan_in * 2 && now.saturating_sub(last) < COMPACT_MIN_INTERVAL_SECS {
+        if !oversize
+            && len >= Self::stall_split_min_compactable(fan_in)
+            && len < fan_in * 2
+            && now.saturating_sub(last) < COMPACT_MIN_INTERVAL_SECS
+        {
             return;
         }
         if self
@@ -681,31 +847,24 @@ impl DiskIndex {
             .name("utxo-disk-compact".into())
             .spawn(move || {
                 let t0 = std::time::Instant::now();
-                let mut passes = 0u32;
-                let mut result = Ok(());
-                let fan_in = disk_fan_in_from_env();
-                while disk.compactable_count() >= fan_in {
-                    result = disk.do_compact_plain();
-                    passes += 1;
-                    if result.is_err() {
-                        break;
-                    }
-                }
+                let result = disk.run_fanin_and_stall_split();
                 disk.is_compacting.store(false, Ordering::Release);
                 let compact_ms = t0.elapsed().as_millis() as u64;
-                if let Err(e) = result {
-                    tracing::error!(
-                        "DiskIndex: async compact failed after {} passes ({}ms): {e:#}",
-                        passes,
+                match result {
+                    Err(e) => tracing::error!(
+                        "DiskIndex: async compact failed ({}ms): {e:#}",
                         compact_ms
-                    );
-                } else if passes > 0 {
-                    tracing::info!(
-                        "DiskIndex: async compact finished passes={} segs_now={} compact_ms={}",
-                        passes,
-                        disk.segments.read().len(),
-                        compact_ms,
-                    );
+                    ),
+                    Ok((passes, stall_alls)) if passes > 0 || stall_alls > 0 => {
+                        tracing::info!(
+                            "DiskIndex: async compact finished passes={} stall_all={} segs_now={} compact_ms={}",
+                            passes,
+                            stall_alls,
+                            disk.segments.read().len(),
+                            compact_ms,
+                        );
+                    }
+                    Ok(_) => {}
                 }
             })
         {
@@ -749,11 +908,15 @@ impl DiskIndex {
     ///
     /// Returns `Err` if the piggyback sink fails (e.g. `MDB_MAP_FULL`) — callers must not
     /// treat a failed sink as a successful export (live 2026-07-13: warn-only hang for 11h).
+    /// Returns `(tee_merged_entries, cold_segs_at_start)`.
+    ///
+    /// `tee_merged_entries` is the number of live `Add`s the piggyback sink actually
+    /// saw. dest-bc: last pass no-op'd under `fan_in=8` → tee 0 → persist was memory overlay.
     pub fn compact_for_checkpoint_sync_with_sink<F>(
         &self,
         checkpoint_height: i32,
         on_live: Option<F>,
-    ) -> anyhow::Result<()>
+    ) -> anyhow::Result<(u64, usize)>
     where
         F: FnMut(super::types::OutputKV) -> anyhow::Result<()>,
     {
@@ -761,8 +924,13 @@ impl DiskIndex {
         // Background compact skips HotPin seed; checkpoint must merge everything for fence GC.
         self.clear_all_hot_pins();
         let fence = super::memory_run::gc_fence_snapshot();
+        let cold_segs_at_start = self.compactable_count();
         let initial_count = self.segments.read().len();
-        if initial_count <= 1
+        let need_tee = on_live.is_some();
+        // Need the 1→1 rewrite whenever a sink must visit disk Adds. Skipping when
+        // fence is unchanged is why C1's 1-seg tee never ran (dest-bc overlay-only persists).
+        if !need_tee
+            && initial_count <= 1
             && self.last_checkpoint_compact_fence.load(Ordering::Acquire) == fence
             && !self.is_compacting.load(Ordering::Relaxed)
         {
@@ -771,7 +939,7 @@ impl DiskIndex {
                 initial_count.max(1),
                 fence
             );
-            return Ok(());
+            return Ok((0, cold_segs_at_start));
         }
         // Spin until we own the CAS lock exclusively, waiting for any concurrent
         // background compaction to complete first.
@@ -790,69 +958,94 @@ impl DiskIndex {
         // of any background compaction that just finished.
         let initial_count = self.segments.read().len();
 
-        // CHECKPOINT_GC_FENCE was advanced before this call. Intermediate
-        // `do_compact_plain` already uses `gc_fence_snapshot()`, so fan-in merges
-        // apply the new fence. C1: do **not** force an extra 1→1 rewrite after
-        // reduction — tee `ExportSink` on the *last* pass (last fan-in merge, or
-        // the sole single-segment fence pass).
-        let mut remaining = initial_count.max(1);
-        let mut reduction_passes = 0usize;
-        let fan_in = disk_fan_in_from_env();
-        while remaining > 1 {
-            remaining = remaining.saturating_sub(fan_in).saturating_add(1);
-            reduction_passes += 1;
-        }
-        // At least one pass when a single segment must advance the fence for export.
-        let total_passes = reduction_passes.max(1);
-
         tracing::debug!(
-            "compact_for_checkpoint_sync: {} segments, {} passes (fence={}, C1 no +1 rewrite)",
+            "compact_for_checkpoint_sync: {} segments (fence={}, dest-bc pair drain then tee)",
             initial_count,
-            total_passes,
             super::memory_run::gc_fence_snapshot(),
         );
 
         let t_fanin = std::time::Instant::now();
-        let result = (|| -> anyhow::Result<()> {
-            if total_passes > 1 {
-                for _ in 0..(total_passes - 1) {
-                    if self.segments.read().is_empty() {
+        let result = (|| -> anyhow::Result<u64> {
+            // dest-bc 91s / ENOSPC: do **not** FanIn or AllCold 8×300M. Drain
+            // megas with stall pairs (peak extra two segs), then last-pass tee.
+            let max = compact_max_entries_from_env();
+            if max > 0 {
+                for _ in 0..128 {
+                    let over = self
+                        .segments
+                        .read()
+                        .iter()
+                        .filter(|s| !s.has_hot_body() && s.entry_count > max)
+                        .count();
+                    if over == 0 {
                         break;
                     }
-                    self.do_compact_plain()?;
+                    self.do_compact_stall_pair_plain()?;
+                    let over_after = self
+                        .segments
+                        .read()
+                        .iter()
+                        .filter(|s| !s.has_hot_body() && s.entry_count > max)
+                        .count();
+                    // Pair of old Adds vs new Deletes can tee 0 (all GC'd / leftover
+                    // Deletes). Stopping on wrote==0 left dest-bc middle megas.
+                    if over_after >= over {
+                        break;
+                    }
                 }
             }
             let fanin_ms = t_fanin.elapsed().as_millis() as u64;
-            if !self.segments.read().is_empty() {
-                match on_live {
-                    Some(cb) => self.do_compact_with_sink_s0(checkpoint_height, cb, fanin_ms)?,
-                    None => {
-                        self.do_compact_plain()?;
-                        tracing::info!(
-                            "[IBD_COMPACT_S0] ckpt={} fanin_ms={} merge_ms=0 sink_ms=0 \
-                             seg_pass1_ms=0 bloom_write_ms=0 directory_ms=0 swap_ms=0 \
-                             (no piggyback sink)",
-                            checkpoint_height,
-                            fanin_ms,
-                        );
+            if self.segments.read().is_empty() {
+                return Ok(0);
+            }
+            let fan = disk_fan_in_from_env();
+            let (cold_len, cold_entries) = {
+                let r = self.segments.read();
+                let cold: Vec<_> = r.iter().filter(|s| !s.has_hot_body()).collect();
+                (
+                    cold.len(),
+                    cold.iter().map(|s| s.entry_count).sum::<usize>(),
+                )
+            };
+            let last = if checkpoint_allcold_write_ok(cold_len, cold_entries, fan, max)
+            {
+                CompactScope::AllCold
+            } else {
+                CompactScope::TeeScan
+            };
+            match on_live {
+                Some(cb) => self.do_compact_impl(checkpoint_height, cb, fanin_ms, last),
+                None => {
+                    if matches!(last, CompactScope::AllCold) {
+                        let _ = self.do_compact_impl(-1, |_| Ok(()), fanin_ms, last)?;
                     }
+                    tracing::info!(
+                        "[IBD_COMPACT_S0] ckpt={} fanin_ms={} merge_ms=0 sink_ms=0 \
+                         seg_pass1_ms=0 bloom_write_ms=0 directory_ms=0 swap_ms=0 \
+                         (no piggyback sink)",
+                        checkpoint_height,
+                        fanin_ms,
+                    );
+                    Ok(0)
                 }
             }
-            Ok(())
         })();
 
         self.last_checkpoint_compact_fence
             .store(fence, Ordering::Release);
         self.is_compacting.store(false, Ordering::Release);
-        result
+        result.map(|tee| (tee, cold_segs_at_start))
     }
 
-    /// Compact oldest segments when compactable count ≥ `fan_in` (default 8). Safe to call
-    /// after releasing any memory-age `is_merging` lock — this is the multi-minute path.
+    /// Compact oldest segments when compactable count ≥ `fan_in` (default 8). Also
+    /// fold dest-bc megas (oldest+last oversized GC) when compactable ≥ stall min (`7` @660k).
+    /// Safe to call after releasing any memory-age `is_merging` lock.
     pub fn compact_oldest_if_needed(&self) -> anyhow::Result<()> {
         let fan_in = disk_fan_in_from_env();
         let len = self.compactable_count();
-        if len < fan_in {
+        let oversize = self.has_oversized_cold();
+        // HP-M4: 1–3 stay. Mid-band [stall_min, fan_in) is R-268 358k (5 segs).
+        if !oversize && len < Self::stall_split_min_compactable(fan_in) {
             return Ok(());
         }
         let now = SystemTime::now()
@@ -860,10 +1053,14 @@ impl DiskIndex {
             .unwrap_or_default()
             .as_secs();
         let last = LAST_COMPACT_FINISH.load(Ordering::Relaxed);
-        if len < fan_in * 2 && now.saturating_sub(last) < COMPACT_MIN_INTERVAL_SECS {
+        if !oversize
+            && len >= Self::stall_split_min_compactable(fan_in)
+            && len < fan_in * 2
+            && now.saturating_sub(last) < COMPACT_MIN_INTERVAL_SECS
+        {
             return Ok(());
         }
-        // CAS: only one compaction at a time. Skip if another is in progress —
+        // CAS: only one compaction runs at a time. Skip if another is in progress —
         // that compaction will re-check after finishing.
         if self
             .is_compacting
@@ -877,44 +1074,175 @@ impl DiskIndex {
             return Ok(());
         }
         let t0 = std::time::Instant::now();
-        // Loop: each pass merges the oldest `fan_in` cold segments (HotPin bodies skipped).
-        let mut result = Ok(());
-        let mut passes = 0u32;
-        while self.compactable_count() >= fan_in {
-            result = self.do_compact_plain();
-            passes += 1;
-            if result.is_err() {
-                break;
-            }
-        }
+        let result = self.run_fanin_and_stall_split();
         self.is_compacting.store(false, Ordering::Release);
         let compact_ms = t0.elapsed().as_millis() as u64;
-        if passes > 0 {
-            tracing::info!(
-                "DiskIndex: compact finished passes={} segs_now={} compact_ms={}",
-                passes,
-                self.segments.read().len(),
-                compact_ms,
-            );
+        if let Ok((passes, stall_alls)) = &result {
+            if *passes > 0 || *stall_alls > 0 {
+                tracing::info!(
+                    "DiskIndex: compact finished passes={} stall_all={} segs_now={} compact_ms={}",
+                    passes,
+                    stall_alls,
+                    self.segments.read().len(),
+                    compact_ms,
+                );
+            }
         }
-        result
+        result.map(|_| ())
     }
 
-    fn do_compact_with_sink_s0<F>(
-        &self,
-        checkpoint_height: i32,
-        on_live: F,
-        fanin_ms: u64,
-    ) -> anyhow::Result<()>
-    where
-        F: FnMut(OutputKV) -> anyhow::Result<()>,
-    {
-        self.do_compact_impl(checkpoint_height, on_live, fanin_ms)
+    /// dest-bc 7-mega stall: take-all of 144G dest would ENOSPC (65G free). Fold
+    /// oldest oversized + last oversized until no mega remains, then fan-in 20M
+    /// chunks. dest-bc 01:31Z FanIn of 8×776M is forbidden while oversized; after
+    /// 20M-cap drain, fan-in of at-cap chunks with no GC must not rewrite 32×.
+    fn run_fanin_and_stall_split(&self) -> anyhow::Result<(u32, u32)> {
+        let fan_in = disk_fan_in_from_env();
+        let max = compact_max_entries_from_env();
+        let mut passes = 0u32;
+        let mut stall_alls = 0u32;
+        for _ in 0..128 {
+            if self.has_oversized_cold() {
+                let over = self
+                    .segments
+                    .read()
+                    .iter()
+                    .filter(|s| !s.has_hot_body() && max > 0 && s.entry_count > max)
+                    .count();
+                self.do_compact_stall_pair_plain()?;
+                stall_alls += 1;
+                let over_after = self
+                    .segments
+                    .read()
+                    .iter()
+                    .filter(|s| !s.has_hot_body() && max > 0 && s.entry_count > max)
+                    .count();
+                if over_after >= over {
+                    break;
+                }
+                continue;
+            }
+            if self.compactable_count() >= fan_in {
+                if let Some(skip) = self.fanin_photocopy_skip(fan_in, max) {
+                    tracing::info!(
+                        "[IBD_FANIN_PHOTOCOPY_SKIP] n_in={} entries={} cap={} out_chunks={} \
+                         fence={} last_fanin_fence={} min_h={} — count-neutral without GC, not running",
+                        skip.n_in,
+                        skip.entries,
+                        skip.cap,
+                        skip.out_chunks,
+                        skip.fence,
+                        skip.last_fence,
+                        skip.min_h,
+                    );
+                    break;
+                }
+                let (n0, e0) = self.cold_len_and_entries();
+                self.do_compact_plain()?;
+                self.last_fanin_gc_fence
+                    .store(super::memory_run::gc_fence_snapshot(), Ordering::Release);
+                passes += 1;
+                let (n1, e1) = self.cold_len_and_entries();
+                // 8×20M with no GC: n and entries unchanged — dest-bc 7.4 must not
+                // rewrite that 32 times (32 × 160M × 56B). Pre-check should have
+                // skipped; this is the last line of defense.
+                if n1 >= n0 && e1 >= e0 {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+        // R-268 358k: 5 overlapping segs sat below fan_in=8 after export GC + re-spill.
+        // dest-bc checkpoint compact had already collapsed to 1–2. HP-M4 1–3 stay.
+        // Do not chain after a mega stall-pair drain (middle tinies must remain).
+        if stall_alls == 0 {
+            let len = self.compactable_count();
+            let min = Self::stall_split_min_compactable(fan_in);
+            if len >= min && len < fan_in {
+                if let Some(skip) = self.fanin_photocopy_skip(len, max) {
+                    tracing::info!(
+                        "[IBD_FANIN_PHOTOCOPY_SKIP] n_in={} entries={} cap={} out_chunks={} \
+                         fence={} last_fanin_fence={} min_h={} — mid-band count-neutral without GC, not running",
+                        skip.n_in,
+                        skip.entries,
+                        skip.cap,
+                        skip.out_chunks,
+                        skip.fence,
+                        skip.last_fence,
+                        skip.min_h,
+                    );
+                } else {
+                    tracing::info!(
+                        "DiskIndex: mid-band compact n={} (below fan_in={}, dest-bc 358k 2-seg shape)",
+                        len,
+                        fan_in,
+                    );
+                    self.do_compact_impl(-1, |_| Ok(()), 0, CompactScope::AllCold)?;
+                    self.last_fanin_gc_fence
+                        .store(super::memory_run::gc_fence_snapshot(), Ordering::Release);
+                    passes += 1;
+                }
+            }
+        }
+        Ok((passes, stall_alls))
     }
 
-    fn do_compact_plain(&self) -> anyhow::Result<()> {
+    /// Skip FanIn when output chunk count cannot fall and GC cannot shrink the inputs.
+    ///
+    /// 400k apply: 142111092 / 20e6 = 7.11 → 8 files, fence stuck at 180000, nine
+    /// 50s photocopies. The leftover after a 20M split is ~2.1M, so "every file
+    /// near cap" misses that shape. Load-bearing test: `ceil(sum/cap) >= n_in`.
+    ///
+    /// GC-can't-help: all input `min_height > fence` (journal entirely above the
+    /// snapshot export), or fence equals the last fan-in that already ran.
+    /// Unlimited cap (`0`) still 8→1 and is never skipped here.
+    fn fanin_photocopy_skip(&self, fan_in: usize, cap: usize) -> Option<FaninPhotocopySkip> {
+        if cap == 0 {
+            return None;
+        }
+        let fence = super::memory_run::gc_fence_snapshot();
+        let last = self.last_fanin_gc_fence.load(Ordering::Acquire);
+        let r = self.segments.read();
+        let cold: Vec<&Arc<DiskSegment>> = r.iter().filter(|s| !s.has_hot_body()).collect();
+        if cold.len() < fan_in {
+            return None;
+        }
+        let inputs = &cold[..fan_in];
+        let n_in = inputs.len();
+        let entries: usize = inputs.iter().map(|s| s.entry_count).sum();
+        let min_h = inputs
+            .iter()
+            .map(|s| s.height_range().0)
+            .min()
+            .unwrap_or(i32::MIN);
+        let out_chunks = entries.div_ceil(cap);
+        if out_chunks < n_in {
+            return None;
+        }
+        let fence_stuck = last != i32::MIN && fence == last;
+        let journal_above_fence = min_h > fence;
+        if !fence_stuck && !journal_above_fence {
+            return None;
+        }
+        Some(FaninPhotocopySkip {
+            n_in,
+            entries,
+            cap,
+            out_chunks,
+            fence,
+            last_fence: last,
+            min_h,
+        })
+    }
+
+    fn do_compact_plain(&self) -> anyhow::Result<u64> {
         // Plain fan-in: noop sink; ckpt=-1 means ExportTee still visits Adds (legacy).
-        self.do_compact_impl(-1, |_| Ok(()), 0)
+        self.do_compact_impl(-1, |_| Ok(()), 0, CompactScope::FanIn)
+    }
+
+    /// dest-bc megas: merge oldest oversized + last oversized (GC + 20M cap). Leaves HotPin.
+    fn do_compact_stall_pair_plain(&self) -> anyhow::Result<u64> {
+        self.do_compact_impl(-1, |_| Ok(()), 0, CompactScope::OldestAndNewest)
     }
 
     fn do_compact_impl<F>(
@@ -922,25 +1250,43 @@ impl DiskIndex {
         checkpoint_height: i32,
         mut on_live: F,
         fanin_ms: u64,
-    ) -> anyhow::Result<()>
+        scope: CompactScope,
+    ) -> anyhow::Result<u64>
     where
         F: FnMut(OutputKV) -> anyhow::Result<()>,
     {
-        // Snapshot the oldest `fan_in` cold (non-HotPin) segments; pinned seed/newest stay.
-        // They remain queryable during compaction.
+        let tee_only = matches!(scope, CompactScope::TeeScan);
+        // Snapshot cold (non-HotPin) segments; pinned seed/newest stay queryable.
+        // Export last pass takes every remaining cold seg (1→1 included). Background
+        // fan-in still requires `fan_in`; dest-bc megas fold oldest+last oversized (peak two segs).
         let to_compact: Vec<Arc<DiskSegment>> = {
             let r = self.segments.read();
             let fan = disk_fan_in_from_env();
             let cold: Vec<Arc<DiskSegment>> =
                 r.iter().filter(|s| !s.has_hot_body()).cloned().collect();
-            if cold.len() < fan {
-                Vec::new()
-            } else {
-                cold[..fan].to_vec()
+            match scope {
+                CompactScope::AllCold | CompactScope::TeeScan => cold,
+                CompactScope::FanIn => {
+                    if cold.len() < fan {
+                        Vec::new()
+                    } else {
+                        cold[..fan].to_vec()
+                    }
+                }
+                CompactScope::OldestAndNewest => {
+                    let max = compact_max_entries_from_env();
+                    let counts: Vec<usize> = cold.iter().map(|s| s.entry_count).collect();
+                    match stall_pair_indices(&counts, max) {
+                        Some((i, j)) if i != j => {
+                            vec![cold[i].clone(), cold[j].clone()]
+                        }
+                        _ => Vec::new(),
+                    }
+                }
             }
         };
         if to_compact.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
 
         let total_in: usize = to_compact.iter().map(|s| s.entry_count).sum();
@@ -1117,6 +1463,7 @@ impl DiskIndex {
             sink_err: std::sync::Arc<std::sync::Mutex<Option<anyhow::Error>>>,
             merge_ns: std::sync::Arc<AtomicU64>,
             sink_ns: std::sync::Arc<AtomicU64>,
+            tee_merged: std::sync::Arc<AtomicU64>,
         }
 
         impl<I, F> Iterator for ExportTee<I, F>
@@ -1148,18 +1495,25 @@ impl DiskIndex {
                         }
                         return None;
                     }
+                    self.tee_merged.fetch_add(1, Ordering::Relaxed);
                 }
                 Some(e)
             }
         }
 
-        // Stream survivors directly to a new segment file. No output Vec.
-        let idx = self.next_idx.fetch_add(1, Ordering::Relaxed);
+        // Stream survivors to one or more segment files (dest-bc compact-output cap).
         let sink_err = std::sync::Arc::new(std::sync::Mutex::new(None));
         super::disk_segment::reset_write_from_iter_stats();
         let merge_ns = std::sync::Arc::new(AtomicU64::new(0));
         let sink_ns = std::sync::Arc::new(AtomicU64::new(0));
-        let new_seg = {
+        let tee_merged = std::sync::Arc::new(AtomicU64::new(0));
+        let compact_max = compact_max_entries_from_env();
+        let chunk_max = if compact_max == 0 {
+            usize::MAX
+        } else {
+            compact_max
+        };
+        if tee_only {
             let iter = ExportTee {
                 inner: merge_iter,
                 ckpt: checkpoint_height,
@@ -1167,24 +1521,74 @@ impl DiskIndex {
                 sink_err: std::sync::Arc::clone(&sink_err),
                 merge_ns: std::sync::Arc::clone(&merge_ns),
                 sink_ns: std::sync::Arc::clone(&sink_ns),
+                tee_merged: std::sync::Arc::clone(&tee_merged),
+            };
+            for _ in iter {}
+            if let Some(err) = sink_err.lock().ok().and_then(|mut g| g.take()) {
+                return Err(err.context(
+                    "piggyback export sink failed during dest-bc tee-scan (often MDB_MAP_FULL)",
+                ));
+            }
+            let tee = tee_merged.load(Ordering::Relaxed);
+            tracing::info!(
+                "[IBD_COMPACT_S0] ckpt={} fanin_ms={} merge_ms={} sink_ms={} \
+                 dest-bc tee-scan (no AllCold write, {} entries in {} segs) tee_merged={}",
+                checkpoint_height,
+                fanin_ms,
+                merge_ns.load(Ordering::Relaxed) / 1_000_000,
+                sink_ns.load(Ordering::Relaxed) / 1_000_000,
+                total_in,
+                to_compact.len(),
+                tee,
+            );
+            return Ok(tee);
+        }
+        note_compact_write_input(total_in);
+        let mut new_segs: Vec<Arc<DiskSegment>> = Vec::new();
+        {
+            let iter = ExportTee {
+                inner: merge_iter,
+                ckpt: checkpoint_height,
+                on_live,
+                sink_err: std::sync::Arc::clone(&sink_err),
+                merge_ns: std::sync::Arc::clone(&merge_ns),
+                sink_ns: std::sync::Arc::clone(&sink_ns),
+                tee_merged: std::sync::Arc::clone(&tee_merged),
             };
             let mut peekable = iter.peekable();
-            if peekable.peek().is_some() {
-                Some(Arc::new(DiskSegment::write_from_iter(
+            while peekable.peek().is_some() {
+                let idx = self.next_idx.fetch_add(1, Ordering::Relaxed);
+                let cap = if chunk_max == usize::MAX {
+                    total_in.max(1)
+                } else {
+                    chunk_max
+                };
+                match DiskSegment::write_from_iter(
                     &self.seg_dir,
                     idx,
-                    total_in, // bloom filter capacity (upper bound)
-                    peekable,
-                )?))
-            } else {
-                None
+                    cap,
+                    peekable.by_ref().take(chunk_max),
+                ) {
+                    Ok(seg) => {
+                        if seg.entry_count == 0 {
+                            let _ = std::fs::remove_file(&seg.path);
+                            break;
+                        }
+                        new_segs.push(Arc::new(seg));
+                    }
+                    Err(e) => {
+                        for s in &new_segs {
+                            let _ = std::fs::remove_file(&s.path);
+                        }
+                        return Err(e);
+                    }
+                }
             }
         };
         let merge_ns = merge_ns.load(Ordering::Relaxed);
         let sink_ns = sink_ns.load(Ordering::Relaxed);
         if let Some(err) = sink_err.lock().ok().and_then(|mut g| g.take()) {
-            // Drop the new segment file if we wrote a partial merge before sink failure.
-            if let Some(seg) = new_seg.as_ref() {
+            for seg in &new_segs {
                 let _ = std::fs::remove_file(&seg.path);
             }
             return Err(err.context(
@@ -1193,13 +1597,13 @@ impl DiskIndex {
             ));
         }
 
-        let total_out = new_seg.as_ref().map_or(0, |s| s.entry_count);
+        let total_out: usize = new_segs.iter().map(|s| s.entry_count).sum();
         let (seg_pass1_ms, directory_ms) = super::disk_segment::take_write_from_iter_stats();
         let merge_ms = merge_ns / 1_000_000;
         let sink_ms = sink_ns / 1_000_000;
         let bloom_write_ms = seg_pass1_ms.saturating_sub(merge_ms + sink_ms);
 
-        // Atomically swap old segments for the new merged one.
+        // Atomically swap old segments for the new merged chunk(s).
         let t_swap = std::time::Instant::now();
         {
             let mut w = self.segments.write();
@@ -1211,8 +1615,8 @@ impl DiskIndex {
                 .position(|s| compact_ptrs.contains(&Arc::as_ptr(s)))
                 .unwrap_or(0);
             segs.retain(|s| !compact_ptrs.contains(&Arc::as_ptr(s)));
-            if let Some(seg) = new_seg {
-                segs.insert(insert_pos, seg);
+            for (i, seg) in new_segs.into_iter().enumerate() {
+                segs.insert(insert_pos + i, seg);
             }
         }
 
@@ -1256,7 +1660,7 @@ impl DiskIndex {
                 .as_secs(),
             Ordering::Relaxed,
         );
-        Ok(())
+        Ok(tee_merged.load(Ordering::Relaxed))
     }
 
     /// Batch query all disk segments (oldest-to-newest) for unresolved keys.
@@ -1365,6 +1769,42 @@ mod tests {
             assert_eq!(disk_fan_in_from_env(), 32);
             std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
         }
+    }
+
+    /// dest-bc after M0+M6 fold: 20M chunks at front, remaining megas. Next pair
+    /// must eat a mega, not re-merge chunk 0 with the newest mega.
+    #[test]
+    fn dest_bc_stall_pair_indices_eats_mega_not_front_chunk() {
+        let counts = [4usize, 4, 4, 9, 9, 9, 9, 9];
+        assert_eq!(stall_pair_indices(&counts, 4), Some((3, 7)));
+    }
+
+    /// dest-bc 144G: old Adds in a tiny front seg, Deletes in the newest mega.
+    #[test]
+    fn dest_bc_stall_pair_indices_oldest_add_plus_newest_mega() {
+        let counts = [1usize, 1, 1, 9];
+        assert_eq!(stall_pair_indices(&counts, 4), Some((0, 3)));
+    }
+
+    /// dest-bc Deletes live in later megas, not the newest 20M spill. Pair both
+    /// megas — `(1, 3)` would merge a mega with a chunk and leave the spend.
+    #[test]
+    fn dest_bc_stall_pair_indices_last_oversized_not_newest_chunk() {
+        let counts = [4usize, 9, 9, 4];
+        assert_eq!(stall_pair_indices(&counts, 4), Some((1, 2)));
+        let front_mega = [9usize, 4, 4, 4];
+        assert_eq!(stall_pair_indices(&front_mega, 4), Some((0, 3)));
+    }
+
+    #[test]
+    fn dest_bc_checkpoint_allcold_write_ok_dest_ba_not_144g() {
+        assert!(checkpoint_allcold_write_ok(1, 9, 8, 4));
+        assert!(checkpoint_allcold_write_ok(5, 20_000_000 * 5, 8, 20_000_000));
+        assert!(checkpoint_allcold_write_ok(9, 18, 8, 20_000_000));
+        assert!(
+            !checkpoint_allcold_write_ok(18, 72, 8, 4),
+            "dest-bc leftover 20M chunks must not AllCold-write 144G"
+        );
     }
 
     #[serial_test::serial(ibd)]
@@ -1800,6 +2240,438 @@ mod tests {
 
     #[serial_test::serial(ibd)]
     #[test]
+    fn compact_max_entries_default_20m_zero_unlimited() {
+        unsafe {
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+            assert_eq!(
+                compact_max_entries_from_env(),
+                COMPACT_MAX_ENTRIES_DEFAULT
+            );
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "");
+            assert_eq!(
+                compact_max_entries_from_env(),
+                COMPACT_MAX_ENTRIES_DEFAULT
+            );
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "0");
+            assert_eq!(compact_max_entries_from_env(), 0);
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "4");
+            assert_eq!(compact_max_entries_from_env(), 4);
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+    }
+
+    /// dest-bc 650k: fan-in packed 8 segs into one mega. Cap must split compact output
+    /// (not HP-M4 spill-split) and still resolve every key.
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn dest_bc_compact_max_splits_fanin_mega_and_resolves() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::set_var("BLVM_IBD_DISK_FAN_IN", "3");
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "4");
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        let mk = |i: u8| {
+            let mut k = [0u8; 36];
+            k[0] = i;
+            k
+        };
+        // 3 cold segs × 3 Adds = 9 live entries. fan_in=3 compact → 4+4+1 under cap=4.
+        for s in 0u8..3 {
+            let entries: Vec<OutputKV> = (0u8..3)
+                .map(|j| {
+                    let i = s * 3 + j + 1;
+                    OutputKV::new_add(mk(i), 10 + i32::from(i), 1000 + u64::from(i))
+                })
+                .collect();
+            disk.push_run_no_compact(MemoryRun::build(entries))
+                .expect("spill");
+        }
+        assert_eq!(disk.segment_count(), 3);
+        disk.do_compact_plain().expect("compact");
+        assert_eq!(
+            disk.segment_count(),
+            3,
+            "9 live entries @ compact_max=4 → 3 chunks (dest-bc mega split)"
+        );
+        let keys: Vec<_> = (1u8..=9).map(mk).collect();
+        let mut ids = vec![OutputId::MAX; 9];
+        disk.batch_query(&keys, &mut ids, 100);
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(*id, 1001 + i as u64, "miss after compact split at {}", i + 1);
+        }
+
+        unsafe {
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "0");
+        }
+        for s in 0u8..3 {
+            let i = 20 + s;
+            disk.push_run_no_compact(MemoryRun::build(vec![OutputKV::new_add(
+                mk(i),
+                50,
+                2000 + u64::from(i),
+            )]))
+            .expect("spill2");
+        }
+        disk.do_compact_plain().expect("unlimited compact");
+        let n = disk.segment_count();
+        assert!(
+            n <= 4,
+            "unlimited compact must not keep dest-bc-style 3-way split, segs={n}"
+        );
+
+        unsafe {
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        std::mem::forget(tmp);
+    }
+
+    /// dest-bc 660k sat at 7 megas — `fan_in=8` never ran. Oversized cold at
+    /// compactable ≥4 folds oldest+newest (20M cap), not wait for 8 segs.
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn dest_bc_fanin_stall_compacts_all_cold_below_fan_in() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN"); // default 8 → stall min 4
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "4");
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        let mk = |i: u8| {
+            let mut k = [0u8; 36];
+            k[0] = i;
+            k
+        };
+        // dest-bc stall: ≥4 cold segs, one mega. 3 tiny + 9-entry mega.
+        for t in 0u8..3 {
+            disk.push_run_no_compact(MemoryRun::build(vec![OutputKV::new_add(
+                mk(100 + t),
+                5,
+                50 + u64::from(t),
+            )]))
+            .expect("tiny");
+        }
+        let entries: Vec<OutputKV> = (1u8..=9)
+            .map(|i| OutputKV::new_add(mk(i), 10, 1000 + u64::from(i)))
+            .collect();
+        disk.push_run_no_compact(MemoryRun::build(entries))
+            .expect("one mega");
+        assert_eq!(disk.segment_count(), 4, "below fan_in=8 — dest-bc stall shape");
+        disk.compact_oldest_if_needed()
+            .expect("stall pair compact oversized below fan_in");
+        let n = disk.segment_count();
+        assert_eq!(
+            n, 5,
+            "oldest tiny+mega @ cap=4 → 3 chunks + 2 leftover tinies (not take-all to 3)"
+        );
+        let keys: Vec<_> = (1u8..=9).chain(100u8..=102).map(mk).collect();
+        let mut ids = vec![OutputId::MAX; keys.len()];
+        disk.batch_query(&keys, &mut ids, 100);
+        for i in 0..9 {
+            assert_eq!(ids[i], 1001 + i as u64, "miss after stall pair at {}", i + 1);
+        }
+        for i in 0..3 {
+            assert_eq!(ids[9 + i], 50 + i as u64, "tiny miss at {}", i);
+        }
+
+        unsafe {
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "0");
+        }
+        let tmp2 = tempfile::tempdir().expect("tempdir2");
+        let (disk2, _) = DiskIndex::new_empty(tmp2.path()).expect("DiskIndex");
+        let disk2 = Arc::new(disk2);
+        for t in 0u8..3 {
+            disk2
+                .push_run_no_compact(MemoryRun::build(vec![OutputKV::new_add(
+                    mk(100 + t),
+                    5,
+                    50 + u64::from(t),
+                )]))
+                .expect("tiny2");
+        }
+        disk2
+            .push_run_no_compact(MemoryRun::build(
+                (1u8..=9)
+                    .map(|i| OutputKV::new_add(mk(i), 10, 1000 + u64::from(i)))
+                    .collect(),
+            ))
+            .expect("unlimited mega");
+        disk2.compact_oldest_if_needed().expect("no stall at 0");
+        assert_eq!(
+            disk2.segment_count(),
+            4,
+            "COMPACT_MAX=0 must leave dest-bc mega (no stall pair)"
+        );
+
+        unsafe {
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        std::mem::forget(tmp);
+        std::mem::forget(tmp2);
+    }
+
+    /// HP-M4 REVERT: a lone mega spill at 1–3 segs must not size-split (300–400k tip).
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn dest_bc_lone_mega_spill_must_not_hp_m4_split() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "4");
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        let mk = |i: u8| {
+            let mut k = [0u8; 36];
+            k[0] = i;
+            k
+        };
+        disk.push_run_no_compact(MemoryRun::build(
+            (1u8..=9)
+                .map(|i| OutputKV::new_add(mk(i), 10, 1000 + u64::from(i)))
+                .collect(),
+        ))
+        .expect("lone mega");
+        disk.compact_oldest_if_needed().expect("must no-op");
+        assert_eq!(
+            disk.segment_count(),
+            1,
+            "1 cold mega < stall min 4 must not HP-M4 split"
+        );
+        for t in 0u8..2 {
+            disk.push_run_no_compact(MemoryRun::build(vec![OutputKV::new_add(
+                mk(50 + t),
+                5,
+                10 + u64::from(t),
+            )]))
+            .expect("tiny");
+        }
+        assert_eq!(disk.segment_count(), 3);
+        disk.compact_oldest_if_needed().expect("still no-op at 3");
+        assert_eq!(
+            disk.segment_count(),
+            3,
+            "3 cold segs is HP-M4 band, not dest-bc 5–7 stall"
+        );
+        unsafe {
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        std::mem::forget(tmp);
+    }
+
+    /// dest-bc 144G vs dest-ba 67G: spends of old Adds live in later megas.
+    /// Stall folds oldest+newest (not take-all of every mega — peak extra is two segs).
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn dest_bc_stall_take_all_gcs_spend_in_later_mega() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "4");
+        }
+        super::super::set_gc_fence(100);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        let mk = |i: u8| {
+            let mut k = [0u8; 36];
+            k[0] = i;
+            k
+        };
+        disk.push_run_no_compact(MemoryRun::build(vec![OutputKV::new_add(
+            mk(1),
+            10,
+            1000,
+        )]))
+        .expect("old add");
+        for t in 0u8..2 {
+            disk.push_run_no_compact(MemoryRun::build(vec![OutputKV::new_add(
+                mk(100 + t),
+                5,
+                50 + u64::from(t),
+            )]))
+            .expect("tiny");
+        }
+        let mut later: Vec<OutputKV> = vec![OutputKV::new_delete(mk(1), 50)];
+        later.extend((2u8..=9).map(|i| OutputKV::new_add(mk(i), 10, 1000 + u64::from(i))));
+        disk.push_run_no_compact(MemoryRun::build(later))
+            .expect("later mega with spend");
+        assert_eq!(disk.segment_count(), 4);
+        let mut pre = [OutputId::MAX];
+        disk.batch_query(&[mk(1)], &mut pre, 40);
+        assert_eq!(pre[0], 1000, "Add must resolve before stall pair (before Delete height)");
+        disk.compact_oldest_if_needed()
+            .expect("stall pair GC");
+        let mut post = [OutputId::MAX];
+        disk.batch_query(&[mk(1)], &mut post, 40);
+        assert_eq!(
+            post[0],
+            OutputId::MAX,
+            "Delete in later mega must GC the dest-bc old Add"
+        );
+        let keys: Vec<_> = (2u8..=9).chain(100u8..=101).map(mk).collect();
+        let mut ids = vec![OutputId::MAX; keys.len()];
+        disk.batch_query(&keys, &mut ids, 100);
+        for i in 0..8 {
+            assert_eq!(ids[i], 1002 + i as u64, "live miss at {}", i + 2);
+        }
+        assert_eq!(ids[8], 50);
+        assert_eq!(ids[9], 51);
+        unsafe {
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        super::super::set_gc_fence(i32::MAX);
+        std::mem::forget(tmp);
+    }
+
+    /// dest-bc 144G: Delete sits in a later mega; newest is a 20M-shaped chunk.
+    /// Pairing mega+chunk would miss the spend. Last-oversized pair must GC.
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn dest_bc_stall_pair_gcs_spend_in_later_mega_not_newest_chunk() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "4");
+        }
+        super::super::set_gc_fence(100);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        let mk = |i: u8| {
+            let mut k = [0u8; 36];
+            k[0] = i;
+            k
+        };
+        disk.push_run_no_compact(MemoryRun::build(vec![OutputKV::new_add(
+            mk(200),
+            5,
+            200,
+        )]))
+        .expect("tiny front");
+        let mega_add: Vec<OutputKV> = std::iter::once(OutputKV::new_add(mk(1), 10, 1000))
+            .chain((2u8..=9).map(|i| OutputKV::new_add(mk(i), 10, 1000 + u64::from(i))))
+            .collect();
+        disk.push_run_no_compact(MemoryRun::build(mega_add))
+            .expect("mega with old Add");
+        let mega_del: Vec<OutputKV> = std::iter::once(OutputKV::new_delete(mk(1), 50))
+            .chain((10u8..=17).map(|i| OutputKV::new_add(mk(i), 10, 1000 + u64::from(i))))
+            .collect();
+        disk.push_run_no_compact(MemoryRun::build(mega_del))
+            .expect("later mega with spend");
+        disk.push_run_no_compact(MemoryRun::build(
+            (80u8..=82)
+                .map(|i| OutputKV::new_add(mk(i), 90, 80 + u64::from(i)))
+                .collect(),
+        ))
+        .expect("newest 20M-shaped chunk");
+        assert_eq!(disk.segment_count(), 4);
+        let mut pre = [OutputId::MAX];
+        disk.batch_query(&[mk(1)], &mut pre, 40);
+        assert_eq!(pre[0], 1000, "Add must resolve before pair");
+        disk.compact_oldest_if_needed()
+            .expect("stall pair last-oversized");
+        let mut post = [OutputId::MAX];
+        disk.batch_query(&[mk(1)], &mut post, 40);
+        assert_eq!(
+            post[0],
+            OutputId::MAX,
+            "Delete in later mega must GC even when newest is a chunk"
+        );
+        let keys: Vec<_> = (2u8..=17).chain(80u8..=82).chain(std::iter::once(200u8)).map(mk).collect();
+        let mut ids = vec![OutputId::MAX; keys.len()];
+        disk.batch_query(&keys, &mut ids, 100);
+        for i in 0..16 {
+            assert_eq!(ids[i], 1002 + i as u64, "live miss at {}", i + 2);
+        }
+        assert_eq!(ids[16], 160);
+        assert_eq!(ids[17], 161);
+        assert_eq!(ids[18], 162);
+        assert_eq!(ids[19], 200);
+        unsafe {
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        super::super::set_gc_fence(i32::MAX);
+        std::mem::forget(tmp);
+    }
+
+    /// Live IBD calls `compact_oldest_async` after spill, not `compact_oldest_if_needed`.
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn dest_bc_compact_oldest_async_stall_compacts() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "4");
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        let mk = |i: u8| {
+            let mut k = [0u8; 36];
+            k[0] = i;
+            k
+        };
+        for t in 0u8..3 {
+            disk.push_run_no_compact(MemoryRun::build(vec![OutputKV::new_add(
+                mk(100 + t),
+                5,
+                50 + u64::from(t),
+            )]))
+            .expect("tiny");
+        }
+        disk.push_run_no_compact(MemoryRun::build(
+            (1u8..=9)
+                .map(|i| OutputKV::new_add(mk(i), 10, 1000 + u64::from(i)))
+                .collect(),
+        ))
+        .expect("mega");
+        assert_eq!(disk.segment_count(), 4);
+        disk.compact_oldest_async();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if disk.segment_count() == 5 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            disk.segment_count(),
+            5,
+            "async compact must stall-pair dest-bc 4-seg mega (WAN path)"
+        );
+        let keys: Vec<_> = (1u8..=9).map(mk).collect();
+        let mut ids = vec![OutputId::MAX; 9];
+        disk.batch_query(&keys, &mut ids, 100);
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(*id, 1001 + i as u64, "async miss at {}", i + 1);
+        }
+        unsafe {
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        std::mem::forget(tmp);
+    }
+
+    #[serial_test::serial(ibd)]
+    #[test]
     fn async_spill_serves_queries_via_pending_then_registers() {
         let _guard = hot_pin_env_lock();
         unsafe {
@@ -1842,5 +2714,977 @@ mod tests {
             std::env::remove_var("BLVM_IBD_HOT_PIN_MAX_ENTRIES");
         }
         std::mem::forget(tmp);
+    }
+
+    /// dest-bc 144G take-all would ENOSPC (65G free). 5 tinies + 1 mega: pair
+    /// oldest+newest, leave the middle tinies. Take-all would merge all 6.
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn dest_bc_stall_pair_leaves_middle_segs() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "4");
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        let mk = |i: u8| {
+            let mut k = [0u8; 36];
+            k[0] = i;
+            k
+        };
+        for t in 0u8..5 {
+            disk.push_run_no_compact(MemoryRun::build(vec![OutputKV::new_add(
+                mk(100 + t),
+                5,
+                50 + u64::from(t),
+            )]))
+            .expect("tiny");
+        }
+        disk.push_run_no_compact(MemoryRun::build(
+            (1u8..=9)
+                .map(|i| OutputKV::new_add(mk(i), 10, 1000 + u64::from(i)))
+                .collect(),
+        ))
+        .expect("mega");
+        assert_eq!(disk.segment_count(), 6);
+        disk.compact_oldest_if_needed()
+            .expect("stall pair");
+        let n = disk.segment_count();
+        assert!(
+            n >= 6,
+            "take-all of 6 segs → 4 chunks; pair must leave middle tinies, segs={n}"
+        );
+        let keys: Vec<_> = (1u8..=9).chain(100u8..=104).map(mk).collect();
+        let mut ids = vec![OutputId::MAX; keys.len()];
+        disk.batch_query(&keys, &mut ids, 100);
+        for i in 0..9 {
+            assert_eq!(ids[i], 1001 + i as u64);
+        }
+        for i in 0..5 {
+            assert_eq!(ids[9 + i], 50 + i as u64, "middle tiny {} dropped", i);
+        }
+        unsafe {
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        std::mem::forget(tmp);
+    }
+
+    /// dest-bc 7 megas: loop must drain every >cap file (not stall with leftover megas).
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn dest_bc_four_megas_drain_to_compact_cap() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "4");
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        let mk = |i: u8| {
+            let mut k = [0u8; 36];
+            k[0] = i;
+            k
+        };
+        let mut expect: Vec<( [u8; 36], u64 )> = Vec::new();
+        for s in 0u8..4 {
+            let entries: Vec<OutputKV> = (1u8..=9)
+                .map(|j| {
+                    let i = s * 10 + j;
+                    expect.push((mk(i), 2000 + u64::from(i)));
+                    OutputKV::new_add(mk(i), 10, 2000 + u64::from(i))
+                })
+                .collect();
+            disk.push_run_no_compact(MemoryRun::build(entries))
+                .expect("mega");
+        }
+        assert_eq!(disk.segment_count(), 4);
+        disk.compact_oldest_if_needed()
+            .expect("drain megas");
+        for s in disk.segments.read().iter() {
+            assert!(
+                s.entry_count <= 4,
+                "leftover dest-bc mega {} entries",
+                s.entry_count
+            );
+        }
+        let keys: Vec<_> = expect.iter().map(|(k, _)| *k).collect();
+        let mut ids = vec![OutputId::MAX; keys.len()];
+        disk.batch_query(&keys, &mut ids, 100);
+        for (i, (_, id)) in expect.iter().enumerate() {
+            assert_eq!(ids[i], *id, "miss after mega drain at {i}");
+        }
+        unsafe {
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        std::mem::forget(tmp);
+    }
+
+    /// dest-bc 01:31Z FanIn 8×776M; 20M cap turns that into at-cap chunks. Fan-in
+    /// of 8×cap with no GC must not rewrite 32× (32 × 160M × 56B during ts 7.4).
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn dest_bc_fanin_at_cap_must_not_rewrite_loop() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "4");
+        }
+        TEST_COMPACT_WRITE_CALLS.store(0, Ordering::Relaxed);
+        LAST_COMPACT_FINISH.store(0, Ordering::Relaxed);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        let mk = |i: u8| {
+            let mut k = [0u8; 36];
+            k[0] = i;
+            k
+        };
+        for s in 0u8..8 {
+            let entries: Vec<OutputKV> = (0u8..4)
+                .map(|j| {
+                    let i = s * 4 + j + 1;
+                    OutputKV::new_add(mk(i), 10, 3000 + u64::from(i))
+                })
+                .collect();
+            disk.push_run_no_compact(MemoryRun::build(entries))
+                .expect("at-cap chunk");
+        }
+        assert_eq!(disk.segment_count(), 8);
+        disk.compact_oldest_if_needed()
+            .expect("one fan-in");
+        let calls = TEST_COMPACT_WRITE_CALLS.load(Ordering::Relaxed);
+        assert!(
+            calls <= 2,
+            "at-cap fan-in with no GC must not loop 32 rewrites, calls={calls}"
+        );
+        assert_eq!(disk.segment_count(), 8, "8×4 @ cap=4 stays 8 segs");
+        let keys: Vec<_> = (1u8..=32).map(mk).collect();
+        let mut ids = vec![OutputId::MAX; 32];
+        disk.batch_query(&keys, &mut ids, 100);
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(*id, 3001 + i as u64, "miss after no-op fan-in at {}", i + 1);
+        }
+        TEST_COMPACT_WRITE_CALLS.store(0, Ordering::Relaxed);
+        disk.compact_oldest_if_needed()
+            .expect("second kick skipped");
+        assert_eq!(
+            TEST_COMPACT_WRITE_CALLS.load(Ordering::Relaxed),
+            0,
+            "fence unchanged after first at-cap pass must not rewrite again"
+        );
+        unsafe {
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        std::mem::forget(tmp);
+    }
+
+    fn spill_n_adds_at(disk: &Arc<DiskIndex>, start: u8, n: u8, h: i32, id0: u64) {
+        let mk = |b: u8| {
+            let mut k = [0u8; 36];
+            k[0] = b;
+            k
+        };
+        let entries: Vec<OutputKV> = (0..n)
+            .map(|j| OutputKV::new_add(mk(start + j), h, id0 + u64::from(j)))
+            .collect();
+        disk.push_run_no_compact(MemoryRun::build(entries))
+            .expect("spill");
+    }
+
+    /// R-268 358k: 5 overlapping segs sat below fan_in=8. dest-bc was 2.
+    /// Mid-band compact must collapse 5 tiny segs (GC can shrink / count can fall).
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn r268_five_segs_below_fan_in_compact_to_dest_bc_shape() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        super::super::set_gc_fence(i32::MAX);
+        LAST_COMPACT_FINISH.store(0, Ordering::Relaxed);
+        TEST_COMPACT_WRITE_CALLS.store(0, Ordering::Relaxed);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        for s in 0u8..5 {
+            spill_n_adds_at(&disk, s * 3 + 1, 3, 10, 6000 + u64::from(s) * 3);
+        }
+        assert_eq!(disk.segment_count(), 5);
+        disk.compact_oldest_if_needed()
+            .expect("mid-band compact");
+        assert!(
+            disk.segment_count() <= 2,
+            "5 segs below fan_in=8 must collapse toward dest-bc 358k (≤2), segs={}",
+            disk.segment_count()
+        );
+        let mk = |b: u8| {
+            let mut k = [0u8; 36];
+            k[0] = b;
+            k
+        };
+        let keys: Vec<_> = (1u8..=15).map(mk).collect();
+        let mut ids = vec![OutputId::MAX; keys.len()];
+        disk.batch_query(&keys, &mut ids, 100);
+        for (i, id) in ids.iter().enumerate() {
+            assert_ne!(*id, OutputId::MAX, "key {} dropped by mid-band compact", i + 1);
+        }
+        super::super::set_gc_fence(i32::MAX);
+        std::mem::forget(tmp);
+    }
+
+    /// HP-M4: 1–3 segs must not fold (stall_split_min = 4 @ fan_in=8).
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn hp_m4_three_segs_do_not_midband_fold() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        LAST_COMPACT_FINISH.store(0, Ordering::Relaxed);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        for s in 0u8..3 {
+            spill_n_adds_at(&disk, s * 3 + 1, 3, 10, 7000 + u64::from(s) * 3);
+        }
+        assert_eq!(disk.segment_count(), 3);
+        disk.compact_oldest_if_needed()
+            .expect("no mid-band at 3");
+        assert_eq!(disk.segment_count(), 3, "HP-M4 1–3 stay");
+        std::mem::forget(tmp);
+    }
+
+    /// Matching-height 358k: candidates scale with live overlapping segs, not prefix bits.
+    /// Keys live in every seg at h=100; query `before=50` so they stay unresolved and
+    /// every seg still emits directory candidates (dest-bc 2 segs / 245 cands vs R-268 5 / 670).
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn matching_height_358k_candidate_fanout() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        fn key_at(i: u16) -> [u8; 36] {
+            let mut k = [0u8; 36];
+            k[0] = (i >> 8) as u8;
+            k[1] = i as u8;
+            k
+        }
+        fn measure(n_segs: usize) -> (u64, u64, u64) {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+            let disk = Arc::new(disk);
+            let n_keys = 64u16;
+            for s in 0..n_segs {
+                let mut entries: Vec<OutputKV> = (0..n_keys)
+                    .map(|i| OutputKV::new_add(key_at(i), 100, 10_000 + u64::from(i)))
+                    .collect();
+                // Height window overlap: filler below `before` so the seg is scanned.
+                entries.push(OutputKV::new_add(key_at(1000 + s as u16), 10, 1));
+                entries.sort_unstable();
+                disk.push_run_no_compact(MemoryRun::build(entries))
+                    .expect("spill");
+            }
+            assert_eq!(disk.segment_count(), n_segs);
+            let keys: Vec<_> = (0..n_keys).map(key_at).collect();
+            let mut ids = vec![OutputId::MAX; keys.len()];
+            super::super::disk_segment::reset_disk_io_stats();
+            disk.batch_query(&keys, &mut ids, 50);
+            for id in &ids {
+                assert_eq!(*id, OutputId::MAX, "h=100 must stay unresolved at before=50");
+            }
+            let (_preads, pread_kb, _max, cands, segs) =
+                super::super::disk_segment::take_disk_io_stats();
+            std::mem::forget(tmp);
+            (cands, segs, pread_kb)
+        }
+        let (c2, s2, kb2) = measure(2);
+        let (c5, s5, kb5) = measure(5);
+        assert_eq!(s2, 2, "dest-bc 358k segs");
+        assert_eq!(s5, 5, "R-268 358k segs");
+        assert_eq!(c2, 64 * 2, "cands scale with segs (2)");
+        assert_eq!(c5, 64 * 5, "cands scale with segs (5)");
+        assert!(
+            c5 as f64 / c2 as f64 > 2.0,
+            "5-seg fan-out must dominate 2-seg, c2={c2} c5={c5} kb2={kb2} kb5={kb5}"
+        );
+    }
+
+    /// 400k apply: fence stuck below journal min_height. First at-cap FanIn must
+    /// not run (the photocopier). Writes stay 0.
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn fanin_photocopy_skip_when_journal_above_stuck_fence() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "4");
+        }
+        super::super::set_gc_fence(5);
+        TEST_COMPACT_WRITE_CALLS.store(0, Ordering::Relaxed);
+        LAST_COMPACT_FINISH.store(0, Ordering::Relaxed);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        for s in 0u8..8 {
+            spill_n_adds_at(&disk, s * 4 + 1, 4, 10, 3000 + u64::from(s) * 4);
+        }
+        assert_eq!(disk.segment_count(), 8);
+        disk.compact_oldest_if_needed()
+            .expect("skip photocopy");
+        assert_eq!(
+            TEST_COMPACT_WRITE_CALLS.load(Ordering::Relaxed),
+            0,
+            "at-cap + min_h>fence must not FanIn"
+        );
+        assert_eq!(disk.segment_count(), 8);
+        super::super::set_gc_fence(i32::MAX);
+        unsafe {
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        std::mem::forget(tmp);
+    }
+
+    /// 7×20M + 2.1M remainder: ceil(sum/cap) >= n even though one file is small.
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn fanin_photocopy_skip_remainder_shape() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "4");
+        }
+        super::super::set_gc_fence(5);
+        TEST_COMPACT_WRITE_CALLS.store(0, Ordering::Relaxed);
+        LAST_COMPACT_FINISH.store(0, Ordering::Relaxed);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        for s in 0u8..7 {
+            spill_n_adds_at(&disk, s * 4 + 1, 4, 10, 4000 + u64::from(s) * 4);
+        }
+        spill_n_adds_at(&disk, 29, 1, 10, 4028);
+        assert_eq!(disk.segment_count(), 8);
+        disk.compact_oldest_if_needed()
+            .expect("skip remainder photocopy");
+        assert_eq!(
+            TEST_COMPACT_WRITE_CALLS.load(Ordering::Relaxed),
+            0,
+            "7×cap + leftover still 8→8 without GC"
+        );
+        super::super::set_gc_fence(i32::MAX);
+        unsafe {
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        std::mem::forget(tmp);
+    }
+
+    /// Compact 1/2 shape: 8×3 @ cap=4 → 6 files, count falls, must still run.
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn fanin_below_cap_still_runs_with_stuck_fence() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "4");
+        }
+        super::super::set_gc_fence(5);
+        TEST_COMPACT_WRITE_CALLS.store(0, Ordering::Relaxed);
+        LAST_COMPACT_FINISH.store(0, Ordering::Relaxed);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        for s in 0u8..8 {
+            spill_n_adds_at(&disk, s * 3 + 1, 3, 10, 5000 + u64::from(s) * 3);
+        }
+        disk.compact_oldest_if_needed()
+            .expect("below-cap fan-in");
+        assert!(
+            TEST_COMPACT_WRITE_CALLS.load(Ordering::Relaxed) >= 1,
+            "8×3 @ cap=4 must still merge (6 out)"
+        );
+        assert!(
+            disk.segment_count() < 8,
+            "below-cap fan-in must reduce count, got {}",
+            disk.segment_count()
+        );
+        super::super::set_gc_fence(i32::MAX);
+        unsafe {
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        std::mem::forget(tmp);
+    }
+
+    /// Fence advance into the journal: min_h <= fence, last is MIN → FanIn may run.
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn fanin_runs_after_fence_advances_into_journal() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "4");
+        }
+        super::super::set_gc_fence(5);
+        TEST_COMPACT_WRITE_CALLS.store(0, Ordering::Relaxed);
+        LAST_COMPACT_FINISH.store(0, Ordering::Relaxed);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        for s in 0u8..8 {
+            spill_n_adds_at(&disk, s * 4 + 1, 4, 10, 6000 + u64::from(s) * 4);
+        }
+        disk.compact_oldest_if_needed().expect("skip");
+        assert_eq!(TEST_COMPACT_WRITE_CALLS.load(Ordering::Relaxed), 0);
+        super::super::set_gc_fence(20);
+        disk.compact_oldest_if_needed()
+            .expect("fan-in after fence move");
+        assert!(
+            TEST_COMPACT_WRITE_CALLS.load(Ordering::Relaxed) >= 1,
+            "fence into journal must allow FanIn"
+        );
+        super::super::set_gc_fence(i32::MAX);
+        unsafe {
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        std::mem::forget(tmp);
+    }
+
+    fn spill_two_adds(disk: &Arc<DiskIndex>, b0: u8, h: i32, id0: u64) {
+        let mk = |b: u8| {
+            let mut k = [0u8; 36];
+            k[0] = b;
+            k
+        };
+        disk.push_run_no_compact(MemoryRun::build(vec![
+            OutputKV::new_add(mk(b0), h, id0),
+            OutputKV::new_add(mk(b0 + 1), h, id0 + 1),
+        ]))
+        .expect("spill");
+    }
+
+    /// dest-bc: last compact pass no-op'd when cold < fan_in=8. 1-seg must 1→1 tee.
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn checkpoint_sink_tees_one_seg_below_fan_in() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::set_var("BLVM_IBD_DISK_FAN_IN", "8");
+        }
+        super::super::set_gc_fence(100);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        spill_two_adds(&disk, 1, 10, 100);
+        assert_eq!(disk.segment_count(), 1);
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen_cb = std::sync::Arc::clone(&seen);
+        let (tee, segs) = disk
+            .compact_for_checkpoint_sync_with_sink(50, Some(move |kv: OutputKV| {
+                if kv.is_add() {
+                    seen_cb.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(())
+            }))
+            .expect("sink");
+        assert_eq!(segs, 1, "one cold seg at start");
+        assert_eq!(tee, 2, "1→1 tee must visit both Adds");
+        assert_eq!(seen.load(Ordering::Relaxed), 2);
+        unsafe {
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+        }
+        super::super::set_gc_fence(i32::MAX);
+        std::mem::forget(tmp);
+    }
+
+    /// dest-bc leftover after a good 8-seg export: 2 cold segs < fan_in=8 must still tee.
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn checkpoint_sink_tees_two_segs_below_fan_in() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::set_var("BLVM_IBD_DISK_FAN_IN", "8");
+        }
+        super::super::set_gc_fence(100);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        spill_two_adds(&disk, 1, 10, 100);
+        spill_two_adds(&disk, 10, 20, 200);
+        assert_eq!(disk.segment_count(), 2);
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen_cb = std::sync::Arc::clone(&seen);
+        let (tee, segs) = disk
+            .compact_for_checkpoint_sync_with_sink(50, Some(move |kv: OutputKV| {
+                if kv.is_add() {
+                    seen_cb.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(())
+            }))
+            .expect("sink");
+        assert_eq!(segs, 2);
+        assert_eq!(tee, 4, "2-seg last pass must merge and tee all Adds");
+        assert_eq!(seen.load(Ordering::Relaxed), 4);
+        unsafe {
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+        }
+        super::super::set_gc_fence(i32::MAX);
+        std::mem::forget(tmp);
+    }
+
+    /// dest-bc leftover after a good fan-in: 9 cold segs → 1 plain 8-way merge + 2 left.
+    /// Last pass must take_all_cold (not wait for fan_in=8) or persist is overlay-only.
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn checkpoint_sink_tees_nine_segs_leftover_after_fan_in() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::set_var("BLVM_IBD_DISK_FAN_IN", "8");
+        }
+        super::super::set_gc_fence(100);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        for i in 0..9u8 {
+            spill_two_adds(
+                &disk,
+                1 + i * 10,
+                10 + i32::from(i) * 10,
+                100 + u64::from(i) * 100,
+            );
+        }
+        assert_eq!(disk.segment_count(), 9);
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen_cb = std::sync::Arc::clone(&seen);
+        let (tee, segs) = disk
+            .compact_for_checkpoint_sync_with_sink(200, Some(move |kv: OutputKV| {
+                if kv.is_add() {
+                    seen_cb.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(())
+            }))
+            .expect("sink");
+        assert_eq!(segs, 9, "nine cold segs at start (8 fan-in + leftover)");
+        assert_eq!(tee, 18, "leftover after fan-in must still tee every Add");
+        assert_eq!(seen.load(Ordering::Relaxed), 18);
+        unsafe {
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+        }
+        super::super::set_gc_fence(i32::MAX);
+        std::mem::forget(tmp);
+    }
+
+    /// dest-bc 8×300M AllCold/FanIn would ENOSPC (144G extra). Checkpoint must
+    /// pair-drain (peak two megas) then tee-scan leftover chunks.
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn dest_bc_checkpoint_must_not_allcold_eight_megas() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "4");
+        }
+        super::super::set_gc_fence(100);
+        TEST_MAX_COMPACT_WRITE_INPUT.store(0, Ordering::Relaxed);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        let mk = |i: u8| {
+            let mut k = [0u8; 36];
+            k[0] = i;
+            k
+        };
+        let mut expect = 0usize;
+        for s in 0u8..8 {
+            let entries: Vec<OutputKV> = (1u8..=9)
+                .map(|j| {
+                    expect += 1;
+                    OutputKV::new_add(mk(s * 10 + j), 10, 2000 + u64::from(s * 10 + j))
+                })
+                .collect();
+            disk.push_run_no_compact(MemoryRun::build(entries))
+                .expect("mega");
+        }
+        assert_eq!(disk.segment_count(), 8);
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen_cb = std::sync::Arc::clone(&seen);
+        let (tee, segs) = disk
+            .compact_for_checkpoint_sync_with_sink(50, Some(move |kv: OutputKV| {
+                if kv.is_add() {
+                    seen_cb.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(())
+            }))
+            .expect("sink");
+        assert_eq!(segs, 8);
+        assert_eq!(tee, expect as u64, "tee-scan must visit every dest-bc Add");
+        assert_eq!(seen.load(Ordering::Relaxed), expect);
+        let peak = TEST_MAX_COMPACT_WRITE_INPUT.load(Ordering::Relaxed);
+        assert!(
+            peak <= 18,
+            "checkpoint write must be a stall pair (2×9), not 8-way/AllCold 72, peak={peak}"
+        );
+        for s in disk.segments.read().iter() {
+            assert!(
+                s.entry_count <= 4,
+                "pair drain must split dest-bc megas, leftover {}",
+                s.entry_count
+            );
+        }
+        unsafe {
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        super::super::set_gc_fence(i32::MAX);
+        std::mem::forget(tmp);
+    }
+
+    /// dest-bc pair of old Adds vs newest Deletes can tee 0. Drain must keep
+    /// eating middle megas (`wrote==0` used to stop).
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn dest_bc_checkpoint_drain_continues_after_pair_gcs_all_adds() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+            std::env::set_var("BLVM_IBD_COMPACT_MAX_ENTRIES", "4");
+        }
+        super::super::set_gc_fence(100);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        let mk = |i: u8| {
+            let mut k = [0u8; 36];
+            k[0] = i;
+            k
+        };
+        disk.push_run_no_compact(MemoryRun::build(
+            (1u8..=9)
+                .map(|i| OutputKV::new_add(mk(i), 10, 1000 + u64::from(i)))
+                .collect(),
+        ))
+        .expect("old adds mega");
+        for s in 1u8..=2 {
+            disk.push_run_no_compact(MemoryRun::build(
+                (1u8..=9)
+                    .map(|j| {
+                        let i = s * 10 + j;
+                        OutputKV::new_add(mk(i), 10, 2000 + u64::from(i))
+                    })
+                    .collect(),
+            ))
+            .expect("middle mega");
+        }
+        disk.push_run_no_compact(MemoryRun::build(
+            (1u8..=9)
+                .map(|i| OutputKV::new_delete(mk(i), 50))
+                .collect(),
+        ))
+        .expect("newest deletes mega");
+        assert_eq!(disk.segment_count(), 4);
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen_cb = std::sync::Arc::clone(&seen);
+        let (tee, _) = disk
+            .compact_for_checkpoint_sync_with_sink(50, Some(move |kv: OutputKV| {
+                if kv.is_add() {
+                    seen_cb.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(())
+            }))
+            .expect("sink");
+        assert_eq!(tee, 18, "spent keys 1-9 GC; middle 18 Adds must still tee");
+        assert_eq!(seen.load(Ordering::Relaxed), 18);
+        for s in disk.segments.read().iter() {
+            assert!(
+                s.entry_count <= 4,
+                "middle dest-bc megas must drain after a 0-tee pair, leftover {}",
+                s.entry_count
+            );
+        }
+        let mut spent = [OutputId::MAX];
+        disk.batch_query(&[mk(1)], &mut spent, 40);
+        assert_eq!(spent[0], OutputId::MAX, "GCed Add must stay spent");
+        unsafe {
+            std::env::remove_var("BLVM_IBD_COMPACT_MAX_ENTRIES");
+        }
+        super::super::set_gc_fence(i32::MAX);
+        std::mem::forget(tmp);
+    }
+
+    /// dest-ba 650k shape: `n_segs` × 20M (or `BLVM_IBD_SYNTH_SEG_ENTRIES`) on disk,
+    /// then `batch_query` dest-ba cand counts. This is the KEEP **measurement**, not a
+    /// stall-pair unit. `#[ignore]` — ~9 G artifact, not CI.
+    ///
+    /// Gauge: dest-ba 650k `preads=240` / `disk_ms=8` at 244 cands; dest-ba 660k
+    /// `preads=2138` / `disk_ms=33` at 2219 cands. Falsify if preads ≫ cands after
+    /// blooms (union FPR from extra segs) or KiB/pread ≫ dest-ba ~33 at 20M.
+    #[serial_test::serial(ibd)]
+    #[ignore]
+    #[test]
+    fn dest_ba_shape_synthetic_pread_budget() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_SPILL_MAX_ENTRIES");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+        }
+        let per_seg: usize = std::env::var("BLVM_IBD_SYNTH_SEG_ENTRIES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20_000_000);
+        let n_segs: usize = std::env::var("BLVM_IBD_SYNTH_N_SEGS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8);
+        let tmp = tempfile::Builder::new()
+            .prefix("diskindex-synth-")
+            .tempdir()
+            .expect("tempdir");
+        let (disk, _) = DiskIndex::new_empty(tmp.path()).expect("DiskIndex");
+        let disk = Arc::new(disk);
+        let mk = |i: u64| {
+            let mut k = [0u8; 36];
+            // Spread into the directory prefix (first 18–20 bits). Sequential
+            // u64-in-low-bytes put every dest-ba-sized key in bucket 0 and F19
+            // coalesced the whole 20M file (1 GiB/pread) — not dest-ba's layout.
+            let mixed = i.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            k[..8].copy_from_slice(&mixed.to_be_bytes());
+            k
+        };
+        let t_write = std::time::Instant::now();
+        for s in 0..n_segs {
+            let base = (s as u64) * (per_seg as u64);
+            let mut entries: Vec<OutputKV> = (0..per_seg as u64)
+                .map(|j| OutputKV::new_add(mk(base + j), 100, base + j + 1))
+                .collect();
+            entries.sort_unstable();
+            disk.push_run_no_compact(MemoryRun::build_presorted(entries))
+                .expect("spill");
+            eprintln!(
+                "synth wrote seg {}/{} entries={} segs_on_disk={}",
+                s + 1,
+                n_segs,
+                per_seg,
+                disk.segment_count()
+            );
+        }
+        let write_s = t_write.elapsed().as_secs_f64();
+        assert_eq!(disk.segment_count(), n_segs, "must not compact during spill");
+        let ram = disk.bloom_bytes_total();
+        let bits = super::super::memory_run::directory_prefix_bits(per_seg);
+        let bucket = per_seg / (1usize << bits);
+        let kb_bucket = bucket * OutputKV::SIZE / 1024;
+        eprintln!(
+            "synth_index segs={} per_seg={} write_s={:.1} ram_miB={:.1} prefix_bits={} kb_per_bucket={}",
+            n_segs,
+            per_seg,
+            write_s,
+            ram as f64 / (1024.0 * 1024.0),
+            bits,
+            kb_bucket
+        );
+
+        let query = |label: &str, keys: Vec<[u8; 36]>| {
+            let n = keys.len();
+            let mut ids = vec![OutputId::MAX; n];
+            super::super::disk_segment::reset_disk_io_stats();
+            let t0 = std::time::Instant::now();
+            disk.batch_query(&keys, &mut ids, 10_000);
+            let ms = t0.elapsed().as_secs_f64() * 1000.0;
+            let (preads, pread_kb, max_kb, cands, segs) =
+                super::super::disk_segment::take_disk_io_stats();
+            let hits = ids.iter().filter(|id| **id != OutputId::MAX).count();
+            let kib_per = if preads > 0 {
+                pread_kb as f64 / preads as f64
+            } else {
+                0.0
+            };
+            eprintln!(
+                "synth_query {label} keys={n} hits={hits} disk_ms={ms:.1} preads={preads} cands={cands} segs={segs} pread_kb={pread_kb} max_pread_kb={max_kb} kib/pread={kib_per:.1}"
+            );
+            (preads, cands, ms)
+        };
+
+        // dest-ba 650k cand count: keys that live in the newest seg (best case).
+        let newest_base = ((n_segs - 1) as u64) * (per_seg as u64);
+        let k244: Vec<_> = (0..244u64).map(|j| mk(newest_base + j)).collect();
+        let (p244, c244, ms244) = query("244_newest", k244);
+        let k2219: Vec<_> = (0..2219u64).map(|j| mk(newest_base + j)).collect();
+        let (p2219, c2219, ms2219) = query("2219_newest", k2219);
+        // Oldest-seg hits: newest-to-oldest walk; blooms should skip 7 segs.
+        let k_old: Vec<_> = (0..244u64).map(mk).collect();
+        let (p_old, c_old, ms_old) = query("244_oldest", k_old);
+        // Total misses: union FPR across n_segs.
+        let miss_base = (n_segs as u64) * (per_seg as u64) + 1_000_000;
+        let k_miss: Vec<_> = (0..244u64).map(|j| mk(miss_base + j)).collect();
+        let (p_miss, c_miss, ms_miss) = query("244_miss", k_miss);
+
+        eprintln!(
+            "synth_vs_dest_ba 650k_preads_gauge=240 got_244_newest={p244} cands={c244} disk_ms={ms244:.1}"
+        );
+        eprintln!(
+            "synth_vs_dest_ba 660k_preads_gauge=2138 got_2219_newest={p2219} cands={c2219} disk_ms={ms2219:.1}"
+        );
+        eprintln!(
+            "synth_fpr oldest_preads={p_old} oldest_cands={c_old} miss_preads={p_miss} miss_cands={c_miss} oldest_ms={ms_old:.1} miss_ms={ms_miss:.1}"
+        );
+
+        // Blooms must keep miss preads ≪ n_segs × keys (otherwise 20M cap without GC is net negative).
+        assert!(
+            p_miss < 244 * n_segs as u64 / 4,
+            "union FPR too high: miss preads={p_miss} vs 8×244"
+        );
+        assert!(p244 > 0 && p2219 > 0, "expected disk preads on hits");
+        drop(tmp);
+    }
+
+    /// One large segment at the count-policy file size (70–150M). Prefix 20 must
+    /// hold bucket cost vs dest-bc 776M @ prefix 16 (251 KiB, 6374 preads).
+    /// `#[ignore]` — ~4.5 GiB artifact. Keys are prefix-sorted so the directory
+    /// spreads (sequential low-bytes would pack bucket 0).
+    #[serial_test::serial(ibd)]
+    #[ignore]
+    #[test]
+    fn prefix20_large_seg_pread_budget() {
+        let _guard = hot_pin_env_lock();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::remove_var("BLVM_IBD_DISK_MMAP");
+            std::env::remove_var("BLVM_IBD_ASYNC_DISK_SPILL");
+            std::env::remove_var("BLVM_IBD_DISK_FAN_IN");
+        }
+        let n: usize = std::env::var("BLVM_IBD_SYNTH_SEG_ENTRIES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(80_000_000);
+        let buckets = 1usize << super::super::memory_run::DIRECTORY_PREFIX_BITS_MAX;
+        let per_bucket = n.div_ceil(buckets).max(1);
+        let mk = |i: u64| {
+            let mut k = [0u8; 36];
+            let p = i / per_bucket as u64;
+            let rem = i % per_bucket as u64;
+            k[0] = (p >> 12) as u8;
+            k[1] = (p >> 4) as u8;
+            k[2] = ((p & 0xF) << 4) as u8;
+            k[3] = rem as u8;
+            k
+        };
+        let tmp = tempfile::Builder::new()
+            .prefix("prefix20-large-")
+            .tempdir()
+            .expect("tempdir");
+        let t_write = std::time::Instant::now();
+        let iter = (0..n as u64).map(|i| OutputKV::new_add(mk(i), 100, i + 1));
+        let seg = super::super::disk_segment::DiskSegment::write_from_iter(
+            tmp.path(),
+            0,
+            n,
+            iter,
+        )
+        .expect("write 80M");
+        let write_s = t_write.elapsed().as_secs_f64();
+        let bits = super::super::memory_run::directory_prefix_bits(seg.entry_count);
+        let bucket = seg.entry_count / (1usize << bits);
+        let kib_bucket = bucket * OutputKV::SIZE / 1024;
+        eprintln!(
+            "prefix20_seg entries={} write_s={:.1} prefix_bits={} entries/bucket={} kib/bucket={} file_mib={:.1}",
+            seg.entry_count,
+            write_s,
+            bits,
+            bucket,
+            kib_bucket,
+            (seg.entry_count * OutputKV::SIZE) as f64 / (1024.0 * 1024.0)
+        );
+
+        let query = |label: &str, keys: Vec<[u8; 36]>| {
+            let n = keys.len();
+            let mut ids = vec![OutputId::MAX; n];
+            super::super::disk_segment::reset_disk_io_stats();
+            let t0 = std::time::Instant::now();
+            seg.batch_lookup(&keys, &mut ids, 0, 10_000)
+                .expect("lookup");
+            let ms = t0.elapsed().as_secs_f64() * 1000.0;
+            let (preads, pread_kb, max_kb, cands, segs) =
+                super::super::disk_segment::take_disk_io_stats();
+            let hits = ids.iter().filter(|id| **id != OutputId::MAX).count();
+            let kib_per = if preads > 0 {
+                pread_kb as f64 / preads as f64
+            } else {
+                0.0
+            };
+            eprintln!(
+                "prefix20_query {label} keys={n} hits={hits} disk_ms={ms:.1} preads={preads} \
+                 cands={cands} segs={segs} pread_kb={pread_kb} max_pread_kb={max_kb} kib/pread={kib_per:.1}"
+            );
+            (preads, cands, ms, kib_per)
+        };
+
+        let k244: Vec<_> = (0..244u64).map(|j| mk(j * (n as u64 / 244))).collect();
+        let (p244, c244, ms244, kib244) = query("244_spread", k244);
+        let k2219: Vec<_> = (0..2219u64).map(|j| mk(j * (n as u64 / 2219))).collect();
+        let (p2219, c2219, ms2219, kib2219) = query("2219_spread", k2219);
+        // High prefix 0xFF.. is past the 80M span (p < 2^20-1). Do not use
+        // mk(n+…) — that wraps the 20-bit prefix and collides with live keys.
+        let k_miss: Vec<_> = (0..244u64)
+            .map(|j| {
+                let mut k = [0xFFu8; 36];
+                k[35] = j as u8;
+                k
+            })
+            .collect();
+        let (p_miss, c_miss, ms_miss, _) = query("244_miss", k_miss);
+
+        eprintln!(
+            "prefix20_vs_dest_bc dest_bc=251KiB/6374preads got_kib/bucket={kib_bucket} \
+             244_preads={p244} cands={c244} disk_ms={ms244:.1} kib/pread={kib244:.1} \
+             2219_preads={p2219} cands={c2219} disk_ms={ms2219:.1} kib/pread={kib2219:.1} \
+             miss_preads={p_miss} miss_cands={c_miss} miss_ms={ms_miss:.1}"
+        );
+        assert_eq!(bits, 20, "80M must saturate prefix 20");
+        assert!(
+            kib_bucket <= 16,
+            "prefix 20 must hold dest-ba-class buckets, got {kib_bucket} KiB"
+        );
+        assert!(p244 > 0 && p2219 > 0, "expected disk preads on hits");
+        assert!(
+            p_miss < 32,
+            "bloom should skip almost all misses, preads={p_miss}"
+        );
+        drop(tmp);
     }
 }

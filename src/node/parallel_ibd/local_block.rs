@@ -11,8 +11,14 @@ use blvm_protocol::types::ARC_BLOCK_CREATED;
 use blvm_protocol::{Block, Hash, ProtocolVersion, segwit::Witness};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use tracing::{debug, info, warn};
+
+/// Contiguous on-disk body tip advanced on the flush write path.
+/// Coordinator copies this into `live_body_tip`. Discovery walks are not
+/// tip authorities (closed `body_tip` cascade).
+static FLUSH_PATH_BODY_TIP: AtomicU64 = AtomicU64::new(0);
 
 /// Process-latched [`FeatureRegistry`] — `for_protocol` rebuilds `Vec`+`String` feature
 /// names on every call. Tip crawl hits persist/load/serve per body; cache by protocol.
@@ -96,25 +102,129 @@ pub fn probe_confirmed_body_height(blockstore: &BlockStore) -> Result<u64> {
     Ok(lo)
 }
 
-/// Peer body warehouse: advance live `wan_body_tip` as GAP_PERSIST extends contiguous on-disk
-/// bodies past the start-of-run tip. Default **off** (`BLVM_IBD_BODY_WAREHOUSE=1` to enable).
+/// Peer body warehouse: advance live `wan_body_tip` as bodies are persisted, not only
+/// at spawn discovery. Default **on**. Opt out with `BLVM_IBD_BODY_WAREHOUSE=0`.
 ///
-/// Without this, `live_body_tip` is frozen at coordinator spawn — past-body stays tip-serial
-/// GetData even after peers have persisted tip+1..N for LOCAL_GAP inject (A0 2026-08-02:
-/// inject under WAN DNA hits dens-class wall ~192).
+/// Genesis spawn has contiguous=0, so `wan_live_body_tip` stays 0 until this refresh
+/// walks the store. Fixture height-keys already have a range at spawn (step 0).
+/// Dens-192 bake stays burned — this is crawl disengage, not inject.
 pub fn body_warehouse_enabled() -> bool {
     latch_env!(bool, {
-        matches!(
+        !matches!(
             std::env::var("BLVM_IBD_BODY_WAREHOUSE").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE")
+            Ok("0") | Ok("false") | Ok("FALSE")
         )
     })
 }
 
+/// Contiguous tip published by [`note_flush_path_bodies`].
+pub fn flush_path_body_tip() -> u64 {
+    FLUSH_PATH_BODY_TIP.load(Ordering::Relaxed)
+}
+
+fn flush_path_height_has_body(blockstore: &BlockStore, height: u64) -> Result<bool> {
+    let Some(hash) = blockstore.get_hash_by_height(height)? else {
+        return Ok(false);
+    };
+    blockstore.has_block_body(&hash)
+}
+
+fn bump_flush_path_if_next(height: u64) {
+    let mut tip = FLUSH_PATH_BODY_TIP.load(Ordering::Relaxed);
+    if height <= tip || height != tip.saturating_add(1) {
+        return;
+    }
+    loop {
+        match FLUSH_PATH_BODY_TIP.compare_exchange_weak(
+            tip,
+            height,
+            Ordering::Release,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(actual) => {
+                tip = actual;
+                if height <= tip || height != tip.saturating_add(1) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn catch_up_flush_path_on_disk(blockstore: &BlockStore) {
+    let mut tip = FLUSH_PATH_BODY_TIP.load(Ordering::Relaxed);
+    loop {
+        let next = tip.saturating_add(1);
+        match flush_path_height_has_body(blockstore, next) {
+            Ok(true) => {}
+            _ => break,
+        }
+        match FLUSH_PATH_BODY_TIP.compare_exchange(
+            tip,
+            next,
+            Ordering::Release,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => tip = next,
+            Err(actual) => {
+                if actual > tip {
+                    tip = actual;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn publish_flush_path_tip() {
+    let tip = FLUSH_PATH_BODY_TIP.load(Ordering::Relaxed);
+    if tip > 0 {
+        super::tip_stage::publish_wan_body_tip(tip);
+    }
+}
+
+/// Sequential bump only. **Tests.** Not a live publisher (arrival / feeder-take /
+/// flush-commit experiments excluded).
+pub fn note_available_body(height: u64) {
+    if !body_warehouse_enabled() || height == 0 {
+        return;
+    }
+    bump_flush_path_if_next(height);
+    publish_flush_path_tip();
+}
+
+/// Disk-insert authority for `wan_body_tip`. Call after a body is in the
+/// store (`store_block_with_witness` / wire-bytes / already-persisted skip).
+/// Flush chunk **commit** is durability only and must not be the publisher.
+///
+/// Sequential heights bump without a disk walk. Out-of-order writes do not
+/// jump holes. After the batch, catch-up fills successors already stored.
+pub fn note_flush_path_bodies(blockstore: &BlockStore, heights: &[u64]) {
+    if !body_warehouse_enabled() {
+        return;
+    }
+    for &height in heights {
+        if height == 0 {
+            continue;
+        }
+        bump_flush_path_if_next(height);
+    }
+    catch_up_flush_path_on_disk(blockstore);
+    publish_flush_path_tip();
+}
+
+#[cfg(test)]
+pub(crate) fn reset_flush_path_body_tip_for_test() {
+    FLUSH_PATH_BODY_TIP.store(0, Ordering::Relaxed);
+}
+
 /// Extend contiguous on-disk body tip from `from` forward (at most `max_steps` heights).
 ///
-/// Used by body warehouse refresh: walk `from+1, from+2, …` while bodies exist. Does **not**
-/// jump sparse holes (unlike [`probe_highest_stored_body_height`]).
+/// Used by spawn-range / unit tests. **Not** a live tip authority — the
+/// coordinator must not walk this (closed `body_tip` cascade).
+/// Does **not** jump sparse holes (unlike [`probe_highest_stored_body_height`]).
 pub fn extend_contiguous_body_tip(
     blockstore: &BlockStore,
     from: u64,
@@ -124,8 +234,77 @@ pub fn extend_contiguous_body_tip(
         return Ok(from);
     }
     let mut tip = from;
-    let limit = max_steps.min(1024);
+    // Apply-tracking backup: one tick may need to cover a 300+ BPS apply window.
+    let limit = max_steps.min(4096);
     for _ in 0..limit {
+        let next = tip.saturating_add(1);
+        let Some(hash) = blockstore.get_hash_by_height(next)? else {
+            break;
+        };
+        if !blockstore.has_block_body(&hash)? {
+            break;
+        }
+        tip = next;
+    }
+    Ok(tip)
+}
+
+/// Contiguous on-disk body tip starting at `from` (inclusive). Stops at the first
+/// missing body — does **not** jump leftover cheese the way
+/// [`probe_confirmed_body_height`] / [`probe_highest_stored_body_height`] do.
+///
+/// After incremental prune + partial re-download, `has_body` is non-monotonic.
+/// Binary search lands on the highest leftover (live: 185817) and hides holes
+/// (70679 / 70713). New-user GetData must see the first hole.
+/// Lowest height whose height-index row has a stored body.
+///
+/// Does **not** assume genesis. A height-key slice (first key 180001) or a dest
+/// seeded at 500k returns that range start instead of 0. Empty store → 0.
+pub fn first_stored_body_height(blockstore: &BlockStore) -> Result<u64> {
+    let tree = blockstore.height_tree()?;
+    for item in tree.iter() {
+        let (key, _) = item?;
+        if key.len() != 8 {
+            continue;
+        }
+        let h = u64::from_be_bytes(key[..].try_into().unwrap_or([0u8; 8]));
+        if h == 0 {
+            continue;
+        }
+        let Some(hash) = blockstore.get_hash_by_height(h)? else {
+            continue;
+        };
+        if blockstore.has_block_body(&hash)? {
+            return Ok(h);
+        }
+    }
+    Ok(0)
+}
+
+/// Contiguous on-disk body tip of the store's **actual** body range.
+///
+/// Finds the first stored body (any start height), then walks until the first
+/// hole. Does not assume contiguity from height 1 and does not use sparse-max.
+pub fn contiguous_body_range_tip(blockstore: &BlockStore) -> Result<u64> {
+    let start = first_stored_body_height(blockstore)?;
+    if start == 0 {
+        return Ok(0);
+    }
+    contiguous_body_tip_from(blockstore, start)
+}
+
+pub fn contiguous_body_tip_from(blockstore: &BlockStore, from: u64) -> Result<u64> {
+    if from == 0 {
+        return Ok(0);
+    }
+    let Some(hash) = blockstore.get_hash_by_height(from)? else {
+        return Ok(from.saturating_sub(1));
+    };
+    if !blockstore.has_block_body(&hash)? {
+        return Ok(from.saturating_sub(1));
+    }
+    let mut tip = from;
+    loop {
         let next = tip.saturating_add(1);
         let Some(hash) = blockstore.get_hash_by_height(next)? else {
             break;
@@ -160,18 +339,65 @@ pub fn probe_highest_stored_body_height(blockstore: &BlockStore) -> Result<u64> 
     Ok(0)
 }
 
+/// Lowest height that must still persist body+undo on a pruned dest.
+///
+/// `0` = archive / no window: never skip for prune. Otherwise skip flush when
+/// `height < horizon` (i.e. `height + window < header_tip`). Persist
+/// `[header_tip − window, header_tip]`; GAP_PERSIST still writes ahead of
+/// validation independently.
+pub fn pruned_midchain_skip_horizon(header_tip: u64, prune_window: u64) -> u64 {
+    if prune_window == 0 || header_tip <= prune_window {
+        return 0;
+    }
+    header_tip.saturating_sub(prune_window)
+}
+
 /// Skip heed3 block-store flush when the body is already on disk (cheap `contains_key` — no
-/// deserialize). Used during sparse local gap replay when [`probe_confirmed_body_height`] is 0.
+/// deserialize), or when a pruned dest will delete it (`height < prune_horizon`).
+///
+/// Used during sparse local gap replay when [`probe_confirmed_body_height`] is 0.
+/// `prune_horizon == 0` keeps archive / warehouse / synth persist unchanged.
 pub fn should_skip_block_store_write(
     blockstore: &BlockStore,
     height: u64,
     block_hash: &Hash,
     local_replay_max_height: u64,
+    prune_horizon: u64,
 ) -> Result<bool> {
     if height > 0 && height <= local_replay_max_height {
         return Ok(true);
     }
+    if prune_horizon > 0 && height < prune_horizon {
+        return Ok(true);
+    }
     blockstore.has_block_body(block_hash)
+}
+
+/// Drop one GAP_PERSIST leftover that just left the prune window.
+///
+/// Validation skip does not flush mid-chain bodies, but GAP_PERSIST still writes
+/// `val+1..val+lookahead`. Incremental prune never runs on Normal mode (needs
+/// Aggressive + commitments), so genesis dest stored the whole chain (22G heed3
+/// @ 296k). Headers stay. LMDB will not shrink the file; this stops further growth.
+pub fn gc_pruned_window_gap_persist(blockstore: &BlockStore, gc_height: u64) -> Result<bool> {
+    if gc_height == 0 {
+        return Ok(false);
+    }
+    // Hash-fetch ahead window lives above validation. Never delete it.
+    if crate::node::parallel_ibd::hash_fetch::enabled()
+        && crate::node::parallel_ibd::hash_fetch::is_ahead_of_validation(gc_height)
+    {
+        return Ok(false);
+    }
+    let Some(hash) = blockstore.get_hash_by_height(gc_height)? else {
+        return Ok(false);
+    };
+    if !blockstore.has_block_body(&hash)? {
+        return Ok(false);
+    }
+    blockstore.remove_block_body(&hash)?;
+    let _ = blockstore.remove_witness(&hash);
+    Ok(true)
 }
 
 /// True when at least one witness stack item is non-empty.
@@ -274,12 +500,34 @@ fn gap_persist_lookahead() -> u64 {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(128)
-            .clamp(1, 256)
+            .clamp(1, 512)
     })
 }
 
-/// Persist body + witness for gap blocks that are within `gap_persist_lookahead` heights
-/// of `validation_height + 1`.
+/// Whether GAP_PERSIST should write `height`.
+///
+/// On-disk predecessor (late desert fill after apply passed). Any height
+/// strictly ahead of apply (farm / LEAD tiles). Height 0 never. The lookahead
+/// env is not a refuse gate. Does not read `FLUSH_PATH_TIP`.
+fn should_persist_gap_height(blockstore: &BlockStore, val_h: u64, height: u64) -> bool {
+    if height == 0 {
+        return false;
+    }
+    if height > val_h {
+        return true;
+    }
+    // Late sequential hole fill after apply passed. Use on-disk predecessor,
+    // not FLUSH_PATH_TIP (that atomic is leftover warehouse — R-196).
+    if height == 1 {
+        return true;
+    }
+    flush_path_height_has_body(blockstore, height.saturating_sub(1)).unwrap_or(false)
+}
+
+/// Persist body + witness for gap blocks that can extend the on-disk prefix.
+///
+/// Writes `flush_path_body_tip()+1` even after apply has passed, and any
+/// height ahead of `validation_height`. Lookahead is not a refuse gate.
 ///
 /// Download workers only repaired witnesses before; without the body on disk,
 /// [`coordinator_inject_local_gap`] cannot recover after a stall even when the gap
@@ -328,14 +576,72 @@ pub fn try_persist_gap_block_for_local_inject_with_wire(
     protocol_version: ProtocolVersion,
     wire_payload: Option<&[u8]>,
 ) -> Result<bool> {
+    match gap_persist_gate(
+        blockstore,
+        validation_height,
+        height,
+        block_hash,
+        block,
+        witnesses,
+        protocol_version,
+    )? {
+        GapPersistGate::Skip => Ok(false),
+        GapPersistGate::OnDisk(repaired) => Ok(repaired),
+        GapPersistGate::Write => {
+            gap_persist_write_one(blockstore, height, block_hash, block, witnesses, wire_payload)
+        }
+    }
+}
+
+/// R-348: outcome of the persist gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GapPersistGate {
+    /// Outside the apply window, or W1 empty-witness-with-commitment: do not persist.
+    Skip,
+    /// Body already on disk; carries the witness-repair result (the old return value).
+    OnDisk(bool),
+    /// Body must be written (bincode or wire blob).
+    Write,
+}
+
+/// R-348: the gate half of [`try_persist_gap_block_for_local_inject_with_wire`] — apply
+/// window, W1 empty-witness check, and the body-already-on-disk repair path. Shared by the
+/// inline path and the batched persist lane.
+pub(crate) fn gap_persist_gate(
+    blockstore: &BlockStore,
+    validation_height: Option<&std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    height: u64,
+    block_hash: Hash,
+    block: &Block,
+    witnesses: &[Vec<Witness>],
+    protocol_version: ProtocolVersion,
+) -> Result<GapPersistGate> {
     let Some(vh) = validation_height else {
-        return Ok(false);
+        return Ok(GapPersistGate::Skip);
     };
     let val_h = vh.load(std::sync::atomic::Ordering::Relaxed);
     let lookahead = gap_persist_lookahead();
-    // Persist only heights in [val+1, val+lookahead].
-    if height == 0 || height <= val_h || height > val_h + lookahead {
-        return Ok(false);
+    // Persist-ahead (Phase 1): do not refuse on the apply window.
+    // Step 0/1 already widened the clamp and still glued FLUSH_PATH_TIP to apply
+    // (holes; inject chained 2). Two refuses made the prefix:
+    //   * height > val+lookahead — farm / LEAD tiles never hit disk, so
+    //     catch_up cannot walk when the desert fills.
+    //   * height <= val — late tip+1 (apply outran GetData) never lands, so
+    //     the contiguous store tip stays at stall−1.
+    // GC is still behind val−144.
+    //
+    // Do **not** call `note_flush_path_bodies` here. Coordinator copies that
+    // atomic into `live_body_tip` / leftover. R-196: persist published tip 32
+    // at apply 1 → `LOCAL_AHEAD` + leftover inject + C1j abort; stall 11011.
+    // Persist writes disk for LOCAL_GAP. It is not the leftover warehouse.
+    if !should_persist_gap_height(blockstore, val_h, height) {
+        return Ok(GapPersistGate::Skip);
+    }
+    if height > val_h.saturating_add(lookahead) {
+        debug!(
+            "[IBD_GAP_PERSIST] height {} outside lookahead {} (val={}) — persist-ahead",
+            height, lookahead, val_h
+        );
     }
     let registry = cached_feature_registry(protocol_version);
     let segwit_on = registry.is_feature_active("segwit", height, block.header.timestamp);
@@ -348,20 +654,34 @@ pub fn try_persist_gap_block_for_local_inject_with_wire(
             height,
             hex::encode(block_hash)
         );
-        return Ok(false);
+        return Ok(GapPersistGate::Skip);
     }
     if blockstore.has_block_body(&block_hash)? {
         // Body present (prior MSG_BLOCK / partial persist) — still need a real witness
         // for segwit heights or inject returns WitnessMissing and the chain breaks.
-        return try_repair_missing_witness(
+        let repaired = try_repair_missing_witness(
             blockstore,
             height,
             block_hash,
             witnesses,
             protocol_version,
             Some(block),
-        );
+        )?;
+        return Ok(GapPersistGate::OnDisk(repaired));
     }
+    Ok(GapPersistGate::Write)
+}
+
+/// R-348: the write half — wire blob when `BLVM_IBD_WIRE_BYTES_STORE=1` and the payload is
+/// here, else bincode via `store_block_with_witness` (one LMDB txn).
+pub(crate) fn gap_persist_write_one(
+    blockstore: &BlockStore,
+    height: u64,
+    block_hash: Hash,
+    block: &Block,
+    witnesses: &[Vec<Witness>],
+    wire_payload: Option<&[u8]>,
+) -> Result<bool> {
     if wire_bytes_store_enabled() {
         if let Some(payload) = wire_payload.filter(|p| !p.is_empty()) {
             blockstore.store_block_wire_bytes(block, height, payload)?;
@@ -455,7 +775,51 @@ pub fn try_load_local_ibd_block_with_reason(
     }
 }
 
+/// Apply takes H from the body store when the feeder is empty.
+///
+/// Default **off**. R-194b dump **192** vs R-193 **2278** with default on.
+/// Opt in with `BLVM_IBD_STORE_APPLY=1`. One height only — not inject-2048.
+pub fn store_apply_enabled() -> bool {
+    latch_env!(bool, {
+        matches!(
+            std::env::var("BLVM_IBD_STORE_APPLY").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("on") | Ok("yes")
+        )
+    })
+}
+
+static STORE_APPLY_N: AtomicU64 = AtomicU64::new(0);
+
+pub fn store_apply_count() -> u64 {
+    STORE_APPLY_N.load(Ordering::Relaxed)
+}
+
+pub fn note_store_apply(height: u64) {
+    let n = STORE_APPLY_N.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+    if n <= 3 || n % 256 == 0 {
+        info!("[IBD_STORE_APPLY] h={} n={}", height, n);
+    }
+}
+
 /// Load block + witnesses from disk when complete for IBD replay (skips network).
+pub fn leftover_stall_try_load(
+    blockstore: &BlockStore,
+    height: u64,
+    protocol_version: ProtocolVersion,
+) -> Result<Option<(SharedBlock, SharedWitnesses)>> {
+    let Some(expected_hash) = blockstore.get_hash_by_height(height)? else {
+        return Ok(None);
+    };
+    // Header-without-body must miss on contains_key (live 70736 heed3 get hang).
+    if !blockstore.has_block_body(&expected_hash)? {
+        return Ok(None);
+    }
+    Ok(
+        try_load_local_ibd_block(blockstore, height, expected_hash, protocol_version)?
+            .map(|(block, witnesses)| (Arc::new(block), Arc::new(witnesses))),
+    )
+}
+
 pub fn try_load_local_ibd_block(
     blockstore: &BlockStore,
     height: u64,
@@ -502,6 +866,20 @@ pub fn ibd_stall_aborts_inflight_gap_fetch(
         Some("0") | Some("false") | Some("FALSE") => false,
         _ => {
             if super::memory::ibd_pressure_is_critical_or_worse() {
+                static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let prev = LAST.load(std::sync::atomic::Ordering::Relaxed);
+                if now.saturating_sub(prev) >= 15 {
+                    LAST.store(now, std::sync::atomic::Ordering::Relaxed);
+                    super::memory::log_pressure_behavior(
+                        "stall_abort_gap_fetch",
+                        "abort",
+                        "reason=pressure_critical_or_worse",
+                    );
+                }
                 return true;
             }
             if wan_multi_peer {
@@ -556,14 +934,14 @@ pub fn gap_inject_lookahead_pub() -> u64 {
 }
 
 fn gap_inject_lookahead() -> u64 {
-    // L3: default 64 (was 10) so dense on-disk runs refill reorder in one coordinator pass
-    // instead of ~one inject per gap-poll tick (live crawl ~4–8 inject/s).
+    // Match persist default 128. R-197/R-198 INJECT_CHAIN max 64 was this cap, not
+    // prefix length. Clamp stays 256 (do not widen; step 0/1 already spent 2048).
     latch_env!(u64, {
         std::env::var("BLVM_IBD_GAP_INJECT_LOOKAHEAD")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(64)
-            .clamp(1, 128)
+            .unwrap_or(128)
+            .clamp(1, 256)
     })
 }
 
@@ -700,6 +1078,7 @@ pub fn coordinator_inject_local_gap(
             false => break, // height not on disk; stop — WAN fetch must fill the gap.
         }
     }
+    super::feeder_miss::note_inject(newly_injected, height, tip_in_pipeline);
     if newly_injected > 1 {
         info!(
             "[IBD_INJECT_CHAIN] from {} chained {} height(s) (lookahead={}, stopped_at={})",
@@ -733,9 +1112,107 @@ mod tests {
     }
 
     #[test]
+    fn note_store_apply_counts() {
+        let before = store_apply_count();
+        note_store_apply(7);
+        assert!(store_apply_count() > before);
+    }
+
+    #[test]
+    fn leftover_stall_try_load_hits_stored_body() {
+        let blockstore = temp_blockstore();
+        let block = Block {
+            header: BlockHeader {
+                version: 4,
+                timestamp: 1_600_000_000,
+                ..Default::default()
+            },
+            transactions: vec![Transaction {
+                version: 1,
+                inputs: blvm_protocol::tx_inputs![],
+                outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                    value: 50_0000_0000,
+                    script_pubkey: vec![0x51],
+                }],
+                lock_time: 0,
+            }]
+            .into(),
+        };
+        let hash = blockstore.get_block_hash(&block);
+        blockstore.store_height(1, &hash).unwrap();
+        blockstore
+            .store_block_with_witness(&block, &[], 1)
+            .unwrap();
+        let loaded = leftover_stall_try_load(&blockstore, 1, ProtocolVersion::BitcoinV1)
+            .unwrap()
+            .expect("body on disk");
+        assert_eq!(blockstore.get_block_hash(loaded.0.as_ref()), hash);
+        assert!(leftover_stall_try_load(&blockstore, 2, ProtocolVersion::BitcoinV1)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn local_gap_fill_allowed_without_contiguous_body_probe() {
         assert!(height_eligible_for_local_gap_fill(338_305, 0));
         assert!(!height_eligible_for_local_gap_fill(0, 0));
+    }
+
+    #[test]
+    fn pruned_midchain_horizon_skips_below_window() {
+        assert_eq!(pruned_midchain_skip_horizon(961_637, 144), 961_493);
+        assert_eq!(pruned_midchain_skip_horizon(223_000, 144), 222_856);
+        assert_eq!(pruned_midchain_skip_horizon(100, 144), 0);
+        assert_eq!(pruned_midchain_skip_horizon(0, 144), 0);
+        assert_eq!(pruned_midchain_skip_horizon(961_637, 0), 0);
+    }
+
+    #[test]
+    fn should_skip_pruned_midchain_without_body_on_disk() {
+        let blockstore = temp_blockstore();
+        let missing = [0xCCu8; 32];
+        // Leftover dest: header tip 961k, window 144, validation at 223k — never persist.
+        assert!(should_skip_block_store_write(&blockstore, 223_000, &missing, 0, 961_493).unwrap());
+        // Inclusive window start (tip − 144) must still flush.
+        assert!(
+            !should_skip_block_store_write(&blockstore, 961_493, &missing, 0, 961_493).unwrap()
+        );
+        // Archive / warehouse: horizon 0 never skips on prune.
+        assert!(!should_skip_block_store_write(&blockstore, 223_000, &missing, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn gc_pruned_window_gap_persist_drops_body_keeps_header() {
+        let blockstore = temp_blockstore();
+        let height = 200u64;
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                timestamp: 1_234_567,
+                ..Default::default()
+            },
+            transactions: vec![Transaction {
+                version: 1,
+                inputs: blvm_protocol::tx_inputs![],
+                outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                    value: 50_0000_0000,
+                    script_pubkey: vec![0x51],
+                }],
+                lock_time: 0,
+            }]
+            .into(),
+        };
+        let hash = blockstore.get_block_hash(&block);
+        blockstore.store_height(height, &hash).unwrap();
+        blockstore
+            .store_block_with_witness(&block, &[vec![]], height)
+            .unwrap();
+        assert!(blockstore.has_block_body(&hash).unwrap());
+        assert!(gc_pruned_window_gap_persist(&blockstore, height).unwrap());
+        assert!(!blockstore.has_block_body(&hash).unwrap());
+        assert_eq!(blockstore.get_hash_by_height(height).unwrap(), Some(hash));
+        assert!(!gc_pruned_window_gap_persist(&blockstore, height).unwrap());
+        assert!(!gc_pruned_window_gap_persist(&blockstore, 0).unwrap());
     }
 
     /// W5/N1: wire-bytes body coexists with bincode; inject loads via one wire deser.
@@ -870,8 +1347,10 @@ mod tests {
             probe_highest_stored_body_height(&blockstore).unwrap(),
             height
         );
-        assert!(should_skip_block_store_write(&blockstore, height, &hash, 0).unwrap());
-        assert!(!should_skip_block_store_write(&blockstore, height + 1, &[0xBBu8; 32], 0).unwrap());
+        assert!(should_skip_block_store_write(&blockstore, height, &hash, 0, 0).unwrap());
+        assert!(
+            !should_skip_block_store_write(&blockstore, height + 1, &[0xBBu8; 32], 0, 0).unwrap()
+        );
     }
 
     #[test]
@@ -947,6 +1426,81 @@ mod tests {
     }
 
     #[test]
+    fn contiguous_body_tip_from_stops_at_first_hole() {
+        let blockstore = temp_blockstore();
+        for h in [1u64, 2, 3, 5] {
+            let block = Block {
+                header: BlockHeader {
+                    version: 4,
+                    timestamp: 1_600_000_000 + h,
+                    ..Default::default()
+                },
+                transactions: vec![Transaction {
+                    version: 1,
+                    inputs: blvm_protocol::tx_inputs![],
+                    outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                        value: 50_0000_0000,
+                        script_pubkey: vec![0x51],
+                    }],
+                    lock_time: 0,
+                }]
+                .into(),
+            };
+            let hash = blockstore.get_block_hash(&block);
+            blockstore.store_height(h, &hash).unwrap();
+            blockstore.store_block_with_witness(&block, &[], h).unwrap();
+        }
+        assert_eq!(
+            contiguous_body_tip_from(&blockstore, 1).unwrap(),
+            3,
+            "must stop before leftover cheese at 5"
+        );
+        assert_eq!(
+            contiguous_body_tip_from(&blockstore, 5).unwrap(),
+            5,
+            "walk from a later island stays on that island"
+        );
+    }
+
+    #[test]
+    fn contiguous_body_range_tip_does_not_require_genesis() {
+        let blockstore = temp_blockstore();
+        for h in [180_001u64, 180_002, 180_003, 180_005] {
+            let block = Block {
+                header: BlockHeader {
+                    version: 4,
+                    timestamp: 1_600_000_000 + h,
+                    ..Default::default()
+                },
+                transactions: vec![Transaction {
+                    version: 1,
+                    inputs: blvm_protocol::tx_inputs![],
+                    outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                        value: 50_0000_0000,
+                        script_pubkey: vec![0x51],
+                    }],
+                    lock_time: 0,
+                }]
+                .into(),
+            };
+            let hash = blockstore.get_block_hash(&block);
+            blockstore.store_height(h, &hash).unwrap();
+            blockstore.store_block_with_witness(&block, &[], h).unwrap();
+        }
+        assert_eq!(first_stored_body_height(&blockstore).unwrap(), 180_001);
+        assert_eq!(
+            contiguous_body_range_tip(&blockstore).unwrap(),
+            180_003,
+            "range tip is the first island, not 0 and not leftover cheese"
+        );
+        assert_eq!(
+            contiguous_body_tip_from(&blockstore, 1).unwrap(),
+            0,
+            "walk-from-1 still misses a slice that does not start at genesis"
+        );
+    }
+
+    #[test]
     fn extend_contiguous_body_tip_stops_at_hole() {
         let blockstore = temp_blockstore();
         for h in [100u64, 101, 102, 104] {
@@ -981,6 +1535,97 @@ mod tests {
             102,
             "no further contiguous from hole edge"
         );
+    }
+
+    fn store_body_at(blockstore: &BlockStore, h: u64) {
+        let block = Block {
+            header: BlockHeader {
+                version: 4,
+                timestamp: 1_600_000_000 + h,
+                ..Default::default()
+            },
+            transactions: vec![Transaction {
+                version: 1,
+                inputs: blvm_protocol::tx_inputs![],
+                outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                    value: 50_0000_0000,
+                    script_pubkey: vec![0x51],
+                }],
+                lock_time: 0,
+            }]
+            .into(),
+        };
+        let hash = blockstore.get_block_hash(&block);
+        blockstore.store_height(h, &hash).unwrap();
+        blockstore.store_block_with_witness(&block, &[], h).unwrap();
+    }
+
+    #[test]
+    fn available_body_bumps_without_disk_or_flush_commit() {
+        reset_flush_path_body_tip_for_test();
+        note_available_body(1);
+        assert_eq!(flush_path_body_tip(), 1, "feeder-take / insert of 1 bumps");
+        note_available_body(2);
+        assert_eq!(flush_path_body_tip(), 2, "sequential availability bumps");
+        note_available_body(4);
+        assert_eq!(
+            flush_path_body_tip(),
+            2,
+            "hole at 3 must not jump"
+        );
+        note_available_body(3);
+        assert_eq!(flush_path_body_tip(), 3, "fill 3; 4 is not auto-caught without disk");
+        reset_flush_path_body_tip_for_test();
+    }
+
+    #[test]
+    fn flush_path_tip_advances_on_write_not_sparse_jump() {
+        reset_flush_path_body_tip_for_test();
+        let blockstore = temp_blockstore();
+        for h in [3u64, 5] {
+            store_body_at(&blockstore, h);
+            note_flush_path_bodies(&blockstore, &[h]);
+        }
+        assert_eq!(
+            flush_path_body_tip(),
+            0,
+            "out-of-order persist must not jump a hole at 1"
+        );
+        store_body_at(&blockstore, 1);
+        note_flush_path_bodies(&blockstore, &[1]);
+        assert_eq!(flush_path_body_tip(), 1, "tip+1 persist bumps once");
+        store_body_at(&blockstore, 2);
+        note_flush_path_bodies(&blockstore, &[2]);
+        assert_eq!(
+            flush_path_body_tip(),
+            3,
+            "tip+1 persist catch-up walks already-on-disk 3"
+        );
+        store_body_at(&blockstore, 4);
+        note_flush_path_bodies(&blockstore, &[4]);
+        assert_eq!(
+            flush_path_body_tip(),
+            5,
+            "catch-up reaches 5 after 4 lands"
+        );
+        reset_flush_path_body_tip_for_test();
+    }
+
+    #[test]
+    fn flush_path_tip_batch_1_to_50_holds() {
+        reset_flush_path_body_tip_for_test();
+        let blockstore = temp_blockstore();
+        let heights: Vec<u64> = (1..=50).collect();
+        for &h in &heights {
+            store_body_at(&blockstore, h);
+        }
+        note_flush_path_bodies(&blockstore, &heights);
+        assert_eq!(
+            flush_path_body_tip(),
+            50,
+            "sorted flush batch 1..=50 must publish tip=50"
+        );
+        reset_flush_path_body_tip_for_test();
     }
 
     #[test]
@@ -1039,6 +1684,154 @@ mod tests {
             .unwrap()
         );
         assert!(reorder_buffer.contains_key(&500));
+    }
+
+    fn persist_toy_at(blockstore: &BlockStore, vh: &Arc<AtomicU64>, h: u64) -> bool {
+        let block = Block {
+            header: BlockHeader {
+                version: 4,
+                timestamp: 1_600_000_000 + h,
+                ..Default::default()
+            },
+            transactions: vec![Transaction {
+                version: 1,
+                inputs: blvm_protocol::tx_inputs![],
+                outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                    value: 50_0000_0000,
+                    script_pubkey: vec![0x51],
+                }],
+                lock_time: 0,
+            }]
+            .into(),
+        };
+        let hash = blockstore.get_block_hash(&block);
+        blockstore.store_height(h, &hash).unwrap();
+        try_persist_gap_block_for_local_inject(
+            blockstore,
+            Some(vh),
+            h,
+            hash,
+            &block,
+            &[],
+            ProtocolVersion::BitcoinV1,
+        )
+        .unwrap()
+    }
+
+    fn toy_block_at(h: u64) -> Block {
+        Block {
+            header: BlockHeader {
+                version: 4,
+                timestamp: 1_600_000_000 + h,
+                ..Default::default()
+            },
+            transactions: vec![Transaction {
+                version: 1,
+                inputs: blvm_protocol::tx_inputs![],
+                outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                    value: 50_0000_0000 + h as i64,
+                    script_pubkey: vec![0x51],
+                }],
+                lock_time: 0,
+            }]
+            .into(),
+        }
+    }
+
+    /// R-348: the persist-lane batch write lands every body in one txn and each reads
+    /// back through the same path the coordinator's local inject uses; the gate reports
+    /// `OnDisk` afterwards (no second write).
+    #[test]
+    fn r348_batch_store_round_trips_and_gate_sees_on_disk() {
+        let bs = temp_blockstore();
+        let blocks: Vec<Block> = (100u64..132).map(toy_block_at).collect();
+        for (i, b) in blocks.iter().enumerate() {
+            bs.store_height(100 + i as u64, &bs.get_block_hash(b)).unwrap();
+        }
+        let empty: Vec<Vec<blvm_protocol::segwit::Witness>> = Vec::new();
+        let items: Vec<(&Block, &[Vec<blvm_protocol::segwit::Witness>], u64)> = blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (b, empty.as_slice(), 100 + i as u64))
+            .collect();
+        bs.store_blocks_with_witness_batch(&items).unwrap();
+        let vh = Arc::new(AtomicU64::new(99));
+        for (i, b) in blocks.iter().enumerate() {
+            let h = 100 + i as u64;
+            let hash = bs.get_block_hash(b);
+            assert!(bs.has_block_body(&hash).unwrap(), "body {h} on disk");
+            let (got, _w) = try_load_local_ibd_block_with_reason(&bs, h, hash, ProtocolVersion::BitcoinV1)
+                .unwrap()
+                .unwrap_or_else(|m| panic!("load {h}: {m:?}"));
+            assert_eq!(got.header.timestamp, b.header.timestamp);
+            let gate = gap_persist_gate(&bs, Some(&vh), h, hash, b, &[], ProtocolVersion::BitcoinV1)
+                .unwrap();
+            assert!(matches!(gate, GapPersistGate::OnDisk(_)), "gate after batch: {gate:?}");
+        }
+        // A fresh height still asks to be written.
+        let nb = toy_block_at(200);
+        let nh = bs.get_block_hash(&nb);
+        bs.store_height(200, &nh).unwrap();
+        assert_eq!(
+            gap_persist_gate(&bs, Some(&vh), 200, nh, &nb, &[], ProtocolVersion::BitcoinV1).unwrap(),
+            GapPersistGate::Write
+        );
+    }
+
+    fn persist_wrote_body(blockstore: &BlockStore, h: u64) -> bool {
+        blockstore
+            .get_hash_by_height(h)
+            .ok()
+            .flatten()
+            .and_then(|hash| blockstore.has_block_body(&hash).ok())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn r196_persist_ahead_prefix() {
+        // Persist writes disk. It must not publish FLUSH_PATH_TIP (R-196 leftover).
+        reset_flush_path_body_tip_for_test();
+        let ahead = temp_blockstore();
+        let vh0 = Arc::new(AtomicU64::new(0));
+        for h in 1u64..=5 {
+            assert!(
+                persist_toy_at(&ahead, &vh0, h),
+                "persist {h} while val=0 must write"
+            );
+            assert!(persist_wrote_body(&ahead, h), "body {h} on disk");
+        }
+        assert_eq!(
+            flush_path_body_tip(),
+            0,
+            "GAP_PERSIST must not publish leftover warehouse tip"
+        );
+
+        reset_flush_path_body_tip_for_test();
+        let late = temp_blockstore();
+        let vh600 = Arc::new(AtomicU64::new(600));
+        assert!(
+            persist_toy_at(&late, &vh600, 1),
+            "late tip+1 must persist after apply passed"
+        );
+        assert!(persist_wrote_body(&late, 1));
+        assert_eq!(flush_path_body_tip(), 0);
+        assert!(
+            persist_toy_at(&late, &vh600, 2),
+            "sequential glue continues after apply passed"
+        );
+        assert!(persist_wrote_body(&late, 2));
+        assert_eq!(flush_path_body_tip(), 0);
+
+        reset_flush_path_body_tip_for_test();
+        let farm = temp_blockstore();
+        let vh10 = Arc::new(AtomicU64::new(10));
+        assert!(
+            persist_toy_at(&farm, &vh10, 2000),
+            "farm tile outside lookahead must persist"
+        );
+        assert!(persist_wrote_body(&farm, 2000));
+        assert_eq!(flush_path_body_tip(), 0);
+        reset_flush_path_body_tip_for_test();
     }
 
     #[test]

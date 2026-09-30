@@ -287,7 +287,7 @@ async fn drain_consecutive_received_after(
         };
         // after_height was just streamed as tip; validation tip_need is still that height
         // until applied — treat drain heights as non-tip for reserve.
-        await_block_tx_tip_reserve(tx, next, Some(after_height)).await;
+        let _ = await_block_tx_tip_reserve(tx, next, Some(after_height), None).await;
         if tx.send((next, block, block_witnesses)).await.is_err() {
             return Err(anyhow::anyhow!(
                 "block_tx closed during consecutive gap drain - chunk needs retry"
@@ -709,13 +709,16 @@ fn tip_cap_during_export(cap: u64, base: u64) -> u64 {
     cap.max(floor).min(base)
 }
 
-/// W10: per-block timeout for far-ahead chunks (default 10s) — abort fast to free the peer.
+/// W10: per-block timeout for far-ahead chunks. Was 10s ("abort fast to free the peer") —
+/// it did not abort, it re-GetData'd the same peer. R-327 slowest 300k+ 90s: 721 of them;
+/// count rose with block size (300k 56 → 360k 6041 per 10k). R-328 at 30s: 300–340k
+/// 68→98.9 BPS, 340–370k 40.7→65.4, wall 2579→1879. Default **30**.
 pub(crate) fn far_ahead_timeout_secs() -> u64 {
     latch_env!(u64, {
         std::env::var("BLVM_IBD_FAR_AHEAD_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(10)
+            .unwrap_or(30)
             .clamp(5, 30)
     })
 }
@@ -747,20 +750,348 @@ pub(crate) fn download_byte_budget() -> Option<u64> {
 }
 
 /// Running estimate of serialized block size for W2 fill-depth (default 1 MiB).
-fn download_est_block_bytes() -> u64 {
+fn download_est_store() -> &'static std::sync::atomic::AtomicU64 {
     static EST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1_000_000);
-    EST.load(std::sync::atomic::Ordering::Relaxed).max(50_000)
+    &EST
 }
 
-fn note_download_block_bytes(nbytes: u64) {
+fn download_bytes_total_store() -> &'static std::sync::atomic::AtomicU64 {
+    static TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    &TOTAL
+}
+
+fn download_bytes_peer_store() -> &'static Mutex<HashMap<String, u64>> {
+    static PEERS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    PEERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn download_est_block_bytes() -> u64 {
+    download_est_store()
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .max(50_000)
+}
+
+/// Cumulative GAP_STREAM / download body bytes (CRAWL `win_mbps` — no PeerManager lock).
+pub(crate) fn download_bytes_total() -> u64 {
+    download_bytes_total_store().load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Cumulative GAP_STREAM bytes for one peer (0 if none). Not title.
+pub(crate) fn download_bytes_for_peer(peer_id: &str) -> u64 {
+    download_bytes_peer_store()
+        .lock()
+        .ok()
+        .and_then(|g| g.get(peer_id).copied())
+        .unwrap_or(0)
+}
+
+fn recv_mbps_cache() -> &'static Mutex<HashMap<String, f64>> {
+    static C: OnceLock<Mutex<HashMap<String, f64>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Last CRAWL-window recv for `peer_id`. `None` until one window has been scored.
+/// Unknown is not mute — fat hold stays until CRAWL prints.
+pub(crate) fn download_cached_recv_mbps(peer_id: &str) -> Option<f64> {
+    recv_mbps_cache()
+        .lock()
+        .ok()
+        .and_then(|g| g.get(peer_id).copied())
+}
+
+/// Sticky vs fattest other peer in the CRAWL recv cache. `None` if sticky
+/// has not been scored this window (H-slow must not hold-blind).
+pub(crate) fn download_cached_sticky_vs_top(sticky: &str) -> Option<(f64, f64)> {
+    let g = recv_mbps_cache().lock().ok()?;
+    let sticky_recv = g.get(sticky).copied()?;
+    let top = g
+        .iter()
+        .filter(|(p, _)| p.as_str() != sticky)
+        .map(|(_, v)| *v)
+        .fold(0.0_f64, f64::max);
+    Some((sticky_recv, top))
+}
+
+/// Fattest CRAWL recv peer other than `exclude`. `None` if the cache is empty
+/// of others (HOLE_ANY dump / R-195: any farm).
+pub(crate) fn download_cached_fattest_other(exclude: &str) -> Option<(String, f64)> {
+    let g = recv_mbps_cache().lock().ok()?;
+    g.iter()
+        .filter(|(p, _)| p.as_str() != exclude)
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(p, v)| (p.clone(), *v))
+}
+
+/// Cumulative blocks assigned to a peer (`insert_in_flight` / get_work stripe).
+/// This is the seat: R-280 `peers_inflight` is the count of peers with a non-empty
+/// in-flight stripe, not the count of peers that happen to have delivered bytes.
+fn download_assigned_store() -> &'static Mutex<HashMap<String, u64>> {
+    static ASSIGNED: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    ASSIGNED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Record that `peer` was given `n_blocks` of work. Called from `insert_in_flight`
+/// — that is the honest "asked for N blocks" signal. GetData in `admit.rs` only
+/// fires for heights missing locally; a seated peer filling from disk still holds
+/// the seat. R-289 ranked the byte store, so a peer never assigned this window
+/// read 0.00 mbps and was evicted (13 of 13).
+pub(crate) fn download_note_assigned(peer_id: &str, n_blocks: u64) {
+    if n_blocks == 0 {
+        return;
+    }
+    if let Ok(mut g) = download_assigned_store().lock() {
+        *g.entry(peer_id.to_string()).or_insert(0) += n_blocks;
+    }
+}
+
+/// Drop a peer from the recv AND assignment accounting. The byte store is not
+/// pruned on disconnect, so without this a departed peer sits at a frozen count,
+/// reads as 0 mbps forever, and is re-picked as "slowest" on every rotation
+/// instead of a live freeloader.
+pub(crate) fn download_forget_peer(peer: &str) {
+    if let Ok(mut g) = download_bytes_peer_store().lock() {
+        g.remove(peer);
+    }
+    if let Ok(mut g) = download_assigned_store().lock() {
+        g.remove(peer);
+    }
+    if let Ok(mut g) = recv_mbps_cache().lock() {
+        g.remove(peer);
+    }
+}
+
+/// Roster-swap pick. `recv_mbps` is still logged so R-289's `recv=0.00` fail
+/// shape is comparable; ranking uses yield (delivered bytes / assigned blocks).
+pub(crate) struct RotateVictim {
+    pub peer: String,
+    pub recv_mbps: f64,
+    pub seated: usize,
+    pub assigned: u64,
+    pub bench: usize,
+    pub top3_frac: f64,
+}
+
+type RotateSnap = (
+    HashMap<String, u64>,
+    HashMap<String, u64>,
+    Option<std::time::Instant>,
+);
+
+fn rotate_prev() -> &'static Mutex<RotateSnap> {
+    static PREV: OnceLock<Mutex<RotateSnap>> = OnceLock::new();
+    PREV.get_or_init(|| Mutex::new((HashMap::new(), HashMap::new(), None)))
+}
+
+/// Rotation-owned window. Deliberately does NOT read `recv_mbps_cache` (only
+/// refreshed inside `wan_tip_crawl && should_log`).
+///
+/// R-289 ranked every peer in the byte store. 13/13 evictions were `recv=0.00`
+/// — never assigned this window (R-280 `peers_conn` 45 vs `peers_inflight` 13.6).
+/// R-290 scores ONLY peers with ≥1 assignment in the window (the roster) and
+/// leaves the bench alone, holding seat count fixed. R-281/R-282 already failed
+/// at raising concurrency.
+///
+/// Score = delivered bytes per assigned block. Mbps treats a 1-block seat the
+/// same as a 16-block hung pipe; yield is occupancy-normalized. A hung seat
+/// (assigned 16, delivered 0) scores 0 and is the worst seated peer.
+pub(crate) fn download_rotate_slowest(
+    exclude: &str,
+    min_scored: usize,
+) -> Option<RotateVictim> {
+    let now_bytes = download_bytes_peer_store()
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    let now_assigned = download_assigned_store()
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    let now_at = std::time::Instant::now();
+
+    let mut g = rotate_prev().lock().ok()?;
+    let (prev_bytes, prev_assigned, prev_at) = &mut *g;
+
+    let Some(at) = *prev_at else {
+        *prev_bytes = now_bytes;
+        *prev_assigned = now_assigned;
+        *prev_at = Some(now_at);
+        return None;
+    };
+    let dt = now_at.saturating_duration_since(at).as_secs_f64();
+    if dt < 1.0 {
+        return None;
+    }
+
+    let mbps = |delta: u64| (delta as f64 / (1024.0 * 1024.0)) * 8.0 / dt;
+    let mut seated: Vec<(String, f64, f64, u64)> = Vec::new();
+    let mut assigned_total = 0u64;
+    let mut known: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for p in now_bytes.keys().chain(now_assigned.keys()) {
+        known.insert(p.clone());
+    }
+    for (p, now_a) in &now_assigned {
+        let was_a = prev_assigned.get(p).copied().unwrap_or(0);
+        let da = now_a.saturating_sub(was_a);
+        if da == 0 {
+            continue;
+        }
+        assigned_total = assigned_total.saturating_add(da);
+        let db = now_bytes
+            .get(p)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(prev_bytes.get(p).copied().unwrap_or(0));
+        let yield_b = db as f64 / da as f64;
+        seated.push((p.clone(), mbps(db), yield_b, da));
+    }
+    let seated_n = seated.len();
+    let bench_n = known.len().saturating_sub(seated_n);
+
+    let mut byte_deltas: Vec<u64> = seated
+        .iter()
+        .map(|(p, _, _, _)| {
+            now_bytes
+                .get(p)
+                .copied()
+                .unwrap_or(0)
+                .saturating_sub(prev_bytes.get(p).copied().unwrap_or(0))
+        })
+        .collect();
+    byte_deltas.sort_unstable_by(|a, b| b.cmp(a));
+    let bytes_all: u64 = byte_deltas.iter().sum();
+    let top3: u64 = byte_deltas.iter().take(3).sum();
+    let top3_frac = if bytes_all == 0 {
+        0.0
+    } else {
+        top3 as f64 / bytes_all as f64
+    };
+
+    *prev_bytes = now_bytes;
+    *prev_assigned = now_assigned;
+    *prev_at = Some(now_at);
+
+    if seated_n < min_scored {
+        return None;
+    }
+    seated
+        .into_iter()
+        .filter(|(p, _, _, _)| p.as_str() != exclude)
+        .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(peer, recv_mbps, _, _)| RotateVictim {
+            peer,
+            recv_mbps,
+            seated: seated_n,
+            assigned: assigned_total,
+            bench: bench_n,
+            top3_frac,
+        })
+}
+
+/// Window recv vs `prev` (updated in place). `sticky_recv_mbps` + fattest other peer.
+/// Also caches per-peer mbps for the fat mute-hold (not a seat).
+pub(crate) fn download_peer_recv_window(
+    sticky: &str,
+    prev: &mut HashMap<String, u64>,
+    dt_secs: f64,
+) -> (f64, String, f64) {
+    let now = download_bytes_peer_store()
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    let mbps = |delta: u64| (delta as f64 / (1024.0 * 1024.0)) * 8.0 / dt_secs.max(0.001);
+    let sticky_d = now
+        .get(sticky)
+        .copied()
+        .unwrap_or(0)
+        .saturating_sub(prev.get(sticky).copied().unwrap_or(0));
+    let mut top_p = "-".to_string();
+    let mut top_d = 0u64;
+    let mut cached: HashMap<String, f64> = HashMap::new();
+    cached.insert(sticky.to_string(), mbps(sticky_d));
+    for (p, b) in &now {
+        if p == sticky {
+            continue;
+        }
+        let d = b.saturating_sub(prev.get(p).copied().unwrap_or(0));
+        cached.insert(p.clone(), mbps(d));
+        if d > top_d {
+            top_d = d;
+            top_p = p.clone();
+        }
+    }
+    if let Ok(mut g) = recv_mbps_cache().lock() {
+        *g = cached;
+    }
+    *prev = now;
+    (mbps(sticky_d), top_p, mbps(top_d))
+}
+
+fn note_download_block_bytes(peer_id: &str, nbytes: u64) {
     if nbytes == 0 {
         return;
     }
-    static EST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1_000_000);
-    let old = EST.load(std::sync::atomic::Ordering::Relaxed).max(50_000);
+    download_bytes_total_store().fetch_add(nbytes, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut g) = download_bytes_peer_store().lock() {
+        *g.entry(peer_id.to_string()).or_insert(0) += nbytes;
+    }
+    let est = download_est_store();
+    let old = est.load(std::sync::atomic::Ordering::Relaxed).max(50_000);
     // EMA: 7/8 old + 1/8 new
     let next = old.saturating_mul(7).saturating_add(nbytes) / 8;
-    EST.store(next.max(50_000), std::sync::atomic::Ordering::Relaxed);
+    est.store(next.max(50_000), std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn test_reset_download_bytes() {
+    download_bytes_total_store().store(0, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut g) = download_bytes_peer_store().lock() {
+        g.clear();
+    }
+    if let Ok(mut g) = recv_mbps_cache().lock() {
+        g.clear();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_set_cached_recv_mbps(peer_id: &str, mbps: f64) {
+    if let Ok(mut g) = recv_mbps_cache().lock() {
+        g.insert(peer_id.to_string(), mbps);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_note_download_block_bytes(peer_id: &str, nbytes: u64) {
+    note_download_block_bytes(peer_id, nbytes);
+}
+
+#[cfg(test)]
+pub(crate) fn test_note_assigned(peer_id: &str, n_blocks: u64) {
+    download_note_assigned(peer_id, n_blocks);
+}
+
+#[cfg(test)]
+pub(crate) fn test_reset_rotate_state() {
+    if let Ok(mut g) = download_bytes_peer_store().lock() {
+        g.clear();
+    }
+    if let Ok(mut g) = download_assigned_store().lock() {
+        g.clear();
+    }
+    if let Ok(mut g) = recv_mbps_cache().lock() {
+        g.clear();
+    }
+    if let Ok(mut g) = rotate_prev().lock() {
+        *g = (HashMap::new(), HashMap::new(), None);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_rotate_backdate_secs(secs: u64) {
+    if let Ok(mut g) = rotate_prev().lock() {
+        if let Some(at) = g.2 {
+            g.2 = at.checked_sub(std::time::Duration::from_secs(secs));
+        }
+    }
 }
 
 /// W10/W12/W14/W24: soft-retry budget for a chunk-local gap height relative to the live tip.
@@ -870,6 +1201,27 @@ pub(crate) fn tip_pipe_has_ahead_buffered(
 /// `tip-gap timeout` for [`crate::node::parallel_ibd::chunk_assigner::ChunkAssigner::note_tip_owner_failed_mute`].
 /// Plain tip fails used 15s cooldown and **skipped** WAN failover arm (W31) →
 /// covering=1 mute thrash (~26s) until watcher rate-fail (32.4 < 35).
+/// Worker 3-strike blacklist: header lag and tip-enter walk-in are assign
+/// artifacts, not peer faults. Live 280–294k: walk-in strikes burned the
+/// 594 BPS sticky for 300s and pinned the soak at 11–44 BPS.
+pub(crate) fn chunk_fail_counts_toward_blacklist(err_str: &str) -> bool {
+    !(err_str.contains("headers must be downloaded first")
+        || err_str.contains("header may not be stored")
+        || err_str.contains("tip-enter walk-in"))
+}
+
+/// dest-ap `107.194` @310 BPS: cheese `(H,H)` 5s tip-gap / no-first-block.
+/// Worker still 3/3 + `MAX_CONSECUTIVE_TIMEOUT_FAILURES=1` → LIMITED evict.
+/// Assigner gates no-strike on ≥80 + cheese sitting; this is the err half.
+pub(crate) fn cheese_h_timeout_err(err_str: &str) -> bool {
+    if err_str.contains("tip-enter walk-in") || err_str.contains("PIPE_FILL mute") {
+        return false;
+    }
+    err_str.contains("tip-gap timeout")
+        || err_str.contains("no first block in")
+        || err_str.contains("Block timeout for gap height")
+}
+
 pub(crate) fn tip_covering_fail_is_mute(err_str: &str) -> bool {
     if err_str.contains("tip-SLA") || err_str.contains("tip-enter walk-in") {
         return false;
@@ -968,7 +1320,7 @@ pub(crate) fn tip_hole_gd_fast_n() -> u64 {
 pub(crate) fn tip_hole_grow_fast_cap() -> usize {
     let cold = tip_hole_grow_cap();
     super::policy::tip_hole_grow_fast_cap_raw()
-        .clamp(cold, 96)
+        .clamp(cold, 128)
         .min(tip_hole_pipe_cap())
         .max(cold)
 }
@@ -1192,9 +1544,36 @@ pub(crate) fn tip_hole_gd_slow() -> bool {
     )
 }
 
-/// C1d: warm peers (hot tip streamer) may deepen to pipe cap (default **off**).
-/// iter10k: warm→128 regressed wall≈22 &lt; C1b floor 40 (`tip_hole_grown_p50=128`).
-/// Opt in: `BLVM_IBD_TIP_HOLE_WARM=1` (Mode T / serving peer only).
+/// B1: C1u slow for **this** peer's EWMA. No peer samples → not slow
+/// (global mute must not freeze a replacement at grow_start=8).
+pub(crate) fn tip_hole_gd_slow_for_peer(peer_id: &str) -> bool {
+    if !tip_hole_grow_enabled() || !tip_hole_gd_slow_enabled() {
+        return false;
+    }
+    matches!(
+        super::tip_stage::getdata_body_ewma_ms_for_peer(peer_id, tip_hole_gd_slow_n()),
+        Some((ms, _n)) if ms >= tip_hole_gd_slow_ms()
+    )
+}
+
+/// C1u clamp/fill-min applies unless this peer already clears the ≥80 keep bar.
+/// Genesis-f: fill-complete skip existed (`fetch.rs` ~1800) but enter-path +
+/// fill-loop still `min(slow_cap)` — `165.140` 32→8 at 266272 / 270998.
+/// dest-an 201447: global ewma 1293 ms / `c1u=true` while hero still @332 —
+/// clamp must read the filling peer, not the shared 7/8.
+pub(crate) fn c1u_applies_slow_clamp(
+    tip_enter: &Option<std::sync::Arc<super::chunk_assigner::ChunkAssigner>>,
+    peer_id: &str,
+) -> bool {
+    tip_hole_gd_slow_for_peer(peer_id)
+        && !tip_enter
+            .as_ref()
+            .is_some_and(|a| a.tip_owner_clears_c1u_clamp(peer_id))
+}
+
+/// C1d: warm peers (hot tip streamer) may deepen to pipe cap.
+/// Ship: hot streamer gets 128 immediately (WARM env no longer required).
+/// `BLVM_IBD_TIP_HOLE_WARM=0` still forces cold cap.
 pub(crate) fn tip_hole_warm_enabled() -> bool {
     super::policy::tip_hole_warm()
 }
@@ -1207,9 +1586,18 @@ fn tip_hole_warm_cap_raw() -> usize {
 }
 
 pub(crate) fn tip_hole_grow_cap_for_peer(hot_tip_streamer: bool) -> usize {
-    // C1n: base is gd-gated effective (cold 32, or 48 when EWMA fast).
+    // C1n: base is gd-gated effective (cold 32, or FAST when EWMA fast).
     let cold = tip_hole_grow_cap_effective();
-    if !tip_hole_grow_enabled() || !tip_hole_warm_enabled() || !hot_tip_streamer {
+    if !tip_hole_grow_enabled() || !hot_tip_streamer {
+        return cold;
+    }
+    // Explicit WARM=0 keeps cold. Unset / on: C1d 128 immediately.
+    if std::env::var("BLVM_IBD_TIP_HOLE_WARM")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        == Some("0")
+    {
         return cold;
     }
     tip_hole_warm_cap_raw()
@@ -1403,20 +1791,24 @@ fn sync_inflight_started(
 ///
 /// W72: tip-cap can store `now` into `deadline_ms` to force a tip-gap timeout without
 /// aborting the whole deep pipe (in-place soft-retry keeps ahead `received`).
+///
+/// R-329: on deadline the **live receiver is returned** (`Err(rx)`), not dropped. The
+/// caller decides whether to re-arm the same wait (peer still owes the block; no second
+/// GetData) or to cancel and re-request. Dropping here made every late body from the
+/// first GetData a `RequeueLoser(drop)` while the same peer served the block twice
+/// (R-326: 64.7k drop losers; R-327 slowest 90s: 721 same-peer re-GetDatas).
 async fn await_block_with_deadline(
     mut rx: tokio::sync::oneshot::Receiver<(Block, Vec<Vec<Witness>>, Option<Vec<u8>>)>,
     deadline_ms: Arc<AtomicU64>,
 ) -> Result<
     Result<(Block, Vec<Vec<Witness>>, Option<Vec<u8>>), tokio::sync::oneshot::error::RecvError>,
-    tokio::time::error::Elapsed,
+    tokio::sync::oneshot::Receiver<(Block, Vec<Vec<Witness>>, Option<Vec<u8>>)>,
 > {
     loop {
         let now = wall_ms_now();
         let dl = deadline_ms.load(Ordering::Relaxed);
         if now >= dl {
-            return Err(timeout(Duration::ZERO, std::future::pending::<()>())
-                .await
-                .unwrap_err());
+            return Err(rx);
         }
         let slice = Duration::from_millis((dl - now).min(500));
         tokio::select! {
@@ -1449,6 +1841,68 @@ fn push_network_inflight(
     }));
 }
 
+/// R-329: max in-place re-arms for an ahead-of-gap height before falling back to the
+/// legacy cancel + same-peer re-GetData. Default **3**. `0` = legacy behavior.
+/// `BLVM_IBD_AHEAD_REARM_MAX`.
+pub(crate) fn ahead_rearm_max() -> u32 {
+    latch_env!(u32, {
+        std::env::var("BLVM_IBD_AHEAD_REARM_MAX")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3)
+            .min(64)
+    })
+}
+
+/// R-329: re-arm a timed-out ahead-of-gap wait on the **same** oneshot. The peer still
+/// owes this block (Core serves GetData in order; a second GetData lands behind the
+/// first and can never arrive sooner). Keeps `request_start` so getdata→body latency
+/// stays honest. Disconnect closes the oneshot → `Ok(Err(_))` abort path; the chunk
+/// outer deadline remains the backstop for a connected-but-stalled peer.
+fn rearm_network_inflight(
+    in_flight: &mut FuturesUnordered<PendingBlockFuture>,
+    in_flight_heights: &mut HashSet<u64>,
+    inflight_deadlines: &mut HashMap<u64, Arc<AtomicU64>>,
+    height: u64,
+    block_hash: [u8; 32],
+    rx: tokio::sync::oneshot::Receiver<(Block, Vec<Vec<Witness>>, Option<Vec<u8>>)>,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    request_start: Instant,
+    timeout_secs: u64,
+) {
+    let deadline = Arc::new(AtomicU64::new(
+        wall_ms_now().saturating_add(timeout_secs.max(1).saturating_mul(1000)),
+    ));
+    inflight_deadlines.insert(height, Arc::clone(&deadline));
+    in_flight_heights.insert(height);
+    in_flight.push(Box::pin(async move {
+        let r = await_block_with_deadline(rx, deadline).await;
+        (height, block_hash, request_start, r, permit)
+    }));
+}
+
+/// Name the `should_abort_tip_walk_in` branch. Archive `wan-650k-hf-93k-hang`
+/// logged `[IBD_TIP_ENTER] … 93063-93063` without a predicate; C1J_ABORT is
+/// 5s-limited and named a neighbor span. Cheap repro of 93063 vs tip=92963.
+pub(crate) fn tip_enter_abort_reason(
+    leftover_force_abort: bool,
+    tip_gap_missing: bool,
+    start: u64,
+    end: u64,
+    next_needed: u64,
+) -> &'static str {
+    if leftover_force_abort {
+        return "leftover_force";
+    }
+    if tip_gap_missing && start > next_needed {
+        return "c1j_ahead";
+    }
+    if next_needed > end {
+        return "tip_past_end";
+    }
+    "walk_in_other"
+}
+
 /// W28d: poll until tip walks into this chunk's range and it is not a tip-cover claim.
 async fn wait_tip_enter_abort(
     tip_enter: &Option<Arc<super::chunk_assigner::ChunkAssigner>>,
@@ -1456,6 +1910,12 @@ async fn wait_tip_enter_abort(
     start_height: u64,
     end_height: u64,
 ) {
+    // F-1: HASH_FETCH take_work is lowest-missing and routinely start>next_needed.
+    // C1j then aborts every ahead (H,H) while genesis tip_gap_missing stays true.
+    if super::hash_fetch_skips_tip_enter_abort() {
+        std::future::pending::<()>().await;
+        return;
+    }
     let Some(assigner) = tip_enter.as_ref() else {
         std::future::pending::<()>().await;
         return;
@@ -1464,7 +1924,87 @@ async fn wait_tip_enter_abort(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
+        let leftover_force = assigner.leftover_force_armed();
+        let body_tip = assigner.wan_body_tip();
+        let need = assigner.next_needed_height();
+        if super::leftover_force_aborts_inflight_stripe(
+            leftover_force,
+            body_tip,
+            start_height,
+            need,
+        ) {
+            tracing::warn!(
+                "[IBD_LEFTOVER_ABORT] leftover stripe {}-{} abort — force={} body_tip={} need={}",
+                start_height,
+                end_height,
+                leftover_force,
+                body_tip,
+                need
+            );
+            return;
+        }
+        if leftover_force {
+            static LAST_MS: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let prev = LAST_MS.load(std::sync::atomic::Ordering::Relaxed);
+            if now.saturating_sub(prev) >= 5000 {
+                LAST_MS.store(now, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    "[IBD_LEFTOVER_ABORT_SKIP] leftover stripe {}-{} kept — force={} body_tip={} need={}",
+                    start_height,
+                    end_height,
+                    leftover_force,
+                    body_tip,
+                    need
+                );
+            }
+        }
         if assigner.should_abort_tip_walk_in(peer_id, start_height, end_height) {
+            static REASON_LOG: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let prev = REASON_LOG.load(std::sync::atomic::Ordering::Relaxed);
+            if now.saturating_sub(prev) >= 5
+                && REASON_LOG
+                    .compare_exchange(
+                        prev,
+                        now,
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                    )
+                    .is_ok()
+            {
+                let leftover_abort = super::leftover_force_aborts_inflight_stripe(
+                    leftover_force,
+                    body_tip,
+                    start_height,
+                    need,
+                );
+                let gap = assigner.tip_gap_is_missing();
+                let reason = tip_enter_abort_reason(
+                    leftover_abort,
+                    gap,
+                    start_height,
+                    end_height,
+                    need,
+                );
+                tracing::warn!(
+                    "[IBD_TIP_ENTER] aborting ahead chunk {}-{} (peer={}) reason={} tip={} gap_missing={} — tip walked in",
+                    start_height,
+                    end_height,
+                    peer_id,
+                    reason,
+                    need,
+                    gap
+                );
+            }
             return;
         }
     }

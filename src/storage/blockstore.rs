@@ -385,6 +385,84 @@ impl BlockStore {
         Ok(())
     }
 
+    /// R-348: store many IBD bodies in **one** LMDB write txn (blocks + headers + meta +
+    /// witness + recent). Same encoding as [`Self::store_block_with_witness`]; falls back to
+    /// per-block stores when the backend is not heed3. R-347 measured the per-block inline
+    /// persist at 4–8 ms/block from 300k with the writer lock over 100 % busy
+    /// (`persist_share` 1.07 / 1.26); batching cuts commits ~N×.
+    pub fn store_blocks_with_witness_batch(
+        &self,
+        items: &[(&Block, &[Vec<Witness>], u64)],
+    ) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        #[cfg(feature = "heed3")]
+        {
+            let n = items.len();
+            let mut flush_order = Vec::with_capacity(n);
+            let mut heights = Vec::with_capacity(n);
+            let mut hashes = Vec::with_capacity(n);
+            let mut bodies = Vec::with_capacity(n);
+            let mut headers = Vec::with_capacity(n);
+            let mut witness_blobs = Vec::with_capacity(n);
+            let mut metas = Vec::with_capacity(n);
+            let mut recent = Vec::with_capacity(n);
+            for (i, (block, witnesses, height)) in items.iter().enumerate() {
+                let block_hash = self.block_hash(block);
+                let block_data = bincode::serialize(block)?;
+                #[cfg(feature = "block-compression")]
+                let block_data = if self.block_compression_enabled {
+                    zstd::encode_all(&block_data[..], self.block_compression_level as i32)
+                        .map_err(|e| anyhow::anyhow!("Block compression failed: {}", e))?
+                } else {
+                    block_data
+                };
+                let header_data = bincode::serialize(&block.header)?;
+                let metadata_data = bincode::serialize(&BlockMetadata {
+                    n_tx: block.transactions.len() as u32,
+                })?;
+                let witness_blob = if !witnesses.is_empty() {
+                    let witness_data = bincode::serialize(witnesses)?;
+                    #[cfg(feature = "witness-compression")]
+                    let witness_data = if self.witness_compression_enabled {
+                        zstd::encode_all(&witness_data[..], self.witness_compression_level as i32)
+                            .map_err(|e| anyhow::anyhow!("Witness compression failed: {}", e))?
+                    } else {
+                        witness_data
+                    };
+                    Some(witness_data)
+                } else {
+                    None
+                };
+                flush_order.push(i);
+                heights.push(*height);
+                hashes.push(block_hash);
+                bodies.push(block_data);
+                headers.push(Arc::new(header_data.clone()));
+                witness_blobs.push(witness_blob);
+                metas.push(metadata_data);
+                recent.push((*height, header_data));
+            }
+            if self.try_ibd_flush_heed3_unified(
+                &flush_order,
+                &heights,
+                &hashes,
+                &bodies,
+                &headers,
+                &witness_blobs,
+                &metas,
+                &recent,
+            )? {
+                return Ok(());
+            }
+        }
+        for (block, witnesses, height) in items {
+            self.store_block_with_witness(block, witnesses, *height)?;
+        }
+        Ok(())
+    }
+
     /// True when a witness blob exists at the height row key or legacy hash-only key.
     pub fn has_witness_blob(&self, block_hash: &Hash) -> Result<bool> {
         if let Some(h) = self.get_height_by_hash(block_hash)? {
@@ -749,7 +827,7 @@ impl BlockStore {
         #[cfg(not(feature = "block-compression"))]
         let block_data = data;
         // `block-compression` yields `Vec<u8>`; otherwise `&[u8]` — both AsRef<[u8]>.
-        let block: Block = bincode::deserialize(block_data)?;
+        let block: Block = bincode::deserialize(block_data.as_ref())?;
         Ok(block)
     }
 

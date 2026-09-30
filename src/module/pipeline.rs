@@ -127,6 +127,14 @@ fn pipeline_handles() -> Option<(Arc<ModuleRouter>, tokio::runtime::Handle)> {
 
 fn route_bytes(method: &str, params: Vec<u8>) -> Option<Vec<u8>> {
     let (router, runtime_handle) = pipeline_handles()?;
+    // R-350: this is called synchronously from tokio worker threads (per-block getdata in
+    // `admit.rs`, per-block flush in the validation loop). Parking the worker on `rx.recv_timeout`
+    // below starves the very task we spawn, so with **no module** routing the method every call
+    // burned the full 6 s timeout — IBD ran at ~1.3 blocks/s. Skip the round trip when the
+    // routing table says nobody serves the method; only fall through when the table is busy.
+    if router.method_registered_now(method) == Some(false) {
+        return None;
+    }
     let method = method.to_string();
     let fut = async move {
         router
@@ -316,4 +324,44 @@ pub fn try_filter_block_download_policy(height: u64, block_hash: Hash, merkle_ro
         .ok()
         .map(|r| r.skip_witness)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::module::inter_module::registry::ModuleApiRegistry;
+
+    /// R-350: with an installed router but **no module** serving the hook, the sync filters must
+    /// return fail-open immediately — even when called from the only runtime worker thread
+    /// (which is exactly where the IBD getdata/flush paths call them). Before the fix this parked
+    /// the worker for the full 6 s timeout because the spawned lookup could never be polled.
+    #[test]
+    #[serial_test::serial(ibd)]
+    fn r350_unrouted_filter_returns_fast_from_runtime_thread() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let router = Arc::new(ModuleRouter::new(Arc::new(ModuleApiRegistry::new())));
+            install_block_pipeline(router);
+            let t0 = std::time::Instant::now();
+            let skip = try_filter_block_download_policy(1, [1u8; 32], [2u8; 32]);
+            let (_blk, _w) = try_filter_block_before_store(
+                1,
+                Block {
+                    header: Default::default(),
+                    transactions: Vec::new().into(),
+                },
+                Arc::new(Vec::new()),
+            );
+            assert!(!skip, "fail-open = full witness");
+            assert!(
+                t0.elapsed() < Duration::from_secs(1),
+                "unrouted hook took {:?} (starved on its own worker)",
+                t0.elapsed()
+            );
+        });
+        reset_block_pipeline_for_tests();
+    }
 }

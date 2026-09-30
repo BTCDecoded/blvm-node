@@ -1,3 +1,75 @@
+/// Rate-limited INFO for C1u clamp vs hold (every tip delivery would storm).
+fn log_tip_hole_gd_slow_info(
+    tag: &str,
+    peer_id: &str,
+    height: u64,
+    from: usize,
+    to: usize,
+    fill_cap: usize,
+    gd: Option<(u64, u64)>,
+) {
+    static LAST_S: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let prev = LAST_S.load(Ordering::Relaxed);
+    if now.saturating_sub(prev) < 5 {
+        return;
+    }
+    LAST_S.store(now, Ordering::Relaxed);
+    warn!(
+        "[{}] peer={} height={} depth {}→{} (fill_cap={} ratchet={} gd_ewma_ms={:?} gd_ewma_n={} gate_ms={})",
+        tag,
+        peer_id,
+        height,
+        from,
+        to,
+        fill_cap,
+        tip_hole_gd_slow_ratchet_enabled(),
+        gd.map(|(ms, _)| ms),
+        gd.map(|(_, n)| n).unwrap_or(0),
+        tip_hole_gd_slow_ms()
+    );
+}
+
+/// Rate-limited GROW / GD_FAST (same 5s cap as C1u).
+fn log_tip_hole_grow_info(
+    tag: &str,
+    peer_id: &str,
+    height: u64,
+    from: usize,
+    to: usize,
+    cap: usize,
+    hot: bool,
+    gd: Option<(u64, u64)>,
+    gate_ms: u64,
+) {
+    static LAST_S: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let prev = LAST_S.load(Ordering::Relaxed);
+    if now.saturating_sub(prev) < 5 {
+        return;
+    }
+    LAST_S.store(now, Ordering::Relaxed);
+    warn!(
+        "[{}] peer={} height={} depth {}→{} (cap={} hot={} gd_ewma_ms={:?} gd_ewma_n={} gate_ms={})",
+        tag,
+        peer_id,
+        height,
+        from,
+        to,
+        cap,
+        hot,
+        gd.map(|(ms, _)| ms),
+        gd.map(|(_, n)| n).unwrap_or(0),
+        gate_ms
+    );
+}
+
 /// Download a chunk of blocks from a peer.
 ///
 /// When block_tx is Some, streams each block immediately so validation doesn't wait for full chunk.
@@ -58,10 +130,14 @@ pub(crate) async fn download_chunk(
         }
     }
 
-    info!(
-        "Downloading chunk from peer {}: heights {} to {}",
-        peer_id, start_height, end_height
-    );
+    if start_height == end_height {
+        log_hf_hot("download", start_height);
+    } else {
+        info!(
+            "Downloading chunk from peer {}: heights {} to {}",
+            peer_id, start_height, end_height
+        );
+    }
 
     let local_disk = is_snapshot_sourced_peer(peer_id);
     let network = match network {
@@ -71,6 +147,7 @@ pub(crate) async fn download_chunk(
             return Ok(DownloadChunkResult {
                 blocks,
                 streamed_block_count: 0,
+                net_block_count: 0,
             });
         }
     };
@@ -84,11 +161,77 @@ pub(crate) async fn download_chunk(
             .map_err(|_| anyhow::anyhow!("Invalid peer address: {}", peer_id))?
     };
 
+    if let Some(assigner) = tip_enter.as_ref() {
+        let lf = assigner.leftover_force_armed();
+        let bt = assigner.wan_body_tip();
+        let stall = assigner.next_needed_height();
+        let leftover_band = bt > 0 && start_height <= bt && start_height.saturating_add(512) > bt;
+        if lf || leftover_band {
+            tracing::warn!(
+                target: "blvm_ibd",
+                start = start_height,
+                end = end_height,
+                leftover_force = lf,
+                body_tip = bt,
+                stall,
+                peer = %peer_id,
+                "[IBD_LEFTOVER_DOWNLOAD] enter"
+            );
+            tracing::warn!(
+                "[IBD_LEFTOVER_TRACE] step=enter start={start_height} end={end_height} leftover_force={lf} body_tip={bt} stall={stall} peer={peer_id} local_disk={local_disk}"
+            );
+        }
+    }
+    let leftover_trace = tip_enter.as_ref().is_some_and(|a| {
+        let bt = a.wan_body_tip();
+        a.leftover_force_armed()
+            || (bt > 0 && start_height <= bt && start_height.saturating_add(512) > bt)
+    });
     if !local_disk {
+        if leftover_trace {
+            tracing::warn!(
+                "[IBD_LEFTOVER_TRACE] step=connect_begin start={start_height} peer={peer_id}"
+            );
+        }
         let connect_wait = Duration::from_secs(config.download_timeout_secs.max(15));
-        wait_for_peer_connected(&network, peer_addr, peer_id, connect_wait, &tip_enter).await?;
+        wait_for_peer_connected(
+            &network,
+            peer_addr,
+            peer_id,
+            connect_wait,
+            &tip_enter,
+            start_height,
+        )
+        .await?;
+        if leftover_trace {
+            tracing::warn!(
+                "[IBD_LEFTOVER_TRACE] step=connect_ok start={start_height} peer={peer_id}"
+            );
+        }
+        if leftover_trace {
+            tracing::warn!(
+                "[IBD_LEFTOVER_TRACE] step=handshake_begin start={start_height} peer={peer_id}"
+            );
+        }
         let handshake_wait = Duration::from_secs(15);
-        wait_for_peer_ibd_ready(&network, peer_addr, peer_id, handshake_wait, &tip_enter).await?;
+        wait_for_peer_ibd_ready(
+            &network,
+            peer_addr,
+            peer_id,
+            handshake_wait,
+            &tip_enter,
+            start_height,
+        )
+        .await?;
+        if leftover_trace {
+            tracing::warn!(
+                "[IBD_LEFTOVER_TRACE] step=handshake_ok start={start_height} peer={peer_id}"
+            );
+        }
+    } else if leftover_trace {
+        tracing::warn!(
+            "[IBD_LEFTOVER_TRACE] step=skip_connect_local_disk start={start_height} peer={peer_id}"
+        );
     }
 
     let validated_tip = validation_height
@@ -101,6 +244,7 @@ pub(crate) async fn download_chunk(
             return Ok(DownloadChunkResult {
                 blocks,
                 streamed_block_count: 0,
+                net_block_count: 0,
             });
         }
     };
@@ -111,6 +255,11 @@ pub(crate) async fn download_chunk(
         );
     }
 
+    if leftover_trace {
+        tracing::warn!(
+            "[IBD_LEFTOVER_TRACE] step=hash_begin start={start_height} end={end_height} resume={resume_from} peer={peer_id}"
+        );
+    }
     let mut block_hashes = Vec::new();
     let mut effective_end = end_height;
     for height in start_height..=end_height {
@@ -138,6 +287,12 @@ pub(crate) async fn download_chunk(
         }
     }
     let end_height = effective_end;
+    if leftover_trace {
+        tracing::warn!(
+            "[IBD_LEFTOVER_TRACE] step=hash_done start={start_height} end={end_height} hashes={} peer={peer_id}",
+            block_hashes.len()
+        );
+    }
 
     if block_hashes.is_empty() {
         return Err(anyhow::anyhow!(
@@ -268,6 +423,8 @@ pub(crate) async fn download_chunk(
     // P4: soft gap timeouts re-request without aborting; hard deadline still aborts.
     // W10/W12: per-timeout budget from gap_soft_retry_budget (tip/far-ahead aware).
     let mut gap_soft_retries: u32 = 0;
+    // R-329: in-place re-arms per ahead-of-gap height (no same-peer re-GetData).
+    let mut ahead_rearms: HashMap<u64, u32> = HashMap::new();
     // W29c: after tip GAP_STREAM succeeds, lengthen per-block timeout for remaining pipe.
     let mut progressive_timeout_applied = false;
     // P1a/P1b: heights loaded via try_load_local (wire_payload=None). Do not credit WAN
@@ -295,6 +452,13 @@ pub(crate) async fn download_chunk(
         .map(|a| a.tip_hole_depth_for(peer_id))
         .unwrap_or_else(tip_hole_grow_start)
         .min(tip_hole_cap);
+    // Ship: hot tip streamer starts at 64 and may use C1d cap 128 immediately.
+    if tip_hole_hot {
+        tip_hole_cap = tip_hole_grow_cap_for_peer(true);
+        if tip_hole_grown < 64 {
+            tip_hole_grown = 64.min(tip_hole_cap);
+        }
+    }
     // C1u: enter with shallow fill if GetData EWMA already slow (sticky may still be 32).
     // Sole ready peer: pin to sole_gd_slow_floor (16) — raise starve-8, lower flood-32.
     // Do not hard-cap FAST_CAP 64 (tc109 tip90≈67.8 used FAST_CAP=64; sole abs-cap regressed).
@@ -315,7 +479,8 @@ pub(crate) async fn download_chunk(
             a.clamp_tip_hole_depth(peer_id, tip_hole_grown);
         }
     }
-    if tip_hole_gd_slow() && sole_ready && tip_hole_sole_floor_applies(next_to_send) {
+    if tip_hole_gd_slow_for_peer(peer_id) && sole_ready && tip_hole_sole_floor_applies(next_to_send)
+    {
         let floor = tip_hole_sole_gd_slow_floor();
         super::tip_stage::note_sole_floor_latch();
         maybe_note_sole_no_fast_latch(next_to_send);
@@ -341,7 +506,7 @@ pub(crate) async fn download_chunk(
                 a.clamp_tip_hole_depth(peer_id, tip_hole_grown);
             }
         }
-    } else if tip_hole_gd_slow() && !sole_ready {
+    } else if !sole_ready && c1u_applies_slow_clamp(&tip_enter, peer_id) {
         let slow = tip_hole_slow_fill_cap();
         if tip_hole_grown > slow {
             tip_hole_grown = slow;
@@ -397,7 +562,18 @@ pub(crate) async fn download_chunk(
         local_sourced_heights: &mut HashSet<u64>,
         tip_hole_grown: usize,
         tip_hole_cap: usize,
+        leftover: Option<&std::sync::Arc<super::chunk_assigner::ChunkAssigner>>,
     ) -> Result<()> {
+        let leftover_trace = leftover.is_some_and(|a| {
+            let bt = a.wan_body_tip();
+            a.leftover_force_armed()
+                || (bt > 0 && start_height <= bt && start_height.saturating_add(512) > bt)
+        });
+        if leftover_trace {
+            tracing::warn!(
+                "[IBD_LEFTOVER_TRACE] step=fill_begin start={start_height} next_to_send={next_to_send} end={end_height} peer={peer_id}"
+            );
+        }
         // Batch network block requests into groups of GETDATA_BATCH_SIZE. Local cache hits
         // (blocks already in blockstore) are enqueued immediately without batching.
         let mut net_batch_heights: Vec<(u64, [u8; 32])> = Vec::new();
@@ -419,7 +595,10 @@ pub(crate) async fn download_chunk(
         // C1u: do not hold depth=32 GetDatas while gd_ewma is drip-slow.
         // Keep fill clamp even when ratchet is opt-in (T172520Z REVERT: dropping
         // this over-piped mute stretches and tip60-failed @480k).
-        if tip_hole && tip_hole_gd_slow() {
+        if tip_hole
+            && tip_hole_gd_slow_for_peer(peer_id)
+            && !leftover.is_some_and(|a| a.tip_owner_clears_c1u_clamp(peer_id))
+        {
             fill_depth = fill_depth.min(tip_hole_slow_fill_cap());
         }
         // Mode T tip-priority: tip-cover chunks stay glued to tip_needed (never
@@ -430,7 +609,9 @@ pub(crate) async fn download_chunk(
         let tip_glue = sole_tip_pri && (tip_hole || near_tip);
         if tip_glue {
             let mut sole_fill = tip_hole_grown.min(pipeline_depth).min(tip_hole_cap).max(1);
-            if tip_hole_gd_slow() {
+            if tip_hole_gd_slow_for_peer(peer_id)
+                && !leftover.is_some_and(|a| a.tip_owner_clears_c1u_clamp(peer_id))
+            {
                 sole_fill = sole_fill.min(tip_hole_slow_fill_cap());
             }
             fill_depth = sole_fill;
@@ -443,7 +624,7 @@ pub(crate) async fn download_chunk(
         if tip_hole && fill_depth > 0 && in_flight.len() < fill_depth {
             let pipe_f = super::tip_stage::pipe_frontier(tip_needed);
             let target = tip_needed.saturating_add((fill_depth as u64).saturating_sub(1));
-            if pipe_f < target {
+            if pipe_f < target && !in_flight.is_empty() {
                 static C2_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -486,6 +667,23 @@ pub(crate) async fn download_chunk(
         };
 
         while in_flight.len() + net_batch_heights.len() < fill_depth {
+            if let Some(a) = leftover {
+                let need = a.next_needed_height();
+                if super::leftover_force_aborts_inflight_stripe(
+                    a.leftover_force_armed(),
+                    a.wan_body_tip(),
+                    start_height,
+                    need,
+                ) {
+                    warn!(
+                        "[IBD_LEFTOVER_FILL_ABORT] leftover stripe start={} need={} — abort fill so GetData can own handoff",
+                        start_height, need
+                    );
+                    return Err(anyhow::anyhow!(
+                        "leftover-force: abort leftover fill {start_height} for GetData {need}"
+                    ));
+                }
+            }
             if let Some(budget) = byte_budget {
                 let pending = (in_flight.len() + net_batch_heights.len()) as u64;
                 let pending_bytes = pending.saturating_mul(download_est_block_bytes());
@@ -510,15 +708,25 @@ pub(crate) async fn download_chunk(
             };
 
             if super::synthetic_wan::is_synthetic_peer(peer_id) {
-                let delay_ms = super::synthetic_wan::getdata_delay_ms();
+                let delay_ms = super::synthetic_wan::getdata_delay_ms_for_peer(peer_id);
                 if delay_ms > 0 {
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 }
             }
 
+            if leftover_trace {
+                tracing::warn!(
+                    "[IBD_LEFTOVER_TRACE] step=try_load_begin start={start_height} h={height} peer={peer_id}"
+                );
+            }
             if let Some((block, block_witnesses)) =
                 try_load_local_ibd_block(blockstore, height, block_hash, protocol_version)?
             {
+                if leftover_trace {
+                    tracing::warn!(
+                        "[IBD_LEFTOVER_TRACE] step=try_load_hit start={start_height} h={height} peer={peer_id}"
+                    );
+                }
                 // Local block: flush any pending network batch first (preserve order of
                 // in_flight_heights insertions — local and network blocks are interleaved).
                 if !net_batch_heights.is_empty() {
@@ -564,6 +772,14 @@ pub(crate) async fn download_chunk(
                 drop(permit);
                 break;
             } else {
+                if leftover_trace {
+                    tracing::warn!(
+                        "[IBD_LEFTOVER_TRACE] step=try_load_miss start={start_height} h={height} peer={peer_id}"
+                    );
+                }
+                if height <= confirmed_body_height || height <= validation_tip.saturating_add(256) {
+                    log_hf_hot("LOCAL_MISS", height);
+                }
                 net_batch_heights.push((height, block_hash));
                 net_batch_permits.push(permit);
 
@@ -612,6 +828,12 @@ pub(crate) async fn download_chunk(
             )
             .await?;
         }
+        if leftover_trace {
+            tracing::warn!(
+                "[IBD_LEFTOVER_TRACE] step=fill_done start={start_height} in_flight={} peer={peer_id}",
+                in_flight.len()
+            );
+        }
         Ok(())
     }
 
@@ -639,26 +861,32 @@ pub(crate) async fn download_chunk(
         &mut local_sourced_heights,
         tip_hole_grown,
         tip_hole_cap,
+        tip_enter.as_ref(),
     )
     .await?;
     // W35″ observability: how full is the GetData pipe after initial fill?
-    if confirmed_body_height > 0
-        && start_height > confirmed_body_height
-        && end_height.saturating_sub(start_height) >= 63
+    // Genesis / prune-window dests keep confirmed_body_height=0 (no mid-chain
+    // bodies on disk). Still note PIPE_FILL so recv0 mute can arm C1t.
+    if end_height.saturating_sub(start_height) >= 63
+        && (confirmed_body_height == 0 || start_height > confirmed_body_height)
     {
         if received.is_empty() && !in_flight.is_empty() {
             pipe_fill_recv0 = true;
             super::tip_stage::note_pipe_fill_recv0();
         }
+        let gd_fill = super::tip_stage::getdata_body_ewma_ms_for_peer(peer_id, 16)
+            .or_else(super::tip_stage::getdata_body_ewma_ms);
         warn!(
-            "[IBD_PIPE_FILL] peer={} chunk={}-{} in_flight={}/{} received={} tip_hole_grown={}",
+            "[IBD_PIPE_FILL] peer={} chunk={}-{} in_flight={}/{} received={} tip_hole_grown={} gd_ewma_ms={:?} c1u={}",
             peer_id,
             start_height,
             end_height,
             in_flight.len(),
             pipeline_depth,
             received.len(),
-            tip_hole_grown
+            tip_hole_grown,
+            gd_fill.map(|(ms, _)| ms),
+            tip_hole_gd_slow_for_peer(peer_id)
         );
     }
 
@@ -689,7 +917,48 @@ pub(crate) async fn download_chunk(
     // Consume the immediate first tick so the first poll is ~1s out.
     deadline_poll.tick().await;
 
+    let mut leftover_fetch_logged = false;
     loop {
+        if leftover_trace && !leftover_fetch_logged {
+            leftover_fetch_logged = true;
+            let (lf, bt, need) = tip_enter
+                .as_ref()
+                .map(|a| {
+                    (
+                        a.leftover_force_armed(),
+                        a.wan_body_tip(),
+                        a.next_needed_height(),
+                    )
+                })
+                .unwrap_or((false, 0, 0));
+            tracing::warn!(
+                "[IBD_LEFTOVER_TRACE] step=fetch_loop start={start_height} end={end_height} next_to_send={next_to_send} leftover_force={lf} body_tip={bt} need={need} peer={peer_id}"
+            );
+        }
+        // Leftover-force WAN handoff: abort leftover stripe every fetch tick.
+        // Live force-trace: leftover_FORCE stayed true, leftover_HANDOFF
+        // enqueued 70736, leftover_ABORT / leftover_HOLE never logged —
+        // leftover 70656–70735 was not in wait_tip_enter / get_work.
+        if let Some(ref a) = tip_enter {
+            let need = a.next_needed_height();
+            if super::leftover_force_aborts_inflight_stripe(
+                a.leftover_force_armed(),
+                a.wan_body_tip(),
+                start_height,
+                need,
+            ) {
+                warn!(
+                    "[IBD_LEFTOVER_DOWNLOAD_ABORT] leftover stripe {}-{} next_to_send={} need={} — abort so GetData can own handoff",
+                    start_height, end_height, next_to_send, need
+                );
+                return Err(anyhow::anyhow!(
+                    "leftover-force: abort leftover stripe {}-{} for GetData {}",
+                    start_height,
+                    end_height,
+                    need
+                ));
+            }
+        }
         // W32d: tiered per-position timeout tracks the live gap cursor.
         let tip_now = validation_height
             .as_ref()
@@ -724,6 +993,22 @@ pub(crate) async fn download_chunk(
         // ~4s of true tip wait (live W84: `need→body` p50≈14ms but CAP soft-retry thrash →
         // tip60 ~20).
         let tip_needed = tip_now.saturating_add(1);
+        // Leftover chunk may have loaded the gap locally while next was still
+        // behind (live: 70657 held, try_stream only ran on receive). Re-arm
+        // every loop tick so the body reaches the coordinator when tip arrives.
+        if try_stream_validation_gap(
+            validation_height.as_ref(),
+            &mut received,
+            block_tx.as_ref(),
+            start_height,
+            end_height,
+        )
+        .await?
+        {
+            last_gap_at = std::time::Instant::now();
+            gap_streams = gap_streams.saturating_add(1);
+            sync_next_to_send_after_gap_stream(&mut next_to_send, end_height);
+        }
         rebase_tip_cap_clock(
             tip_needed,
             &mut tip_cap_clock_h,
@@ -732,7 +1017,16 @@ pub(crate) async fn download_chunk(
         );
         let ahead_buffered = tip_pipe_has_ahead_buffered(&received, tip_needed);
         // W109/W139/W184: CAP — empty deep 16s; empty (H,H) mute 5s; holey pending 16s.
-        let tip_cap_secs = tip_gap_timeout_secs_for_chunk(ahead_buffered, start_height, end_height);
+        // R-186: HASH_FETCH no longer uses u64::MAX (R-185 90min sit). Product 5s
+        // mute CAP fired @186537 then Face 2 fat 136. R-187: under the flag, floor
+        // 45s = R-185 first IBD_STALL after last apply. Sit still dies; 5s does
+        // not abort a live fat GetData. Not u64::MAX.
+        let mut tip_cap_secs =
+            tip_gap_timeout_secs_for_chunk(ahead_buffered, start_height, end_height);
+        if crate::node::parallel_ibd::hash_fetch::enabled() {
+            const HF_SIT_CAP_SECS: u64 = 45;
+            tip_cap_secs = tip_cap_secs.max(HF_SIT_CAP_SECS);
+        }
         if next_to_send == tip_needed
             && in_flight_heights.contains(&next_to_send)
             && inflight_started
@@ -965,6 +1259,7 @@ pub(crate) async fn download_chunk(
             return Ok(DownloadChunkResult {
                 blocks,
                 streamed_block_count: if streaming { streamed_block_count } else { 0 },
+                net_block_count: network_body_heights.len(),
             });
         }
         // W13: also exit cleanly if streaming cursor past end after resync.
@@ -973,6 +1268,7 @@ pub(crate) async fn download_chunk(
             return Ok(DownloadChunkResult {
                 blocks,
                 streamed_block_count: if streaming { streamed_block_count } else { 0 },
+                net_block_count: network_body_heights.len(),
             });
         }
         let next_result = if progress.last_block_hash.is_none() {
@@ -986,17 +1282,33 @@ pub(crate) async fn download_chunk(
                     r = in_flight.next() => r,
                     stall_res = rx.recv() => {
                         if let Ok(stall_h) = stall_res {
-                            if stall_h >= start_height && stall_h <= end_height {
+                            let leftover_cheese = tip_enter.as_ref().is_some_and(|a| {
+                                super::leftover_force_aborts_inflight_stripe(
+                                    a.leftover_force_armed(),
+                                    a.wan_body_tip(),
+                                    start_height,
+                                    stall_h,
+                                )
+                            });
+                            if leftover_cheese
+                                || (stall_h >= start_height && stall_h <= end_height)
+                            {
                                 // Ignore premature coordinator stalls while the first block is
                                 // still in flight (common at height 1 before peer responds).
-                                if chunk_start_time.elapsed() < first_block_wait {
+                                // Leftover-force handoff (stall 70736 vs leftover 70625–70735)
+                                // must not wait — that sat 4h with nobody on (H,H).
+                                if !leftover_cheese
+                                    && chunk_start_time.elapsed() < first_block_wait
+                                {
                                     continue;
                                 }
-                                if !ibd_stall_aborts_inflight_gap_fetch(
-                                    wan_multi_peer,
-                                    confirmed_body_height,
-                                    stall_h,
-                                ) {
+                                if !leftover_cheese
+                                    && !ibd_stall_aborts_inflight_gap_fetch(
+                                        wan_multi_peer,
+                                        confirmed_body_height,
+                                        stall_h,
+                                    )
+                                {
                                     continue;
                                 }
                                 warn!("Coordinator stall at {}: aborting chunk {}-{} (no first block yet)", stall_h, start_height, end_height);
@@ -1014,10 +1326,7 @@ pub(crate) async fn download_chunk(
                         continue;
                     }
                     _ = wait_tip_enter_abort(&tip_enter, peer_id, start_height, end_height) => {
-                        warn!(
-                            "[IBD_TIP_ENTER] aborting ahead chunk {}-{} (peer={}) — tip walked in",
-                            start_height, end_height, peer_id
-                        );
+                        log_hf_hot("TIP_ENTER", start_height);
                         flush_received_on_abort(
                             &mut received,
                             block_tx.as_ref(),
@@ -1166,15 +1475,29 @@ pub(crate) async fn download_chunk(
                     // assigner can requeue a gap micro-chunk to another peer instead of burning
                     // another chunk_deadline_secs on the same slow peer.
                     if let Ok(stall_h) = stall_res {
-                        if stall_h >= start_height
-                            && stall_h <= end_height
-                            && stall_h == next_to_send
-                        {
-                            if !ibd_stall_aborts_inflight_gap_fetch(
-                                wan_multi_peer,
-                                confirmed_body_height,
+                        // Leftover cheese: workers sit AHEAD of the hole
+                        // (live 70703 wait, in-flight 70721–70730). Abort any
+                        // leftover-band chunk so GetData can own the miss.
+                        let leftover_cheese = tip_enter.as_ref().is_some_and(|a| {
+                            super::leftover_force_aborts_inflight_stripe(
+                                a.leftover_force_armed(),
+                                a.wan_body_tip(),
+                                start_height,
                                 stall_h,
-                            ) {
+                            )
+                        });
+                        if leftover_cheese
+                            || (stall_h >= start_height
+                                && stall_h <= end_height
+                                && stall_h == next_to_send)
+                        {
+                            if !leftover_cheese
+                                && !ibd_stall_aborts_inflight_gap_fetch(
+                                    wan_multi_peer,
+                                    confirmed_body_height,
+                                    stall_h,
+                                )
+                            {
                                 continue;
                             }
                             warn!(
@@ -1211,10 +1534,7 @@ pub(crate) async fn download_chunk(
                     continue;
                 }
                 _ = wait_tip_enter_abort(&tip_enter, peer_id, start_height, end_height) => {
-                    warn!(
-                        "[IBD_TIP_ENTER] aborting ahead chunk {}-{} (peer={}) — tip walked in",
-                        start_height, end_height, peer_id
-                    );
+                    log_hf_hot("TIP_ENTER", start_height);
                     flush_received_on_abort(
                         &mut received,
                         block_tx.as_ref(),
@@ -1421,6 +1741,7 @@ pub(crate) async fn download_chunk(
                 let from_local = local_sourced_heights.remove(&height);
                 if !from_local {
                     network_body_heights.insert(height);
+                    network_body_heights.insert(height);
                     // P1d: only tip-band net bodies cancel mute (ahead delivery must not
                     // shelter a mute tip — thermo gd_p50≈2.7s on ahead reset the 3s clock).
                     if height == next_to_send || height <= tip_now.saturating_add(1) {
@@ -1455,7 +1776,10 @@ pub(crate) async fn download_chunk(
                             }
                             super::tip_stage::note_tip_hole_duty(tip_hole_grown);
                         }
-                        if tip_hole_gd_slow() && sole_ready && tip_hole_sole_floor_applies(height) {
+                        if tip_hole_gd_slow_for_peer(peer_id)
+                            && sole_ready
+                            && tip_hole_sole_floor_applies(height)
+                        {
                             let floor = tip_hole_sole_gd_slow_floor();
                             super::tip_stage::note_sole_floor_latch();
                             maybe_note_sole_no_fast_latch(height);
@@ -1496,49 +1820,63 @@ pub(crate) async fn download_chunk(
                                 }
                                 super::tip_stage::note_tip_hole_duty(tip_hole_grown);
                             }
-                        } else if tip_hole_gd_slow() && !sole_ready {
+                        } else if !sole_ready && c1u_applies_slow_clamp(&tip_enter, peer_id) {
                             let slow = tip_hole_slow_fill_cap();
                             let next = tip_hole_gd_slow_next_depth(tip_hole_grown);
                             if next < tip_hole_grown {
                                 tip_hole_grown = next;
-                                debug!(
-                                    "[IBD_TIP_HOLE_GD_SLOW] peer={} height={} depth {}→{} (fill_cap={} ratchet={} gd_ewma_ms={:?} gate_ms={})",
+                                // INFO soak 2026-08-22: this was debug — drip grown=8 could not
+                                // be distinguished from grow_start vs a 32→8 cliff.
+                                log_tip_hole_gd_slow_info(
+                                    "IBD_TIP_HOLE_GD_SLOW",
                                     peer_id,
                                     height,
                                     prev,
                                     tip_hole_grown,
                                     slow,
-                                    tip_hole_gd_slow_ratchet_enabled(),
-                                    gd.map(|(ms, _)| ms),
-                                    tip_hole_gd_slow_ms()
+                                    gd,
                                 );
                                 if let Some(ref a) = tip_enter {
                                     a.clamp_tip_hole_depth(peer_id, tip_hole_grown);
                                 }
                                 super::tip_stage::note_tip_hole_duty(tip_hole_grown);
+                            } else {
+                                log_tip_hole_gd_slow_info(
+                                    "IBD_TIP_HOLE_GD_SLOW_HOLD",
+                                    peer_id,
+                                    height,
+                                    tip_hole_grown,
+                                    tip_hole_grown,
+                                    slow,
+                                    gd,
+                                );
                             }
                         } else {
                             tip_hole_grown =
                                 tip_hole_grow_on_delivery_capped(tip_hole_grown, tip_hole_cap);
                             if tip_hole_grown > prev {
-                                debug!(
-                                    "[IBD_TIP_HOLE_GROW] peer={} height={} depth {}→{} (cap={} hot={} gd_ewma_ms={:?})",
+                                log_tip_hole_grow_info(
+                                    "IBD_TIP_HOLE_GROW",
                                     peer_id,
                                     height,
                                     prev,
                                     tip_hole_grown,
                                     tip_hole_cap,
                                     tip_hole_hot,
-                                    gd.map(|(ms, _)| ms)
+                                    gd,
+                                    tip_hole_gd_fast_ms(),
                                 );
                                 if tip_hole_cap > tip_hole_grow_cap() {
-                                    debug!(
-                                        "[IBD_TIP_HOLE_GD_FAST] peer={} depth={} cap={} gd_ewma_ms={:?} gate_ms={}",
+                                    log_tip_hole_grow_info(
+                                        "IBD_TIP_HOLE_GD_FAST",
                                         peer_id,
+                                        height,
+                                        prev,
                                         tip_hole_grown,
                                         tip_hole_cap,
-                                        gd.map(|(ms, _)| ms),
-                                        tip_hole_gd_fast_ms()
+                                        tip_hole_hot,
+                                        gd,
+                                        tip_hole_gd_fast_ms(),
                                     );
                                 }
                                 if let Some(ref a) = tip_enter {
@@ -1580,24 +1918,91 @@ pub(crate) async fn download_chunk(
                         height
                     ));
                 }
+                if crate::node::parallel_ibd::hash_fetch::enabled() {
+                    match blockstore.get_header(&block_hash) {
+                        Ok(Some(hdr))
+                            if crate::node::parallel_ibd::tip_probe::verify_probe_body(
+                                &block,
+                                block_hash,
+                                hdr.merkle_root,
+                            ) => {}
+                        Ok(Some(_)) => {
+                            warn!(
+                                "[IBD_HASH_FETCH] merkle mismatch height {} hash {} — drop, re-request",
+                                height,
+                                hex::encode(block_hash)
+                            );
+                            peer_scorer.record_failure(peer_addr);
+                            flush_received_on_abort(
+                                &mut received,
+                                block_tx.as_ref(),
+                                start_height,
+                                end_height,
+                                next_to_send,
+                                validation_height.as_deref(),
+                            )
+                            .await;
+                            for &h in &in_flight_heights {
+                                if let Some(&h_hash) = block_hash_by_height.get(&h) {
+                                    network.cancel_block_request(peer_addr, h_hash);
+                                }
+                            }
+                            return Err(anyhow::anyhow!(
+                                "merkle mismatch at height {} - hash fetch retry",
+                                height
+                            ));
+                        }
+                        _ => {
+                            warn!(
+                                "[IBD_HASH_FETCH] missing stored header at height {} — cannot admit",
+                                height
+                            );
+                            return Err(anyhow::anyhow!(
+                                "missing header at height {} for hash-fetch admit",
+                                height
+                            ));
+                        }
+                    }
+                }
                 progress.record_progress(received_hash);
                 progress.reset_timeout();
                 let latency_ms = request_start.elapsed().as_secs_f64() * 1000.0;
-                // Rough wire-size for W2 EMA + peer scorer (not consensus-critical).
-                let mut block_size = 80u64;
+                // Wire size for W2 EMA + peer scorer + window tile sizing (not
+                // consensus-critical). R-346: use the actual P2P payload length when the
+                // frame is here; the field-count approximation below ignores scriptSig /
+                // scriptPubKey bytes and ran ~2.2× low (R-345 cum wire_B 30.6 GB vs rx_B
+                // 13.6 GB), so 1 MB "tiles" were 2–3 MB and `blk_kb` read 128 at 300k
+                // where frames average 273 KB.
+                let mut approx = 80u64;
                 for tx in &block.transactions {
-                    block_size = block_size
+                    approx = approx
                         .saturating_add(40)
                         .saturating_add((tx.inputs.len() * 40 + tx.outputs.len() * 34) as u64);
                 }
                 for stack in block_witnesses.iter() {
                     for wit in stack.iter() {
                         for item in wit.iter() {
-                            block_size = block_size.saturating_add(item.len() as u64);
+                            approx = approx.saturating_add(item.len() as u64);
                         }
                     }
                 }
-                note_download_block_bytes(block_size);
+                let block_size = wire_payload
+                    .as_ref()
+                    .map(|p| p.len() as u64)
+                    .filter(|&n| n > 0)
+                    .unwrap_or(approx);
+                if !from_local {
+                    crate::node::parallel_ibd::body_dup::note_body_rx(height, block_size);
+                    if received.contains_key(&height) {
+                        crate::node::parallel_ibd::body_dup::note_discard(
+                            crate::node::parallel_ibd::body_dup::DiscardReason::AlreadyPresent,
+                            Some(height),
+                            block_size,
+                        );
+                    }
+                }
+                note_download_block_bytes(peer_id, block_size);
+                crate::node::parallel_ibd::hash_fetch::note_bytes(peer_id, block_size);
                 peer_scorer.record_block(peer_addr, block_size, latency_ms);
                 // W7: empty-witness MSG_BLOCK of a *commitment* block must not enter
                 // `received` (stripped payload). Blocks without BIP141 commitment may
@@ -1645,6 +2050,11 @@ pub(crate) async fn download_chunk(
                         ));
                     }
                     // Rate-limit spam: first 3 hits + every 8th thereafter.
+                    crate::node::parallel_ibd::body_dup::note_discard(
+                        crate::node::parallel_ibd::body_dup::DiscardReason::EmptyWitness,
+                        Some(height),
+                        block_size,
+                    );
                     if empty_witness_hits <= 3 || empty_witness_hits % 8 == 0 {
                         warn!(
                             "[IBD_EMPTY_WITNESS] height {}: rejecting empty-witness payload — re-requesting MSG_WITNESS_BLOCK (hit={}/{})",
@@ -1697,6 +2107,7 @@ pub(crate) async fn download_chunk(
                         &mut local_sourced_heights,
                         tip_hole_grown,
                         tip_hole_cap,
+                        tip_enter.as_ref(),
                     )
                     .await?;
                     continue;
@@ -1724,17 +2135,43 @@ pub(crate) async fn download_chunk(
                     Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
                 );
                 let t_persist = Instant::now();
-                if let Err(e) = try_persist_gap_block_for_local_inject_with_wire(
-                    blockstore,
-                    validation_height.as_ref(),
-                    height,
-                    block_hash,
-                    block_arc.as_ref(),
-                    wit_arc.as_ref(),
-                    protocol_version,
-                    wire_payload.as_deref(),
-                ) {
-                    warn!("[IBD_GAP_PERSIST] height {}: persist failed: {e}", height);
+                // R-348: hand WAN bodies to the batched persist lane; local re-loads and a
+                // full/absent lane persist inline (R-347 behaviour).
+                let laned = !from_local
+                    && crate::node::parallel_ibd::persist_lane::submit(
+                        crate::node::parallel_ibd::persist_lane::PersistJob {
+                            height,
+                            hash: block_hash,
+                            block: Arc::clone(&block_arc),
+                            witnesses: Arc::clone(&wit_arc),
+                            // Payload copy only when the wire-blob store will use it.
+                            wire: if crate::node::parallel_ibd::local_block::wire_bytes_store_enabled()
+                            {
+                                wire_payload.as_ref().map(|w| Arc::new(w.clone()))
+                            } else {
+                                None
+                            },
+                            bytes: block_size,
+                        },
+                    );
+                if !laned {
+                    if let Err(e) = try_persist_gap_block_for_local_inject_with_wire(
+                        blockstore,
+                        validation_height.as_ref(),
+                        height,
+                        block_hash,
+                        block_arc.as_ref(),
+                        wit_arc.as_ref(),
+                        protocol_version,
+                        wire_payload.as_deref(),
+                    ) {
+                        warn!("[IBD_GAP_PERSIST] height {}: persist failed: {e}", height);
+                    }
+                    if !from_local {
+                        crate::node::parallel_ibd::ms_breakdown::note_gap_persist(
+                            t_persist.elapsed().as_millis() as u64,
+                        );
+                    }
                 }
                 if sync_log {
                     let ms = t_persist.elapsed().as_millis();
@@ -1752,13 +2189,42 @@ pub(crate) async fn download_chunk(
                     height,
                     (Arc::clone(&block_arc), Arc::clone(&wit_arc)),
                 );
+                if !from_local {
+                    if let Some(ref a) = tip_enter {
+                        if a.peer_lookahead_covers(peer_id, height) {
+                            a.note_lookahead_stream(peer_id);
+                        }
+                    }
+                }
+                // S-8.1: first body wins — complete the height and drop losing GetDatas.
+                if crate::node::parallel_ibd::hash_fetch::enabled() {
+                    let losers: Vec<String> = crate::node::parallel_ibd::hash_fetch::complete(height)
+                        .into_iter()
+                        .filter(|p| p != peer_id)
+                        .collect();
+                    if losers.len() >= 2 {
+                        info!(
+                            "[IBD_HF_TIP_CANCEL] h={} winner={} losers={}",
+                            height,
+                            peer_id,
+                            losers.len()
+                        );
+                    }
+                    for loser in losers {
+                        if let Ok(addr) = loser.parse::<std::net::SocketAddr>() {
+                            network.cancel_block_request_force(addr, block_hash);
+                        }
+                    }
+                }
                 trim_download_received(
                     &mut received,
                     blockstore,
                     validation_height.as_ref(),
                     protocol_version,
                 );
+                super::tip_stage::note_body_bytes(height, block_size);
                 super::tip_stage::mark_body(height);
+                crate::node::parallel_ibd::tip_hedge_note_body(height, peer_id);
                 // Keep tip-hot window on tip-adjacent body arrival even when coordinator
                 // already advanced via LOCAL_GAP inject of GAP_PERSIST (try_stream no-ops).
                 // Live 2026-07-15: 15s without GAP_STREAM note → idle floor upgrade mid-pipe
@@ -1802,6 +2268,8 @@ pub(crate) async fn download_chunk(
                         network_tip_streamed = true;
                         if let Some(ref a) = tip_enter {
                             a.note_wan_tip_stream(peer_id);
+                            // Land credit already notes reserved lookahead once (~2133).
+                            // Do not double-count GAP_STREAM as a second farmer sample.
                         }
                     }
                     // Once per chunk — logging every streamed height flooded the log
@@ -1836,6 +2304,40 @@ pub(crate) async fn download_chunk(
                 }
             }
             Ok(Err(_)) => {
+                if crate::node::parallel_ibd::wire_hash_gate::was_skipped(block_hash) {
+                    // R-304: hash-gate dropped an already-validated frame and closed
+                    // this oneshot on purpose. Do not abort the chunk.
+                    if height == next_to_send {
+                        next_to_send = height.saturating_add(1);
+                    }
+                    fill_pipeline(
+                        next_to_send,
+                        end_height,
+                        pipeline_depth,
+                        &received,
+                        &mut in_flight,
+                        &mut in_flight_heights,
+                        &mut inflight_deadlines,
+                        &block_hash_by_height,
+                        &network,
+                        peer_addr,
+                        peer_id,
+                        blockstore,
+                        protocol_version,
+                        tip_now,
+                        confirmed_body_height,
+                        chunk_default_secs,
+                        &blocks_sem,
+                        &mut first_block_logged,
+                        start_height,
+                        &mut local_sourced_heights,
+                        tip_hole_grown,
+                        tip_hole_cap,
+                        tip_enter.as_ref(),
+                    )
+                    .await?;
+                    continue;
+                }
                 warn!("Block channel closed for height {}", height);
                 peer_scorer.record_failure(peer_addr);
                 flush_received_on_abort(
@@ -1857,7 +2359,7 @@ pub(crate) async fn download_chunk(
                     height
                 ));
             }
-            Err(_) => {
+            Err(timed_out_rx) => {
                 if height == next_to_send {
                     // P4: soft-timeout on the gap — re-request in place (keep ahead `received`)
                     // instead of aborting the whole chunk. Hard deadline (W8) still aborts.
@@ -2000,6 +2502,7 @@ pub(crate) async fn download_chunk(
                         &mut local_sourced_heights,
                         tip_hole_grown,
                         tip_hole_cap,
+                        tip_enter.as_ref(),
                     )
                     .await?;
                     continue;
@@ -2013,6 +2516,72 @@ pub(crate) async fn download_chunk(
                     end_height,
                     chunk_default_secs,
                 );
+                // R-329: the peer still owes this block. Re-arm the same wait instead of
+                // dropping the oneshot and sending a second GetData to the same peer
+                // (that second body is the `RequeueLoser(drop)` — same bytes twice).
+                // Bounded by `ahead_rearm_max`; then legacy cancel + re-request below.
+                let rearms = ahead_rearms.entry(height).or_insert(0);
+                // R-331: another peer may have delivered this height meanwhile (GAP_STREAM /
+                // RESEND / PRIORITY_ZONE persist bodies to the store). The legacy re-request
+                // found it via `try_load_local_ibd_block` before sending anything; re-arm
+                // must too, or the stripe sticks on a height that is already satisfied
+                // (R-330: busy 8 / ready 44, RESEND up, bands 57.7 / 55.0 vs 98.9 / 65.4).
+                if *rearms < ahead_rearm_max() {
+                    if let Some((block, block_witnesses)) = try_load_local_ibd_block(
+                        blockstore,
+                        height,
+                        block_hash,
+                        protocol_version,
+                    )? {
+                        drop(timed_out_rx);
+                        network.cancel_block_request(peer_addr, block_hash);
+                        warn!(
+                            "[IBD_AHEAD_REARM_LOCAL] height {} ahead of gap {} waited {}s — satisfied from store, no re-arm (tip={})",
+                            height,
+                            next_to_send,
+                            request_start.elapsed().as_secs(),
+                            tip_now
+                        );
+                        let permit = try_take_blocks_permit(&blocks_sem)?.flatten();
+                        in_flight_heights.insert(height);
+                        local_sourced_heights.insert(height);
+                        in_flight.push(Box::pin(async move {
+                            let r = Ok(Ok((block, block_witnesses, None)));
+                            (height, block_hash, request_start, r, permit)
+                        }));
+                        continue;
+                    }
+                }
+                if *rearms < ahead_rearm_max() && network.is_peer_connected(peer_addr).await {
+                    *rearms += 1;
+                    let n = *rearms;
+                    warn!(
+                        "[IBD_AHEAD_REARM] height {} ahead of gap {} waited {}s — re-armed {}s on {} (n={}/{}, no re-GetData)",
+                        height,
+                        next_to_send,
+                        request_start.elapsed().as_secs(),
+                        used_secs,
+                        peer_id,
+                        n,
+                        ahead_rearm_max()
+                    );
+                    let permit = blocks_sem
+                        .as_ref()
+                        .and_then(|s| Arc::clone(s).try_acquire_owned().ok());
+                    rearm_network_inflight(
+                        &mut in_flight,
+                        &mut in_flight_heights,
+                        &mut inflight_deadlines,
+                        height,
+                        block_hash,
+                        timed_out_rx,
+                        permit,
+                        request_start,
+                        used_secs,
+                    );
+                    continue;
+                }
+                drop(timed_out_rx);
                 warn!(
                     "Block timeout for height {} ahead of gap {} after {}s — re-requesting",
                     height, next_to_send, used_secs
@@ -2063,18 +2632,89 @@ pub(crate) async fn download_chunk(
                     &mut local_sourced_heights,
                     tip_hole_grown,
                     tip_hole_cap,
+                    tip_enter.as_ref(),
                 )
                 .await?;
                 continue;
             }
         }
 
-        while let Some((block, block_witnesses)) = received_take(&mut received, next_to_send) {
+        while received.contains_key(&next_to_send) {
+            if tip_enter.as_ref().is_some_and(|a| a.leftover_force_armed()) {
+                let need = tip_need_from(validation_height.as_ref()).unwrap_or(0);
+                if next_to_send != need {
+                    warn!(
+                        "[IBD_LEFTOVER_DRAIN_ABORT] leftover-force at tip={} — abort dump at {} (chunk {}-{})",
+                        need, next_to_send, start_height, end_height
+                    );
+                    return Err(anyhow::anyhow!(
+                        "leftover-force: abort cheese dump {} so GetData can own tip {}",
+                        next_to_send,
+                        need
+                    ));
+                }
+            }
+            let tip_need = tip_need_from(validation_height.as_ref());
+            if let Some(need) = tip_need {
+                if next_to_send > need.saturating_add(super::local_body_ahead_cap()) {
+                    // Keep leftover cheese in `received` for GAP_STREAM when tip arrives
+                    // (live: sequential dump of 70657–70701 while next was ~70k).
+                    break;
+                }
+            }
+            let Some((block, block_witnesses)) = received_take(&mut received, next_to_send) else {
+                break;
+            };
             if let Some(ref tx) = block_tx {
-                let tip_need = tip_need_from(validation_height.as_ref());
-                await_block_tx_tip_reserve(tx, next_to_send, tip_need).await;
+                if tip_enter.as_ref().is_some_and(|a| a.leftover_force_armed()) {
+                    let need = tip_need.unwrap_or(0);
+                    if next_to_send != need {
+                        warn!(
+                            "[IBD_LEFTOVER_DRAIN_ABORT] leftover-force at tip={} — abort send wait at {}",
+                            need, next_to_send
+                        );
+                        return Err(anyhow::anyhow!(
+                            "leftover-force: abort cheese send {} so GetData can own tip {}",
+                            next_to_send,
+                            need
+                        ));
+                    }
+                }
+                if await_block_tx_tip_reserve(tx, next_to_send, tip_need, tip_enter.as_ref()).await
+                {
+                    warn!(
+                        "[IBD_LEFTOVER_DRAIN_ABORT] leftover-force broke tip-reserve wait at {}",
+                        next_to_send
+                    );
+                    return Err(anyhow::anyhow!(
+                        "leftover-force: abort reserve wait at {}",
+                        next_to_send
+                    ));
+                }
                 let t0 = std::time::Instant::now();
-                let send_r = tx.send((next_to_send, block, block_witnesses)).await;
+                let send_r = tokio::select! {
+                    r = tx.send((next_to_send, block, block_witnesses)) => r,
+                    _ = async {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            if tip_enter.as_ref().is_some_and(|a| a.leftover_force_armed()) {
+                                let need = tip_need_from(validation_height.as_ref()).unwrap_or(0);
+                                if next_to_send != need {
+                                    return;
+                                }
+                            }
+                        }
+                    } => {
+                        warn!(
+                            "[IBD_LEFTOVER_DRAIN_ABORT] leftover-force broke send wait at {}",
+                            next_to_send
+                        );
+                        return Err(anyhow::anyhow!(
+                            "leftover-force: abort blocked send at {}",
+                            next_to_send
+                        ));
+                    }
+                };
                 let wait_ms = t0.elapsed().as_millis() as u64;
                 if wait_ms >= 10 {
                     info!(
@@ -2092,6 +2732,7 @@ pub(crate) async fn download_chunk(
                         "block_tx closed during stream - chunk needs retry"
                     ));
                 }
+                super::memory::note_block_tx_len(tx);
                 streamed_block_count += 1;
                 gap_streams = gap_streams.saturating_add(1);
                 // P1a: drain credit only for network-sourced bodies.
@@ -2133,6 +2774,7 @@ pub(crate) async fn download_chunk(
             &mut local_sourced_heights,
             tip_hole_grown,
             tip_hole_cap,
+            tip_enter.as_ref(),
         )
         .await?;
     }
@@ -2143,9 +2785,32 @@ pub(crate) async fn download_chunk(
     }
 
     while let Some((block, block_witnesses)) = received_take(&mut received, next_to_send) {
+        if tip_enter.as_ref().is_some_and(|a| a.leftover_force_armed()) {
+            let need = tip_need_from(validation_height.as_ref()).unwrap_or(0);
+            if next_to_send != need {
+                warn!(
+                    "[IBD_LEFTOVER_DRAIN_ABORT] leftover-force at tip={} — abort exit dump at {} (chunk {}-{})",
+                    need, next_to_send, start_height, end_height
+                );
+                return Err(anyhow::anyhow!(
+                    "leftover-force: abort cheese dump {} so GetData can own tip {}",
+                    next_to_send,
+                    need
+                ));
+            }
+        }
         if let Some(ref tx) = block_tx {
             let tip_need = tip_need_from(validation_height.as_ref());
-            await_block_tx_tip_reserve(tx, next_to_send, tip_need).await;
+            if await_block_tx_tip_reserve(tx, next_to_send, tip_need, tip_enter.as_ref()).await {
+                warn!(
+                    "[IBD_LEFTOVER_DRAIN_ABORT] leftover-force broke exit reserve wait at {}",
+                    next_to_send
+                );
+                return Err(anyhow::anyhow!(
+                    "leftover-force: abort reserve wait at {}",
+                    next_to_send
+                ));
+            }
             let t0 = std::time::Instant::now();
             let send_r = tx.send((next_to_send, block, block_witnesses)).await;
             let wait_ms = t0.elapsed().as_millis() as u64;
@@ -2154,6 +2819,9 @@ pub(crate) async fn download_chunk(
                     "[IBD_BLOCK_TX_SEND_WAIT] height={} wait_ms={} (download→coordinator channel)",
                     next_to_send, wait_ms
                 );
+            }
+            if send_r.is_ok() {
+                super::memory::note_block_tx_len(tx);
             }
             if send_r.is_err() {
                 received_drain_all(&mut received);
@@ -2188,5 +2856,6 @@ pub(crate) async fn download_chunk(
     Ok(DownloadChunkResult {
         blocks,
         streamed_block_count: if streaming { streamed_block_count } else { 0 },
+        net_block_count: network_body_heights.len(),
     })
 }

@@ -4,12 +4,9 @@ impl ChunkAssigner {
         super::top_peer_in_flight_cap()
     }
 
-    /// A4: top-scoring half of peers may hold two chunks; others one.
-    /// A6l: preferred sticky tip owner always gets the top-peer cap — tip downloaders
-    /// floor at ~0.1 while idle ready workers sit ~0.19, so sticky falls below median,
-    /// gets `max_in_flight=1`, cannot re-arm the next tip span while finishing the current
-    /// chunk, and a higher-scored idle peer steals ownership (live A6k: 103.228→146.190
-    /// at chunk boundary while sticky still streaming; sticky tenure BPS already only ~4.4).
+    /// Layer C: only the preferred sticky may use `TOP_PEER_IN_FLIGHT`.
+    /// A4 gave the top-scoring half that cap — that is N-way ahead, not same-peer
+    /// next-stripe. A6l: sticky still gets the cap when below score median.
     fn max_in_flight_for(&self, peer_id: &str) -> usize {
         // Synth bulk local-disk: single peer falls into scores.len()<4 → cap 1, which
         // serializes tip-owner complete→reassign. Cap 2 overlaps tip+next without the
@@ -25,6 +22,11 @@ impl ChunkAssigner {
         }
         if self.preferred_tip_owner().as_deref() == Some(peer_id) && self.tip_sticky_usable(peer_id)
         {
+            // R-74 hung @8300 with covering=2 after ignition dual. TOP=2
+            // only after empty band (same 50k door as leftover-off).
+            if self.next_needed_height() < 50_000 {
+                return 1;
+            }
             // Mode T tip-priority: sticky max_in_flight from TOP_PEER_IN_FLIGHT (harness=1).
             // in_flight=2 flooded archive (tc172). Dual parked (tc168/171).
             // A2 attempt1 2026-08-09: sole-ready always-2 REVERT (tc220a2overlap tip90≈40
@@ -40,19 +42,13 @@ impl ChunkAssigner {
         Self::max_in_flight_for_scores(&scores, peer_id)
     }
 
-    fn max_in_flight_for_scores(scores: &HashMap<String, f64>, peer_id: &str) -> usize {
-        if scores.len() < 4 {
-            return 1;
-        }
-        let my = scores.get(peer_id).copied().unwrap_or(0.0);
-        let mut vals: Vec<f64> = scores.values().copied().collect();
-        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = vals[vals.len() / 2];
-        if my >= median {
-            Self::top_peer_in_flight_cap()
-        } else {
-            1
-        }
+    fn max_in_flight_for_scores(_scores: &HashMap<String, f64>, _peer_id: &str) -> usize {
+        // Non-sticky: `BLVM_IBD_PEER_DEPTH` (default 1 = R-288 / historical DNA).
+        // A4 gave the top-scoring half a cap of 2 — that is N-way ahead, not
+        // same-peer next-stripe. This cap is uniform and the worker only pulls
+        // extra stripes that are contiguous (owner_end+1 / next map chunk).
+        // Sticky/tip still uses `max_in_flight_for` above (TOP_PEER / sole_tip).
+        super::ibd_peer_depth()
     }
 
     /// Rate-limited diag: sticky at flight cap cannot re-arm yet.
@@ -189,6 +185,12 @@ impl ChunkAssigner {
             if self.peer_has_flight_capacity(&cand, &inflight)
                 && !Self::peer_inflight_ahead_only_map(&inflight, &cand, tip)
             {
+                return Some(cand);
+            }
+        }
+        // R-58: pin from lookahead rank, not score lottery (R-56 84.228 score=0.143).
+        if let Some((cand, _, _)) = self.best_lookahead_ready(None) {
+            if self.peer_has_flight_capacity(&cand, &inflight) {
                 return Some(cand);
             }
         }
@@ -404,9 +406,13 @@ impl ChunkAssigner {
         // except during tip-distress race (soft-retry / late body; not bridge holes).
         // TPP L1 REVERT (300→320 L1 cell): wall 377<C0 390 — manual undo peer_may C1g.
         let tip_distress = Self::tip_is_distressed() || self.c1t_tip_height_race();
+        let ignition_race = wan
+            && covering_next >= 1
+            && self.tip_gap_missing.load(Ordering::Relaxed)
+            && self.next_needed_height() < 64;
         if wan {
             let distress_race = covering_next >= 1 && tip_distress;
-            if !distress_race {
+            if !distress_race && !ignition_race {
                 if let Some(top) = self.top_scored_peer_id() {
                     if peer_id != top {
                         return false;
@@ -419,7 +425,7 @@ impl ChunkAssigner {
         // C1t: also after tip missing ≥C1T_MS under gd-fast (tip height only).
         // W180: still apply W95 floor/unproven gates — live W179b mute CAP + distress armed
         // score=0.001 owners while mid+ workers existed (ready_active_ok=10).
-        if covering_next >= 1 && tip_distress {
+        if covering_next >= 1 && (tip_distress || ignition_race) {
             if wan
                 && self.peer_score_of(peer_id) <= Self::TIP_OWNER_MID_SCORE
                 && self
@@ -437,18 +443,24 @@ impl ChunkAssigner {
             if pref == peer_id && self.tip_sticky_usable(pref) {
                 return true;
             }
+            // dest-as @63k: cheese C1J dropped hero start>H (ahead=192), so
+            // substantial cover was false. Mute 32.217 gap-preempt restickied;
+            // instant window 3983→11 blk/s at 66k. KEEP hold must not require
+            // cover — preferred re-arms H; mute does not. dest-aj mute HOLD
+            // stays dead: this arm is KEEP ≥80 only.
+            if self.preferred_meets_keep_bps() {
+                if !self.peer_has_flight_capacity(pref, in_flight) {
+                    Self::log_sticky_busy_hold(pref, peer_id);
+                }
+                return false;
+            }
             // A6l: wait for usable sticky even when it is at capacity (finishing current span).
             // Prior logic only waited while sticky had spare capacity — so a busy sticky with
             // max_in_flight=1 yielded tip to idle higher-scored peers at every chunk boundary
             // (live A6k: STICKY_DROP=0 but ownership lottery after first sticky stretch).
             // Hung sticky is rotated by tip-SLA / blacklist / tip_owner_open, not by steal.
             // W65: do not wait on a sticky whose only tip claim is a shallow walk-promote.
-            if self.tip_sticky_usable(pref) && self.peer_holds_substantial_tip_cover(pref) {
-                if !self.peer_has_flight_capacity(pref, in_flight) {
-                    Self::log_sticky_busy_hold(pref, peer_id);
-                }
-                return false;
-            }
+            // Mute preferred with cover: dest-aj — do not HOLD (KEEP-only above).
         }
 
         let scores = self.peer_scores.lock().unwrap().clone();
@@ -615,6 +627,17 @@ impl ChunkAssigner {
             if self.deep_tip_cover_count(next_needed) == 0 {
                 return 2;
             }
+            // Ignition tournament: cap 4 on the same 1-32 until close. After close
+            // fall through (distress may still need 2). Mid-band flood-hold stays 2.
+            if self.tip_gap_missing.load(Ordering::Relaxed)
+                && next_needed < 64
+                && next_needed <= 32
+                && !super::tip_stage::tournament_closed()
+            {
+                return 4;
+            }
+            // R-78: empty-band cap=2 through 50k cheesed H (holes at 1098).
+            // Tournament cap 4 (above) stays. Mute/distress/C1t still raise 2.
             // C1h: tip body still missing — deep owner stripe must NOT pin fetchers_cap=1.
             // Live C1g: freeze past-tip + cap=1 → no (H,H) race → ~3 BPS EMPTY_TIP.
             if self.tip_gap_missing.load(Ordering::Relaxed)
@@ -714,24 +737,26 @@ impl ChunkAssigner {
     }
 
     /// C1e: max contiguous assign band from tip while tip body missing (multi-peer stripes).
-    /// Default **96**. Env `BLVM_IBD_TIP_RUNWAY_CAP` (clamp 32–256).
+    /// Default **256**. Env `BLVM_IBD_TIP_RUNWAY_CAP` (clamp 32–256).
     pub(crate) fn tip_runway_cap() -> u64 {
         latch_env!(u64, {
             std::env::var("BLVM_IBD_TIP_RUNWAY_CAP")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(96)
+                .unwrap_or(256)
                 .clamp(32, 256)
         })
     }
 
-    /// C1e: stripe width for tip-owner / ahead peers inside the runway (default **32** = C1b).
+    /// C1e: stripe width for tip-owner / ahead peers inside the runway.
+    /// Default **64** hides the next GetData RTT (product batch 64).
+    /// Not L2c 512 (R-110 **649**). Not FAST 128 as start.
     pub(crate) fn tip_runway_stripe() -> u64 {
         let raw = latch_env!(u64, {
             std::env::var("BLVM_IBD_TIP_RUNWAY_STRIPE")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(32)
+                .unwrap_or(64)
                 .clamp(8, 128)
         });
         raw.min(Self::tip_runway_cap())
@@ -820,6 +845,27 @@ impl ChunkAssigner {
             .values()
             .flatten()
             .any(|(s, e)| *s <= end && start <= *e)
+    }
+
+    /// R-249: priority-zone tiles may duplicate the preferred owner's covering
+    /// for start>H. Still exclusive on H itself (Wall A).
+    /// R-250: ignition tournament puts **N** peers on 1–32 (`cap=4` live).
+    /// Excepting only preferred left 2–17 blocked (R-249 first tile 34–49).
+    fn range_overlaps_inflight_except_h_coverers(
+        in_flight: &HashMap<String, Vec<(u64, u64)>>,
+        next_needed: u64,
+        start: u64,
+        end: u64,
+    ) -> bool {
+        in_flight.iter().any(|(_peer, ranges)| {
+            let covers_h = ranges
+                .iter()
+                .any(|&(s, e)| s <= next_needed && next_needed <= e);
+            if covers_h {
+                return false;
+            }
+            ranges.iter().any(|&(s, e)| s <= end && start <= e)
+        })
     }
 
     /// P1c: true when `peer_id` already holds an in-flight range covering `next_needed`.
@@ -915,5 +961,15 @@ impl ChunkAssigner {
             .entry(peer_id.to_string())
             .or_default()
             .push((start, end));
+        crate::node::parallel_ibd::ms_breakdown::note_assigned(start, end);
+        // R-290: seat accounting. insert_in_flight is the honest "given work"
+        // signal (R-280 peers_inflight). GetData in admit.rs is only the wire
+        // miss path; a disk-fill still occupies the seat.
+        crate::node::parallel_ibd::download::download_note_assigned(
+            peer_id,
+            end.saturating_sub(start).saturating_add(1),
+        );
+        let n = in_flight.values().filter(|v| !v.is_empty()).count();
+        crate::node::parallel_ibd::ms_breakdown::note_peers_inflight(n);
     }
 }

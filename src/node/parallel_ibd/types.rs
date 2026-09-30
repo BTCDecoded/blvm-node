@@ -184,6 +184,44 @@ pub type PrefetchWorkItemV2 = (
 /// Chunk work item for re-queue on drop. Live log 2026-02-21: workers_in_flight=[], chunks lost every 100 blocks.
 pub type ChunkWorkItem = (u64, u64, Option<String>);
 
+/// Retry-queue entry. R-283: attempts + not_before so ChunkGuard Drop cannot spin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RetryEntry {
+    pub start: u64,
+    pub end: u64,
+    pub exclude: Option<String>,
+    pub attempts: u32,
+    pub not_before_ms: u64,
+}
+
+impl RetryEntry {
+    pub(crate) fn fresh(start: u64, end: u64, exclude: Option<String>) -> Self {
+        Self {
+            start,
+            end,
+            exclude,
+            attempts: 0,
+            not_before_ms: 0,
+        }
+    }
+}
+
+/// R-283: per-range retry bookkeeping that survives in-flight (queue entry is popped on assign).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RetryTrack {
+    pub attempts: u32,
+    pub sticky_exclude: Option<String>,
+}
+
+/// R-284: last successful `Ok(chunk)` for a `(peer, start, end)` stripe.
+/// Used to skip no-progress re-issue while `next_needed` is parked.
+#[derive(Debug, Clone)]
+pub(crate) struct NoprogComplete {
+    pub completed_at_ms: u64,
+    pub net_block_count: usize,
+    pub validation_height_at_completion: u64,
+}
+
 /// IBD lifecycle phase — drives export defer, inject policy, and stall behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IbdPhase {

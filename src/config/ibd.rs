@@ -253,7 +253,15 @@ pub struct IbdEngineDurabilityConfig {
 impl Default for IbdEngineDurabilityConfig {
     fn default() -> Self {
         Self {
-            checkpoint_interval: None,
+            // R-353: fixed sparse cadence is the tree default. R-352 ran
+            // `BLVM_IBD_CHECKPOINT_INTERVAL=100000` (exports exactly at 100k/200k/300k,
+            // fence follows validation between exports, `[IBD_CKPT_EXIT]` clean) and was the
+            // best run on record; every export window still costs validation ~2× view-build
+            // for its duration (300k export: 68 s, ~14k blocks inside the scored band).
+            // 200k keeps one export per ~200k blocks (Core flushes chainstate far less often
+            // during IBD). `BLVM_IBD_CHECKPOINT_INTERVAL=0|adaptive` restores the adaptive
+            // schedule (min/max/target_secs below).
+            checkpoint_interval: Some(200_000),
             checkpoint_min_interval: 500,
             // Mid-chain piggyback exports are 90–200s @ 30–60M UTXOs (W173). A 10k
             // ceiling forced ~5k-block cadence once UTXO scaling + BPS min() interacted;
@@ -269,7 +277,10 @@ impl Default for IbdEngineDurabilityConfig {
 pub fn ibd_engine_durability_config(_config: Option<&IbdConfig>) -> IbdEngineDurabilityConfig {
     let mut d = IbdEngineDurabilityConfig::default();
     if let Ok(v) = std::env::var("BLVM_IBD_CHECKPOINT_INTERVAL") {
-        if let Ok(n) = v.trim().parse::<i32>() {
+        let v = v.trim();
+        if v == "0" || v.eq_ignore_ascii_case("adaptive") {
+            d.checkpoint_interval = None;
+        } else if let Ok(n) = v.parse::<i32>() {
             if n > 0 {
                 d.checkpoint_interval = Some(n);
             }
@@ -644,9 +655,31 @@ mod ibd_engine_config_tests {
     #[test]
     fn ibd_engine_durability_defaults() {
         with_env("BLVM_IBD_CHECKPOINT_MIN_INTERVAL", None, || {
-            let d = ibd_engine_durability_config(None);
-            assert_eq!(d.checkpoint_min_interval, 500);
-            assert_eq!(d.muhash_persist_interval, 200);
+            with_env("BLVM_IBD_CHECKPOINT_INTERVAL", None, || {
+                let d = ibd_engine_durability_config(None);
+                // R-353: sparse fixed cadence is the default (R-352 100k proven; 200k promoted).
+                assert_eq!(d.checkpoint_interval, Some(200_000));
+                assert_eq!(d.checkpoint_min_interval, 500);
+                assert_eq!(d.muhash_persist_interval, 200);
+            });
+        });
+    }
+
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn r353_checkpoint_interval_zero_or_adaptive_restores_adaptive() {
+        with_env("BLVM_IBD_CHECKPOINT_INTERVAL", Some("0"), || {
+            assert_eq!(ibd_engine_durability_config(None).checkpoint_interval, None);
+        });
+        with_env("BLVM_IBD_CHECKPOINT_INTERVAL", Some("adaptive"), || {
+            assert_eq!(ibd_engine_durability_config(None).checkpoint_interval, None);
+        });
+        with_env("BLVM_IBD_CHECKPOINT_INTERVAL", Some("garbage"), || {
+            // Unparseable value keeps the tree default.
+            assert_eq!(
+                ibd_engine_durability_config(None).checkpoint_interval,
+                Some(200_000)
+            );
         });
     }
 

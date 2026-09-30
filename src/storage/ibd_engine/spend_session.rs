@@ -55,7 +55,8 @@ thread_local! {
         RefCell::new(FxHashMap::with_hasher(Default::default()));
 }
 
-/// `BLVM_IBD_HOTPATH_TIMERS=N` → log `[IBD_HOTPATH]` every N heights (0 = off).
+/// `BLVM_IBD_HOTPATH_TIMERS=N` → log `[IBD_HOTPATH]` every N heights.
+/// Default **1000**. `0` disables.
 /// Works without `--features profile` so release-fast can attribute query/fetch/fill.
 pub fn hotpath_timer_sample() -> u64 {
     static SAMPLE: OnceLock<u64> = OnceLock::new();
@@ -63,7 +64,7 @@ pub fn hotpath_timer_sample() -> u64 {
         std::env::var("BLVM_IBD_HOTPATH_TIMERS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(0)
+            .unwrap_or(1000)
     })
 }
 

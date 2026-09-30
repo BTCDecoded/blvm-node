@@ -33,7 +33,9 @@ pub const TIP_HOLE_GROW: bool = true;
 pub const TIP_HOLE_PIPE: usize = 128;
 /// Cold grow cap. KEEP 32.
 pub const TIP_HOLE_GROW_CAP: usize = 32;
-/// Fast grow cap when getdata→body EWMA is healthy. KEEP 64; historical unset 48.
+/// Fast grow cap when getdata→body EWMA is healthy.
+/// **R-43 baseline.** Grown **64**. R-44 FAST 128 printed 190k **187** but
+/// 10–50k **568**. R-45 flood skip FAIL. Every later dest starts here.
 pub const TIP_HOLE_GROW_FAST_CAP: usize = 64;
 /// Initial tip-hole depth under grow-on-delivery.
 pub const TIP_HOLE_GROW_START: usize = 8;
@@ -217,7 +219,7 @@ pub(crate) fn tip_hole_grow_fast_cap_raw() -> usize {
         48,
         "BLVM_IBD_TIP_HOLE_GROW_FAST_CAP",
         2,
-        96
+        128
     )
 }
 

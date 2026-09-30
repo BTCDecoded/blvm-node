@@ -74,7 +74,50 @@ pub fn is_synthetic_peer(peer_id: &str) -> bool {
     )
 }
 
-/// Simulated getdata→body latency per block (0 = instant disk load).
+/// dest-1 / dest-ak class: 2–3 ms body IA → ~305–370 wall BPS.
+pub const REPLAY_180_220K_HERO: &str = "203.0.113.1:8333";
+pub const REPLAY_180_220K_HERO_MS: u64 = 3;
+/// Drip class: 23–27 ms IA → ~25–67 wall BPS. Probe wave is still ≥80 (`32/0.025s`).
+pub const REPLAY_180_220K_DRIP: &str = "203.0.113.2:8333";
+pub const REPLAY_180_220K_DRIP_MS: u64 = 25;
+/// Stall: 800 ms sojourn → wave 40 ≺ 80 (not `probe_keep_hero`).
+pub const REPLAY_180_220K_STALL: &str = "203.0.113.3:8333";
+pub const REPLAY_180_220K_STALL_MS: u64 = 800;
+
+/// Named replay fixture (`BLVM_IBD_SYNTH_REPLAY=180-220k`).
+pub fn replay_fixture() -> Option<&'static str> {
+    if !enabled() {
+        return None;
+    }
+    let v = std::env::var("BLVM_IBD_SYNTH_REPLAY").ok()?;
+    match v.trim() {
+        "180-220k" | "180_220k" | "180220k" => Some("180-220k"),
+        _ => None,
+    }
+}
+
+fn peer_delay_overrides() -> std::collections::HashMap<String, u64> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(s) = std::env::var("BLVM_IBD_SYNTH_GETDATA_DELAY_PEER_MS") else {
+        return out;
+    };
+    for part in s.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let Some((peer, ms)) = part.rsplit_once('=') else {
+            continue;
+        };
+        let Ok(ms) = ms.trim().parse::<u64>() else {
+            continue;
+        };
+        out.insert(peer.trim().to_string(), ms.min(30_000));
+    }
+    out
+}
+
+/// Simulated getdata→body latency per block (0 = instant disk load). Global default.
 pub fn getdata_delay_ms() -> u64 {
     if !enabled() {
         return 0;
@@ -86,6 +129,33 @@ pub fn getdata_delay_ms() -> u64 {
         .min(30_000)
 }
 
+/// Per-peer GetData IA. Overlay env beats the named 180–220k fixture; else global.
+pub fn getdata_delay_ms_for_peer(peer_id: &str) -> u64 {
+    if !enabled() {
+        return 0;
+    }
+    if let Some(&ms) = peer_delay_overrides().get(peer_id) {
+        return ms;
+    }
+    if replay_fixture() == Some("180-220k") {
+        return match peer_id {
+            REPLAY_180_220K_HERO => REPLAY_180_220K_HERO_MS,
+            REPLAY_180_220K_DRIP => REPLAY_180_220K_DRIP_MS,
+            REPLAY_180_220K_STALL => REPLAY_180_220K_STALL_MS,
+            _ => getdata_delay_ms().max(50),
+        };
+    }
+    getdata_delay_ms()
+}
+
+/// True when synth injects GetData IA (global, per-peer overlay, or named replay).
+pub fn injected_ia() -> bool {
+    if !enabled() {
+        return false;
+    }
+    getdata_delay_ms() > 0 || replay_fixture().is_some() || !peer_delay_overrides().is_empty()
+}
+
 /// Whether download workers should use fake WAN peer ids (assigner multi-peer / tip-crawl).
 ///
 /// Bulk baseline (`delay=0`, single peer, no force): use `local-disk` stream path — same
@@ -95,7 +165,7 @@ pub fn use_fake_download_peers() -> bool {
     if !enabled() {
         return false;
     }
-    if getdata_delay_ms() > 0 {
+    if injected_ia() {
         return true;
     }
     if std::env::var("BLVM_IBD_SYNTH_WAN_FORCE_PEERS")
@@ -152,6 +222,8 @@ mod tests {
         unsafe { std::env::set_var("BLVM_IBD_SYNTH_WAN", "1") };
         unsafe { std::env::set_var("BLVM_IBD_SYNTH_WAN_PEER_COUNT", "1") };
         unsafe { std::env::remove_var("BLVM_IBD_SYNTH_GETDATA_DELAY_MS") };
+        unsafe { std::env::remove_var("BLVM_IBD_SYNTH_GETDATA_DELAY_PEER_MS") };
+        unsafe { std::env::remove_var("BLVM_IBD_SYNTH_REPLAY") };
         unsafe { std::env::remove_var("BLVM_IBD_SYNTH_WAN_FORCE_PEERS") };
         assert!(!use_fake_download_peers());
         assert!(bulk_local_disk_stream());
@@ -165,5 +237,47 @@ mod tests {
         unsafe { std::env::remove_var("BLVM_IBD_SYNTH_WAN") };
         unsafe { std::env::remove_var("BLVM_IBD_SYNTH_WAN_PEER_COUNT") };
         unsafe { std::env::remove_var("BLVM_IBD_SYNTH_WAN_FORCE_PEERS") };
+        unsafe { std::env::remove_var("BLVM_IBD_SYNTH_GETDATA_DELAY_PEER_MS") };
+        unsafe { std::env::remove_var("BLVM_IBD_SYNTH_REPLAY") };
+    }
+
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn replay_180_220k_injects_per_peer_ia() {
+        // Per-peer GetData IA only. Checkpoint export at 180000 is
+        // dest_bl_180k_sit_must_not_clear_w75_burst_ema +
+        // dest_bl_180k_export_hold_restore_must_keep_preferred_hh.
+        // Do not `wan-bench-local-replay.sh restore` while /mnt/data is 15G free.
+        let _lock = crate::ibd_test_lock::guard();
+        unsafe { std::env::set_var("BLVM_IBD_SYNTH_WAN", "1") };
+        unsafe { std::env::set_var("BLVM_IBD_SYNTH_REPLAY", "180-220k") };
+        unsafe { std::env::remove_var("BLVM_IBD_SYNTH_GETDATA_DELAY_MS") };
+        unsafe { std::env::remove_var("BLVM_IBD_SYNTH_GETDATA_DELAY_PEER_MS") };
+        assert_eq!(replay_fixture(), Some("180-220k"));
+        assert!(injected_ia());
+        assert!(use_fake_download_peers());
+        assert!(!bulk_local_disk_stream());
+        assert_eq!(
+            getdata_delay_ms_for_peer(REPLAY_180_220K_HERO),
+            REPLAY_180_220K_HERO_MS
+        );
+        assert_eq!(
+            getdata_delay_ms_for_peer(REPLAY_180_220K_DRIP),
+            REPLAY_180_220K_DRIP_MS
+        );
+        assert_eq!(
+            getdata_delay_ms_for_peer(REPLAY_180_220K_STALL),
+            REPLAY_180_220K_STALL_MS
+        );
+        // Overlay beats the named fixture (dest-x cheese pin vs drip).
+        unsafe { std::env::set_var("BLVM_IBD_SYNTH_GETDATA_DELAY_PEER_MS", "203.0.113.2:8333=2") };
+        assert_eq!(getdata_delay_ms_for_peer(REPLAY_180_220K_DRIP), 2);
+        assert_eq!(
+            getdata_delay_ms_for_peer(REPLAY_180_220K_HERO),
+            REPLAY_180_220K_HERO_MS
+        );
+        unsafe { std::env::remove_var("BLVM_IBD_SYNTH_WAN") };
+        unsafe { std::env::remove_var("BLVM_IBD_SYNTH_REPLAY") };
+        unsafe { std::env::remove_var("BLVM_IBD_SYNTH_GETDATA_DELAY_PEER_MS") };
     }
 }

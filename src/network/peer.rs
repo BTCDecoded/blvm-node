@@ -142,8 +142,12 @@ impl Peer {
                                 std::net::SocketAddr::from(([0, 0, 0, 0], 0))
                             }
                         };
-                        let _ = message_tx_clone
-                            .send(NetworkMessage::RawMessageReceived(data, peer_addr));
+                        if message_tx_clone
+                            .send(NetworkMessage::RawMessageReceived(data, peer_addr))
+                            .is_ok()
+                        {
+                            crate::network::parse_offload::note_peer_rx_enqueue();
+                        }
                     }
                     Err(e) => {
                         warn!("Peer read error for {:?}: {}", transport_addr_clone, e);
@@ -336,8 +340,12 @@ impl Peer {
                     #[cfg(feature = "iroh")]
                     TransportAddr::Iroh(_) => std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
                 };
-                let _ =
-                    message_tx_clone.send(NetworkMessage::RawMessageReceived(data, peer_socket));
+                if message_tx_clone
+                    .send(NetworkMessage::RawMessageReceived(data, peer_socket))
+                    .is_ok()
+                {
+                    crate::network::parse_offload::note_peer_rx_enqueue();
+                }
             }
         });
 

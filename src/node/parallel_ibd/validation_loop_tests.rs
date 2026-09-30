@@ -15,7 +15,13 @@ fn fresh_last_adapt_zero() -> Arc<AtomicU64> {
 fn classify_binder_supply_vs_engine() {
     assert_eq!(
         classify_ibd_binder(0, 12, 0, 0, Some(90), PressureLevel::None, false),
-        "SUPPLY_TIP_HOLE"
+        "SUPPLY_TIP_HOLE_STAGED",
+        "R-302: feeder=0 holes>0 contig=0 await_ms=0 is staged (in our bridge), not absent"
+    );
+    assert_eq!(
+        classify_ibd_binder(0, 0, 0, 250, None, PressureLevel::None, false),
+        "SUPPLY_TIP_HOLE_ABSENT",
+        "R-302: await_ms>=200 is H has not arrived"
     );
     assert_eq!(
         classify_ibd_binder(0, 0, 0, 0, None, PressureLevel::None, false),
@@ -313,6 +319,138 @@ fn join_all_utxo_flush_handles_releases_mutex_before_join() {
     release.store(true, Ordering::Release);
     joiner.join().expect("join thread").expect("join flushes");
     assert!(utxo_flush_handles.lock().is_empty());
+}
+
+/// R-361: the dropper frees the block's last references off-thread; disabled → inline drop.
+#[test]
+fn r361_deferred_dropper_frees_last_refs() {
+    use blvm_consensus::{Block, BlockHeader};
+    let mk = || {
+        Arc::new(Block {
+            header: BlockHeader {
+                version: 4,
+                ..Default::default()
+            },
+            transactions: Vec::new().into(),
+        })
+    };
+    let block = mk();
+    let weak = Arc::downgrade(&block);
+    let mut dropper = DeferredDropper::spawn();
+    assert!(dropper.send(DeferredDrop {
+        block,
+        witnesses: Arc::new(Vec::new()),
+        undo_log: Some(blvm_consensus::reorganization::BlockUndoLog::new()),
+    }));
+    dropper.close_and_join();
+    assert!(weak.upgrade().is_none(), "dropper must have freed the block");
+    // A second close is a no-op; a send after close reports false and drops inline.
+    dropper.close_and_join();
+    let block2 = mk();
+    let weak2 = Arc::downgrade(&block2);
+    assert!(!dropper.send(DeferredDrop {
+        block: block2,
+        witnesses: Arc::new(Vec::new()),
+        undo_log: None,
+    }));
+    assert!(weak2.upgrade().is_none());
+
+    let off = DeferredDropper::disabled();
+    let block3 = mk();
+    let weak3 = Arc::downgrade(&block3);
+    assert!(!off.send(DeferredDrop {
+        block: block3,
+        witnesses: Arc::new(Vec::new()),
+        undo_log: None,
+    }));
+    assert!(weak3.upgrade().is_none(), "disabled dropper frees inline");
+}
+
+/// R-360: the append thread must consume prep-pool output strictly in height order, once each,
+/// and reject a height it has already passed.
+#[test]
+fn r360_in_order_jobs_reassembles_prep_pool_output() {
+    let mut q: InOrderJobs<&'static str> = InOrderJobs::new(100);
+    assert!(q.pop_ready().is_none());
+    q.push(102, "c").unwrap();
+    q.push(101, "b").unwrap();
+    assert!(q.pop_ready().is_none(), "100 not yet arrived");
+    assert_eq!(q.pending_len(), 2);
+    q.push(100, "a").unwrap();
+    let mut out = Vec::new();
+    while let Some(j) = q.pop_ready() {
+        out.push(j);
+    }
+    assert_eq!(out, vec!["a", "b", "c"]);
+    assert_eq!(q.next_height(), 103);
+    assert_eq!(q.pending_len(), 0);
+    assert_eq!(q.push(102, "dup"), Err((103, "dup")));
+    q.push(104, "e").unwrap();
+    assert!(q.pop_ready().is_none(), "103 missing blocks 104");
+    q.push(103, "d").unwrap();
+    assert_eq!(q.pop_ready(), Some("d"));
+    assert_eq!(q.pop_ready(), Some("e"));
+}
+
+/// R-360: the append-thread prep must produce exactly what the orchestrator's dispatch built
+/// (txids and, below assume-valid, the output cache); above assume-valid no cache.
+#[test]
+fn r360_engine_prep_deferred_matches_dispatch_prep() {
+    use blvm_consensus::{Block, BlockHeader, Transaction, TransactionOutput};
+    let tx = |value: i64| Transaction {
+        version: 1,
+        inputs: blvm_protocol::tx_inputs![],
+        outputs: blvm_protocol::tx_outputs![
+            TransactionOutput {
+                value,
+                script_pubkey: vec![0x51],
+            },
+            TransactionOutput {
+                value: value / 2,
+                script_pubkey: vec![0x52],
+            }
+        ],
+        lock_time: 0,
+    };
+    let block = Block {
+        header: BlockHeader {
+            version: 4,
+            timestamp: 1_600_000_000,
+            ..Default::default()
+        },
+        transactions: vec![tx(50_0000_0000), tx(25_0000_0000), tx(7)].into(),
+    };
+    let mut expect_ids = Vec::new();
+    crate::storage::disk_utxo::compute_tx_ids_only(&block, &mut expect_ids);
+    assert_eq!(expect_ids.len(), 3);
+    let expect_cache = blvm_consensus::utxo_overlay::build_block_output_utxo_cache(
+        &block,
+        expect_ids.as_slice(),
+        1_000,
+    );
+
+    // Below assume-valid: ids filled, cache built and equal to the dispatch-side build.
+    let mut ids = Vec::new();
+    let cache = engine_prep_deferred(&block, 1_000, 912_683, &mut ids).expect("cache below AV");
+    assert_eq!(ids, expect_ids);
+    assert_eq!(cache.len(), expect_cache.len());
+    assert_eq!(cache.len(), 6);
+    for (op, u) in expect_cache.iter() {
+        let got = cache.get(op).expect("outpoint present");
+        assert_eq!(got.value, u.value);
+        assert_eq!(got.script_pubkey, u.script_pubkey);
+    }
+
+    // At/above assume-valid: ids still filled, no cache (matches dispatch `h < AV` gate).
+    let mut ids_hi = Vec::new();
+    assert!(engine_prep_deferred(&block, 912_683, 912_683, &mut ids_hi).is_none());
+    assert_eq!(ids_hi, expect_ids);
+
+    // Pre-filled ids are kept, not recomputed.
+    let mut pre = expect_ids.clone();
+    pre.reverse();
+    let _ = engine_prep_deferred(&block, 1_000, 912_683, &mut pre);
+    assert_ne!(pre, expect_ids);
 }
 
 #[serial_test::serial(ibd)]

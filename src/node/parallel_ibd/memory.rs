@@ -2,8 +2,8 @@
 //!
 //! Hardware-aware tuning: derives memory budget from total RAM, allocates across
 //! UTXO cache, block buffer, prefetch, and overhead. Flush and download **ahead**
-//! depth are driven by **live** `/proc` RSS + MemAvailable + MemTotal — no
-//! env-var knobs required. The system must never OOM regardless of host RAM.
+//! depth are driven by process `RssAnon` + `VmSwap` against the cgroup/RSS-budget
+//! limit. Host `MemAvailable` / host swap do not set [`PressureLevel`].
 //!
 //! Graduated pressure response (see `adjust_max_ahead_live`; fractions depend on RAM tier):
 //!   None     → recover toward nominal `max_ahead` in steps
@@ -18,9 +18,36 @@
 use libmimalloc_sys;
 #[cfg(target_os = "linux")]
 use std::io::Read;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Host `MemAvailable` must be below this before the OOM backstop may raise
+/// Emergency. dest-bc latched Critical at 32720 MiB — that is not OOM.
+pub(crate) const HOST_OOM_BACKSTOP_AVAIL_MB: u64 = 1536;
+
+/// Host `MemAvailable` below which *our* swapped-out pages count as node pressure.
+/// Matches [`MemoryGuard::large_host_our_swap_counts`].
+pub(crate) const OUR_SWAP_COUNTS_AVAIL_MB: u64 = 32 * 1024;
+
+/// Whether `VmSwap` indicates real paging by this process.
+///
+/// Cold anon pages get evicted whenever a co-tenant fills swap — on R-276 the IDE held
+/// 7.6 GiB of a 16 GiB zram while 68 GiB of RAM stayed free, and the node's 2.8 GiB of
+/// evicted pages tripped the unconditional `>1024` Emergency at h≈407k. Admission was
+/// quartered, the feeder drained to zero, and every block degraded to a serial
+/// single-height gap fetch (`IBD_TIP_CRAWL`). With `MemAvailable` this high the kernel
+/// serves our allocations from RAM, so those pages are an artifact, not pressure.
+///
+/// Unknown (`0`) counts as pressure: absent a reading, assume the swap is real.
+#[inline]
+pub(crate) fn our_swap_counts(sys_avail_mb: u64) -> bool {
+    sys_avail_mb == 0 || sys_avail_mb < OUR_SWAP_COUNTS_AVAIL_MB
+}
+
+/// 0 = node footprint, 1 = host OOM backstop, 2 = `BLVM_IBD_FORCE_PRESSURE`.
+static LAST_PRESSURE_SOURCE: AtomicU8 = AtomicU8::new(0);
 
 /// Memory pressure severity. Higher levels trigger more aggressive responses
 /// in the validation loop. Ordered so `>=` comparisons work naturally.
@@ -208,9 +235,166 @@ pub(crate) fn refresh_stale_emergency_pressure(rss_budget_mb: u64) {
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn refresh_stale_emergency_pressure(_rss_budget_mb: u64) {}
 
+/// Lab falsifier only: `BLVM_IBD_FORCE_PRESSURE=critical` (or `emergency`).
+fn forced_ibd_pressure_from_env() -> Option<PressureLevel> {
+    match std::env::var("BLVM_IBD_FORCE_PRESSURE")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("critical") | Some("Critical") | Some("CRITICAL") => Some(PressureLevel::Critical),
+        Some("emergency") | Some("Emergency") | Some("EMERGENCY") => {
+            Some(PressureLevel::Emergency)
+        }
+        _ => None,
+    }
+}
+
 #[inline]
 pub(crate) fn ibd_pressure_level_snapshot() -> PressureLevel {
+    if let Some(forced) = forced_ibd_pressure_from_env() {
+        LAST_PRESSURE_SOURCE.store(2, Ordering::Relaxed);
+        return forced;
+    }
     PressureLevel::from_u8(IBD_PRESSURE_LEVEL.load(Ordering::Relaxed))
+}
+
+fn pressure_source_name(v: u8) -> &'static str {
+    match v {
+        1 => "host_oom_backstop",
+        2 => "forced_env",
+        _ => "node",
+    }
+}
+
+/// Log a consumer that changed IBD behavior because of pressure.
+pub(crate) fn log_pressure_behavior(consumer: &'static str, action: &str, extra: &str) {
+    let level = ibd_pressure_level_snapshot();
+    let source = pressure_source_name(LAST_PRESSURE_SOURCE.load(Ordering::Relaxed));
+    tracing::info!(
+        "[IBD_PRESSURE_BEHAVIOR] consumer={} action={} level={:?} source={} {}",
+        consumer,
+        action,
+        level,
+        source,
+        extra
+    );
+}
+
+/// Cgroup `memory.max` (MiB) for this process, if finite.
+pub(crate) fn cgroup_memory_limit_mb() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        static CACHED: OnceLock<Option<u64>> = OnceLock::new();
+        return *CACHED.get_or_init(read_cgroup_memory_max_mb);
+    }
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn read_cgroup_memory_max_mb() -> Option<u64> {
+    let cg = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let rel = cg
+        .lines()
+        .find_map(|l| l.strip_prefix("0::"))
+        .map(str::trim)?;
+    for name in ["memory.max", "memory.high"] {
+        let path = format!("/sys/fs/cgroup{rel}/{name}");
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let raw = raw.trim();
+        if raw == "max" {
+            continue;
+        }
+        if let Some(mb) = raw.parse::<u64>().ok().map(|b| b / 1024 / 1024).filter(|&m| m > 0)
+        {
+            return Some(mb);
+        }
+    }
+    None
+}
+
+/// Limit the node may consume: min(RSS budget, cgroup max).
+pub(crate) fn footprint_limit_mb(rss_budget_mb: u64) -> u64 {
+    match cgroup_memory_limit_mb() {
+        Some(cg) => rss_budget_mb.min(cg).max(1),
+        None => rss_budget_mb.max(1),
+    }
+}
+
+/// Node pressure from **this process** only: `RssAnon` and `VmSwap` vs `limit_mb`.
+///
+/// `VmSwap` is only read when [`our_swap_counts`] holds — see that function for why an
+/// ample-`MemAvailable` host makes our swapped pages a co-tenant artifact.
+pub(crate) fn classify_node_pressure(
+    limit_mb: u64,
+    no_swap: bool,
+    current: PressureLevel,
+    snap: &MemorySnapshot,
+) -> PressureLevel {
+    let mut level = PressureLevel::None;
+    let r = if snap.rss_anon_mb > 0 {
+        snap.rss_anon_mb
+    } else {
+        0
+    };
+    if limit_mb > 0 && r > 0 {
+        let emerg_line = if no_swap {
+            limit_mb * 85 / 100
+        } else {
+            limit_mb
+        };
+        let emerg_exit = if no_swap {
+            limit_mb * 80 / 100
+        } else {
+            limit_mb * 95 / 100
+        };
+        let crit_line = if no_swap {
+            limit_mb * 75 / 100
+        } else {
+            limit_mb * 92 / 100
+        };
+        let elev_line = if no_swap {
+            limit_mb * 65 / 100
+        } else {
+            limit_mb * 82 / 100
+        };
+        if r >= emerg_line {
+            return PressureLevel::Emergency;
+        }
+        if current == PressureLevel::Emergency && r >= emerg_exit {
+            return PressureLevel::Emergency;
+        }
+        if r >= crit_line {
+            level = PressureLevel::Critical;
+        } else if r >= elev_line {
+            level = PressureLevel::Elevated;
+        }
+    }
+    let our_swap = snap.vm_swap_mb;
+    if !our_swap_counts(snap.sys_avail_mb) {
+        return level;
+    }
+    if our_swap > 1024 {
+        return PressureLevel::Emergency;
+    }
+    if our_swap > 256 {
+        level = level.max(PressureLevel::Critical);
+    } else if our_swap > 64 {
+        level = level.max(PressureLevel::Elevated);
+    }
+    level
+}
+
+/// Genuine host OOM only. `MemAvailable` 32 GiB + full swap is **not** this.
+pub(crate) fn classify_host_oom_backstop(snap: &MemorySnapshot) -> Option<PressureLevel> {
+    if snap.sys_avail_mb > 0 && snap.sys_avail_mb < HOST_OOM_BACKSTOP_AVAIL_MB {
+        Some(PressureLevel::Emergency)
+    } else {
+        None
+    }
 }
 
 /// Concurrent UTXO flush threads allowed **right now**, derived from the RAM tier base
@@ -258,9 +442,15 @@ pub(crate) static BLOCK_BUFFER_COUNT: AtomicU64 = AtomicU64::new(0);
 pub(crate) static BRIDGE_PENDING_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Blocks flushed to coordinator on download chunk abort ([IBD_FLUSH_ON_ABORT]).
 pub(crate) static GAP_FLUSH_ON_ABORT_BLOCKS: AtomicU64 = AtomicU64::new(0);
+/// Times a worker backed off after an all-local chunk instead of re-taking it (R-273 spin).
+pub(crate) static ALL_LOCAL_RETAKE_BACKOFFS: AtomicU64 = AtomicU64::new(0);
+/// Times a quiet seated tip cover was re-raced to a second peer ([IBD_TIP_RERACE]).
+pub(crate) static TIP_STALE_RERACES: AtomicU64 = AtomicU64::new(0);
 /// Sum of blocks buffered in per-worker download `received` maps (not yet sent to coordinator).
 /// W55: jemalloc 1 MiB class grew to ~4k live objs while reorder≪1k — attribution + trim target.
 pub(crate) static DOWNLOAD_RECEIVED_BLOCKS: AtomicU64 = AtomicU64::new(0);
+/// Live download→coordinator `block_tx` queue depth (`max_capacity − capacity`).
+pub(crate) static BLOCK_TX_LEN: AtomicU64 = AtomicU64::new(0);
 /// Far-ahead download `received` entries dropped after GAP_PERSIST (or hard trim).
 pub(crate) static DOWNLOAD_RECEIVED_TRIM_BLOCKS: AtomicU64 = AtomicU64::new(0);
 /// W27: last validation-gap height successfully streamed to coordinator (dedup multi-worker storms).
@@ -297,6 +487,18 @@ pub(crate) static BRIDGE_EVICT_BLOCKS: AtomicU64 = AtomicU64::new(0);
 /// Wall-clock ms at last proactive jemalloc retained purge (rate-limit ≤1/60s).
 static LAST_JEMALLOC_RETAINED_PURGE_MS: AtomicU64 = AtomicU64::new(0);
 const JEMALLOC_RETAINED_PURGE_MIN_INTERVAL_MS: u64 = 60_000;
+
+/// Snapshot download→coordinator channel occupancy for [MEM_REPORT] `block_tx_len=`.
+pub(crate) fn note_block_tx_len(
+    tx: &tokio::sync::mpsc::Sender<(
+        u64,
+        super::types::SharedBlock,
+        super::types::SharedWitnesses,
+    )>,
+) {
+    let len = tx.max_capacity().saturating_sub(tx.capacity()) as u64;
+    BLOCK_TX_LEN.store(len, Ordering::Relaxed);
+}
 
 /// Update shared reorder-buffer counters for [MEM_REPORT] attribution.
 #[cfg(feature = "production")]
@@ -2084,15 +2286,30 @@ impl MemoryGuard {
         if prev == new {
             return;
         }
+        let source = pressure_source_name(LAST_PRESSURE_SOURCE.load(Ordering::Relaxed));
+        let limit = footprint_limit_mb(self.rss_budget_mb);
         tracing::info!(
-            "MemoryGuard: pressure transition {} -> {} ({})",
+            "[IBD_PRESSURE] {} → {} source={} anon={}MB limit={}MB proc_swap={}MB \
+             cgroup={:?} rss_budget={}MB sys_avail={}MB host_swap_used={}MB ({})",
             Self::pressure_level_name(prev),
             Self::pressure_level_name(new),
+            source,
+            snap.rss_anon_mb,
+            limit,
+            snap.vm_swap_mb,
+            cgroup_memory_limit_mb(),
+            self.rss_budget_mb,
+            snap.sys_avail_mb,
+            snap.swap_used_mb(),
             snap
         );
-        // On first Critical/Emergency transition, dump mimalloc allocation stats to stderr so we
-        // can identify what is consuming memory. Gated on feature="mimalloc" so it compiles away
-        // in non-production builds. The output goes to stderr — redirect with 2>/tmp/mi-stats.log.
+        if source == "host_oom_backstop" {
+            tracing::warn!(
+                "[IBD_HOST_OOM_BACKSTOP] sys_avail={}MB < {}MB — host Emergency distinct from node footprint",
+                snap.sys_avail_mb,
+                HOST_OOM_BACKSTOP_AVAIL_MB
+            );
+        }
         if new >= (PressureLevel::Critical as u8) && prev < (PressureLevel::Critical as u8) {
             #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
             unsafe {
@@ -2110,12 +2327,15 @@ impl MemoryGuard {
     /// `cancel_all_background_work` calls in the hot validation path.
     pub(crate) fn pressure_level(&self, snap: &MemorySnapshot) -> PressureLevel {
         let current = PressureLevel::from_u8(self.last_reported_pressure.load(Ordering::Relaxed));
-        let level = self.clamp_pressure_to_process_budget(
-            self.pressure_level_for(snap, current),
-            snap,
-            current,
-        );
-        Self::clamp_pressure_to_swap_state(level, snap)
+        let limit = footprint_limit_mb(self.rss_budget_mb);
+        let node = classify_node_pressure(limit, self.no_swap_at_boot, current, snap);
+        if let Some(host) = classify_host_oom_backstop(snap) {
+            LAST_PRESSURE_SOURCE.store(1, Ordering::Relaxed);
+            node.max(host)
+        } else {
+            LAST_PRESSURE_SOURCE.store(0, Ordering::Relaxed);
+            node
+        }
     }
 
     /// Raise pressure when system-wide swap is near exhaustion AND RAM is tight, OR when our
@@ -2138,6 +2358,7 @@ impl MemoryGuard {
     ///    immediately after an IBD restart on a machine whose swap was still 99% full from the
     ///    previous run's OOM kill — despite `proc_swap=0` and 73 GiB available. The result was
     ///    an infinite Emergency admission pause at height 1, blocking the entire pipeline.
+    #[allow(dead_code)]
     fn clamp_pressure_to_swap_state(level: PressureLevel, snap: &MemorySnapshot) -> PressureLevel {
         if snap.swap_total_mb == 0 {
             return level; // No swap configured: skip.
@@ -2175,6 +2396,7 @@ impl MemoryGuard {
     /// Large-host (>16 GiB) process-swap pressure only counts when MemAvailable is
     /// under 32 GiB. Matches the `sys_swap_*` gate written for vLLM-filled zram.
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn large_host_our_swap_counts(sys_avail_mb: u64) -> bool {
         sys_avail_mb > 0 && sys_avail_mb < 32 * 1024
     }
@@ -2190,6 +2412,7 @@ impl MemoryGuard {
     /// `VmRSS` against a budget sized for *anonymous* use caused spurious Emergency triggers
     /// that nuked the UTXO cache to ~170k entries and created cascading write-lock contention
     /// across block-flush threads.
+    #[allow(dead_code)]
     fn clamp_pressure_to_process_budget(
         &self,
         mut level: PressureLevel,
@@ -2262,6 +2485,7 @@ impl MemoryGuard {
         engine_mb.max(2048)
     }
 
+    #[allow(dead_code)]
     fn pressure_level_for(&self, snap: &MemorySnapshot, current: PressureLevel) -> PressureLevel {
         let t = if snap.mem_total_mb > 0 {
             snap.mem_total_mb
@@ -2549,7 +2773,8 @@ impl MemoryGuard {
                 };
                 if cur > target {
                     tracing::warn!(
-                        "MemoryGuard: EMERGENCY — download ahead {} → {} ({})",
+                        "[IBD_PRESSURE_BEHAVIOR] consumer=max_ahead action=shrink level=Emergency \
+                         {} → {} ({})",
                         cur,
                         target,
                         snap
@@ -2565,7 +2790,8 @@ impl MemoryGuard {
                 };
                 if cur > target {
                     tracing::warn!(
-                        "MemoryGuard: CRITICAL — download ahead {} → {} ({})",
+                        "[IBD_PRESSURE_BEHAVIOR] consumer=max_ahead action=shrink level=Critical \
+                         {} → {} ({})",
                         cur,
                         target,
                         snap
@@ -2994,8 +3220,9 @@ pub(crate) fn c2_working_set_track_ok(verdict: MemReportAccountedVerdict) -> boo
 #[cfg(test)]
 mod memory_tier_tests {
     use super::{
-        MemReportAccountedVerdict, MemoryGuard, PressureLevel, ROCKSDB_PIPELINE_RESERVE_MB,
-        WorkloadClass, c2_working_set_track_ok, classify_mem_report_accounted,
+        MemReportAccountedVerdict, MemoryGuard, MemorySnapshot, PressureLevel,
+        ROCKSDB_PIPELINE_RESERVE_MB, WorkloadClass, c2_working_set_track_ok,
+        classify_host_oom_backstop, classify_mem_report_accounted, classify_node_pressure,
         emergency_entry_anon_mb, ibd_pressure_is_emergency, ibd_pressure_level_snapshot,
         publish_ibd_pressure, reset_ibd_pressure_on_session_end, stale_emergency_step_down_level,
     };
@@ -3174,29 +3401,103 @@ mod memory_tier_tests {
         );
     }
 
-    /// r24b @411k: sys_avail=63G, zram 99% full, proc_swap=650. Must not count as
-    /// Emergency-class our-swap (that cut depth 32→8). Tight RAM still counts.
+    /// dest-bc 02:49 None→Critical at sys_avail=32720, proc_swap=0, host swap full.
+    /// That latch is host-driven and must not be node Critical.
     #[test]
-    fn r24b_ample_avail_does_not_count_process_swap_as_emergency() {
-        assert!(
-            !MemoryGuard::large_host_our_swap_counts(63_509),
-            "r24b sys_avail=63G — vLLM-filled zram is not OOM"
+    fn dest_bc_host_swap_avail32g_is_not_node_critical() {
+        let snap = MemorySnapshot {
+            rss_mb: 33_000,
+            rss_anon_mb: 8_000,
+            mem_total_mb: 94_162,
+            sys_avail_mb: 32_720,
+            swap_total_mb: 4_095,
+            swap_free_mb: 40,
+            vm_swap_mb: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_node_pressure(23_000, false, PressureLevel::None, &snap),
+            PressureLevel::None,
+            "8G anon vs 23G limit, proc_swap=0"
         );
-        assert!(
-            !MemoryGuard::large_host_our_swap_counts(32 * 1024),
-            "32 GiB avail is the gate, not under it"
+        assert_eq!(
+            classify_host_oom_backstop(&snap),
+            None,
+            "32720 MiB avail is not the 1536 MiB backstop"
         );
-        assert!(
-            MemoryGuard::large_host_our_swap_counts(32 * 1024 - 1),
-            "just under 32 GiB still counts"
+    }
+
+    #[test]
+    fn host_oom_backstop_only_below_1536() {
+        let mut snap = MemorySnapshot {
+            sys_avail_mb: 1536,
+            ..Default::default()
+        };
+        assert_eq!(classify_host_oom_backstop(&snap), None);
+        snap.sys_avail_mb = 1535;
+        assert_eq!(
+            classify_host_oom_backstop(&snap),
+            Some(PressureLevel::Emergency)
         );
-        assert!(
-            MemoryGuard::large_host_our_swap_counts(8_192),
-            "tight RAM + our swap still Emergency-eligible"
+    }
+
+    #[test]
+    fn node_proc_swap_over_256_is_critical() {
+        let snap = MemorySnapshot {
+            rss_anon_mb: 4_000,
+            vm_swap_mb: 300,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_node_pressure(23_000, false, PressureLevel::None, &snap),
+            PressureLevel::Critical
         );
-        assert!(
-            !MemoryGuard::large_host_our_swap_counts(0),
-            "unknown avail must not trip"
+        let emerg = MemorySnapshot {
+            rss_anon_mb: 4_000,
+            vm_swap_mb: 1025,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_node_pressure(23_000, false, PressureLevel::None, &emerg),
+            PressureLevel::Emergency
+        );
+    }
+
+    /// R-276 h≈407804: the IDE held 7.6 GiB of a 16 GiB zram, so the kernel evicted 2.8 GiB
+    /// of our cold pages while 68 GiB of RAM stayed free. The old unconditional `>1024`
+    /// latched Emergency, `coord_admit` quartered the pipeline, feeder/reorder drained to 0
+    /// and apply fell to ~1 BPS in `IBD_TIP_CRAWL`. Anon was 6.9 GiB of a 47 GiB budget.
+    #[test]
+    fn r276_coresident_zram_swap_with_ample_ram_is_not_pressure() {
+        let snap = MemorySnapshot {
+            rss_mb: 38_598,
+            rss_anon_mb: 6_946,
+            mem_total_mb: 94_162,
+            sys_avail_mb: 69_948,
+            swap_total_mb: 16_383,
+            swap_free_mb: 688,
+            vm_swap_mb: 2_847,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_node_pressure(47_081, false, PressureLevel::None, &snap),
+            PressureLevel::None,
+            "6.9G anon vs 47G budget with 68G MemAvailable is not node pressure"
+        );
+        assert_eq!(
+            classify_host_oom_backstop(&snap),
+            None,
+            "69948 MiB avail is not the 1536 MiB backstop"
+        );
+        // Emergency must not be absorbing: same swap, but RAM genuinely tight.
+        let tight = MemorySnapshot {
+            sys_avail_mb: 4_096,
+            ..snap
+        };
+        assert_eq!(
+            classify_node_pressure(47_081, false, PressureLevel::Emergency, &tight),
+            PressureLevel::Emergency,
+            "2.8G of our pages on disk with 4G avail is real paging"
         );
     }
 }

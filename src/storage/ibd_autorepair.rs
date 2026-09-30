@@ -113,23 +113,85 @@ pub fn validation_error_suggests_utxo_repair(err: &anyhow::Error) -> bool {
         || s.contains("Failed to open IBD UTXO tree")
 }
 
-/// Reject clearly incomplete checkpoint snapshots (live 2026-07-14: 5581 UTXOs labeled
-/// as h=40000 / h=48702 after exporting from stale contiguous_length).
+/// Reject incomplete / truncated checkpoint snapshots.
 ///
-/// Early mainnet UTXO set grows well above `height/7` by height 10k; this floor is
-/// intentionally conservative so we only reject pathological poison, not real snapshots.
+/// dest-bc persisted 3.6M / 0 / 2.4M after fan-in no-op because `height/7` is too
+/// weak (516773/7 ≈ 74k lets dest-ak 8.2M through). Repair and persist share this
+/// gate: refuse `count==0`; refuse `count < last_accepted/2`; when there is no
+/// predecessor, at h≥400k refuse `count < height*18` (8.2M@516k fails; a genesis
+/// ~1M@221k must pass — a 100k height*18 floor would refuse the next soak).
 pub fn checkpoint_utxo_count_plausible(height: u64, count: u64) -> bool {
+    checkpoint_utxo_count_monotonic(height, count, 0)
+}
+
+/// Same as [`checkpoint_utxo_count_plausible`] plus the 50% drop vs last accepted.
+pub fn checkpoint_utxo_count_monotonic(height: u64, count: u64, last_accepted: u64) -> bool {
     if height == 0 {
         return true;
     }
-    // Unset metadata (0) is not enough to declare poison — prefer prev-slot rollback.
     if count == 0 {
-        return true;
+        return false;
     }
     if height < 10_000 {
         return count > 0;
     }
-    count >= height / 7
+    if last_accepted > 0 && count < last_accepted / 2 {
+        return false;
+    }
+    // dest-ak 8.2M @516773 passed height/7 (~74k). Absolute floor only when
+    // there is no last_accepted and height is past the 2015-era UTXO ramp —
+    // dest-bc 1.15M@221k is real-enough genesis; 100k×18 would refuse it.
+    if last_accepted == 0 && height >= 400_000 && count < height.saturating_mul(18) {
+        return false;
+    }
+    if last_accepted == 0 && height < 100_000 {
+        return count >= height / 7;
+    }
+    true
+}
+
+/// First persist (no predecessor): refuse fan-in no-op overlay and order-of-magnitude
+/// drops vs what the tee actually merged.
+pub fn checkpoint_first_persist_acceptable(
+    count: u64,
+    tee_merged_entries: u64,
+    disk_segs_existed: bool,
+) -> bool {
+    if disk_segs_existed && tee_merged_entries == 0 {
+        return false;
+    }
+    if tee_merged_entries > 0 && count.saturating_mul(10) < tee_merged_entries {
+        return false;
+    }
+    true
+}
+
+/// Combined persist gate used by the export thread.
+pub fn checkpoint_persist_acceptable(
+    height: u64,
+    count: u64,
+    last_accepted: u64,
+    tee_merged_entries: u64,
+    disk_segs_existed: bool,
+    is_first: bool,
+) -> bool {
+    if !checkpoint_utxo_count_monotonic(height, count, last_accepted) {
+        return false;
+    }
+    if is_first
+        && !checkpoint_first_persist_acceptable(count, tee_merged_entries, disk_segs_existed)
+    {
+        return false;
+    }
+    true
+}
+
+/// 3 consecutive refused persists stop the export path. Does **not** set
+/// `ibd_utxo_repair_required` — that re-seeds (dest-ak poison).
+pub const CKPT_REFUSE_HARD_STOP: u32 = 3;
+
+pub fn checkpoint_refuse_hard_stop(streak: u32) -> bool {
+    streak >= CKPT_REFUSE_HARD_STOP
 }
 
 /// If `ibd_utxo_watermark` is non-zero but the durable UTXO tree has no rows, persisted watermark
@@ -344,6 +406,11 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
             .get_engine_export_utxo_count()
             .unwrap_or(None)
             .unwrap_or(0);
+        let prev_accepted = storage
+            .chain()
+            .get_engine_prev_accepted_utxo_count()
+            .unwrap_or(None)
+            .unwrap_or(0);
         let active_slot = storage.chain().get_engine_ckpt_slot().unwrap_or(0);
         let active_tree_name = crate::storage::ibd_engine::ckpt_tree_for_slot(active_slot);
         let active_tree_len = storage
@@ -351,14 +418,21 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
             .ok()
             .and_then(|t| t.len().ok())
             .unwrap_or(0) as u64;
-        // Soft engine repair: active ping-pong snapshot may be poisoned (incomplete export
-        // while metadata still claims a full count — live 2026-07-14: rolled to slot 0 at
-        // h=418818 with tree len 54.5M while chain_info expected 97M → infinite UTXO-miss).
-        // Detect poison from metadata *or* actual tree size.
-        let meta_poisoned =
-            export_height > 0 && !checkpoint_utxo_count_plausible(export_height, export_utxo_count);
+        // Soft engine repair: 50% vs last accepted (not height/7). dest-ak 8.2M@516k
+        // passed height/7 and re-seeded poison. Use prev_accepted, else other-slot len.
+        let mut gate_last = prev_accepted;
+        let other_slot = if active_slot == 0 { 1u8 } else { 0u8 };
+        if gate_last == 0 {
+            if let Ok(tree) =
+                storage.open_tree(crate::storage::ibd_engine::ckpt_tree_for_slot(other_slot))
+            {
+                gate_last = tree.len().unwrap_or(0) as u64;
+            }
+        }
+        let meta_poisoned = export_height > 0
+            && !checkpoint_utxo_count_monotonic(export_height, export_utxo_count, gate_last);
         let tree_poisoned = export_height > 0
-            && (!checkpoint_utxo_count_plausible(export_height, active_tree_len)
+            && (!checkpoint_utxo_count_monotonic(export_height, active_tree_len, gate_last)
                 || (export_utxo_count > 0 && active_tree_len != export_utxo_count));
         let active_poisoned = meta_poisoned || tree_poisoned;
         if active_poisoned {
@@ -386,7 +460,7 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
                     storage.open_tree(crate::storage::ibd_engine::ckpt_tree_for_slot(slot))
                 {
                     let len = tree.len().unwrap_or(0) as u64;
-                    if len > 0 && checkpoint_utxo_count_plausible(h, len) {
+                    if len > 0 && checkpoint_utxo_count_monotonic(h, len, 0) {
                         if best.map(|(_, bh, _)| h > bh).unwrap_or(true) {
                             best = Some((slot, h, len));
                         }
@@ -902,7 +976,108 @@ mod ibd_autorepair_tests {
         assert!(!checkpoint_utxo_count_plausible(40_000, 5_581));
         assert!(!checkpoint_utxo_count_plausible(48_702, 5_581));
         assert!(checkpoint_utxo_count_plausible(40_000, 80_000));
-        assert!(checkpoint_utxo_count_plausible(40_000, 0)); // unset
+        assert!(
+            !checkpoint_utxo_count_plausible(40_000, 0),
+            "count==0 is refuse, not unset-OK"
+        );
+        // dest-ak 8.2M@516k passed height/7 (~74k); must be poison.
+        assert!(!checkpoint_utxo_count_plausible(516_773, 8_236_260));
+        assert!(!checkpoint_utxo_count_monotonic(
+            516_773, 8_236_260, 16_800_000
+        ));
+        assert!(checkpoint_utxo_count_plausible(340_000, 16_800_000));
+        // Overlay 3.6M@340k with no predecessor is tee/50%, not height*18.
+        // A 100k×18 floor would refuse genesis ~1M@221k and abort the post-fix soak.
+        assert!(checkpoint_utxo_count_plausible(221_814, 1_154_316));
+        assert!(checkpoint_utxo_count_plausible(340_000, 3_600_000));
+        assert!(!checkpoint_utxo_count_monotonic(
+            340_000, 3_600_000, 16_800_000
+        ));
+        assert!(!checkpoint_utxo_count_monotonic(
+            200_000, 4_000_000, 16_800_000
+        ));
+        assert!(checkpoint_first_persist_acceptable(16_800_000, 16_800_000, true));
+        assert!(!checkpoint_first_persist_acceptable(3_600_000, 0, true));
+        assert!(!checkpoint_first_persist_acceptable(3_600_000, 200_000_000, true));
+        // dest-bc overlay persists vs last good 16.8M — 50% gate, not height/7.
+        assert!(!checkpoint_persist_acceptable(
+            452_846, 0, 16_800_000, 0, true, false
+        ));
+        assert!(!checkpoint_persist_acceptable(
+            340_000, 3_600_000, 16_800_000, 0, true, false
+        ));
+        assert!(checkpoint_persist_acceptable(
+            340_000, 16_800_000, 16_800_000, 16_800_000, true, false
+        ));
+        assert!(
+            checkpoint_persist_acceptable(221_814, 1_154_316, 0, 1_154_316, true, true),
+            "genesis first persist ~1M@221k must not trip height*18"
+        );
+        assert!(checkpoint_persist_acceptable(
+            265_774, 2_822_399, 1_154_316, 2_822_399, true, false
+        ));
+        assert!(!checkpoint_refuse_hard_stop(2));
+        assert!(checkpoint_refuse_hard_stop(3));
+        assert!(checkpoint_refuse_hard_stop(4));
+    }
+
+    #[test]
+    fn apply_autorepair_dest_ak_8m_at_516k_must_not_look_healthy() {
+        // dest-ak resumed 8236260 @516773 (passes height/7) then MISSING_UTXO.
+        // Trees are gone on disk; this fixture reconstructs the metadata+stub tree.
+        // Must not take "looks healthy — align watermark and re-seed".
+        let _guard = crate::ibd_test_lock::guard();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_AGGRESSIVE_REPAIR");
+            std::env::remove_var("BLVM_IBD_DEFER_CHECKPOINT_INTERVAL");
+            std::env::set_var("BLVM_IBD_ENGINE", "1");
+        }
+        let dir = TempDir::new().unwrap();
+        let data_dir = dir.path();
+        let storage = Storage::new(data_dir).unwrap();
+
+        storage.chain().force_set_engine_ckpt_slot(0).unwrap();
+        storage
+            .chain()
+            .set_engine_ckpt_slot_height(0, 516_773)
+            .unwrap();
+        storage
+            .chain()
+            .force_set_ibd_utxo_watermark(516_773)
+            .unwrap();
+        storage
+            .chain()
+            .force_set_engine_export_height(516_773)
+            .unwrap();
+        storage
+            .chain()
+            .force_set_engine_export_utxo_count(8_236_260)
+            .unwrap();
+        storage
+            .chain()
+            .force_set_engine_prev_accepted_utxo_count(16_800_000)
+            .unwrap();
+        let ckpt_a = storage.open_tree("ibd_utxos_ckpt_a").unwrap();
+        ckpt_a.insert(b"poison-stub", b"x").unwrap();
+        storage.flush().unwrap();
+
+        set_ibd_utxo_repair_flag(data_dir).unwrap();
+        apply_ibd_utxo_autorepair_if_needed(&storage, data_dir).unwrap();
+
+        assert!(!ibd_utxo_repair_flag_present(data_dir));
+        let export_h = storage.chain().get_engine_export_height().unwrap().unwrap_or(0);
+        let wm = storage.chain().get_utxo_watermark().unwrap().unwrap_or(0);
+        assert_eq!(
+            export_h, 0,
+            "8.2M@516k must not re-seed; genesis reset, got export_h={export_h}"
+        );
+        assert_eq!(
+            wm, 0,
+            "must not align watermark to poison 516773, got {wm}"
+        );
+        unsafe {
+            std::env::remove_var("BLVM_IBD_ENGINE");
+        }
     }
 
     #[test]

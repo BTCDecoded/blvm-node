@@ -95,6 +95,11 @@ impl UtxoDatabase {
         self.index.disk_segment_count()
     }
 
+    /// Cold journal entries waiting for compact/tee (not the live UTXO count).
+    pub fn disk_cold_entry_count(&self) -> u64 {
+        self.index.disk_cold_entry_count()
+    }
+
     /// Live disk-eviction age (spill tier is `eviction_age - 1`).
     pub fn eviction_age_live(&self) -> usize {
         self.index.eviction_age_live()
@@ -253,6 +258,15 @@ impl UtxoDatabase {
         self.table.fetch(ids, details)
     }
 
+    /// Directory holding `utxo_table.bin` (and `.segs/`), for on-disk scratch such as the
+    /// checkpoint-export spill. `None` only for a bare relative file name.
+    pub fn table_dir(&self) -> Option<PathBuf> {
+        self.table_path
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+    }
+
     /// Highest height that has been fully appended (all blocks 0..=height committed).
     /// Useful for partial-query logic: callers can query with `before=contiguous_length+1`
     /// to resolve any currently-committed outputs without waiting for future appends.
@@ -299,7 +313,7 @@ impl UtxoDatabase {
         &self,
         checkpoint_height: i32,
         on_live: Option<F>,
-    ) -> anyhow::Result<u64>
+    ) -> anyhow::Result<(u64, u64, usize)>
     where
         F: FnMut(OutputKV) -> anyhow::Result<()>,
     {

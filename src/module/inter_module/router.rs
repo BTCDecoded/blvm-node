@@ -46,6 +46,12 @@ impl ModuleRouter {
         self
     }
 
+    /// Non-blocking: does any module currently route `method`? See
+    /// [`ModuleApiRegistry::method_registered_now`] for the `None` (table busy) case.
+    pub fn method_registered_now(&self, method: &str) -> Option<bool> {
+        self.registry.method_registered_now(method)
+    }
+
     /// Route a module-to-module API call
     ///
     /// # Arguments

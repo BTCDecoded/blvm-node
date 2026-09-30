@@ -1079,7 +1079,11 @@ impl NetworkManager {
         rx
     }
 
-    /// Complete a pending Headers request (FIFO - completes oldest request for this peer)
+    /// Complete a pending Headers request (FIFO — oldest *live* waiter).
+    ///
+    /// A 30s timeout drops the oneshot rx but left the tx at the front.
+    /// The next Headers then went to a closed waiter and IBD sat (R-48
+    /// 640k / R-47 ~840k). Skip closed senders.
     pub fn complete_headers_request(
         &self,
         peer_addr: SocketAddr,
@@ -1088,16 +1092,20 @@ impl NetworkManager {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut pending = self.pending_headers_requests.lock().await;
-                if let Some(queue) = pending.get_mut(&peer_addr) {
-                    if let Some(sender) = queue.pop_front() {
-                        let _ = sender.send(headers);
-                        // Clean up empty queues
-                        if queue.is_empty() {
-                            pending.remove(&peer_addr);
-                        }
-                        return true;
+                let Some(queue) = pending.get_mut(&peer_addr) else {
+                    return false;
+                };
+                while let Some(sender) = queue.pop_front() {
+                    if sender.is_closed() {
+                        continue;
                     }
+                    let _ = sender.send(headers);
+                    if queue.is_empty() {
+                        pending.remove(&peer_addr);
+                    }
+                    return true;
                 }
+                pending.remove(&peer_addr);
                 false
             })
         })
@@ -1234,6 +1242,48 @@ impl NetworkManager {
         None
     }
 
+    /// Ask **one** connected peer for a full block via GetData. Not persisted.
+    /// Used by the non-owner IBD probe — do not loop other peers.
+    pub async fn request_block_from_peer(
+        &self,
+        peer_addr: SocketAddr,
+        block_hash: blvm_protocol::Hash,
+        timeout: std::time::Duration,
+    ) -> Option<blvm_protocol::Block> {
+        use crate::network::inventory::MSG_WITNESS_BLOCK;
+        use crate::network::protocol::{GetDataMessage, InventoryVector, ProtocolMessage};
+
+        if !self.is_peer_connected(peer_addr).await {
+            return None;
+        }
+        let block_rx = self.register_block_request(peer_addr, block_hash);
+        let inventory = vec![InventoryVector {
+            inv_type: MSG_WITNESS_BLOCK,
+            hash: block_hash,
+        }];
+        let wire_msg =
+            match ProtocolParser::serialize_message(&ProtocolMessage::GetData(GetDataMessage {
+                inventory,
+            })) {
+                Ok(msg) => msg,
+                Err(_) => {
+                    self.cancel_block_request(peer_addr, block_hash);
+                    return None;
+                }
+            };
+        if self.send_to_peer(peer_addr, wire_msg).await.is_err() {
+            self.cancel_block_request(peer_addr, block_hash);
+            return None;
+        }
+        match tokio::time::timeout(timeout, block_rx).await {
+            Ok(Ok((block, _witnesses, _wire))) => Some(block),
+            _ => {
+                self.cancel_block_request(peer_addr, block_hash);
+                None
+            }
+        }
+    }
+
     /// Register multiple block download requests in a single mutex acquisition.
     ///
     /// Equivalent to calling [`register_block_request`] N times but acquires
@@ -1293,6 +1343,23 @@ impl NetworkManager {
         });
     }
 
+    /// HASH_FETCH extras only: drop the live GetData so a losing peer unblocks
+    /// when another peer already landed the body. Stall recovery must keep
+    /// using [`Self::cancel_block_request`] (live siblings stay).
+    pub fn cancel_block_request_force(
+        &self,
+        peer_addr: SocketAddr,
+        block_hash: blvm_protocol::Hash,
+    ) {
+        let key = (Self::block_request_key(peer_addr), block_hash);
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut pending = self.pending_block_requests.lock().await;
+                pending.remove(&key);
+            })
+        });
+    }
+
     /// Complete a pending Block request (no original wire payload).
     pub fn complete_block_request(
         &self,
@@ -1314,10 +1381,31 @@ impl NetworkManager {
         wire_payload: Option<Vec<u8>>,
     ) -> bool {
         let key = (Self::block_request_key(peer_addr), block_hash);
-        tokio::task::block_in_place(|| {
+        let wire_bytes = wire_payload.as_ref().map(|p| p.len() as u64).unwrap_or(0);
+        let handled = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut pending = self.pending_block_requests.lock().await;
                 let Some(senders) = pending.remove(&key) else {
+                    crate::node::parallel_ibd::body_dup::note_loser_branch_missing();
+                    if crate::node::parallel_ibd::late_body::try_admit(
+                        peer_addr,
+                        block_hash,
+                        block,
+                        witnesses,
+                        wire_payload,
+                    ) {
+                        crate::node::parallel_ibd::body_dup::note_discard(
+                            crate::node::parallel_ibd::body_dup::DiscardReason::LateAdmit,
+                            None,
+                            wire_bytes,
+                        );
+                        return true;
+                    }
+                    crate::node::parallel_ibd::body_dup::note_discard(
+                        crate::node::parallel_ibd::body_dup::DiscardReason::RequeueLoser,
+                        None,
+                        wire_bytes,
+                    );
                     return false;
                 };
                 // Deliver to the first sender whose receiver is still alive. `oneshot::Sender::send`
@@ -1333,11 +1421,35 @@ impl NetworkManager {
                     }
                 }
                 // The key existed (this was an IBD response) but every receiver had been dropped.
-                // Report handled so the block is not re-routed onto the relay/main-loop path; a
-                // still-needed height will be requested again by the coordinator.
+                // A still-needed height inside the admit window is kept; otherwise the coordinator
+                // requests it again.
+                let (block, witnesses, wire_payload) = payload;
+                crate::node::parallel_ibd::body_dup::note_loser_branch_dropped();
+                if crate::node::parallel_ibd::late_body::try_admit(
+                    peer_addr,
+                    block_hash,
+                    block,
+                    witnesses,
+                    wire_payload,
+                ) {
+                    crate::node::parallel_ibd::body_dup::note_discard(
+                        crate::node::parallel_ibd::body_dup::DiscardReason::LateAdmit,
+                        None,
+                        wire_bytes,
+                    );
+                    return true;
+                }
+                crate::node::parallel_ibd::body_dup::note_discard(
+                    crate::node::parallel_ibd::body_dup::DiscardReason::RequeueLoser,
+                    None,
+                    wire_bytes,
+                );
                 true
             })
-        })
+        });
+        // After admit lookup: `want` is the header index try_admit reads.
+        crate::node::parallel_ibd::wire_hash_gate::forget_want(block_hash);
+        handled
     }
 
     /// Clean up expired requests (older than max_age_seconds)
@@ -1383,6 +1495,17 @@ impl NetworkManager {
                 pm.peer_socket_addresses()
             })
         })
+    }
+
+    /// Connected IBD addrs only (no DNS / connect expansion).
+    ///
+    /// Coordinator ready-refresh must use this under `tokio::time::timeout`.
+    /// [`Self::peer_addresses_for_ibd`] is `block_in_place` + `block_on` and
+    /// cannot be cancelled — R-240 CRAWL silent after TIP_FAILOVER @107124,
+    /// zero `[IBD_READY_REFRESH_TIMEOUT]`.
+    pub async fn peer_addresses_for_ibd_connected(&self) -> Vec<SocketAddr> {
+        let pm = self.peer_manager.lock().await;
+        pm.peer_socket_addresses_for_ibd()
     }
 
     /// Get peer addresses suitable for IBD full-history block download.
@@ -1542,6 +1665,30 @@ impl NetworkManager {
         use blvm_protocol::service_flags::standard::NODE_NETWORK_LIMITED;
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
+                if crate::network::ibd_peers_pinned() {
+                    warn!(
+                        "IBD: pinned set — disconnect {} and reconnect from BLVM_IBD_PIN_PEERS (no DNS)",
+                        peer_addr
+                    );
+                    let _ = self.peer_tx.send(NetworkMessage::PeerDisconnected(
+                        TransportAddr::Tcp(peer_addr),
+                    ));
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    for addr in crate::network::ibd_pin_peers() {
+                        let current: Vec<SocketAddr> = {
+                            let pm = self.peer_manager.lock().await;
+                            pm.peer_socket_addresses()
+                        };
+                        if current.iter().any(|c| *c == addr) {
+                            continue;
+                        }
+                        if self.connect_to_peer(addr).await.is_ok() {
+                            info!("IBD: pinned replacement connected: {}", addr);
+                            break;
+                        }
+                    }
+                    return;
+                }
                 // 1. Mark as NODE_NETWORK_LIMITED in the address database.
                 {
                     let mut db = self.address_database().write().await;
@@ -2162,6 +2309,9 @@ impl NetworkManager {
             }
             NetworkMessage::PeerDisconnected(addr) => {
                 info!("Peer disconnected (during pending processing): {:?}", addr);
+                if let TransportAddr::Tcp(sa) = addr {
+                    crate::node::parallel_ibd::ibd_peer_gone(&sa.to_string());
+                }
                 self.clear_companion_udp_peer_on_disconnect(&addr).await;
                 let mut pm = self.peer_manager.lock().await;
                 pm.remove_peer(&addr);
@@ -2173,11 +2323,8 @@ impl NetworkManager {
                 // blocks the ordered pipeline; at ~13 disconnects/minute this
                 // was wasting ~6× as much wall-clock time as real block work.
                 if let TransportAddr::Tcp(sa) = addr {
-                    let peer_ip = Self::block_request_key(sa);
-                    let mut pending = self.pending_block_requests.lock().await;
-                    pending.retain(|(ip, _), _| *ip != peer_ip);
-                    // Dropping the removed Vec<Sender> values closes the
-                    // channels, waking the timeout(…, rx) futures with Ok(Err).
+                    self.cancel_pending_block_requests_for_disconnected_peer(sa)
+                        .await;
                 }
 
                 let event_publisher_guard = self.event_publisher.lock().await;
@@ -2281,8 +2428,16 @@ impl NetworkManager {
                 message_count = 0; // Reset after update for next period
             }
 
+            crate::network::parse_offload::note_peer_rx_dequeue();
+
             // Process getdata inline (KEEP tc220 path). Spawn+SEM was forensics-only and
             // coincided with tip30 collapse; parallel W5 serve_getdata_request remains.
+            // R-302: inbound BLOCK parse may leave this loop when PARSE_OFFLOAD=1.
+            // That is not the serve path — do not spawn getdata handling here.
+            let message = match crate::network::parse_offload::take_inbound_block(self, message) {
+                Some(m) => m,
+                None => continue,
+            };
             super::network_message_dispatch::handle_network_message(self, message).await?;
         }
         Ok(())
@@ -2362,7 +2517,27 @@ impl NetworkManager {
             }
         }
 
-        let parsed = ProtocolParser::parse_message(&data)?;
+        // R-304: hash 80-byte header before deserialize. Default-off is a no-op.
+        if crate::network::parse_offload::is_block_frame(&data) {
+            if let Some(hash) =
+                crate::node::parallel_ibd::wire_hash_gate::try_skip_obsolete_block_frame(&data)
+            {
+                self.cancel_block_request_force(peer_addr, hash);
+                return Ok(());
+            }
+        }
+
+        let parsed = {
+            let t0 = std::time::Instant::now();
+            let parsed = ProtocolParser::parse_message(&data)?;
+            if matches!(parsed, ProtocolMessage::Block(_)) {
+                crate::node::parallel_ibd::note_block_parse(
+                    t0.elapsed().as_millis() as u64,
+                    false,
+                );
+            }
+            parsed
+        };
 
         // Publish MessageReceived event for module subscribers
         if let Some(ref ep) = *self.event_publisher.lock().await {
@@ -3034,6 +3209,21 @@ impl NetworkManager {
     /// Pending requests (for utxo_commitments_client)
     pub(crate) fn pending_requests(&self) -> &Arc<Mutex<HashMap<u64, PendingRequest>>> {
         &self.pending_requests
+    }
+
+    /// Drop pending GetData oneshots for a TCP peer that just left.
+    ///
+    /// Handshake `PeerDisconnected` already did this. The live dispatch path
+    /// (`handle_peer_disconnected`) did not — R-242 RST of covering hero
+    /// `3.136.178.225` left inflight GetData parked until the 30–45s deadline,
+    /// then TIP_WALK_PROMOTE retitled the corpse as owner of 186264.
+    pub async fn cancel_pending_block_requests_for_disconnected_peer(
+        &self,
+        sa: SocketAddr,
+    ) {
+        let peer_ip = Self::block_request_key(sa);
+        let mut pending = self.pending_block_requests.lock().await;
+        pending.retain(|(ip, _), _| *ip != peer_ip);
     }
 
     /// Pending block requests (for utxo_commitments_client)

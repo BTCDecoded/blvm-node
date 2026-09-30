@@ -26,9 +26,13 @@ async fn await_block_tx_tip_reserve(
     tx: &tokio::sync::mpsc::Sender<(u64, SharedBlock, SharedWitnesses)>,
     height: u64,
     tip_need: Option<u64>,
-) {
+    leftover: Option<&std::sync::Arc<super::chunk_assigner::ChunkAssigner>>,
+) -> bool {
+    if leftover.is_some_and(|a| a.leftover_force_armed()) && tip_need != Some(height) {
+        return true;
+    }
     if tip_need == Some(height) || tip_need.is_none() {
-        return;
+        return false;
     }
     // Keep tip-reserve for synth bulk too: disabling it re-starved tip (Validation
     // first block ~11s). Use 1ms sleep — not yield_now — so the coordinator can drain
@@ -46,8 +50,12 @@ async fn await_block_tx_tip_reserve(
                 reserve
             );
         }
+        if leftover.is_some_and(|a| a.leftover_force_armed()) && tip_need != Some(height) {
+            return true;
+        }
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
+    false
 }
 
 /// Disk-backed block source: offline local replay or synthetic WAN harness.
@@ -141,6 +149,10 @@ fn received_drain_all(received: &mut BTreeMap<u64, (SharedBlock, SharedWitnesses
 /// **Never** removes tip-adjacent `h <= need` — deliberate diverge from rbitcoin's soft
 /// "never drop already-received" (we drop far-ahead; we still protect the tip window).
 /// Phase 0b.1 policy surface (docs/RBITCOIN_VS_BLVM_IBD_ARCHITECTURE.md).
+///
+/// Leapfrog reserved heights (L1 admit) also stay: persist lookahead is 64 and
+/// LEAD is 8192, so persist-then-drop refuses and hard-trim used to delete the
+/// warehouse (R-98 `total_trimmed` 11k in 5s, CRAWL reorder=0, wait_feeder).
 fn hard_trim_download_received_far_ahead(
     received: &mut BTreeMap<u64, (SharedBlock, SharedWitnesses)>,
     need: u64,
@@ -148,12 +160,19 @@ fn hard_trim_download_received_far_ahead(
 ) -> u64 {
     let mut forced = 0u64;
     while received.len() > hard {
-        let Some((&h, _)) = received.iter().next_back() else {
+        let Some(h) = received
+            .iter()
+            .rev()
+            .map(|(&h, _)| h)
+            .find(|&h| h > need && !super::lookahead_height_reserved(h))
+        else {
             break;
         };
-        if h <= need {
-            break;
-        }
+        crate::node::parallel_ibd::body_dup::note_discard(
+            crate::node::parallel_ibd::body_dup::DiscardReason::RecvTrim,
+            Some(h),
+            0,
+        );
         let _ = received_take(received, h);
         forced = forced.saturating_add(1);
     }
@@ -189,19 +208,27 @@ fn trim_download_received(
         if h >= need {
             break;
         }
+        crate::node::parallel_ibd::body_dup::note_discard(
+            crate::node::parallel_ibd::body_dup::DiscardReason::AlreadyValidated,
+            Some(h),
+            0,
+        );
         let _ = received_take(received, h);
         trimmed = trimmed.saturating_add(1);
     }
 
-    // (2) Soft trim: persist-then-drop only.
+    // (2) Soft trim: persist-then-drop unreserved only. Persist-ahead writes
+    // farm / LEAD tiles (no apply-window refuse); reserved heights still skip
+    // this trim so the warehouse stays in `received` until apply needs them.
     while received.len() > soft {
-        let Some((&h, _)) = received.iter().next_back() else {
+        let Some(h) = received
+            .iter()
+            .rev()
+            .map(|(&h, _)| h)
+            .find(|&h| h > need && !super::lookahead_height_reserved(h))
+        else {
             break;
         };
-        // Never drop the validation tip from the worker buffer.
-        if h <= need {
-            break;
-        }
         let Some((block, witnesses)) = received_take(received, h) else {
             break;
         };
@@ -267,6 +294,12 @@ fn trim_download_received(
 pub(crate) struct DownloadChunkResult {
     pub blocks: Vec<(u64, SharedBlock, SharedWitnesses)>,
     pub streamed_block_count: usize,
+    /// Bodies that arrived over the wire (not `try_load_local_ibd_block`).
+    ///
+    /// Zero means the whole chunk was already on disk. The chunk map never retires a
+    /// range, so such a chunk is re-assignable the instant it completes — see the
+    /// re-take backoff in the download worker loop.
+    pub net_block_count: usize,
 }
 
 impl DownloadChunkResult {
@@ -446,6 +479,7 @@ async fn wait_for_peer_connected(
     peer_id: &str,
     max_wait: Duration,
     tip_enter: &Option<Arc<super::chunk_assigner::ChunkAssigner>>,
+    start_height: u64,
 ) -> Result<()> {
     // Check eviction FIRST — an IP that has been permanently evicted this session
     // must be rejected even if it briefly reconnects.
@@ -454,6 +488,30 @@ async fn wait_for_peer_connected(
         if evicted.contains(&peer_addr.ip()) {
             return Err(anyhow::anyhow!(
                 "Peer {peer_id} evicted (NODE_NETWORK_LIMITED) — chunk needs retry on another peer"
+            ));
+        }
+    }
+    if let Some(assigner) = tip_enter.as_ref() {
+        let leftover_force = assigner.leftover_force_armed();
+        let body_tip = assigner.wan_body_tip();
+        let stall = assigner.next_needed_height();
+        if super::leftover_force_aborts_inflight_stripe(
+            leftover_force,
+            body_tip,
+            start_height,
+            stall,
+        ) {
+            tracing::warn!(
+                target: "blvm_ibd",
+                start = start_height,
+                leftover_force,
+                body_tip,
+                stall,
+                peer = %peer_id,
+                "[IBD_LEFTOVER_CONNECT_ABORT] leftover stripe still waiting for TCP"
+            );
+            return Err(anyhow::anyhow!(
+                "leftover_force aborted leftover connect wait {start_height} (stall={stall} body_tip={body_tip})"
             ));
         }
     }
@@ -474,6 +532,30 @@ async fn wait_for_peer_connected(
                 "Peer {peer_id} blacklisted during connect wait — chunk needs retry"
             ));
         }
+        if let Some(assigner) = tip_enter.as_ref() {
+            let leftover_force = assigner.leftover_force_armed();
+            let body_tip = assigner.wan_body_tip();
+            let stall = assigner.next_needed_height();
+            if super::leftover_force_aborts_inflight_stripe(
+                leftover_force,
+                body_tip,
+                start_height,
+                stall,
+            ) {
+                tracing::warn!(
+                    target: "blvm_ibd",
+                    start = start_height,
+                    leftover_force,
+                    body_tip,
+                    stall,
+                    peer = %peer_id,
+                    "[IBD_LEFTOVER_CONNECT_ABORT] leftover stripe still waiting for TCP"
+                );
+                return Err(anyhow::anyhow!(
+                    "leftover_force aborted leftover connect wait {start_height} (stall={stall} body_tip={body_tip})"
+                ));
+            }
+        }
         if network.is_peer_connected(peer_addr).await {
             return Ok(());
         }
@@ -492,6 +574,7 @@ async fn wait_for_peer_ibd_ready(
     peer_id: &str,
     max_wait: Duration,
     tip_enter: &Option<Arc<super::chunk_assigner::ChunkAssigner>>,
+    start_height: u64,
 ) -> Result<()> {
     let deadline = tokio::time::Instant::now() + max_wait;
     let mut poll = tokio::time::interval(Duration::from_millis(200));
@@ -505,6 +588,26 @@ async fn wait_for_peer_ibd_ready(
             return Err(anyhow::anyhow!(
                 "Peer {peer_id} blacklisted during handshake wait — chunk needs retry"
             ));
+        }
+        if let Some(assigner) = tip_enter.as_ref() {
+            let leftover_force = assigner.leftover_force_armed();
+            let body_tip = assigner.wan_body_tip();
+            let stall = assigner.next_needed_height();
+            if super::leftover_force_aborts_inflight_stripe(leftover_force, body_tip, start_height, stall)
+            {
+                tracing::warn!(
+                    target: "blvm_ibd",
+                    start = start_height,
+                    leftover_force,
+                    body_tip,
+                    stall,
+                    peer = %peer_id,
+                    "[IBD_LEFTOVER_HANDSHAKE_ABORT] leftover stripe still waiting for IBD-ready"
+                );
+                return Err(anyhow::anyhow!(
+                    "leftover_force aborted leftover handshake wait {start_height} (stall={stall} body_tip={body_tip})"
+                ));
+            }
         }
         if network.peer_ibd_ready(peer_addr).await {
             return Ok(());
@@ -547,6 +650,7 @@ async fn register_and_request_block(
             "Peer {peer_id} not connected — cannot request block at height {height}"
         ));
     }
+    crate::node::parallel_ibd::wire_hash_gate::note_want(block_hash, height);
     let block_rx = network.register_block_request(peer_addr, block_hash);
     let inventory = vec![InventoryVector {
         inv_type: ibd_getdata_inv_type(blockstore, height, block_hash),
@@ -560,17 +664,19 @@ async fn register_and_request_block(
         network.cancel_block_request(peer_addr, block_hash);
         return Err(e);
     }
-    super::tip_stage::mark_getdata(height);
+    super::tip_stage::mark_getdata_from_peer(height, peer_id);
     Ok(block_rx)
 }
 
+/// R-329: on deadline the wait returns the still-live oneshot (`Err(rx)`) so the
+/// caller can re-arm in place instead of dropping it and re-GetData'ing the same peer.
 type PendingBlockResult = (
     u64,
     [u8; 32],
     std::time::Instant,
     Result<
         Result<(Block, Vec<Vec<Witness>>, Option<Vec<u8>>), tokio::sync::oneshot::error::RecvError>,
-        tokio::time::error::Elapsed,
+        tokio::sync::oneshot::Receiver<(Block, Vec<Vec<Witness>>, Option<Vec<u8>>)>,
     >,
     Option<tokio::sync::OwnedSemaphorePermit>,
 );
@@ -616,6 +722,9 @@ async fn enqueue_network_block_batch(
     }
 
     let hashes: Vec<[u8; 32]> = heights_and_hashes.iter().map(|(_, h)| *h).collect();
+    for &(height, hash) in &heights_and_hashes {
+        crate::node::parallel_ibd::wire_hash_gate::note_want(hash, height);
+    }
     let mut rxs = network.register_block_requests_batch(peer_addr, &hashes);
 
     // Build a single GetData message for all blocks in the batch.
@@ -640,19 +749,23 @@ async fn enqueue_network_block_batch(
         return Err(e);
     }
     for &(height, _) in &heights_and_hashes {
-        super::tip_stage::mark_getdata(height);
+        super::tip_stage::mark_getdata_from_peer(height, peer_id);
     }
 
     if !*first_block_logged {
-        info!(
-            "[IBD] {} chunk {}-{}: batch-requested {} blocks starting at height {} (hash {})",
-            peer_id,
-            start_height,
-            end_height,
-            heights_and_hashes.len(),
-            first_height,
-            hex::encode(hashes[0])
-        );
+        if start_height == end_height {
+            log_hf_hot("batch", first_height);
+        } else {
+            info!(
+                "[IBD] {} chunk {}-{}: batch-requested {} blocks starting at height {} (hash {})",
+                peer_id,
+                start_height,
+                end_height,
+                heights_and_hashes.len(),
+                first_height,
+                hex::encode(hashes[0])
+            );
+        }
         *first_block_logged = true;
     }
 

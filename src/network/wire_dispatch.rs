@@ -53,6 +53,7 @@ impl NetworkManager {
         } else {
             None
         };
+        crate::node::parallel_ibd::body_dup::note_wire_block(data.len() as u64);
         if self.complete_block_request_with_wire(
             peer_addr,
             block_hash,

@@ -671,6 +671,11 @@ impl UtxoIndex {
         self.disk_index.segment_count()
     }
 
+    /// Cold journal entries (checkpoint TeeScan / AllCold input size).
+    pub fn disk_cold_entry_count(&self) -> u64 {
+        self.disk_index.cold_entry_count()
+    }
+
     /// Per-age diagnostics: (run_count, mem_mb) for each age tier, plus disk (segment_count, bloom_mb).
     ///
     /// Used by MEM_REPORT to show per-tier breakdown so operators can see if the compacter
@@ -1251,14 +1256,19 @@ impl UtxoIndex {
         &self,
         checkpoint_height: i32,
         on_live: Option<F>,
-    ) -> anyhow::Result<u64>
+    ) -> anyhow::Result<(u64, u64, usize)>
     where
         F: FnMut(OutputKV) -> anyhow::Result<()>,
     {
         let t_compact = std::time::Instant::now();
-        self.disk_index
+        let (tee_merged, cold_segs) = self
+            .disk_index
             .compact_for_checkpoint_sync_with_sink(checkpoint_height, on_live)?;
-        Ok(t_compact.elapsed().as_millis() as u64)
+        Ok((
+            t_compact.elapsed().as_millis() as u64,
+            tee_merged,
+            cold_segs,
+        ))
     }
 
     /// Copy in-memory age entries with `height <= max_height` (no disk scan).

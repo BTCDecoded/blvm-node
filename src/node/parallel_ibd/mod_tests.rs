@@ -68,6 +68,477 @@ fn a4_tip_admit_tight_opt_in_ignores_bulk_catchup() {
 
 #[serial_test::serial(ibd)]
 #[test]
+fn hash_fetch_skips_tip_enter_abort_only_when_flag_on() {
+    // Archive wan-650k-hf-93k-hang: C1j `tip_gap_missing && start > next_needed`
+    // aborted every HASH_FETCH (H,H) above apply. Flag-off assigner C1j stays.
+    let prev = std::env::var("BLVM_IBD_HASH_FETCH").ok();
+    unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") };
+    assert!(
+        !hash_fetch_skips_tip_enter_abort(),
+        "flag-off keeps assigner TIP_ENTER / C1j"
+    );
+    unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", "1") };
+    assert!(
+        hash_fetch_skips_tip_enter_abort(),
+        "HASH_FETCH must not C1j-abort take_work ahead of next_needed (93k hang)"
+    );
+    match prev {
+        Some(v) => unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", v) },
+        None => unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") },
+    }
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn hole_under_sparse_confirmed_does_not_hide_wan_gap() {
+    // Live 2026-08-20: confirmed=185817 (binary-search cheese) / contiguous=70669 /
+    // hole at 70713. Using confirmed as live_body_tip made wan_gap=false and
+    // GetData never armed — new-user IBD must not wait on leftover disk.
+    assert_eq!(
+        wan_live_body_tip(0, 70669),
+        70669,
+        "confirmed=0 must not zero a real contiguous range (fixture / genesis spawn)"
+    );
+    assert_eq!(
+        wan_live_body_tip(0, 0),
+        0,
+        "empty store still has no body tip"
+    );
+    assert_eq!(wan_live_body_tip(70806, 70669), 70669);
+    assert_eq!(wan_live_body_tip(70669, 70669), 70669);
+    assert_eq!(
+        pull_wan_body_tip_for_hole(70806, 70592),
+        70591,
+        "local miss under leftover tip must drop warehouse so GetData owns the hole"
+    );
+    assert_eq!(pull_wan_body_tip_for_hole(0, 70839), 0);
+    assert_eq!(pull_wan_body_tip_for_hole(100, 200), 100);
+    assert!(should_pull_wan_body_tip_on_inject(
+        true, false, 70735, 70713
+    ));
+    assert!(
+        !should_pull_wan_body_tip_on_inject(false, false, 70735, 70713),
+        "LOCAL_GAP_FILL=0 is not a disk miss"
+    );
+    assert!(!should_pull_wan_body_tip_on_inject(
+        true, true, 70735, 70713
+    ));
+    assert!(leftover_hole_needs_getdata(true, 70713, 70735, 0));
+    assert!(
+        leftover_hole_needs_getdata(true, 70736, 70735, 0),
+        "first height past leftover tip is WAN handoff GetData"
+    );
+    assert!(
+        leftover_hole_needs_getdata(true, 70713, 70735, 1),
+        "leftover covering is not a feeder pipeline — still GetData the hole"
+    );
+    assert!(!leftover_hole_needs_getdata(false, 70713, 70735, 0));
+    assert!(
+        leftover_trace_watch(true, 70_736, 70_735),
+        "leftover_force must TRACE get_work after leftover_HANDOFF"
+    );
+    assert!(
+        leftover_trace_watch(false, 70_736, 70_735),
+        "leftover tip+1 is leftover-band even before leftover_force"
+    );
+    assert!(
+        leftover_trace_watch(false, 70_300, 70_735),
+        "last leftover 512 heights are leftover-band"
+    );
+    assert!(
+        !leftover_trace_watch(false, 1, 70_735),
+        "1→70k must not flood leftover_TRACE (next ≪ leftover tip-512)"
+    );
+    assert!(
+        !leftover_hole_needs_getdata(false, 1, 70735, 0),
+        "spawn tip_gap_missing must not GetData (1,1) under leftover cheese"
+    );
+    assert!(leftover_replay_stall_is_disk_hole(70705, 70735));
+    assert!(
+        leftover_replay_stall_is_disk_hole(70736, 70735),
+        "stall at leftover tip+1 must arm GetData (live 70736 freeze)"
+    );
+    assert!(
+        leftover_replay_stall_is_disk_hole(70736, 172_791),
+        "sparse leftover max must still treat 70736 as leftover-stall (live dest)"
+    );
+    assert!(
+        leftover_force_aborts_inflight_stripe(true, 70_735, 70_625, 70_736),
+        "leftover stripe 70625–70735 must abort when stall is WAN handoff 70736"
+    );
+    assert!(leftover_force_aborts_inflight_stripe(
+        true, 70_735, 70_625, 70_689
+    ));
+    assert!(
+        !leftover_force_aborts_inflight_stripe(false, 70_735, 70_625, 70_736),
+        "leftover_force off — do not abort leftover download"
+    );
+    assert!(
+        !leftover_force_aborts_inflight_stripe(true, 70_735, 70_736, 70_736),
+        "WAN handoff chunk 70736+ is the GetData we want — do not abort"
+    );
+    assert!(
+        leftover_force_survives_disk_inject(true, 70_736, 70_735),
+        "assigner next=70736 must keep leftover_force (not stale coord val_h=70656)"
+    );
+    assert!(
+        !leftover_force_survives_disk_inject(true, 70_657, 70_735),
+        "leftover-band disk inject may still clear leftover_force"
+    );
+    assert!(!leftover_force_survives_disk_inject(false, 70_736, 70_735));
+    assert!(
+        leftover_stall_skips_disk_load(70_736, 70_735),
+        "WAN handoff must skip leftover heed3 load (live 70736 hang)"
+    );
+    assert!(
+        !stall_may_arm_leftover_force(true),
+        "Stage 1: filled store must not FORCE GetData on validation stall"
+    );
+    assert!(
+        stall_may_arm_leftover_force(false),
+        "empty store still arms leftover_force (coordinator silent / leftover hole)"
+    );
+    assert!(
+        leftover_stall_skips_disk_load(91_698, 0),
+        "genesis TRUE WAN stall must skip heed3 (header without body)"
+    );
+    assert!(
+        leftover_disk_hole_should_inject(0, 2, true, false, false, false),
+        "R-223 IBD:1 store=1 feeder=0 reorder_has=0 live_tip=0 must leftover-inject"
+    );
+    assert!(
+        !leftover_disk_hole_should_inject(0, 2, false, false, false, false),
+        "empty store + unpublished tip must not leftover-FORCE from height 1"
+    );
+    assert!(
+        leftover_disk_hole_should_inject(70_735, 70_657, false, false, false, false),
+        "classic leftover under published cheese tip still injects"
+    );
+    assert!(
+        !leftover_disk_hole_should_inject(0, 2, true, true, false, false),
+        "already in reorder — Case B, not re-inject"
+    );
+    assert!(!leftover_disk_hole_should_inject(
+        0, 2, true, false, true, false
+    ));
+    assert!(!leftover_disk_hole_should_inject(
+        0, 2, true, false, false, true
+    ));
+    assert!(!leftover_disk_hole_should_inject(
+        0, 0, true, false, false, false
+    ));
+    // R-287: args are (injected, tip_in_feeder, flight_tip, stalled_ms, next_needed).
+    // OR of two gates — immediate at/above the 248k floor, stall-gated below it.
+    assert!(
+        leftover_inject_should_feeder(true, false, 0, 0, 249_000),
+        "R-273 leftover: at/above the floor promote immediately, no stall wait \
+         (R-273 in_reorder_not_feeder 17 vs R-283 350 / R-284 276)"
+    );
+    assert!(
+        leftover_inject_should_feeder(true, false, 0, 0, 248_000),
+        "floor is inclusive"
+    );
+    assert!(
+        !leftover_inject_should_feeder(true, false, 0, 0, 40_000),
+        "dump advances next_needed every few ms — must not fire below the floor. \
+         R-286 dropped the floor and cost 10–50k 1337 vs 3246"
+    );
+    assert!(!leftover_inject_should_feeder(true, false, 0, 999, 40_000));
+    assert!(
+        leftover_inject_should_feeder(true, false, 0, 90_000, 176_199),
+        "r278a h=176199 froze 90s below the floor — the stall gate must still fire"
+    );
+    assert!(
+        !leftover_inject_should_feeder(true, false, 0, 0, 176_199),
+        "same height, no stall — the stall gate must not fire on a healthy band"
+    );
+    assert!(
+        leftover_inject_should_feeder(true, false, 1, 0, 249_000),
+        "R-272 300–340k sit: flight_tip=1 must not block store_has emit"
+    );
+    assert!(!leftover_inject_should_feeder(true, true, 0, 90_000, 249_000));
+    assert!(!leftover_inject_should_feeder(false, false, 0, 90_000, 249_000));
+}
+
+#[test]
+fn all_local_retake_backs_off_only_off_tip() {
+    // R-273 137000→138000: 58 all-local ranges re-taken 185,683× in 60s.
+    assert_eq!(
+        all_local_retake_backoff_ms(0, 137_534, 137_549, 137_154),
+        all_local_retake_backoff_base_ms(),
+        "all-local range ahead of a stuck tip must back off"
+    );
+    assert_eq!(
+        all_local_retake_backoff_ms(0, 137_150, 137_165, 137_154),
+        0,
+        "range covering next_needed must stay re-takeable"
+    );
+    assert_eq!(
+        all_local_retake_backoff_ms(1, 137_534, 137_549, 137_154),
+        0,
+        "a chunk that fetched a body over the wire is real work"
+    );
+}
+
+#[test]
+fn tip_stale_cover_rerace_fires_only_on_a_quiet_seated_cover() {
+    let th = 300;
+    // R-273 p90 22ms / p99 205ms — healthy stages must never re-race.
+    assert!(!tip_stale_cover_should_rerace(
+        true, 22, th, 1, 2, false, false, false
+    ));
+    assert!(!tip_stale_cover_should_rerace(
+        true, 205, th, 1, 2, false, false, false
+    ));
+    assert!(
+        tip_stale_cover_should_rerace(true, 300, th, 1, 2, false, false, false),
+        "quiet seated cover past threshold is the 293s R-273 tail"
+    );
+    assert!(
+        !tip_stale_cover_should_rerace(true, 5_000, th, 0, 2, false, false, false),
+        "uncovered H is HOLE_ANY's job, not the re-race"
+    );
+    assert!(
+        !tip_stale_cover_should_rerace(true, 5_000, th, 2, 2, false, false, false),
+        "max_covering caps at incumbent + one racer"
+    );
+    assert!(
+        !tip_stale_cover_should_rerace(true, 5_000, th, 1, 2, false, true, false),
+        "incumbent must not re-race its own quiet pipe"
+    );
+    assert!(
+        !tip_stale_cover_should_rerace(true, 5_000, th, 1, 2, true, false, false),
+        "peer already covering H does not duplicate itself"
+    );
+    assert!(
+        !tip_stale_cover_should_rerace(true, 5_000, th, 1, 2, false, false, true),
+        "one racer per height"
+    );
+    assert!(
+        !tip_stale_cover_should_rerace(true, 5_000, 0, 1, 2, false, false, false),
+        "threshold 0 disables the re-race"
+    );
+    assert!(!tip_stale_cover_should_rerace(
+        false, 5_000, th, 1, 2, false, false, false
+    ));
+    assert_eq!(
+        tip_stale_cover_rerace_ms(),
+        0,
+        "R-274 dested 300ms: 3350s vs R-273 1580s. Default stays off."
+    );
+    IBD_TIP_GAP_MISSING.store(true, Ordering::Relaxed);
+    assert!(
+        leftover_hole_needs_getdata(true, 91_698, 0, 2),
+        "genesis leftover_force must assign (H,H) despite covering=2"
+    );
+    IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
+    assert!(
+        !leftover_hole_needs_getdata(true, 91_698, 0, 2),
+        "genesis leftover_force must not stay (H,H) after tip lands"
+    );
+    assert!(
+        !leftover_hole_needs_getdata(false, 91_698, 0, 2),
+        "do not GetData (1,1) on spawn tip_gap without leftover_force"
+    );
+    assert!(
+        !leftover_stall_skips_disk_load(70_678, 70_735),
+        "leftover-band stall still loads disk"
+    );
+    assert!(
+        !leftover_replay_stall_is_disk_hole(70705, 0),
+        "no local-replay max — not leftover cheese"
+    );
+    assert!(!leftover_replay_stall_is_disk_hole(80000, 70735));
+    assert!(local_ahead_start_within_window(70_257, 70_001));
+    assert!(
+        !local_ahead_start_within_window(70_657, 70_001),
+        "leftover 70657 is past next+256 — must not assign"
+    );
+}
+
+/// R-300: stall-gated hedge of next-needed H. N=1 is today's exclusive pipe.
+#[serial_test::serial(ibd)]
+#[test]
+fn r300_tip_hedge_stays_inert_until_h_is_stale_on_a_distinct_delivering_peer() {
+    test_tip_hedge_reset();
+    unsafe {
+        std::env::remove_var("BLVM_IBD_TIP_HEDGE_N");
+        std::env::remove_var("BLVM_IBD_TIP_HEDGE_MS");
+    }
+    assert_eq!(
+        tip_hedge_n(),
+        1,
+        "unset BLVM_IBD_TIP_HEDGE_N must be 1 — R-298 exclusive-H, feature off"
+    );
+    assert!(
+        !tip_hedge_should_fire(1, 10_000, 300, 1, false, false, true, 0),
+        "N=1 is today's behavior — never issue a second GetData for H"
+    );
+    assert!(
+        !tip_hedge_should_fire(3, 299, 300, 1, false, false, true, 0),
+        "299ms is below the 300ms stall — hedging immediately is a bandwidth tax \
+         on the common case where H arrives (R-280 asked H is slow, not unasked)"
+    );
+    assert!(
+        !tip_hedge_should_fire(3, 800, 300, 1, true, false, true, 0),
+        "sticky owner is the quiet pipe — a second GetData on that socket is A2/tc172, not a hedge"
+    );
+    assert!(
+        !tip_hedge_should_fire(3, 800, 300, 1, false, true, true, 0),
+        "peer already covering H must not duplicate itself"
+    );
+    assert!(
+        !tip_hedge_should_fire(3, 800, 300, 1, false, false, false, 0),
+        "pick by delivered bytes, not score — a zero-byte bench peer is the R-289 victim"
+    );
+    assert!(
+        !tip_hedge_should_fire(3, 800, 300, 0, false, false, true, 0),
+        "uncovered H is HOLE_ANY, not a hedge"
+    );
+    assert!(
+        tip_hedge_should_fire(3, 800, 300, 1, false, false, true, 0),
+        "H outstanding 800ms (R-280 store_absent p50 794ms) + N=3 + distinct \
+         delivering peer that does not cover H — this is the hedge"
+    );
+    assert!(
+        !tip_hedge_should_fire(3, 800, 300, 3, false, false, true, 2),
+        "N=3 allows 2 extra racers; covering==n or issued==n-1 is the cap"
+    );
+    test_tip_hedge_reset();
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn r259_leftover_w22_floor_is_248k_not_180k() {
+    // Dump CHEESE @33 / dest-bc 0–10k 298: cursor ahead must stay W22-delivered.
+    assert!(
+        leftover_w22_cursor_is_delivered(33, Some(34), false, false, 0),
+        "dump warehouse must not requeue on cursor-ahead"
+    );
+    assert!(!leftover_w22_cursor_lie(33, Some(34), false, false, 0));
+    assert!(
+        leftover_w22_cursor_is_delivered(3_112, Some(3_113), false, false, 0),
+        "R-257 dump lie-shape @3112 must stay W22 (dest-bc 0-10k)"
+    );
+    assert!(!leftover_w22_cursor_lie(
+        179_999,
+        Some(180_000),
+        false,
+        false,
+        0
+    ));
+    // R-258 180k floor dested dump occupancy FAIL (lie 0). Fat 181k stays W22.
+    assert!(leftover_w22_cursor_is_delivered(
+        181_000,
+        Some(181_001),
+        false,
+        false,
+        0
+    ));
+    assert!(!leftover_w22_cursor_lie(
+        181_000,
+        Some(181_001),
+        false,
+        false,
+        0
+    ));
+    assert!(!leftover_w22_cursor_lie(
+        195_669,
+        Some(195_670),
+        false,
+        false,
+        0
+    ));
+    assert!(!leftover_w22_cursor_lie(
+        248_000,
+        Some(248_001),
+        false,
+        false,
+        0
+    ));
+    // R-245 restore: leftover cursor-ahead stays W22-delivered (R-257–R-261 dested).
+    assert!(!leftover_w22_cursor_lie(
+        300_000,
+        Some(300_001),
+        false,
+        false,
+        0
+    ));
+    assert!(leftover_w22_cursor_is_delivered(
+        300_000,
+        Some(300_001),
+        false,
+        false,
+        0
+    ));
+    assert!(
+        !leftover_w22_cursor_lie(248_000, Some(248_001), false, false, 0),
+        "R-245 restore: no leftover W22 lie"
+    );
+    // Seated GetData: keep W22 (W26b / R-235 fat drip).
+    assert!(!leftover_w22_cursor_lie(
+        300_000,
+        Some(300_001),
+        false,
+        false,
+        1
+    ));
+    assert!(leftover_w22_cursor_is_delivered(
+        300_000,
+        Some(300_001),
+        false,
+        false,
+        1
+    ));
+    // Validation already holds H.
+    assert!(!leftover_w22_cursor_lie(
+        300_000,
+        Some(300_001),
+        false,
+        true,
+        0
+    ));
+    assert!(leftover_w22_cursor_is_delivered(
+        300_000,
+        Some(300_001),
+        false,
+        true,
+        0
+    ));
+    // Feeder has H.
+    assert!(!leftover_w22_cursor_lie(
+        300_000,
+        Some(300_001),
+        true,
+        false,
+        0
+    ));
+    assert!(leftover_w22_cursor_is_delivered(
+        300_000,
+        Some(300_001),
+        true,
+        false,
+        0
+    ));
+    // Cursor not ahead: not delivered.
+    assert!(!leftover_w22_cursor_is_delivered(
+        300_000,
+        Some(300_000),
+        false,
+        false,
+        0
+    ));
+    assert!(!leftover_w22_cursor_lie(
+        300_000,
+        Some(300_000),
+        false,
+        false,
+        0
+    ));
+}
+
+#[serial_test::serial(ibd)]
+#[test]
 fn c1f_tip_runway_mode_classifies_tip_hole_ahead() {
     assert_eq!(
         tip_runway_mode(false, 0, 64, 0, false),
@@ -82,6 +553,125 @@ fn c1f_tip_runway_mode_classifies_tip_hole_ahead() {
         tip_runway_mode(false, 0, 64, 0, true),
         "FILLED_RUNWAY",
         "tip in feeder must not be classified as tip hole"
+    );
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn cheese_starve_forces_tip_h_when_covering_one() {
+    // q 175715: 220 ahead, covering=1, feeder=0 — must (H,H), not wait covering=0.
+    assert!(cheese_starve_should_force_tip_h(true, 220, 1));
+    assert!(cheese_starve_should_force_tip_h(true, 8, 0));
+    assert!(
+        !cheese_starve_should_force_tip_h(true, 220, 2),
+        "W73: covering>1 must not stripe-force"
+    );
+    assert!(
+        !cheese_starve_should_force_tip_h(true, 7, 1),
+        "ahead<8 is not the 2s CHEESE proof"
+    );
+    assert!(!cheese_starve_should_force_tip_h(false, 220, 1));
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn cheese_starve_pins_hero_only_on_holes() {
+    // Contiguous first=H+1 is healthy — do not pin.
+    assert!(!cheese_starve_should_pin_hero(true, 64, 0, Some(450), 449));
+    assert!(!cheese_starve_should_pin_hero(true, 7, 17, Some(176), 100));
+    assert!(!cheese_starve_should_pin_hero(
+        false,
+        220,
+        17,
+        Some(200),
+        100
+    ));
+    // q / s@3425: holes≥5.
+    assert!(cheese_starve_should_pin_hero(true, 220, 5, None, 175_715));
+    assert!(cheese_starve_should_pin_hero(
+        true,
+        128,
+        32,
+        Some(3457),
+        3425
+    ));
+    // s@449 / t@7596: holes=0 first=+64/+86 is PIPE_FILL, not pin.
+    assert!(!cheese_starve_should_pin_hero(true, 64, 0, Some(513), 449));
+    assert!(!cheese_starve_should_pin_hero(true, 19, 0, Some(7682), 7596));
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn cheese_fast_hero_sparse_sit_keep_only() {
+    // dest-ab @255073: ≥80 hero + holes=17 + first=+64 + reorder=3.
+    assert!(cheese_fast_hero_sparse_sit(
+        true,
+        17,
+        Some(255_137),
+        255_073,
+        true,
+        3
+    ));
+    // dest-ac FAIL: same cheese, mute preferred — do not pin.
+    assert!(!cheese_fast_hero_sparse_sit(
+        true,
+        17,
+        Some(255_137),
+        255_073,
+        false,
+        3
+    ));
+    // dest-ae FAIL: loose holes≥5 / first≥H+8 with reorder already ≥8
+    // (dest-ab starve already owns that) or brief sparse.
+    assert!(!cheese_fast_hero_sparse_sit(
+        true,
+        5,
+        Some(457),
+        449,
+        true,
+        3
+    ));
+    assert!(!cheese_fast_hero_sparse_sit(
+        true,
+        17,
+        Some(255_137),
+        255_073,
+        true,
+        8
+    ));
+    // Healthy first=H+1, holes=0.
+    assert!(!cheese_fast_hero_sparse_sit(
+        true,
+        0,
+        Some(450),
+        449,
+        true,
+        3
+    ));
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn wan_mute_cheese_fast_leftover_keep_hero_stays_45s() {
+    // dest-ag @340221 / dest-ai @244590: mute + holes≥5 + WAN → 15s.
+    // dest-ai leftover was 45s when IBD_TIP_GAP_MISSING was false.
+    assert_eq!(
+        wan_mute_cheese_fast_leftover_wait_secs(true, false, 21),
+        Some(15)
+    );
+    assert_eq!(
+        wan_mute_cheese_fast_leftover_wait_secs(true, false, 24),
+        Some(15)
+    );
+    // dest-ab @255073 KEEP hero — do not steal leftover from autopsy pin.
+    assert_eq!(
+        wan_mute_cheese_fast_leftover_wait_secs(true, true, 17),
+        None
+    );
+    // Healthy holes=0 mute crawl — leftover stays 45s, not 15s storm.
+    assert_eq!(
+        wan_mute_cheese_fast_leftover_wait_secs(true, false, 0),
+        None
     );
 }
 
@@ -116,6 +706,7 @@ fn pinned_ibd_peers_skips_archive_dns_seed() {
     let _g = LOCK.lock().unwrap();
     unsafe {
         std::env::remove_var("BLVM_IBD_PEERS");
+        std::env::remove_var("BLVM_IBD_PIN_PEERS");
     }
     assert!(!skip_ibd_archive_dns_seed());
     unsafe {
@@ -153,6 +744,49 @@ fn c1f_reorder_contig_runway_counts_from_tip() {
     reorder.insert(tip, (dummy_block.clone(), dummy_w.clone()));
     reorder.insert(tip + 1, (dummy_block, dummy_w));
     assert_eq!(reorder_contig_runway(&reorder, tip), 4);
+}
+
+/// L2b lands the warehouse in the feeder. Hero hole must walk that have,
+/// not stop at H+1 because reorder emptied (R-102 skip max 128, desert 151).
+#[serial_test::serial(ibd)]
+#[test]
+fn r103_have_contig_walks_feeder_not_gap() {
+    use std::sync::Arc;
+    let mut reorder: std::collections::BTreeMap<u64, (SharedBlock, SharedWitnesses)> =
+        std::collections::BTreeMap::new();
+    let dummy_block = Arc::new(Block {
+        header: BlockHeader {
+            version: 1,
+            timestamp: 1,
+            ..Default::default()
+        },
+        transactions: vec![].into(),
+    });
+    let dummy_w: SharedWitnesses = Arc::new(vec![]);
+    let tip = 8254u64;
+    // Stripe in feeder only (L2b emit). Gap at tip+2048.
+    let feeder: std::collections::BTreeSet<u64> = (tip..tip + 2048).collect();
+    assert_eq!(
+        have_contig_runway(&reorder, |h| feeder.contains(&h), tip),
+        2048
+    );
+    // Hole in the middle stops the walk. Inflight past the hole is not have.
+    let feeder_gap: std::collections::BTreeSet<u64> =
+        (tip..tip + 64).chain(tip + 128..tip + 2048).collect();
+    assert_eq!(
+        have_contig_runway(&reorder, |h| feeder_gap.contains(&h), tip),
+        64
+    );
+    // Union: H in feeder, H+1.. in reorder.
+    reorder.insert(tip + 1, (dummy_block.clone(), dummy_w.clone()));
+    reorder.insert(tip + 2, (dummy_block, dummy_w));
+    let feeder_tip: std::collections::BTreeSet<u64> = [tip].into_iter().collect();
+    assert_eq!(
+        have_contig_runway(&reorder, |h| feeder_tip.contains(&h), tip),
+        3
+    );
+    // first_hole = tip + have; contig runway stays reorder-only (0 here).
+    assert_eq!(reorder_contig_runway(&reorder, tip), 0);
 }
 
 /// Isolate tests from shell `BLVM_IBD_*` (e.g. left over from manual IBD runs).
@@ -306,6 +940,153 @@ fn bps_scaling_shrinks_interval_when_validation_is_slow() {
 
 #[serial_test::serial(ibd)]
 #[test]
+fn dest_be_tee_wall_must_not_bps_undercut_interval_to_1k() {
+    // dest-be @223k: ~10.6M UTXOs, last wall 13.9s, validation ~20 BPS.
+    // Old path: 20 × 60s = 1200 → LAG_EXEMPT every ~1k while compact is 15s.
+    let d = crate::config::ibd::IbdEngineDurabilityConfig {
+        checkpoint_interval: None,
+        checkpoint_min_interval: 500,
+        checkpoint_max_interval: 50_000,
+        checkpoint_target_secs: 60,
+        muhash_persist_interval: 200,
+    };
+    let iv = adaptive_checkpoint_interval(10_615_659, 13.9, 20.0, &d);
+    assert!(
+        iv >= 10_000,
+        "dest-be 13.9s tee must keep utxo_iv ≥10k, got {iv}"
+    );
+    // First real 1→1 tee @184k: 2.88M UTXOs, 8.3s wall, ~135 BPS.
+    let iv2 = adaptive_checkpoint_interval(2_883_000, 8.3, 135.0, &d);
+    assert!(
+        iv2 >= 10_000,
+        "dest-be 8.3s tee must keep utxo_iv ≥10k, got {iv2}"
+    );
+    // dest-bc-like no-op compact: sub-2s overlay may still BPS-cap.
+    let cheap = adaptive_checkpoint_interval(2_883_000, 0.5, 20.0, &d);
+    assert_eq!(
+        cheap, 1_200,
+        "sub-2s overlay may still BPS-cap to 20×60s, got {cheap}"
+    );
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn dest_bd_sit_sample_bps_must_not_collapse_interval_to_500() {
+    // dest-bd @83k: overlay ~18ms, sit sample bps=5.9, utxo_iv=10000.
+    // Old path: 5.9×60s → min_interval 500; LAG_EXEMPT aligned last+500.
+    let d = crate::config::ibd::IbdEngineDurabilityConfig {
+        checkpoint_interval: None,
+        checkpoint_min_interval: 500,
+        checkpoint_max_interval: 50_000,
+        checkpoint_target_secs: 60,
+        muhash_persist_interval: 200,
+    };
+    let iv = adaptive_checkpoint_interval(1_200_000, 0.018, 5.9, &d);
+    assert!(
+        iv >= 10_000,
+        "dest-bd sit-sample 5.9 BPS overlay must keep utxo_iv ≥10k, got {iv}"
+    );
+    assert_eq!(
+        checkpoint_schedule_interval(500, 10_000, 1_200_000),
+        10_000,
+        "collapsed 500 must not be the genesis schedule step"
+    );
+    assert_eq!(
+        checkpoint_schedule_interval(960, 80_000, 640_068_968),
+        960,
+        "640M resume tightness still uses BPS-capped interval"
+    );
+    assert_eq!(adopt_checkpoint_bps_sample(55.3, 5.9), 55.3);
+    assert_eq!(adopt_checkpoint_bps_sample(0.0, 5.9), 5.9);
+    assert_eq!(adopt_checkpoint_bps_sample(55.3, 80.0), 80.0);
+    // dest-bc-like overlay 20 still replaces a non-burst prev.
+    assert_eq!(adopt_checkpoint_bps_sample(55.3, 20.0), 20.0);
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn dest_be_high_utxo_tee_wall_must_not_bps_undercut_to_500() {
+    // dest-be @345853: crossed 40M UTXOs, last wall ~30s, sample 0.1 BPS
+    // during compact → old path min_interval 500 while utxo_iv=50k.
+    let d = crate::config::ibd::IbdEngineDurabilityConfig {
+        checkpoint_interval: None,
+        checkpoint_min_interval: 500,
+        checkpoint_max_interval: 50_000,
+        checkpoint_target_secs: 60,
+        muhash_persist_interval: 200,
+    };
+    let iv = adaptive_checkpoint_interval(49_170_639, 30.1, 0.1, &d);
+    assert_eq!(
+        iv, 50_000,
+        "≥40M + 30s tee must keep high-UTXO ceiling, got {iv}"
+    );
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn slice_a_448m_journal_must_shrink_50k_interval_below_allcold_budget() {
+    // Slice A: dest-be floor held interval=50000 after 81M @399546. Next dump
+    // ingested 447_868_337. 313M TeeScan returned in 19 min; 448M was still
+    // grinding at the 20 min disk stop. Shrink the *ceiling*, keep dest-be 10k floor.
+    let d = crate::config::ibd::IbdEngineDurabilityConfig {
+        checkpoint_interval: None,
+        checkpoint_min_interval: 500,
+        checkpoint_max_interval: 50_000,
+        checkpoint_target_secs: 60,
+        muhash_persist_interval: 200,
+    };
+    let adaptive = adaptive_checkpoint_interval(81_263_724, 1252.0, 19.2, &d);
+    assert_eq!(
+        adaptive, 50_000,
+        "HIGH_UTXO + 21 min tee still *ceilings* at 50k"
+    );
+    let sched = checkpoint_schedule_interval(adaptive, 50_000, 81_263_724);
+    assert_eq!(
+        sched, 50_000,
+        "schedule step was the dest-be HIGH_UTXO ceiling"
+    );
+    let floor = d.checkpoint_min_interval.max(DEST_BE_INTERVAL_FLOOR);
+    assert_eq!(floor, 10_000);
+    assert_eq!(
+        journal_scaled_checkpoint_interval(sched, 0, floor),
+        50_000,
+        "empty journal must not shrink (dest-be high-UTXO path intact)"
+    );
+    assert_eq!(
+        journal_scaled_checkpoint_interval(sched, CHECKPOINT_COMPACT_INPUT_TARGET, floor),
+        50_000,
+        "at the AllCold budget the 50k ceiling may hold"
+    );
+    let at_313m = journal_scaled_checkpoint_interval(sched, 313_222_168, floor);
+    assert!(
+        at_313m < 50_000 && at_313m >= floor,
+        "313M (returned TeeScan) must shrink below 50k, got {at_313m}"
+    );
+    let at_448m = journal_scaled_checkpoint_interval(sched, 447_868_337, floor);
+    assert!(
+        at_448m < 50_000 && at_448m >= floor,
+        "448M (Slice A hang input) must shrink below 50k, got {at_448m}"
+    );
+    assert!(
+        at_448m <= at_313m,
+        "larger journal must not lengthen the interval ({at_448m} > {at_313m})"
+    );
+    assert_eq!(
+        journal_scaled_checkpoint_interval(sched, 2_000_000_000, floor),
+        floor,
+        "unbounded journal clamps to dest-be floor, not dest-bd 500"
+    );
+    // dest-be sit-sample collapse still blocked when journal is small.
+    let iv_sit = adaptive_checkpoint_interval(1_200_000, 0.018, 5.9, &d);
+    assert!(iv_sit >= 10_000);
+    assert_eq!(
+        journal_scaled_checkpoint_interval(iv_sit, 1_000_000, floor),
+        iv_sit
+    );
+}
+
+#[serial_test::serial(ibd)]
+#[test]
 fn w173_expensive_midchain_export_keeps_sparse_interval() {
     // Live W173: TARGET_SECS=300, ~50M UTXOs, 90–208s piggyback walls, tip60~80–100.
     // Old scaler: BASE*25M/count → ~5k, duration scale never fired (175 < 300),
@@ -360,6 +1141,89 @@ fn aligned_checkpoint_height_steps_from_last_exported() {
     assert_eq!(aligned_checkpoint_height(931_000, 880_000, 960), 930_880);
     assert_eq!(aligned_checkpoint_height(880_960, 880_000, 960), 880_960);
     assert_eq!(aligned_checkpoint_height(880_959, 880_000, 960), 880_000);
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn dest_x_vs_persist_180k_export_alignment() {
+    // dest-bf…bl: last_exported on the 10k grid after schedule clamp. Catch-up
+    // from 110000 at cl=180000 is exactly 180000 (dest-bf first in-band export).
+    assert_eq!(aligned_checkpoint_height(180_000, 110_000, 10_000), 180_000);
+    assert_eq!(aligned_checkpoint_height(179_999, 110_000, 10_000), 170_000);
+    // dest-x: last_exported=30336, live interval 3465 (pre-clamp). Catch-up at
+    // cl=180k is 179331, not 180000. First export after the skip was
+    // 213981 = 30336 + 53×3465 at engine_height=215563.
+    assert_eq!(aligned_checkpoint_height(180_000, 30_336, 3_465), 179_331);
+    assert_eq!(aligned_checkpoint_height(215_563, 30_336, 3_465), 213_981);
+    // dest-bd offset 10k grid missed 180000 (next 185840). Local max ts 164.
+    assert_eq!(aligned_checkpoint_height(180_000, 175_840, 10_000), 175_840);
+    assert_eq!(aligned_checkpoint_height(185_840, 175_840, 10_000), 185_840);
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn dest_x_burst_bps_defers_export_dest_bi_197_does_not() {
+    // dest-x 180–200k ts 247 and dest-bc 741: 30s EMA stays in the burst bin.
+    // dest-x 180k IBD print 164.5 is a 1k window; the gate is the EMA.
+    assert!(checkpoint_export_defer_for_burst_bps(247.0));
+    assert!(checkpoint_export_defer_for_burst_bps(556.0));
+    assert!(checkpoint_export_defer_for_burst_bps(200.1));
+    assert!(!checkpoint_export_defer_for_burst_bps(200.0));
+    // dest-bi @180000 logged bps=197.3 (just under); dest-bf logged 29.6.
+    assert!(!checkpoint_export_defer_for_burst_bps(197.3));
+    assert!(!checkpoint_export_defer_for_burst_bps(29.6));
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn dest_bl_180k_sit_must_not_clear_w75_burst_ema() {
+    // dest-bl 178k inst 541 then sit 29.2 used to release 180000. Burst EMA
+    // must survive the sit so W75 keeps deferring — dest-x 180–200k
+    // export_on=0. dest-bi 197.3 is a real leave-burst and still replaces.
+    assert_eq!(aligned_checkpoint_height(180_126, 170_000, 10_000), 180_000);
+    assert_eq!(adopt_checkpoint_bps_sample(541.6, 29.2), 541.6);
+    assert!(checkpoint_export_defer_for_burst_bps(
+        adopt_checkpoint_bps_sample(541.6, 29.2)
+    ));
+    assert_eq!(adopt_checkpoint_bps_sample(387.0, 29.6), 387.0);
+    assert!(checkpoint_export_defer_for_burst_bps(
+        adopt_checkpoint_bps_sample(387.0, 29.6)
+    ));
+    assert_eq!(adopt_checkpoint_bps_sample(247.0, 197.3), 197.3);
+    assert!(!checkpoint_export_defer_for_burst_bps(
+        adopt_checkpoint_bps_sample(247.0, 197.3)
+    ));
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn apply4_sit_21_8_must_not_clear_w75_burst_ema() {
+    // Apply 4: IBD 190000 → export 130s, engine_height=191859, bps=21.8.
+    // 181–190k 10k-print was 192; W75 only stays on if the 30s EMA is >200
+    // (do not change checkpoint_export_defer_for_burst_bps). Sit 21.8 must
+    // not replace that burst EMA — dump on covering=0 was the leak.
+    assert_eq!(adopt_checkpoint_bps_sample(247.0, 21.8), 247.0);
+    assert!(checkpoint_export_defer_for_burst_bps(
+        adopt_checkpoint_bps_sample(247.0, 21.8)
+    ));
+    // Apply 5 prev ~73 is not burst: sit 20.4 still adopted, dump proceeds.
+    assert_eq!(adopt_checkpoint_bps_sample(73.0, 20.4), 20.4);
+    assert!(!checkpoint_export_defer_for_burst_bps(
+        adopt_checkpoint_bps_sample(73.0, 20.4)
+    ));
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn apply6_resume_must_not_count_bps_from_height_zero() {
+    // Apply 6: export thread origin 0 + resume vh=180000 → first 30s sample
+    // 180000/30 ≈6000, sit-keep froze W75. Arm origin at current vh.
+    assert_eq!(checkpoint_bps_arm_sample_origin(0, 180_000), Some(180_000));
+    assert_eq!(checkpoint_bps_arm_sample_origin(180_000, 180_500), None);
+    assert_eq!(checkpoint_bps_arm_sample_origin(0, 0), None);
+    let fake = 180_000.0 / 30.0;
+    assert!(fake > CHECKPOINT_EXPORT_BURST_BPS);
+    assert_eq!(adopt_checkpoint_bps_sample(fake, 21.8), fake);
 }
 
 #[serial_test::serial(ibd)]
@@ -529,6 +1393,80 @@ fn w177_export_gate_defers_during_local_body_ahead() {
         match prev_kill {
             Some(v) => std::env::set_var("BLVM_PROC_ANON_KILL_MB", v),
             None => std::env::remove_var("BLVM_PROC_ANON_KILL_MB"),
+        }
+    }
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn lag_exempt_skips_w176_when_validation_past_interval() {
+    let prev_kill = std::env::var_os("BLVM_PROC_ANON_KILL_MB");
+    unsafe {
+        std::env::set_var("BLVM_PROC_ANON_KILL_MB", "999999999");
+    }
+    IBD_VALIDATION_STALL_WALL_MS.store(0, Ordering::Relaxed);
+    tip_stage::clear_tip_ahead_soft_freeze();
+    IBD_TIP_GAP_MISSING.store(true, Ordering::Relaxed);
+    IBD_TIP_BRIDGE_HOLES.store(16, Ordering::Relaxed);
+    IBD_LOCAL_BODY_AHEAD.store(false, Ordering::Relaxed);
+    assert!(
+        !export_start_gate_allows(),
+        "W176 still defers when not lag-exempt"
+    );
+    assert!(
+        export_start_gate_allows_at(614_973, 594_973, 20_000),
+        "vh-last_exported >= interval must skip W176/stall (dest-bc 96s)"
+    );
+    assert!(
+        !export_start_gate_allows_at(351_353, 345_853, 500),
+        "collapsed 500-block interval must not LAG_EXEMPT at 5.5k lag"
+    );
+    assert!(
+        export_start_gate_allows_at(365_853, 345_853, 500),
+        "20k lag still LAG_EXEMPT when interval collapsed to 500"
+    );
+    IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
+    IBD_TIP_BRIDGE_HOLES.store(0, Ordering::Relaxed);
+    unsafe {
+        match prev_kill {
+            Some(v) => std::env::set_var("BLVM_PROC_ANON_KILL_MB", v),
+            None => std::env::remove_var("BLVM_PROC_ANON_KILL_MB"),
+        }
+    }
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn lag_exempt_overrides_critical_pressure() {
+    let prev_kill = std::env::var_os("BLVM_PROC_ANON_KILL_MB");
+    let prev_force = std::env::var_os("BLVM_IBD_FORCE_PRESSURE");
+    unsafe {
+        std::env::set_var("BLVM_PROC_ANON_KILL_MB", "999999999");
+        std::env::remove_var("BLVM_IBD_FORCE_PRESSURE");
+    }
+    IBD_VALIDATION_STALL_WALL_MS.store(0, Ordering::Relaxed);
+    tip_stage::clear_tip_ahead_soft_freeze();
+    IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
+    IBD_TIP_BRIDGE_HOLES.store(0, Ordering::Relaxed);
+    IBD_LOCAL_BODY_AHEAD.store(false, Ordering::Relaxed);
+    memory::publish_ibd_pressure(memory::PressureLevel::Critical);
+    assert!(
+        !export_start_gate_allows_at(10_000, 0, 10_000),
+        "Critical must still refuse when lag is below LAG_EXEMPT_MIN"
+    );
+    assert!(
+        export_start_gate_allows_at(25_000, 0, 10_000),
+        "LAG_EXEMPT must start an export even when pressure is Critical"
+    );
+    memory::publish_ibd_pressure(memory::PressureLevel::None);
+    unsafe {
+        match prev_kill {
+            Some(v) => std::env::set_var("BLVM_PROC_ANON_KILL_MB", v),
+            None => std::env::remove_var("BLVM_PROC_ANON_KILL_MB"),
+        }
+        match prev_force {
+            Some(v) => std::env::set_var("BLVM_IBD_FORCE_PRESSURE", v),
+            None => std::env::remove_var("BLVM_IBD_FORCE_PRESSURE"),
         }
     }
 }
@@ -976,28 +1914,35 @@ fn test_config_timeout_reasonable() {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn checkpoint_export_exits_on_validation_height_even_if_ckpt_lagging() {
-    // Live hang: cl=957000, interval-aligned ckpt stuck at 880000, end=957804.
-    assert!(checkpoint_export_thread_should_exit(
-        957804, 957000, 957804, 880000
-    ));
-    assert!(checkpoint_export_thread_should_exit(957804, 0, 957804, 0));
+fn checkpoint_export_does_not_exit_when_vh_or_cl_hit_end_while_export_lags() {
+    // Slice A 2026-08-28T02:22: skip-path raced tip to END; last_exported=468301.
     assert!(!checkpoint_export_thread_should_exit(
-        957000, 957000, 957804, 880000
+        669992, 670000, 670000, 468301, 32863
     ));
+    // July F-C1 shape: vh at end, last_ckpt an interval behind — hold, do not join.
+    assert!(!checkpoint_export_thread_should_exit(
+        957804, 957000, 957804, 880000, 10000
+    ));
+    assert!(!checkpoint_export_thread_should_exit(957804, 0, 957804, 0, 10000));
 }
 
 #[serial_test::serial(ibd)]
 #[test]
-fn checkpoint_export_exits_on_contiguous_length_or_ckpt() {
-    assert!(checkpoint_export_thread_should_exit(0, 957804, 957804, 0));
+fn checkpoint_export_exits_when_last_committed_near_end() {
+    // last_ckpt >= end - interval
     assert!(checkpoint_export_thread_should_exit(
-        0, 957000, 957804, 957804
+        670000, 670000, 670000, 637137, 32863
+    ));
+    assert!(checkpoint_export_thread_should_exit(
+        0, 957000, 957804, 957804, 10000
     ));
     assert!(!checkpoint_export_thread_should_exit(
-        0, 957000, 957804, 880000
+        0, 957000, 957804, 880000, 10000
     ));
-    assert!(checkpoint_export_thread_should_exit(0, 0, 0, 0)); // end_h<=0
+    assert!(checkpoint_export_thread_should_exit(0, 0, 0, 0, 0)); // end_h<=0
+    // interval<=0: must have committed at end_h itself
+    assert!(!checkpoint_export_thread_should_exit(100, 100, 100, 99, 0));
+    assert!(checkpoint_export_thread_should_exit(100, 100, 100, 100, 0));
 }
 
 #[serial_test::serial(ibd)]
@@ -1030,6 +1975,67 @@ fn tip_follow_extends_when_peer_advances() {
     assert_eq!(
         tip_follow_new_effective_end(957_850, 957_850, 957_900),
         None
+    );
+}
+
+/// R-238 dump 20–30k: 5s TIP_FOLLOW_TIMEOUT while feeder=0 / FILLED_RUNWAY.
+/// Coordinator must not park. dest-bc 0–10k 298 lives.
+#[serial_test::serial(ibd)]
+#[test]
+fn r238_tip_follow_does_not_park_hungry_apply() {
+    assert!(!tip_follow_may_block_coord(0, 25_493, 370_000, Some(370_000)));
+    assert!(!tip_follow_may_block_coord(64, 25_493, 370_000, Some(370_000)));
+    assert!(!tip_follow_may_block_coord(689, 10_000, 370_000, Some(370_000)));
+    assert!(!tip_follow_may_block_coord(64, 25_493, 370_000, None));
+    assert!(tip_follow_may_block_coord(64, 960_000, 965_000, None));
+    assert!(!tip_follow_may_block_coord(0, 960_000, 965_000, None));
+}
+
+/// R-240 freeze: last CRAWL @107124 then mute CAP, then coordinator silent.
+/// Ready refresh must not call blocking `peer_addresses_for_ibd()`.
+#[test]
+fn r241_ready_refresh_does_not_use_blocking_peer_scan() {
+    let src = include_str!("mod.rs");
+    assert!(
+        src.contains("peer_addresses_for_ibd_connected().await"),
+        "coordinator ready-refresh must await connected-only scan"
+    );
+    let refresh = src
+        .split("let refresh = async move {")
+        .nth(1)
+        .expect("ready-refresh future");
+    let refresh = refresh
+        .split("tokio::time::timeout(Duration::from_millis(250), refresh)")
+        .next()
+        .unwrap();
+    let code: String = refresh
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect();
+    assert!(
+        !code.contains("peer_addresses_for_ibd()"),
+        "block_in_place peer_addresses_for_ibd inside refresh defeats 250ms timeout"
+    );
+}
+
+/// R-242 freeze: covering hero RST, dispatch `Peer disconnected:` without
+/// cancelling pending GetData (handshake path already did). Live path must
+/// cancel + `ibd_peer_gone`.
+#[test]
+fn r243_dispatch_rst_cancels_pending_getdata() {
+    let src = include_str!("../../network/network_message_dispatch.rs");
+    let handler = src
+        .split("async fn handle_peer_disconnected")
+        .nth(1)
+        .expect("handle_peer_disconnected");
+    let handler = handler.split("#[cfg(test)]").next().unwrap();
+    assert!(
+        handler.contains("cancel_pending_block_requests_for_disconnected_peer"),
+        "RST dispatch must drop GetData oneshots (R-242 parked 186264 on dead 3.136)"
+    );
+    assert!(
+        handler.contains("ibd_peer_gone"),
+        "RST dispatch must release assigner inflight so walk-promote cannot retitle a corpse"
     );
 }
 
@@ -1168,6 +2174,80 @@ fn insert_reorder_gap_aware_drops_far_ahead_when_gap_missing() {
         window,
         0,
     ));
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn r97_reserved_far_inserts_while_gap_missing() {
+    use blvm_protocol::{Block, BlockHeader};
+    use std::sync::Arc;
+
+    test_clear_lookahead_reserved();
+    let block = Arc::new(Block {
+        header: BlockHeader::default(),
+        transactions: Default::default(),
+    });
+    let w: SharedWitnesses = Arc::new(vec![]);
+    let mut reorder: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
+    let next_needed = 100u64;
+    let far = next_needed + 2048;
+    publish_lookahead_reserved(vec![(far, far + 2047)]);
+    assert!(
+        insert_reorder_gap_aware(
+            &mut reorder,
+            far,
+            Arc::clone(&block),
+            Arc::clone(&w),
+            next_needed,
+            64,
+            16,
+            0,
+        ),
+        "reserved hole+LEAD must insert while gap_missing"
+    );
+    test_clear_lookahead_reserved();
+    assert!(
+        !insert_reorder_gap_aware(
+            &mut reorder,
+            far + 1,
+            Arc::clone(&block),
+            Arc::clone(&w),
+            next_needed,
+            64,
+            16,
+            0,
+        ),
+        "unreserved far must still drop"
+    );
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn r97_evict_skips_reserved_key() {
+    use blvm_protocol::{Block, BlockHeader};
+    use std::sync::Arc;
+
+    test_clear_lookahead_reserved();
+    let block = Arc::new(Block {
+        header: BlockHeader::default(),
+        transactions: Default::default(),
+    });
+    let w: SharedWitnesses = Arc::new(vec![]);
+    let mut reorder: BTreeMap<u64, (SharedBlock, SharedWitnesses)> = BTreeMap::new();
+    let next_needed = 100u64;
+    let window = 16u64;
+    let reserved = next_needed + 50;
+    publish_lookahead_reserved(vec![(reserved, reserved)]);
+    for h in (next_needed + window + 1)..=(next_needed + 50) {
+        reorder.insert(h, (Arc::clone(&block), Arc::clone(&w)));
+    }
+    let evicted = evict_reorder_gap_pressure(&mut reorder, next_needed, 64, window, 0);
+    assert!(evicted > 0);
+    assert!(
+        reorder.contains_key(&reserved),
+        "reserved key must survive evict"
+    );
+    test_clear_lookahead_reserved();
 }
 
 /// Phase 0b.2 / rbitcoin request-vs-receive: throttle *new* far-ahead admit; do not
@@ -1758,6 +2838,172 @@ fn defer_bridge_ahead_w58_bulk_still_defers_when_tip_missing() {
     ));
 }
 
+/// L2b: W58 still defers reserved farm while apply is in the desert.
+#[serial_test::serial(ibd)]
+#[test]
+fn r102_reserved_far_still_deferred_while_h_missing() {
+    test_clear_lookahead_reserved();
+    let next = 100u64;
+    let farm_a = next + 2048;
+    publish_lookahead_reserved(vec![(farm_a, farm_a + 2047)]);
+    assert!(
+        defer_bridge_ahead_dispatch(farm_a, next, true, true, 192, true, false, true),
+        "H missing: reserved hole+LEAD must still W58"
+    );
+    assert!(
+        defer_bridge_ahead_dispatch(farm_a + 1, next, true, true, 192, true, false, true),
+        "H missing: rest of reserved stripe still W58"
+    );
+    test_clear_lookahead_reserved();
+}
+
+/// L2b: apply inside held stripe — emit the rest of that stripe (W58 would re-arm).
+#[serial_test::serial(ibd)]
+#[test]
+fn r102_same_stripe_not_deferred_after_first_height_leaves() {
+    test_clear_lookahead_reserved();
+    let s = 10_241u64;
+    let e = 12_288u64;
+    publish_lookahead_reserved(vec![(s, e)]);
+    // R-101: after s leaves reorder, gap_missing && next_expected_missing.
+    assert!(
+        !defer_bridge_ahead_dispatch(s + 1, s, true, true, 192, true, false, true),
+        "same stripe after tip leaves reorder"
+    );
+    assert!(
+        !defer_bridge_ahead_dispatch(e, s, true, true, 192, true, false, true),
+        "same stripe end"
+    );
+    test_clear_lookahead_reserved();
+}
+
+/// L2b: farm B at +LEAD stays W58 while apply is in A.
+#[serial_test::serial(ibd)]
+#[test]
+fn r102_other_reserved_stripe_still_deferred() {
+    test_clear_lookahead_reserved();
+    let a_s = 10_241u64;
+    let a_e = 12_288u64;
+    let b_s = a_s + 2048;
+    let b_e = b_s + 2047;
+    publish_lookahead_reserved(vec![(a_s, a_e), (b_s, b_e)]);
+    assert!(
+        !defer_bridge_ahead_dispatch(a_e, a_s, true, true, 192, true, false, true),
+        "stripe A must emit"
+    );
+    assert!(
+        defer_bridge_ahead_dispatch(b_s, a_s, true, true, 192, true, false, true),
+        "stripe B at +LEAD must stay W58"
+    );
+    assert!(
+        defer_bridge_ahead_dispatch(b_s + 64, a_s, true, true, 192, true, false, true),
+        "stripe B interior must stay W58"
+    );
+    test_clear_lookahead_reserved();
+}
+
+/// L2b: unreserved far still W58 (HASH_FETCH unset).
+#[serial_test::serial(ibd)]
+#[test]
+fn r102_unreserved_far_still_deferred() {
+    test_clear_lookahead_reserved();
+    let next = 100u64;
+    assert!(
+        defer_bridge_ahead_dispatch(next + 8192, next, true, true, 192, true, false, true),
+        "unreserved hole+LEAD still W58"
+    );
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn r192_hf_fat_empty_take_hole_gate() {
+    let prev = std::env::var("BLVM_IBD_HASH_FETCH").ok();
+    unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", "1") };
+    IBD_TIP_IN_REORDER.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        !hf_fat_empty_take_hole(50_000),
+        "dump must stay get_work (not R-178)"
+    );
+    assert!(
+        hf_fat_empty_take_hole(180_000),
+        "fat EMPTY must take_hole"
+    );
+    IBD_TIP_IN_REORDER.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        !hf_fat_empty_take_hole(180_000),
+        "H in reorder is not EMPTY take_hole"
+    );
+    IBD_TIP_IN_REORDER.store(false, std::sync::atomic::Ordering::Relaxed);
+    unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") };
+    assert!(
+        !hf_fat_empty_take_hole(180_000),
+        "flag-off stays get_work"
+    );
+    match prev {
+        Some(v) => unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", v) },
+        None => unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") },
+    }
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn r191_hf_undispatched_empty_rearm_due() {
+    use std::time::Duration;
+    let prev = std::env::var("BLVM_IBD_HASH_FETCH").ok();
+    unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", "1") };
+    assert!(
+        !hf_undispatched_empty_rearm_due(0, false, Some(Duration::from_secs(44))),
+        "under 45s must not rearm"
+    );
+    assert!(
+        hf_undispatched_empty_rearm_due(0, false, Some(Duration::from_secs(45))),
+        "R-190: covering=0 !dispatched ≥45s must EMPTY_REARM"
+    );
+    assert!(
+        !hf_undispatched_empty_rearm_due(0, true, Some(Duration::from_secs(45))),
+        "dispatched covering=0 is COVERING_ZERO, not this path"
+    );
+    assert!(
+        !hf_undispatched_empty_rearm_due(1, false, Some(Duration::from_secs(45))),
+        "covering>0 must not rearm"
+    );
+    unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") };
+    assert!(
+        !hf_undispatched_empty_rearm_due(0, false, Some(Duration::from_secs(45))),
+        "flag-off stays silent"
+    );
+    match prev {
+        Some(v) => unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", v) },
+        None => unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") },
+    }
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn defer_bridge_ahead_w58_holds_under_hash_fetch() {
+    // R-182: HASH_FETCH skip of W58 reprinted Face 2. Flag on still defers ahead.
+    let prev = std::env::var("BLVM_IBD_HASH_FETCH").ok();
+    unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", "1") };
+    let next = 60_000u64;
+    let window = 256u64;
+    assert!(
+        !defer_bridge_ahead_dispatch(next, next, true, true, window, true, false, true),
+        "tip itself always admitted"
+    );
+    assert!(
+        defer_bridge_ahead_dispatch(next + 32, next, true, true, window, true, false, true),
+        "HASH_FETCH must W58-defer next+32 when tip missing"
+    );
+    assert!(
+        defer_bridge_ahead_dispatch(next + 65, next, true, true, window, true, false, true),
+        "W58 still defers past next+64"
+    );
+    match prev {
+        Some(v) => unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", v) },
+        None => unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") },
+    }
+}
+
 #[serial_test::serial(ibd)]
 #[test]
 fn wan_bulk_catchup_threshold() {
@@ -1769,9 +3015,55 @@ fn wan_bulk_catchup_threshold() {
 
 #[serial_test::serial(ibd)]
 #[test]
+fn r305_wide_runway_default_off_clamps_tip_gap_at_2048() {
+    unsafe {
+        std::env::remove_var("BLVM_IBD_WIDE_RUNWAY");
+        std::env::set_var("BLVM_IBD_WAN_BULK_TIP_GAP_AHEAD", "8192");
+        assert!(
+            !wide_runway_enabled(),
+            "WIDE_RUNWAY unset must stay off"
+        );
+        assert_eq!(
+            wan_bulk_tip_gap_ahead_cap(),
+            2048,
+            "R-305: without WIDE_RUNWAY, 8192 env still clamps at today's 2048"
+        );
+        std::env::remove_var("BLVM_IBD_WAN_BULK_TIP_GAP_AHEAD");
+        assert_eq!(
+            wan_bulk_tip_gap_ahead_cap(),
+            wan_tip_gap_ahead_cap(),
+            "unset GAP env still follows tip-gap default"
+        );
+    }
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn r305_wide_runway_on_allows_8192() {
+    unsafe {
+        std::env::set_var("BLVM_IBD_WIDE_RUNWAY", "1");
+        std::env::set_var("BLVM_IBD_WAN_BULK_TIP_GAP_AHEAD", "8192");
+        assert!(wide_runway_enabled());
+        assert_eq!(
+            wan_bulk_tip_gap_ahead_cap(),
+            8192,
+            "R-305: WIDE_RUNWAY + GAP=8192 must match RUNWAY_SPAN"
+        );
+        std::env::remove_var("BLVM_IBD_WIDE_RUNWAY");
+        std::env::remove_var("BLVM_IBD_WAN_BULK_TIP_GAP_AHEAD");
+    }
+}
+
+#[serial_test::serial(ibd)]
+#[test]
 fn w76_wan_ahead_policy_feeder_starve_uses_tip_window_even_when_bulk() {
     // Mid-chain: headers at network tip ⇒ bulk=true always; feeder empty must not
     // keep the old 1024 bulk-gap window (live tip never in bridge @ ~350k).
+    unsafe {
+        std::env::remove_var("BLVM_IBD_WIDE_RUNWAY");
+        std::env::remove_var("BLVM_IBD_WAN_BULK_TIP_GAP_AHEAD");
+        std::env::remove_var("BLVM_IBD_TIP_ADMIT_TIGHT");
+    }
     let (kind, cap) = wan_ahead_policy(true, true, true, 2);
     assert_eq!(kind, "wan_bulk_gap");
     assert_eq!(cap, wan_bulk_tip_gap_ahead_cap());
@@ -1926,4 +3218,185 @@ fn w54_tip_handoff_ignores_feeder_depth_when_tip_stranded() {
         "must not re-handoff tip already in feeder"
     );
     assert!(reorder.contains_key(&next_needed));
+}
+
+/// R-289 slow-peer rotation clock. Eviction today only fires on hard failure, so the
+/// peer draw taken at connect time survives the whole run: R-287 and R-288 are the
+/// SAME binary `a7729c9a` and scored dump 3378 vs 907 (3.7x).
+#[test]
+fn r289_rotate_seeds_clock_before_it_judges_a_cold_mesh() {
+    assert!(
+        !should_rotate_slow_peer(1_000_000, 0, 30),
+        "last_ms=0 is a cold mesh with no CRAWL window yet — seed the clock, \
+         do not evict the first peer that happens to be unscored"
+    );
+    assert!(
+        !should_rotate_slow_peer(1_029_999, 1_000_000, 30),
+        "29.999s — one rotation per interval"
+    );
+    assert!(should_rotate_slow_peer(1_030_000, 1_000_000, 30));
+    assert!(
+        !should_rotate_slow_peer(9_999_999, 1_000_000, 0),
+        "BLVM_IBD_PEER_ROTATE_SECS=0 is the off switch (R-273 DNA baseline arm)"
+    );
+}
+
+/// R-289 evicted 13/13 at recv=0.00 mbps. Those peers were never assigned
+/// (R-280 peers_conn 45.0 vs peers_inflight 13.6). Ranking the byte store
+/// rotates the bench. R-290 scores only peers with ≥1 assignment in the window.
+#[serial_test::serial(ibd)]
+#[test]
+fn r290_rotate_evicts_worst_seated_not_the_bench() {
+    download::test_reset_rotate_state();
+    // Seed window: three seated + one bench that already has historical bytes
+    // (the R-289 0.00 mbps shape — delivered once, then never asked again).
+    download::test_note_assigned("1.1.1.1:8333", 16); // sticky
+    download::test_note_download_block_bytes("1.1.1.1:8333", 800_000);
+    download::test_note_assigned("3.3.3.3:8333", 16); // will be slow seated
+    download::test_note_download_block_bytes("3.3.3.3:8333", 800_000);
+    download::test_note_assigned("4.4.4.4:8333", 16); // fast seated
+    download::test_note_download_block_bytes("4.4.4.4:8333", 800_000);
+    download::test_note_download_block_bytes("2.2.2.2:8333", 50_000); // bench, never assigned
+    assert!(
+        download::download_rotate_slowest("1.1.1.1:8333", 2).is_none(),
+        "first call seeds the window; nobody is judged on a cold mesh"
+    );
+
+    // Window 2: sticky + slow + fast get more work. Bench gets ZERO assignments
+    // and ZERO new bytes — the R-289 victim shape.
+    download::test_note_assigned("1.1.1.1:8333", 16);
+    download::test_note_download_block_bytes("1.1.1.1:8333", 800_000);
+    download::test_note_assigned("3.3.3.3:8333", 16);
+    download::test_note_download_block_bytes("3.3.3.3:8333", 10_000); // poor yield
+    download::test_note_assigned("4.4.4.4:8333", 16);
+    download::test_note_download_block_bytes("4.4.4.4:8333", 800_000);
+    download::test_rotate_backdate_secs(2);
+
+    let v = download::download_rotate_slowest("1.1.1.1:8333", 2)
+        .expect("three seated ≥ min_scored=2");
+    assert_eq!(
+        v.peer, "3.3.3.3:8333",
+        "R-289 evicted 13/13 at recv=0.00 — those peers were never assigned \
+         (R-280 conn 45 inflight 13.6). Victim must be the worst SEATED peer \
+         (3.3.3.3 yield 10000/16), not the bench peer 2.2.2.2 (assigned=0) \
+         and not sticky 1.1.1.1"
+    );
+    assert_eq!(
+        v.seated, 3,
+        "sticky+slow+fast were assigned this window; bench must not count as seated"
+    );
+    assert!(
+        v.bench >= 1,
+        "bench= peers with 0 assignment this window (2.2.2.2); got bench={}",
+        v.bench
+    );
+    assert!(
+        v.assigned >= 48,
+        "assigned= total blocks given this window (3×16); got {}",
+        v.assigned
+    );
+    assert!(
+        v.recv_mbps > 0.0,
+        "seated slow still delivered some bytes — recv>0 is the R-290 gate vs R-289's all-zero"
+    );
+}
+
+/// min_scored now counts SEATED peers. Default 8: a 13-seat roster (R-280 inflight
+/// 13.6) can meet it; 16 could not without counting the bench.
+#[serial_test::serial(ibd)]
+#[test]
+fn r290_min_scored_counts_seated_not_connected() {
+    download::test_reset_rotate_state();
+    unsafe {
+        std::env::remove_var("BLVM_IBD_PEER_ROTATE_MIN_SCORED");
+    }
+    assert_eq!(
+        ibd_peer_rotate_min_scored(),
+        8,
+        "default 8: R-280 inflight 13.6; 16 was the connected-mesh floor that \
+         forced scoring the bench (R-289 scored 40–43 against min 16)"
+    );
+    for i in 0..3u16 {
+        let p = format!("10.0.0.{i}:8333");
+        download::test_note_assigned(&p, 16);
+        download::test_note_download_block_bytes(&p, 100_000);
+    }
+    // 30 bench peers with historical bytes, zero assignments — R-289 would have
+    // scored them and met min_scored=16.
+    for i in 0..30u16 {
+        download::test_note_download_block_bytes(&format!("11.0.0.{i}:8333"), 1_000);
+    }
+    assert!(download::download_rotate_slowest("-", 8).is_none()); // seed
+    for i in 0..3u16 {
+        let p = format!("10.0.0.{i}:8333");
+        download::test_note_assigned(&p, 16);
+        download::test_note_download_block_bytes(&p, 100_000);
+    }
+    download::test_rotate_backdate_secs(2);
+    assert!(
+        download::download_rotate_slowest("-", 8).is_none(),
+        "3 seated < min_scored=8 — do not evict out of a thin roster, even if \
+         30 bench peers would have padded a connected-mesh count to 33"
+    );
+}
+
+/// R-291: default depth 1 is current DNA (one stripe per non-sticky). Env 8 is
+/// same-peer sequential pipelining, clamped to Core's 16. Sticky/tip path is
+/// not this knob (max_in_flight_for / TOP_PEER / sole_tip).
+#[serial_test::serial(ibd)]
+#[test]
+fn r291_peer_depth_default_is_one_and_env_raises() {
+    unsafe {
+        std::env::remove_var("BLVM_IBD_PEER_DEPTH");
+    }
+    assert_eq!(
+        ibd_peer_depth(),
+        1,
+        "unset BLVM_IBD_PEER_DEPTH must be 1 — R-288 DNA, a true control vs depth=8"
+    );
+    unsafe {
+        std::env::set_var("BLVM_IBD_PEER_DEPTH", "8");
+    }
+    assert_eq!(
+        ibd_peer_depth(),
+        8,
+        "R-280 GetData→body 1274ms; depth 1 is a >1s bubble after every stripe. 8 is the treatment."
+    );
+    unsafe {
+        std::env::set_var("BLVM_IBD_PEER_DEPTH", "99");
+    }
+    assert_eq!(
+        ibd_peer_depth(),
+        16,
+        "clamp to Core MAX_BLOCKS_IN_TRANSIT_PER_PEER=16, not unbounded ahead"
+    );
+    unsafe {
+        std::env::remove_var("BLVM_IBD_PEER_DEPTH");
+    }
+}
+
+/// R-291 pin is a different env from BLVM_IBD_PEERS (LAN/archive tip-now).
+/// PIN skips DNS entirely so A/B shares one peer set.
+#[serial_test::serial(ibd)]
+#[test]
+fn r291_pin_peers_skips_archive_dns_seed() {
+    unsafe {
+        std::env::remove_var("BLVM_IBD_PEERS");
+        std::env::remove_var("BLVM_IBD_PIN_PEERS");
+    }
+    assert!(
+        !skip_ibd_archive_dns_seed(),
+        "no pin → DNS seeds still run (fresh lottery every dest)"
+    );
+    unsafe {
+        std::env::set_var("BLVM_IBD_PIN_PEERS", "1.2.3.4:8333,5.6.7.8:8333");
+    }
+    assert!(
+        skip_ibd_archive_dns_seed(),
+        "BLVM_IBD_PIN_PEERS must skip DNS or the A/B pair is two different draws"
+    );
+    assert_eq!(crate::network::ibd_pin_peers().len(), 2);
+    unsafe {
+        std::env::remove_var("BLVM_IBD_PIN_PEERS");
+    }
 }

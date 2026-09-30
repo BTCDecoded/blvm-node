@@ -32,6 +32,18 @@ pub fn getdata_delay_ms() -> u64 {
     0
 }
 
+pub fn getdata_delay_ms_for_peer(_peer_id: &str) -> u64 {
+    0
+}
+
+pub fn injected_ia() -> bool {
+    false
+}
+
+pub fn replay_fixture() -> Option<&'static str> {
+    None
+}
+
 pub fn use_fake_download_peers() -> bool {
     false
 }

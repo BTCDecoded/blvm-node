@@ -2,13 +2,13 @@
 //! chunks are re-queued on drop if not disarmed.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::ParallelIBDConfig;
 use super::latch_env;
-use super::types::ChunkWorkItem;
+use super::types::{ChunkWorkItem, NoprogComplete, RetryEntry, RetryTrack};
 
 /// Tracks sticky WAN tenure for A6m/A6n measured-BPS rotation.
 #[derive(Debug, Clone)]
@@ -38,18 +38,20 @@ struct TipTrial {
     next_needed_at_start: u64,
 }
 
-/// W4/N12: `get_work` `in_flight_per_peer` wait/hold (`BLVM_IBD_ASSIGNER_LOCK_TIMERS=1`).
+/// W4/N12: `get_work` `in_flight_per_peer` wait/hold. Default **on**; `=0` disables.
 static ASSIGNER_GW_WAIT_NS: AtomicU64 = AtomicU64::new(0);
 static ASSIGNER_GW_HOLD_NS: AtomicU64 = AtomicU64::new(0);
 static ASSIGNER_GW_SAMPLES: AtomicU64 = AtomicU64::new(0);
 fn assigner_lock_timers_enabled() -> bool {
-    matches!(
-        std::env::var("BLVM_IBD_ASSIGNER_LOCK_TIMERS")
-            .ok()
-            .as_deref()
-            .map(str::trim),
-        Some("1") | Some("true") | Some("yes") | Some("on")
-    )
+    match std::env::var("BLVM_IBD_ASSIGNER_LOCK_TIMERS")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        None => true,
+        Some("0") | Some("false") | Some("off") | Some("no") => false,
+        _ => true,
+    }
 }
 
 /// Records `in_flight` wait + hold for one `get_work` that acquired the outer lock.
@@ -87,6 +89,80 @@ impl Drop for AssignerGetWorkTimer {
             );
         }
     }
+}
+
+/// leftover_TRACE: who currently holds `in_flight_per_peer` (get_work holds it
+/// for the whole assign). leftover_force_arm try_lock_fail reads this.
+struct InFlightLockOwner {
+    site: &'static str,
+}
+
+static IN_FLIGHT_LOCK_SITE: Mutex<Option<(&'static str, String, u64, Instant)>> = Mutex::new(None);
+
+fn note_in_flight_holder(site: &'static str, peer: &str, next: u64) -> InFlightLockOwner {
+    if let Ok(mut g) = IN_FLIGHT_LOCK_SITE.lock() {
+        *g = Some((site, peer.to_string(), next, Instant::now()));
+    }
+    InFlightLockOwner { site }
+}
+
+impl Drop for InFlightLockOwner {
+    fn drop(&mut self) {
+        if let Ok(mut g) = IN_FLIGHT_LOCK_SITE.lock() {
+            if g.as_ref().is_some_and(|(s, ..)| *s == self.site) {
+                *g = None;
+            }
+        }
+    }
+}
+
+fn format_in_flight_holder() -> String {
+    match IN_FLIGHT_LOCK_SITE.lock() {
+        Ok(g) => match &*g {
+            Some((site, peer, next, at)) => format!(
+                "site={site} peer={peer} next={next} held_ms={}",
+                at.elapsed().as_millis()
+            ),
+            None => "site=unknown".to_string(),
+        },
+        Err(_) => "site=holder_poison".to_string(),
+    }
+}
+
+/// leftover_TRACE inside leftover `get_work` after `in_flight` is held.
+/// One line per phase on the leftover-band call — last phase is the wait.
+fn leftover_get_work_phase(
+    peer_id: &str,
+    next: u64,
+    body_tip: u64,
+    leftover_force: bool,
+    phase: &'static str,
+) {
+    if super::leftover_trace_watch(leftover_force, next, body_tip) {
+        leftover_trace_rate(
+            "get_work_phase",
+            format!(
+                "peer={peer_id} next={next} body_tip={body_tip} leftover_force={leftover_force} phase={phase}"
+            ),
+        );
+    }
+}
+
+pub(crate) fn leftover_trace_rate(step: &'static str, msg: String) {
+    static LAST_MS: Mutex<Option<HashMap<&'static str, u64>>> = Mutex::new(None);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if let Ok(mut slot) = LAST_MS.lock() {
+        let map = slot.get_or_insert_with(HashMap::new);
+        let prev = map.get(step).copied().unwrap_or(0);
+        if now.saturating_sub(prev) < 5_000 {
+            return;
+        }
+        map.insert(step, now);
+    }
+    tracing::warn!("[IBD_LEFTOVER_TRACE] step={step} {msg}");
 }
 
 /// Chunk of blocks to download, assigned to a specific peer.
@@ -193,7 +269,36 @@ pub(crate) struct ChunkAssigner {
     /// Preferred peer for `chunks[i]` when `!work_stealing`. Empty under work-stealing.
     preferred_peers: Vec<String>,
     next_index: AtomicUsize,
-    retry_queue: Mutex<VecDeque<ChunkWorkItem>>,
+    retry_queue: Mutex<VecDeque<RetryEntry>>,
+    /// R-283: attempts/sticky exclude keyed by (start,end). Survives get_work pop.
+    retry_track: Mutex<HashMap<(u64, u64), RetryTrack>>,
+    /// R-336 window assigner: heights whose chunk completed Ok (delivered), ≥ next_needed.
+    window_done: Mutex<std::collections::BTreeMap<u64, Instant>>,
+    /// R-336: `(peer, start, end)` → issue time, for front-of-window stall duplicates.
+    window_started: Mutex<HashMap<(String, u64, u64), Instant>>,
+    /// R-336: `(start, end)` → (failing peer, when). That peer skips these heights briefly.
+    window_fail: Mutex<HashMap<(u64, u64), (String, Instant)>>,
+    /// R-336: front-stall strikes per holder `(count, last)`.
+    window_strikes: Mutex<HashMap<String, (u32, Instant)>>,
+    /// R-336: peers queued for eviction by the window path; drained by the worker loop.
+    window_evict: Mutex<Vec<String>>,
+    /// R-336: last window eviction (rate limit).
+    window_last_evict: Mutex<Option<Instant>>,
+    /// R-337: front-stallers benched off the window until `Instant`.
+    window_bench: Mutex<HashMap<String, Instant>>,
+    /// R-344: struck-out front holders kept off the front reserve until `Instant` (stay on the roster).
+    window_front_cool: Mutex<HashMap<String, Instant>>,
+    /// R-345: strike-out history per peer `(count, last)`; drives bench escalation 15 → 60 → 300 s.
+    window_offense: Mutex<HashMap<String, (u32, Instant)>>,
+    /// R-338: EMA of window tile wall time (ms); 0 until the first completion.
+    window_tile_ms_ema: AtomicU64,
+    /// R-341: roster EMA of per-block tile time (ms).
+    window_blk_ms_ema: AtomicU64,
+    /// R-341: per-peer `(per-block ms EMA, completions)`.
+    window_peer_blk_ms: Mutex<HashMap<String, (u64, u32)>>,
+    /// R-284: last `Ok(chunk)` per `(peer, start, end)`. Skip re-issue when
+    /// `net_block_count==0` and `next_needed` is unchanged. Evict `end < next`.
+    noprog_ok: Mutex<HashMap<(String, u64, u64), NoprogComplete>>,
     validation_height: Arc<std::sync::atomic::AtomicU64>,
     /// When true, only chunks with start==0 are assignable. Set when start_height==0; cleared when bootstrap chunk completes.
     bootstrap_complete: AtomicBool,
@@ -219,6 +324,8 @@ pub(crate) struct ChunkAssigner {
     wan_body_tip: AtomicU64,
     /// Coordinator sets when validation tip (val+1) is absent from reorder_buffer.
     tip_gap_missing: AtomicBool,
+    /// Validation stall / leftover inject-miss — not spawn tip_gap_missing.
+    leftover_force_getdata: AtomicBool,
     /// Bridge holes in `[next_expected, …]` from coordinator (`pending_diag`). Used to gate
     /// multi-peer tip-band ahead — **not** steady-state `gap_missing` (always true while
     /// waiting for the next body). Live 2026-07-15: `allow_ahead=!gap_missing` → covering=1
@@ -262,6 +369,11 @@ pub(crate) struct ChunkAssigner {
     tip_progress_samples: Mutex<VecDeque<(Instant, u64)>>,
     /// A6n: per-peer WAN tip GAP_STREAM counts (avoids bulk IBD contamination).
     peer_tip_streams: Mutex<HashMap<String, TipStreamWindow>>,
+    /// dest-az 154k: last peer that crossed KEEP stream in this STREAM window.
+    /// Survives decay / 600s roll. Not dest-aq 180s keep-hot — only blocks P1e 120s.
+    last_stream_keep_hero: Mutex<Option<String>>,
+    /// dest-az 179k: GD_SLOW `new=` pin time. First-H mute must not P1e-120s them.
+    last_gd_slow_pin: Mutex<Option<(String, Instant)>>,
     /// C1c: sticky tip-hole GetData depth per peer across chunks (cold-start was always 8).
     /// Reset on mute tip fail. Opt out: `BLVM_IBD_TIP_HOLE_STICKY=0`.
     tip_hole_depth: Mutex<HashMap<String, usize>>,
@@ -287,6 +399,34 @@ pub(crate) struct ChunkAssigner {
     /// [`super::memory::GAP_STREAM_DEDUP_HEIGHT`] already covered `next_needed`.
     /// 0 = not blocking. Escape after grace while `tip_gap_missing` (true tip loss).
     synth_tip_dedup_block_since_ms: AtomicU64,
+    /// R-28: last MUTE_DROP tip height. Same-H walk (R-26: 31 drops @323067 in 5 ms)
+    /// is a cover leak, not 31 sits.
+    last_mute_drop_h: AtomicU64,
+    /// R-28: unix-ms of that drop. Same height may drop again after 8s if still mute.
+    last_mute_drop_at_ms: AtomicU64,
+    /// R-29: exclusive extra-pipe claims. Survive C1j abort / on_chunk_complete
+    /// so the next get_work cannot stampede the same stripe (R-28: two peers
+    /// 2364–2427 in 5 ms, then cheese @2366).
+    latched_ahead: Mutex<Vec<(String, u64, u64)>>,
+    /// R-248: satd priority zone — disjoint tiles in (H, H+256]. Not R-27 same
+    /// stripe. Not 50k shuffle. C1j holds these like latch.
+    priority_zone: Mutex<Vec<(String, u64, u64)>>,
+    /// R-58: reserved disjoint lookahead stripes (cap 2). Not mesh extras / latch.
+    /// One owner per stripe. Rank is STREAM on these heights, not throwaway probe.
+    lookahead_stripes: Mutex<Vec<(String, u64, u64)>>,
+    /// R-142: one fat-entry probe retitle per dest (180–210k window).
+    fat_probe_retitle_done: AtomicBool,
+    /// One farm-recv promote per dest (15s mute sticky + fat farm stripe).
+    farm_recv_promote_done: AtomicBool,
+    /// R-241 dump spent the one-shot @113k; fat 180–200k **144** had covering=0
+    /// sticky recv 0.7 vs top **1021** with no second promote. Rearm once at 180k.
+    farm_recv_fat_rearmed: AtomicBool,
+    farm_recv_mute_streak: AtomicU32,
+    farm_recv_last_tick: Mutex<Option<Instant>>,
+    /// Entered farm ranges still ahead of apply. Stripes drop so farms leapfrog;
+    /// hold stays reserved so evict/trim do not delete have (R-99 enter @10243).
+    lookahead_have_hold: Mutex<Vec<(u64, u64)>>,
+    lookahead_streams: Mutex<HashMap<String, TipStreamWindow>>,
 }
 
 fn a6m_min_bps() -> f64 {
@@ -376,14 +516,15 @@ fn a6m_gd_slow_feeder_keep() -> usize {
         .clamp(0, 64)
 }
 
-/// E16b: skip GD_SLOW rotate when recent tip BPS ≥ this (default **80**), even if
-/// feeder briefly dips below keep. Live: tip_bps=162 feeder=5 ewma=554 (≥500) OPEN'd
-/// the hero → same cascade. E11 illusory health was ~64 BPS with feeder=0.
+/// E16b: skip GD_SLOW rotate when recent *or stream* tip BPS ≥ this (default **0** = off).
+/// Ship: KEEP-hold is opt-in (`BLVM_IBD_A6M_GD_SLOW_TIP_BPS_KEEP=80`). Live: tip_bps=162
+/// feeder=5 ewma=554 (≥500) OPEN'd the hero → same cascade. dest-ax 226k: cheese sit
+/// dropped height recent_bps below min while stream was 92; KEEP uses `wan_tip_stream_bps`.
 fn a6m_gd_slow_tip_bps_keep() -> f64 {
     std::env::var("BLVM_IBD_A6M_GD_SLOW_TIP_BPS_KEEP")
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(80.0)
+        .unwrap_or(0.0)
         .clamp(0.0, 400.0)
 }
 
@@ -422,9 +563,117 @@ fn a6m_gd_slow_force_min_tip_bps() -> f64 {
         .clamp(1.0_f64, 200.0_f64)
 }
 
+/// dest-az: protect a just-pinned GD_SLOW `new=` from P1e 120s on first-H mute.
+/// Default **30s** (live gap was 3s). Not dest-aq 180s keep-hot.
+fn gd_slow_pin_protect_secs() -> u64 {
+    std::env::var("BLVM_IBD_GD_SLOW_PIN_PROTECT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30)
+        .clamp(8, 90)
+}
+
+/// R-218 dump freeze: `feeder==0 && rtt>1500 && bps<150` is true for the
+/// whole 0–50k hole (`tip_gd` 373s / sticky 2.5). RTT path stays fat-only.
+const H_SLOW_MIN_HEIGHT: u64 = 180_000;
+/// Dump warehouse rotate: R-222 5–6k **109 BPS** with `reorder=4096`,
+/// `feeder=0`, GetData ewma **169ms** (RTT path silent). Same WIDTH as farms.
+const DUMP_WAREHOUSE_REORDER: u64 = 2048;
+
+/// R-219: default 15s `tip_owner_fail` expired and `74.167` re-won exclusive-H
+/// four times (`[IBD_H_SLOW]` 10, 180–200k **60**). Mute already uses **120s**.
+const H_SLOW_COOLDOWN_SECS: u64 = 120;
+
+/// R-334: fat-RTT H rotation is **off** by default (opt-in
+/// `BLVM_IBD_H_SLOW_ROTATE=1`). The predicate (`feeder==0 && gd>1500ms &&
+/// bps<60`, ≥180k) was derived when tip GetData→body was ~700ms (R-213); in
+/// the R-328–R-333 crawl p50 GetData→body is 4–8s and BPS 32–94, so it is
+/// simply true: `[IBD_H_SLOW]` 18× in R-273 (1580s) vs 226/249/**333**× in
+/// R-328/R-332/R-333, each one a 120s tip ban plus
+/// `force_release_peer_inflight` — the owner's ranges leave the assigner
+/// book and are re-issued elsewhere while its fetch task still has them in
+/// flight (RESEND / PRIORITY_ZONE duplicates). `[IBD_MS_BREAKDOWN]` binder
+/// `gd_slow` grew 31.8% → 39.5% → 46.8% of wall over the same runs. Same
+/// negative-sign family as the closed aborts / 10s far-ahead re-request /
+/// tip trials. Dump-warehouse rotate (<180k) is unchanged.
+pub(crate) fn h_slow_rotate_enabled() -> bool {
+    matches!(
+        std::env::var("BLVM_IBD_H_SLOW_ROTATE").ok().as_deref(),
+        Some("1") | Some("true") | Some("on") | Some("yes")
+    )
+}
+
+static LAST_H_SLOW_GD_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Height whose quiet tip cover has already been re-raced once (R-273). One racer per H.
+static TIP_RERACE_HEIGHT: AtomicU64 = AtomicU64::new(0);
+
+/// Exclusive-H GetData analog of `header_batch_rtt_should_rotate`.
+///
+/// R-218: same sample (`rtt_ms=762279`) rotated 24× and left `sticky=-`.
+/// One shot per `last_getdata_body_ms`. Dump RTT path stays off.
+///
+/// Replay:
+/// - R-218 h=66, 373s, bps 2.5, feeder 0 → false
+/// - R-213 200–248k: 700ms / 300 BPS → false
+/// - R-250 191773: 1716ms / **115.3** BPS → **false** (was true at cutoff 150)
+/// - R-250 194348: 1540ms / **16.1** BPS → true (mute still rotates)
+/// - R-217 2750ms / 70 BPS → **false** (70 is line-rate; cutoff is 60 not 150)
+pub(crate) fn body_h_rtt_should_rotate(
+    latency_ms: f64,
+    sticky_bps: f64,
+    feeder: u64,
+    next_needed: u64,
+    already_rotated_this_gd: bool,
+) -> bool {
+    next_needed >= H_SLOW_MIN_HEIGHT
+        && feeder == 0
+        && latency_ms > 1500.0
+        && sticky_bps < 60.0
+        && !already_rotated_this_gd
+}
+
+/// R-224: `[IBD_H_SLOW]` rotated `73.164` (sticky_recv **64.9** > top **42.4**)
+/// onto farm-score `216.230` → 194–195k **34 BPS**. Recv leader is already
+/// the H pipe. Unknown cache is not a hold (R-217 2750/70 still rotates).
+pub(crate) fn h_slow_recv_leader_holds(sticky_recv_mbps: f64, top_recv_mbps: f64) -> bool {
+    sticky_recv_mbps >= top_recv_mbps
+}
+
+/// R-226 190–200k **176**: H-slow pinned score-successor `18.194`, then sticky
+/// became `36.225` recv **0.1** vs farms **947–2053**. Only rotate onto a
+/// ready worker whose CRAWL recv is **strictly above** sticky. Equal/unknown
+/// cand is not a beat (hold the pipe).
+pub(crate) fn h_slow_recv_successor_beats(sticky_recv_mbps: f64, cand_recv_mbps: f64) -> bool {
+    cand_recv_mbps > sticky_recv_mbps
+}
+
+/// Dump Face-2: farms already hold ≥WIDTH while apply sleeps on H.
+/// R-218 empty-hole (`reorder=0`, 373s GetData) stays off. Flood dump
+/// (`bps≥150`) stays off. One shot per GetData sample + successor pin.
+pub(crate) fn body_dump_warehouse_should_rotate(
+    sticky_bps: f64,
+    feeder: u64,
+    next_needed: u64,
+    reorder_ahead: u64,
+    already_rotated_this_gd: bool,
+) -> bool {
+    next_needed < H_SLOW_MIN_HEIGHT
+        && feeder == 0
+        && sticky_bps < 150.0
+        && reorder_ahead >= DUMP_WAREHOUSE_REORDER
+        && !already_rotated_this_gd
+}
+
+#[cfg(test)]
+pub(crate) fn test_reset_h_slow_gd() {
+    LAST_H_SLOW_GD_MS.store(0, Ordering::Relaxed);
+}
+
 include!("chunk_assigner_parts/impl_assign.rs");
 include!("chunk_assigner_parts/impl_tip_hole.rs");
 include!("chunk_assigner_parts/impl_flight.rs");
+include!("chunk_assigner_parts/impl_window.rs");
 
 /// Re-queues chunk on drop if not disarmed. Prevents chunk loss on panic/task-cancel/any exit.
 pub(crate) struct ChunkGuard {
@@ -461,7 +710,7 @@ impl Drop for ChunkGuard {
             if let Some(peer_id) = self.peer_id.take() {
                 self.assigner.on_chunk_complete_range(&peer_id, start, end);
             }
-            self.assigner.requeue(start, end, exclude);
+            self.assigner.requeue_reason(start, end, exclude, "guard_drop");
         } else if let Some(peer_id) = self.peer_id.take() {
             self.assigner.on_chunk_complete(&peer_id);
         }

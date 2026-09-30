@@ -61,6 +61,11 @@ impl NetworkManager {
             }
         };
 
+        if crate::network::ibd_peers_pinned() {
+            info!("IBD: skipping DNS seeds — BLVM_IBD_PIN_PEERS set");
+            return Ok(());
+        }
+
         info!("Discovering peers from DNS seeds for {}", network);
         let timing_config_default = crate::config::NetworkTimingConfig::default();
         let timing_config = config
@@ -90,6 +95,10 @@ impl NetworkManager {
     /// keep the complete blockchain and can serve historical blocks for IBD.  Call this when
     /// the standard seed returns mostly pruned peers that cannot serve historical blocks.
     pub async fn discover_archive_peers_from_dns(&self) -> Result<usize> {
+        if crate::network::ibd_peers_pinned() {
+            info!("IBD: skipping archive DNS seeds — BLVM_IBD_PIN_PEERS set");
+            return Ok(0);
+        }
         use crate::network::dns_seeds;
         let seeds = dns_seeds::MAINNET_ARCHIVE_DNS_SEEDS;
         info!(
@@ -227,6 +236,24 @@ impl NetworkManager {
 
     /// Connect to peers from address database when below target count
     pub async fn connect_peers_from_database(&self, target_count: usize) -> Result<usize> {
+        if crate::network::ibd_peers_pinned() {
+            let current: std::collections::HashSet<SocketAddr> = {
+                let pm = self.peer_manager_mutex().lock().await;
+                pm.peer_socket_addresses().into_iter().collect()
+            };
+            let mut connected = 0usize;
+            for addr in crate::network::ibd_pin_peers() {
+                if current.contains(&addr) {
+                    continue;
+                }
+                match self.connect_to_peer(addr).await {
+                    Ok(()) => connected += 1,
+                    Err(e) => debug!("IBD pin reconnect {} failed: {e}", addr),
+                }
+            }
+            return Ok(connected);
+        }
+
         let current_count = self.peer_count();
         if current_count >= target_count {
             return Ok(0);
@@ -277,10 +304,21 @@ impl NetworkManager {
             }
         }
 
+        // R-347: during a live IBD session race more candidates per call. R-346 top-up ticks
+        // connected 3–10 of the 30–44 needed from `needed × 2` sockets (stale seed
+        // addresses); the attempts run concurrently so a wider fan-out costs little.
+        let fanout: usize =
+            if crate::node::parallel_ibd::PARALLEL_IBD_SESSION_ACTIVE
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                4
+            } else {
+                2
+            };
         let addresses: Vec<_> = {
             let db = self.address_database().read().await;
             // IBD-biased ordering: full-history peers first, unknown second, pruned last.
-            let fresh = db.get_fresh_ibd_addresses(needed * 3);
+            let fresh = db.get_fresh_ibd_addresses(needed * (fanout + 1));
             db.filter_addresses(fresh, &ban_list, &connected_peers)
         };
 
@@ -293,7 +331,7 @@ impl NetworkManager {
             let db = self.address_database().read().await;
             addresses
                 .iter()
-                .take(needed * 2)
+                .take(needed * fanout)
                 .map(|addr| db.network_addr_to_socket(addr))
                 .collect()
         };
@@ -345,6 +383,22 @@ impl NetworkManager {
         target_peer_count: usize,
     ) -> Result<()> {
         use super::lan_discovery;
+
+        if crate::network::ibd_peers_pinned() {
+            let pinned = crate::network::ibd_pin_peers();
+            info!(
+                "[IBD_PINNED_PEERS] n={} — skip DNS/LAN/Iroh, connect exactly this set",
+                pinned.len()
+            );
+            for addr in &pinned {
+                self.add_persistent_peer(*addr);
+                match self.connect_to_peer(*addr).await {
+                    Ok(()) => info!("[IBD_PINNED_PEERS] connected {}", addr),
+                    Err(e) => warn!("[IBD_PINNED_PEERS] connect {} failed: {e}", addr),
+                }
+            }
+            return Ok(());
+        }
 
         info!(
             "Peer discovery in progress — IBD block downloads start once peers connect (typically 15–60s on first start)"
@@ -455,25 +509,15 @@ impl NetworkManager {
             }
         }
 
-        if !self.dos_protection().check_connection(ip).await {
+        // R-357: throttle our own dial rate, never ban the target for it. The old branch
+        // auto-banned 11 productive IBD peers for 3600 s in R-356 (remote evicted our fresh
+        // inbound every 1–2 s → immediate reconnect → 10 dials / 60 s → ban). Inbound
+        // floods still go through `check_connection` + `should_auto_ban` elsewhere.
+        if !self.dos_protection().check_outbound_connection(ip).await {
             warn!(
                 "Connection rate limit exceeded for IP {}, rejecting outgoing connection",
                 ip
             );
-            if self.dos_protection().should_auto_ban(ip).await {
-                warn!(
-                    "Auto-banning IP {} for repeated connection rate violations",
-                    ip
-                );
-                let ban_duration = self.dos_protection().ban_duration_seconds();
-                let unban_timestamp = current_timestamp() + ban_duration;
-                let mut ban_list = self.ban_list().write().await;
-                ban_list.insert(addr, unban_timestamp);
-                return Err(anyhow::anyhow!(
-                    "IP {} is banned due to connection rate violations",
-                    ip
-                ));
-            }
             return Err(anyhow::anyhow!(
                 "Connection rate limit exceeded for IP {}",
                 ip
@@ -496,7 +540,10 @@ impl NetworkManager {
 
         for transport_type in transports_to_try {
             match self.try_connect_with_transport(&transport_type, addr).await {
-                Ok((peer, transport_addr)) => {
+                Ok((mut peer, transport_addr)) => {
+                    if crate::network::ibd_pin_contains(addr) {
+                        peer.set_is_manual(true);
+                    }
                     {
                         let mut pm = self.peer_manager_mutex().lock().await;
                         pm.add_peer(transport_addr.clone(), peer)?;

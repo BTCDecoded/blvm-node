@@ -38,6 +38,15 @@ impl NetworkManager {
         };
 
         let local_height = storage.chain().get_height()?.unwrap_or(0);
+        // IBD owns GetHeaders/GetData from genesis. A height-0 inv probe
+        // registered on peers[0] and poisoned the header FIFO (R-48 640k sit;
+        // R-49 100k sit after CATCH_UP timeout + mass disconnect).
+        if local_height == 0
+            || crate::node::parallel_ibd::PARALLEL_IBD_SESSION_ACTIVE
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(());
+        }
         let blockstore = storage.blocks();
         let peer_key = peer_addr.to_string();
 

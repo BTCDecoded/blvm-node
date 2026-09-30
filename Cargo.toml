@@ -423,6 +423,11 @@ path = "examples/strip_bodies_range.rs"
 required-features = ["production", "heed3", "ibd-dev"]
 
 [[example]]
+name = "copy_height_keys"
+path = "examples/copy_height_keys.rs"
+required-features = ["production", "heed3", "ibd-dev"]
+
+[[example]]
 name = "recover_ckpt_slot"
 path = "examples/recover_ckpt_slot.rs"
 required-features = ["production", "heed3", "ibd-dev"]

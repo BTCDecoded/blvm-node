@@ -75,16 +75,71 @@ fn seed_entry_from_utxo(
     batch_items.push((out_key, header, utxo.script_pubkey.as_ref().to_vec()));
 }
 
+/// Refuse truncated / poisoned snapshots before `finalize_seed`.
+/// dest-ak 8.2M@516k vs last_accepted 16.8M must not re-seed.
+fn seed_count_must_be_healthy(
+    checkpoint_height: i32,
+    total: usize,
+    expected_count: Option<u64>,
+    last_accepted: u64,
+) -> Result<()> {
+    if total == 0 && checkpoint_height > 0 {
+        anyhow::bail!(
+            "checkpoint tree empty at height {} — export incomplete or wrong slot",
+            checkpoint_height
+        );
+    }
+    if let Some(expected) = expected_count {
+        if expected > 0 && total as u64 != expected {
+            let delta = (total as u64).abs_diff(expected);
+            // Live 2026-07-16: tree 98581399 vs meta 98581401 (Δ=2) after
+            // Emergency checkpoint race — exact match refused seed forever.
+            const MAX_EXPORT_META_SLACK: u64 = 16;
+            if delta > MAX_EXPORT_META_SLACK {
+                anyhow::bail!(
+                    "IBD engine seed: imported {} UTXOs but chain_info expected {} \
+                     at height {} (Δ={}) — checkpoint incomplete/poisoned (refusing seed)",
+                    total,
+                    expected,
+                    checkpoint_height,
+                    delta
+                );
+            }
+            warn!(
+                "IBD engine seed: imported {} UTXOs vs chain_info expected {} at h={} \
+                 (Δ={}) — accepting within slack {}",
+                total, expected, checkpoint_height, delta, MAX_EXPORT_META_SLACK
+            );
+        }
+    }
+    if !crate::storage::ibd_autorepair::checkpoint_utxo_count_monotonic(
+        checkpoint_height as u64,
+        total as u64,
+        last_accepted,
+    ) {
+        anyhow::bail!(
+            "IBD engine seed: imported {} UTXOs at height {} fails \
+             monotonicity (last_accepted={}) — checkpoint poisoned (refusing seed)",
+            total,
+            checkpoint_height,
+            last_accepted
+        );
+    }
+    Ok(())
+}
+
 /// Rebuild engine state from the durable checkpoint tree at `checkpoint_height`.
 ///
 /// The tree must be an exact snapshot (clear + write export). Returns the number of UTXOs imported.
 ///
 /// Peak memory: O(SEED_BATCH × 56 B × 2) ≈ 6 MB — safe on an 8 GB Raspberry Pi 5.
+/// `last_accepted` is the previously committed persist count (0 if none).
 pub fn seed_from_ibd_utxos(
     db: &UtxoDatabase,
     tree: &dyn Tree,
     checkpoint_height: i32,
     expected_count: Option<u64>,
+    last_accepted: u64,
     codec: ValueCodec,
 ) -> Result<usize> {
     use std::cell::Cell;
@@ -172,50 +227,12 @@ pub fn seed_from_ibd_utxos(
                         let seg = writer
                             .join()
                             .map_err(|_| anyhow::anyhow!("ibd-seed-writer thread panicked"))??;
-                        if total == 0 && checkpoint_height > 0 {
-                            anyhow::bail!(
-                                "checkpoint tree empty at height {} — export incomplete or wrong slot",
-                                checkpoint_height
-                            );
-                        }
-                        if let Some(expected) = expected_count {
-                            if expected > 0 && total as u64 != expected {
-                                let delta = (total as u64).abs_diff(expected);
-                                // Live 2026-07-16: tree 98581399 vs meta 98581401 (Δ=2) after
-                                // Emergency checkpoint race — exact match refused seed forever.
-                                const MAX_EXPORT_META_SLACK: u64 = 16;
-                                if delta > MAX_EXPORT_META_SLACK {
-                                    anyhow::bail!(
-                                        "IBD engine seed: imported {} UTXOs but chain_info expected {} \
-                                         at height {} (Δ={}) — checkpoint incomplete/poisoned (refusing seed)",
-                                        total,
-                                        expected,
-                                        checkpoint_height,
-                                        delta
-                                    );
-                                }
-                                warn!(
-                                    "IBD engine seed: imported {} UTXOs vs chain_info expected {} at h={} \
-                                     (Δ={}) — accepting within slack {}",
-                                    total,
-                                    expected,
-                                    checkpoint_height,
-                                    delta,
-                                    MAX_EXPORT_META_SLACK
-                                );
-                            }
-                        }
-                        if !crate::storage::ibd_autorepair::checkpoint_utxo_count_plausible(
-                            checkpoint_height as u64,
-                            total as u64,
-                        ) {
-                            anyhow::bail!(
-                                "IBD engine seed: imported {} UTXOs at height {} fails \
-                                 plausibility — checkpoint poisoned (refusing seed)",
-                                total,
-                                checkpoint_height
-                            );
-                        }
+                        seed_count_must_be_healthy(
+                            checkpoint_height,
+                            total,
+                            expected_count,
+                            last_accepted,
+                        )?;
                         db.finalize_seed(seg, checkpoint_height);
                         db.flush_table_tail()?;
                         #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
@@ -294,47 +311,12 @@ pub fn seed_from_ibd_utxos(
         anyhow::bail!("ibd-seed-writer thread exited early; disk segment may be incomplete");
     }
 
-    if total == 0 && checkpoint_height > 0 {
-        anyhow::bail!(
-            "checkpoint tree empty at height {} — export incomplete or wrong slot",
-            checkpoint_height
-        );
-    }
-
-    if let Some(expected) = expected_count {
-        if expected > 0 && total as u64 != expected {
-            let delta = (total as u64).abs_diff(expected);
-            // Live 2026-07-16: tree 98581399 vs meta 98581401 (Δ=2) after
-            // Emergency checkpoint race — exact match refused seed forever.
-            const MAX_EXPORT_META_SLACK: u64 = 16;
-            if delta > MAX_EXPORT_META_SLACK {
-                anyhow::bail!(
-                    "IBD engine seed: imported {} UTXOs but chain_info expected {} \
-                     at height {} (Δ={}) — checkpoint incomplete/poisoned (refusing seed)",
-                    total,
-                    expected,
-                    checkpoint_height,
-                    delta
-                );
-            }
-            warn!(
-                "IBD engine seed: imported {} UTXOs vs chain_info expected {} at h={} \
-                 (Δ={}) — accepting within slack {}",
-                total, expected, checkpoint_height, delta, MAX_EXPORT_META_SLACK
-            );
-        }
-    }
-    if !crate::storage::ibd_autorepair::checkpoint_utxo_count_plausible(
-        checkpoint_height as u64,
-        total as u64,
-    ) {
-        anyhow::bail!(
-            "IBD engine seed: imported {} UTXOs at height {} fails \
-             plausibility — checkpoint poisoned (refusing seed)",
-            total,
-            checkpoint_height
-        );
-    }
+    seed_count_must_be_healthy(
+        checkpoint_height,
+        total,
+        expected_count,
+        last_accepted,
+    )?;
 
     // Register segment + commit watermark (contiguous_length + GC fence).
     db.finalize_seed(seg, checkpoint_height);
@@ -471,4 +453,30 @@ pub fn bootstrap_ckpt_from_legacy_standalone(
         total, ckpt_tree_name, write_slot, checkpoint_height
     );
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::seed_count_must_be_healthy;
+
+    #[test]
+    fn seed_refuses_dest_ak_drop_vs_last_accepted() {
+        assert!(
+            seed_count_must_be_healthy(516_773, 8_236_260, Some(8_236_260), 16_800_000).is_err(),
+            "dest-ak 8.2M vs last_accepted 16.8M must refuse seed"
+        );
+        assert!(
+            seed_count_must_be_healthy(516_773, 8_236_260, Some(8_236_260), 0).is_err(),
+            "dest-ak 8.2M@516k fails height*18 even with no last_accepted"
+        );
+        assert!(seed_count_must_be_healthy(
+            340_000,
+            16_800_000,
+            Some(16_800_000),
+            16_800_000
+        )
+        .is_ok());
+        assert!(seed_count_must_be_healthy(340_000, 16_800_000, Some(16_800_000), 0).is_ok());
+        assert!(seed_count_must_be_healthy(0, 0, None, 0).is_ok());
+    }
 }

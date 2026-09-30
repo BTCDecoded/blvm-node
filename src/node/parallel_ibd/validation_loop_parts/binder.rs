@@ -37,6 +37,17 @@ fn async_engine_append_enabled() -> bool {
     }
 }
 
+/// R-360: number of `ibd-engine-prep` threads between the orchestrator and the serial append
+/// thread (txid SHA256d + output cache, formerly on the orchestrator's dispatch). `0` keeps
+/// the R-359 behaviour (prep on the orchestrator). Default **2**, clamp 0–8.
+/// `BLVM_IBD_PREP_THREADS`.
+fn engine_prep_threads() -> usize {
+    match std::env::var("BLVM_IBD_PREP_THREADS") {
+        Ok(v) => v.trim().parse::<usize>().unwrap_or(2).min(8),
+        Err(_) => 2,
+    }
+}
+
 /// Opt in: `BLVM_IBD_BINDER_LOG=1` (or `true`/`on`). Default **off**.
 /// Soak harness (`wan-bench-common.sh`) forces `=1` — emit `[IBD_BINDER]` / `[IBD_SLOW_STRETCH]`.
 fn binder_log_enabled() -> bool {
@@ -66,8 +77,12 @@ fn classify_ibd_binder(
         return "ENGINE_PRESSURE";
     }
     // Tip missing on the wire / awaiting getdata→body.
-    if await_ms >= 200 || (feeder == 0 && holes > 0 && contig == 0) {
-        return "SUPPLY_TIP_HOLE";
+    if await_ms >= 200 {
+        return "SUPPLY_TIP_HOLE_ABSENT";
+    }
+    // Body may already be in reorder/bridge, but the feeder has a hole below it.
+    if feeder == 0 && holes > 0 && contig == 0 {
+        return "SUPPLY_TIP_HOLE_STAGED";
     }
     if tip_failover {
         return "SUPPLY_FAILOVER";
@@ -95,6 +110,51 @@ fn classify_ibd_binder(
     }
     // Feeder stocked, pressure calm — scripts/engine/retire path.
     "ENGINE_OR_SCRIPTS"
+}
+
+/// R-302: one line per >2s tip_hole wait (R-301: 114 events owned 54% of hole seconds).
+pub(crate) fn maybe_log_tip_hole_anatomy(
+    h: u64,
+    wait_ms: u64,
+    binder: &str,
+    feeder: usize,
+    holes: u64,
+    contig: u64,
+) {
+    if wait_ms < 2000 || !binder.starts_with("SUPPLY_TIP_HOLE") {
+        return;
+    }
+    let gd_peer = super::tip_stage::getdata_peer_for(h);
+    let gd_outstanding_ms = super::ms_breakdown::assigned_ms_ago(h);
+    let in_reorder = super::IBD_TIP_IN_REORDER.load(Ordering::Relaxed);
+    let bridge_pending = memory::BRIDGE_PENDING_COUNT.load(Ordering::Relaxed);
+    let reorder_ahead = super::IBD_REORDER_AHEAD.load(Ordering::Relaxed);
+    let body_await_ms = super::tip_stage::tip_awaiting_ms_for_cap();
+    let soft_retry = super::tip_stage::tip_ahead_frozen_for_soft_retry();
+    let late_body = super::tip_stage::tip_ahead_frozen_for_late_body();
+    let soft_retries = super::tip_stage::tip_soft_retries();
+    let peer_rx = 0usize; // R-303: dropped the underflowed depth counter.
+    let prior_discard = crate::node::parallel_ibd::body_dup::height_was_discarded(h);
+    tracing::warn!(
+        "[IBD_TIP_HOLE_ANATOMY] h={} wait_ms={} binder={} gd_peer={} gd_outstanding_ms={} in_reorder={} bridge_pending={} reorder_ahead={} feeder={} holes={} contig={} body_await_ms={} soft_retry={} late_body_freeze={} soft_retries={} peer_rx_depth={} prior_discard={}",
+        h,
+        wait_ms,
+        binder,
+        gd_peer.as_deref().unwrap_or("-"),
+        gd_outstanding_ms,
+        in_reorder,
+        bridge_pending,
+        reorder_ahead,
+        feeder,
+        holes,
+        contig,
+        body_await_ms,
+        soft_retry,
+        late_body,
+        soft_retries,
+        peer_rx,
+        prior_discard
+    );
 }
 
 /// Block-counter for throttling `evict_aggressive_for_rss`. The function walks every DashMap
@@ -390,6 +450,7 @@ fn dynamic_prefetch_lookahead(level: PressureLevel, nominal: usize) -> usize {
 #[inline]
 fn pipeline_depth_for_engine_append(nominal: usize) -> usize {
     let slow_pct = crate::storage::ibd_engine::memory_age::memory_age_throttle_slow_pct();
+    crate::node::parallel_ibd::ms_breakdown::note_slow_pct(slow_pct);
     if slow_pct == 0 {
         return nominal;
     }
@@ -449,12 +510,23 @@ fn pipeline_depth_for_pressure(level: PressureLevel, nominal: usize) -> usize {
             nominal = (nominal / 2).max(8);
         }
     }
-    match effective_pressure_for_tip_crawl(level) {
+    let live = match effective_pressure_for_tip_crawl(level) {
         PressureLevel::Emergency => (nominal / 4).max(4),
         PressureLevel::Critical => (nominal / 2).max(8),
         PressureLevel::Elevated => (nominal * 3 / 4).max(12),
         PressureLevel::None => nominal,
+    };
+    static LAST_LIVE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+    let prev = LAST_LIVE.swap(live as u64, std::sync::atomic::Ordering::Relaxed);
+    crate::node::parallel_ibd::ms_breakdown::note_eff_depth(live);
+    if prev != live as u64 {
+        crate::node::parallel_ibd::memory::log_pressure_behavior(
+            "pipeline_depth",
+            if live < nominal { "shrink" } else { "hold_configured" },
+            &format!("configured={nominal} live={live}"),
+        );
     }
+    live
 }
 
 /// How often the orchestrator polls MemoryGuard + engine spill in engine mode.
@@ -1536,6 +1608,147 @@ struct EngineAppendJob {
     cached_network_time: u64,
     ibd_block_outputs:
         Option<Arc<rustc_hash::FxHashMap<blvm_consensus::OutPoint, Arc<blvm_consensus::UTXO>>>>,
+    /// R-360: when true the orchestrator skipped txid SHA and the output cache; the append
+    /// thread computes both (`tx_ids` arrives empty, `ibd_block_outputs` arrives `None`).
+    prep_deferred: bool,
+}
+
+/// R-361: the orchestrator held the **last** reference to every validated block (`[ARC_BLOCK_ENTRY_SC]
+/// sc_after_block_arc_drop=1` on the skip path) and paid its deallocation — ~10–20k small frees
+/// for a 2015 block — inside `drain` (0.40 / 0.60 ms/block at 300k+, the whole "drain residual"
+/// after the R-360 timers found `skipchk` 0.01 and `flush` 0.00). Hand the last refs to one
+/// `ibd-drop` thread instead. `BLVM_IBD_DEFERRED_DROP=0` restores the inline drop.
+struct DeferredDrop {
+    block: Arc<Block>,
+    witnesses: Arc<Vec<Vec<Witness>>>,
+    undo_log: Option<blvm_consensus::reorganization::BlockUndoLog>,
+}
+
+fn deferred_drop_enabled() -> bool {
+    match std::env::var("BLVM_IBD_DEFERRED_DROP") {
+        Ok(v) => {
+            let t = v.trim();
+            !(t == "0" || t.eq_ignore_ascii_case("false") || t.eq_ignore_ascii_case("off"))
+        }
+        Err(_) => true,
+    }
+}
+
+/// Owns the `ibd-drop` thread; `Drop` closes the queue and joins (all exit paths).
+struct DeferredDropper {
+    tx: Option<crossbeam_channel::Sender<DeferredDrop>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl DeferredDropper {
+    fn spawn() -> Self {
+        let (tx, rx) = crossbeam_channel::unbounded::<DeferredDrop>();
+        let handle = std::thread::Builder::new()
+            .name("ibd-drop".into())
+            .spawn(move || {
+                while let Ok(item) = rx.recv() {
+                    let t0 = Instant::now();
+                    drop(item);
+                    crate::node::parallel_ibd::ms_breakdown::note_deferred_drop_us(
+                        t0.elapsed().as_micros() as u64,
+                    );
+                }
+            })
+            .expect("spawn IBD deferred-drop thread");
+        Self {
+            tx: Some(tx),
+            handle: Some(handle),
+        }
+    }
+    fn disabled() -> Self {
+        Self {
+            tx: None,
+            handle: None,
+        }
+    }
+    /// Queue the block's last references for off-thread deallocation; returns `false`
+    /// (and drops inline) when the dropper is off or gone.
+    fn send(&self, item: DeferredDrop) -> bool {
+        match self.tx.as_ref() {
+            Some(tx) => tx.send(item).is_ok(),
+            None => false,
+        }
+    }
+    fn close_and_join(&mut self) {
+        drop(self.tx.take());
+        if let Some(h) = self.handle.take() {
+            if let Err(e) = h.join() {
+                warn!("IBD deferred-drop join error: {:?}", e);
+            }
+        }
+    }
+}
+
+impl Drop for DeferredDropper {
+    fn drop(&mut self) {
+        self.close_and_join();
+    }
+}
+
+/// R-360: height-ordered reassembly for the serial append thread. The prep pool returns jobs
+/// out of order; `SpendSession::append` must see `first, first+1, …` exactly once each.
+struct InOrderJobs<T> {
+    next: u64,
+    pending: std::collections::BTreeMap<u64, T>,
+}
+
+impl<T> InOrderJobs<T> {
+    fn new(first_height: u64) -> Self {
+        Self {
+            next: first_height,
+            pending: std::collections::BTreeMap::new(),
+        }
+    }
+    /// `Err((next, job))` when `height` is below the next expected height (already consumed).
+    fn push(&mut self, height: u64, job: T) -> Result<(), (u64, T)> {
+        if height < self.next {
+            return Err((self.next, job));
+        }
+        self.pending.insert(height, job);
+        Ok(())
+    }
+    /// The next in-order job, if it has arrived. Advances `next`.
+    fn pop_ready(&mut self) -> Option<T> {
+        let job = self.pending.remove(&self.next)?;
+        self.next += 1;
+        Some(job)
+    }
+    fn next_height(&self) -> u64 {
+        self.next
+    }
+    fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+}
+
+/// R-360: the per-block prep the orchestrator used to do at dispatch — serial txid SHA256d
+/// and (below assume-valid) the block output cache — now run on the append thread.
+/// Fills `tx_ids` when empty; returns the output cache exactly as dispatch built it.
+fn engine_prep_deferred(
+    block: &blvm_consensus::Block,
+    height: u64,
+    assume_valid_height: u64,
+    tx_ids: &mut Vec<Hash>,
+) -> Option<Arc<rustc_hash::FxHashMap<blvm_consensus::OutPoint, Arc<blvm_consensus::UTXO>>>> {
+    if tx_ids.is_empty() {
+        crate::storage::disk_utxo::compute_tx_ids_only(block, tx_ids);
+    }
+    if height < assume_valid_height {
+        Some(Arc::new(
+            blvm_consensus::utxo_overlay::build_block_output_utxo_cache(
+                block,
+                tx_ids.as_slice(),
+                height,
+            ),
+        ))
+    } else {
+        None
+    }
 }
 
 struct LegacyValidateJob {
@@ -1576,8 +1789,6 @@ struct ValidateResult {
     engine_append_ms: u64,
     /// Engine Phase 2 query+fetch time (worker thread).
     engine_complete_ms: u64,
-    /// Per-block MuHash contribution (engine mode only; folded in-order by orchestrator).
-    block_muhash: Option<blvm_muhash::MuHash3072>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1639,6 +1850,9 @@ struct InFlightEntry {
 fn run_validation_worker_shared(
     rx: crossbeam_channel::Receiver<ValidateJob>,
     tx: crossbeam_channel::Sender<ValidateResult>,
+    // R-359: per-block MuHash subs leave on this side channel *after* the result is sent, so
+    // the fold is off the head-of-line path the orchestrator blocks on.
+    mh_tx: crossbeam_channel::Sender<super::muhash_fold::MuHashSub>,
     parallel_ibd: Arc<super::ParallelIBD>,
     blockstore: Arc<crate::storage::blockstore::BlockStore>,
     protocol: Arc<blvm_protocol::BitcoinProtocolEngine>,
@@ -1840,7 +2054,6 @@ fn run_validation_worker_shared(
                     view_build_ms,
                     engine_append_ms: 0,
                     engine_complete_ms: 0,
-                    block_muhash: None,
                 });
 
                 let cap = max_pending_ops.load(Ordering::Relaxed);
@@ -1891,7 +2104,6 @@ fn run_validation_worker_shared(
                             view_build_ms: 0,
                             engine_append_ms: ej.engine_append_ms,
                             engine_complete_ms: 0,
-                            block_muhash: None,
                         });
                         continue;
                     }
@@ -1980,21 +2192,13 @@ fn run_validation_worker_shared(
                     Ok((_ids, delta, undo)) => (Ok(delta), undo),
                     Err(e) => (Err(e), blvm_consensus::reorganization::BlockUndoLog::new()),
                 };
-                let block_muhash =
-                    if crate::config::ibd::ibd_engine_muhash_enabled() && result.is_ok() {
-                        let mut sub = blvm_muhash::MuHash3072::new();
-                        crate::storage::ibd_utxo_muhash::fold_block_engine_muhash(
-                            ej.block_arc.as_ref(),
-                            &ej.tx_ids,
-                            height,
-                            &session,
-                            &mut sub,
-                        );
-                        Some(sub)
-                    } else {
-                        None
-                    };
-                let vr = ValidateResult {
+                // R-359: the MuHash fold (~2 µs/element, ≈ 7.5 ms at 340–370k) used to run
+                // here, before the send — i.e. on the head-of-line path the orchestrator blocks
+                // on in `collect_wait`. Send (or park) the result first; fold afterwards and
+                // ship the sub on the side channel. The orchestrator folds in height order.
+                let result_ok = result.is_ok();
+                let fold_muhash = result_ok && crate::config::ibd::ibd_engine_muhash_enabled();
+                let mut vr_opt = Some(ValidateResult {
                     height,
                     result,
                     undo_log,
@@ -2003,15 +2207,16 @@ fn run_validation_worker_shared(
                     view_build_ms,
                     engine_append_ms: ej.engine_append_ms,
                     engine_complete_ms,
-                    block_muhash,
-                };
+                });
                 // A3: if connect parked ECDSA SoA, submit to wave and continue collecting.
                 #[cfg(all(feature = "production"))]
                 {
-                    if vr.result.is_ok() {
+                    if result_ok {
                         if let Some(soa) = blvm_consensus::ecdsa_wave::take_parked() {
                             let wrx = blvm_consensus::ecdsa_wave::submit(height, soa);
-                            wave_pending.push(WavePending { vr, rx: wrx });
+                            if let Some(vr) = vr_opt.take() {
+                                wave_pending.push(WavePending { vr, rx: wrx });
+                            }
                             // Join this height before taking more work when pending==1 would
                             // otherwise HOL the orch (in_flight=1 VALRES_STALL). Overlap only
                             // when wave_depth allows multiple pending ECDSA joins.
@@ -2022,15 +2227,97 @@ fn run_validation_worker_shared(
                                 // Safe default: complete ECDSA before next collect.
                                 block_wave_oldest(&mut wave_pending, &tx);
                             }
-                            continue;
                         }
                     }
                 }
-                let _ = tx.send(vr);
+                if let Some(vr) = vr_opt {
+                    let _ = tx.send(vr);
+                }
+                if fold_muhash {
+                    let t_mh = std::time::Instant::now();
+                    let mut sub = blvm_muhash::MuHash3072::new();
+                    crate::storage::ibd_utxo_muhash::fold_block_engine_muhash(
+                        ej.block_arc.as_ref(),
+                        &ej.tx_ids,
+                        height,
+                        &session,
+                        &mut sub,
+                    );
+                    let _ = mh_tx.send(super::muhash_fold::MuHashSub {
+                        height,
+                        sub,
+                        compute_us: t_mh.elapsed().as_micros() as u64,
+                    });
+                }
                 continue;
             }
         }
     }
+}
+
+/// R-359: non-blocking — pull every sub that has arrived and fold the contiguous prefix.
+fn muhash_fold_ready(
+    folder: &mut super::muhash_fold::InOrderMuHashFolder,
+    rx: &crossbeam_channel::Receiver<super::muhash_fold::MuHashSub>,
+    acc: &Arc<Mutex<blvm_muhash::MuHash3072>>,
+) {
+    while let Ok(s) = rx.try_recv() {
+        folder.push(s);
+    }
+    let us = {
+        let mut g = acc.lock();
+        folder.fold_ready(&mut g)
+    };
+    super::ms_breakdown::note_engine_muhash_us(us);
+}
+
+/// R-359 barrier: block until every sub for heights ≤ `through` is folded. Used before the
+/// periodic running-state persist and at shutdown, so a persisted MuHash never lags the
+/// height it is stamped with. Errors if the channel closes (or 60 s pass) with a gap left.
+fn muhash_fold_through(
+    folder: &mut super::muhash_fold::InOrderMuHashFolder,
+    rx: &crossbeam_channel::Receiver<super::muhash_fold::MuHashSub>,
+    acc: &Arc<Mutex<blvm_muhash::MuHash3072>>,
+    through: u64,
+) -> Result<()> {
+    const MUHASH_BARRIER_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+    muhash_fold_ready(folder, rx, acc);
+    let started = std::time::Instant::now();
+    while folder.folded_through() < through {
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(s) => {
+                folder.push(s);
+                muhash_fold_ready(folder, rx, acc);
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                warn!(
+                    "[IBD_MUHASH_BARRIER] waiting for MuHash sub h={} (need through {}, pending={}, {}s)",
+                    folder.folded_through() + 1,
+                    through,
+                    folder.pending_len(),
+                    started.elapsed().as_secs()
+                );
+                if started.elapsed() >= MUHASH_BARRIER_LIMIT {
+                    return Err(anyhow::anyhow!(
+                        "IBD MuHash fold: sub for h={} never arrived (need through {})",
+                        folder.folded_through() + 1,
+                        through
+                    ));
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                muhash_fold_ready(folder, rx, acc);
+                if folder.folded_through() < through {
+                    return Err(anyhow::anyhow!(
+                        "IBD MuHash fold: workers gone with sub for h={} missing (need through {})",
+                        folder.folded_through() + 1,
+                        through
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Adapt `max_pending_ops` online based on RSS pressure and pending-log fill ratio.
@@ -2182,6 +2469,9 @@ pub struct ValidationParams {
     pub local_replay_max_height: u64,
     /// When `Some(h)`, periodic checkpoint export is deferred until validation passes `h`.
     pub engine_gap_export_defer_until: Option<u64>,
+    /// Assigner handle so feeder stalls under leftover cheese can arm GetData
+    /// without waiting on a silent coordinator (live 70705 / 1080s abort).
+    pub assigner: Arc<super::chunk_assigner::ChunkAssigner>,
 }
 
 /// Join in-flight async block flushes and persist any deferred batch before validation workers

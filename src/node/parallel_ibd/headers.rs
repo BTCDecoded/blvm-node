@@ -87,6 +87,31 @@ impl HeaderSyncResult {
     }
 }
 
+/// Sequential GetHeaders only rotated on send-fail / empty-not-tip / chain-break.
+/// Timeout default is 5s (`BLVM_IBD_HEADERS_TIMEOUT`), so a peer that answers
+/// slowly still sticks for the whole 967k walk.
+///
+/// R-214 COMPLETE **19466 h/s** ⇒ ~103ms per 2000-header batch. Stays.
+/// R-215 COMPLETE **1127 h/s** / **857.9s** ⇒ ~1770ms/batch, never rotated.
+/// 400ms = 4× the R-214 batch. Replay: 103 → false; 1770 → true.
+pub(crate) fn header_batch_rtt_should_rotate(latency_ms: f64) -> bool {
+    latency_ms > 400.0
+}
+
+/// BIP130 empty HEADERS means *this peer's* tip. dest-bg: a LIMITED/mute
+/// peer returned empty at genesis → COMPLETE height 0 against target ~964k,
+/// then CATCH_UP 480s backoff. Empty with **no progress** is rotate, not tip.
+pub(crate) fn empty_headers_is_ibd_tip(
+    fetched_tip: u64,
+    start_height: u64,
+    end_height: u64,
+) -> bool {
+    if fetched_tip >= end_height {
+        return true;
+    }
+    fetched_tip + 1 > start_height
+}
+
 /// H08: child links to parent when parent header is stored, else compare to expected hash bytes.
 fn header_links_to_parent(
     blockstore: &BlockStore,
@@ -102,6 +127,54 @@ fn header_links_to_parent(
         }
     }
     Ok(header.prev_block_hash == *last_hash)
+}
+
+/// Bitcoin Core-style GetHeaders locator heights (tip, tip-1, … then doubling).
+///
+/// A single-hash locator at a skipped stored tip (leftover dest 961637) makes every
+/// public peer answer from genesis (`6fe28c0a…`) when that hash is unknown — leftover
+/// peer-rotate then loops forever (`leftover-c1t-recv0` 5976×).
+pub(crate) fn ibd_header_locator_heights(last_known_height: u64) -> Vec<u64> {
+    let mut out = Vec::with_capacity(32);
+    let mut h = last_known_height;
+    let mut step = 1u64;
+    loop {
+        out.push(h);
+        if h == 0 || out.len() >= 32 {
+            break;
+        }
+        if out.len() > 10 {
+            step = step.saturating_mul(2);
+        }
+        h = h.saturating_sub(step);
+    }
+    if out.last() != Some(&0) {
+        out.push(0);
+    }
+    out
+}
+
+fn ibd_header_locator_hashes(
+    blockstore: &BlockStore,
+    last_known_height: u64,
+    last_hash: &[u8; 32],
+) -> Result<Vec<[u8; 32]>> {
+    let mut hashes = Vec::with_capacity(32);
+    for h in ibd_header_locator_heights(last_known_height) {
+        if h == last_known_height {
+            hashes.push(*last_hash);
+            continue;
+        }
+        match blockstore.get_hash_by_height(h)? {
+            Some(stored) => hashes.push(stored),
+            None if h == 0 => hashes.push(GENESIS_BLOCK_HASH_INTERNAL),
+            None => {}
+        }
+    }
+    if hashes.is_empty() {
+        hashes.push(*last_hash);
+    }
+    Ok(hashes)
 }
 
 /// Download headers for a range starting from the given locator hash.
@@ -721,7 +794,11 @@ pub(crate) async fn download_headers(
 
         let get_headers = GetHeadersMessage {
             version: 70015,
-            block_locator_hashes: vec![last_hash],
+            block_locator_hashes: ibd_header_locator_hashes(
+                blockstore,
+                current_height.saturating_sub(1),
+                &last_hash,
+            )?,
             hash_stop: [0; 32],
         };
 
@@ -762,12 +839,25 @@ pub(crate) async fn download_headers(
                     peer_addr,
                     latency_ms as u64
                 );
-                consecutive_failures = 0;
 
                 if headers.is_empty() {
+                    let fetched_tip = current_height.saturating_sub(1);
+                    if !empty_headers_is_ibd_tip(fetched_tip, start_height, end_height) {
+                        warn!(
+                            "[IBD_HEADER_EMPTY] peer={} fetched_tip={} start={} end={} — not IBD tip; rotate",
+                            peer_addr, fetched_tip, start_height, end_height
+                        );
+                        consecutive_failures += 1;
+                        current_peer_idx += 1;
+                        if let Some(idx) = peer_addrs.iter().position(|&a| a == peer_addr) {
+                            let p = peer_addrs.remove(idx);
+                            peer_addrs.push(p);
+                        }
+                        continue;
+                    }
                     info!(
                         "Header sync COMPLETE at height {} (chain tip reached)",
-                        current_height.saturating_sub(1)
+                        fetched_tip
                     );
                     break;
                 }
@@ -798,12 +888,65 @@ pub(crate) async fn download_headers(
                     }
 
                     if !header_links_to_parent(blockstore, header, current_height, &last_hash)? {
-                        return Err(anyhow::anyhow!(
-                            "Header chain break at height {}: expected prev {} got {}",
+                        // Live 2026-08-20: skip-to-tip + one-hash locator → genesis-start.
+                        // leftover-c1t-recv0: peer rotate never rewound last_hash (5976×).
+                        if let Ok(Some(attach_h)) =
+                            blockstore.get_height_by_hash(&header.prev_block_hash)
+                        {
+                            if attach_h > 0 && attach_h + 1 < current_height {
+                                warn!(
+                                    "[IBD_HEADER_REWIND] attach prev height {} → ask {} (was {}) peer={}",
+                                    attach_h,
+                                    attach_h + 1,
+                                    current_height,
+                                    peer_addr
+                                );
+                                last_hash = header.prev_block_hash;
+                                current_height = attach_h + 1;
+                                consecutive_failures = 0;
+                                batch_entries.clear();
+                                break;
+                            }
+                        }
+                        if header.prev_block_hash == GENESIS_BLOCK_HASH_INTERNAL
+                            && current_height > 1
+                        {
+                            let back = 2048u64.min(current_height.saturating_sub(1));
+                            let new_h = current_height - back;
+                            if let Ok(Some(hh)) =
+                                blockstore.get_hash_by_height(new_h.saturating_sub(1))
+                            {
+                                warn!(
+                                    "[IBD_HEADER_REWIND] genesis-start at {} — step back to {} peer={}",
+                                    current_height, new_h, peer_addr
+                                );
+                                current_height = new_h;
+                                last_hash = hh;
+                                consecutive_failures = 0;
+                                batch_entries.clear();
+                                break;
+                            }
+                        }
+                        warn!(
+                            "[IBD_HEADER_PEER] chain break at height {} from {}: expected prev {} got {} — trying next peer",
                             current_height,
+                            peer_addr,
                             hex::encode(last_hash),
                             hex::encode(header.prev_block_hash)
-                        ));
+                        );
+                        current_peer_idx += 1;
+                        consecutive_failures += 1;
+                        if consecutive_failures >= headers_max_failures {
+                            return Err(anyhow::anyhow!(
+                                "Header chain break at height {}: expected prev {} got {} ({} peers failed)",
+                                current_height,
+                                hex::encode(last_hash),
+                                hex::encode(header.prev_block_hash),
+                                consecutive_failures
+                            ));
+                        }
+                        batch_entries.clear();
+                        break;
                     }
 
                     let mut header_data = [0u8; 80];
@@ -826,6 +969,10 @@ pub(crate) async fn download_headers(
                 }
 
                 let batch_count = batch_entries.len();
+                if batch_count == 0 {
+                    continue;
+                }
+                consecutive_failures = 0;
                 debug!("Storing {} headers in batch...", batch_count);
                 let store_start = std::time::Instant::now();
                 let blockstore_clone = blockstore.clone();
@@ -840,6 +987,13 @@ pub(crate) async fn download_headers(
                     batch_count,
                     store_start.elapsed()
                 );
+                if header_batch_rtt_should_rotate(latency_ms) {
+                    warn!(
+                        "[IBD_HEADER_SLOW] peer={} rtt_ms={:.0} n={} — rotate",
+                        peer_addr, latency_ms, batch_count
+                    );
+                    current_peer_idx += 1;
+                }
 
                 if current_height > last_progress_log && current_height - last_progress_log >= 20000
                 {
@@ -1014,6 +1168,19 @@ mod n13_tests {
     }
 
     #[test]
+    fn ibd_header_locator_heights_doubles_after_ten_steps() {
+        let hs = ibd_header_locator_heights(20);
+        assert_eq!(hs[0], 20);
+        assert_eq!(&hs[0..10], &[20, 19, 18, 17, 16, 15, 14, 13, 12, 11]);
+        assert!(hs.contains(&0), "locator must include genesis");
+        let high = ibd_header_locator_heights(961_637);
+        assert_eq!(high[0], 961_637);
+        assert!(high.len() > 12);
+        assert_eq!(*high.last().unwrap(), 0);
+        assert!(high.contains(&961_628));
+    }
+
+    #[test]
     fn n13_schedule_covers_all_ranges_with_one_inflight_per_peer() {
         let peer_count = 3;
         let range_count = 7;
@@ -1052,5 +1219,27 @@ mod n13_tests {
         assert_eq!(assigned.len(), 3);
         let peers_used: std::collections::HashSet<_> = assigned.iter().map(|(p, _)| *p).collect();
         assert_eq!(peers_used.len(), 3);
+    }
+
+    #[test]
+    fn r216_header_slow_rtt_rotates_r215_stays_on_r214() {
+        // R-214 ~103ms/batch (19466 h/s). R-215 ~1770ms/batch (1127 h/s).
+        assert!(!header_batch_rtt_should_rotate(103.0));
+        assert!(!header_batch_rtt_should_rotate(400.0));
+        assert!(header_batch_rtt_should_rotate(401.0));
+        assert!(header_batch_rtt_should_rotate(1770.0));
+    }
+
+    #[test]
+    fn dest_bg_empty_headers_at_genesis_is_not_ibd_tip() {
+        // dest-bg 2026-08-25T07:21Z: empty getheaders at height 1 → COMPLETE 0
+        // against target 963969. Rotate, do not declare tip.
+        assert!(!empty_headers_is_ibd_tip(0, 1, 963_969));
+        assert!(
+            empty_headers_is_ibd_tip(961_638, 1, 963_969),
+            "progress then empty is BIP130 this-peer tip (dest-bf 961k complete)"
+        );
+        assert!(empty_headers_is_ibd_tip(963_969, 1, 963_969));
+        assert!(!empty_headers_is_ibd_tip(499_999, 500_000, 963_969));
     }
 }

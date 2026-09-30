@@ -85,6 +85,7 @@ static CHECKPOINT_GC_FENCE: AtomicI32 = AtomicI32::new(i32::MAX);
 /// concurrent `scan_live_at_height(checkpoint_height)`.
 pub fn set_gc_fence(checkpoint_height: i32) {
     CHECKPOINT_GC_FENCE.store(checkpoint_height, Ordering::Release);
+    note_gc_fence_high_water(checkpoint_height);
     tracing::debug!(
         "IBD engine GC fence set to {} — cross-checkpoint GC disabled for Delete > {}",
         checkpoint_height,
@@ -103,6 +104,7 @@ pub fn advance_gc_fence_to(height: i32) {
         return;
     }
     let prev = CHECKPOINT_GC_FENCE.fetch_max(height, Ordering::AcqRel);
+    note_gc_fence_high_water(height);
     if height > prev {
         tracing::info!(
             "IBD engine GC fence advanced {} → {} (gap replay — disk/memory compaction may GC spent pairs)",
@@ -116,6 +118,71 @@ pub fn advance_gc_fence_to(height: i32) {
 /// same GC rules as memory-level merges.
 pub fn gc_fence_snapshot() -> i32 {
     CHECKPOINT_GC_FENCE.load(Ordering::Acquire)
+}
+
+/// Highest **finite** fence ever applied in this process (`i32::MAX` = "no fence" is not
+/// recorded). Pairs with `Delete.height <= high_water` may already be gone, so no snapshot
+/// may ever be labelled **below** this height — the export scheduler checks it (R-352).
+static GC_FENCE_HIGH_WATER: AtomicI32 = AtomicI32::new(0);
+
+fn note_gc_fence_high_water(height: i32) {
+    if height > 0 && height != i32::MAX {
+        GC_FENCE_HIGH_WATER.fetch_max(height, Ordering::AcqRel);
+    }
+}
+
+/// See [`GC_FENCE_HIGH_WATER`]. `0` when no finite fence was ever set.
+pub fn gc_fence_high_water() -> i32 {
+    GC_FENCE_HIGH_WATER.load(Ordering::Acquire)
+}
+
+/// Next scheduled checkpoint height (`last_exported + interval`), published by the export
+/// thread every tick. The between-export fence advance never passes it, so a lagged or
+/// refused-and-retried export at that height still finds every Add it needs (R-351: every
+/// export ran 20k behind validation via LAG_EXEMPT; with a 100k interval a refused persist
+/// would otherwise retry below the high-water forever and the thread could never exit).
+static NEXT_CHECKPOINT_TARGET: AtomicI32 = AtomicI32::new(0);
+
+pub fn set_next_checkpoint_target(height: i32) {
+    NEXT_CHECKPOINT_TARGET.store(height.max(0), Ordering::Release);
+}
+
+pub fn next_checkpoint_target() -> i32 {
+    NEXT_CHECKPOINT_TARGET.load(Ordering::Acquire)
+}
+
+/// R-352: let the fence follow validation **between** exports, not only during gap replay.
+///
+/// With exports 100k apart (`BLVM_IBD_CHECKPOINT_INTERVAL`), a fence parked at the last
+/// export height means every spend after it is un-GC-able: memory merges and disk
+/// compactions report `GC'd 0`, the cold journal grows toward
+/// `CHECKPOINT_COMPACT_INPUT_TARGET` and the journal scaler drags the interval back to 10k.
+/// Advancing to the validated height is safe **only while no export scan is running** —
+/// the caller passes that (`IBD_CHECKPOINT_EXPORT_ACTIVE`); during a scan the fence must
+/// stay at the checkpoint height so Adds live at `ckpt` but spent later survive the scan.
+/// The next export must then be labelled at or above [`gc_fence_high_water`].
+pub fn advance_gc_fence_between_exports(height: i32, export_active: bool) -> bool {
+    if export_active || height <= 0 {
+        return false;
+    }
+    // Clamp to the next scheduled checkpoint; unknown target (thread not ticked yet) → wait.
+    let target = next_checkpoint_target();
+    if target <= 0 {
+        return false;
+    }
+    let height = height.min(target);
+    let prev = CHECKPOINT_GC_FENCE.fetch_max(height, Ordering::AcqRel);
+    note_gc_fence_high_water(height);
+    if height > prev {
+        tracing::info!(
+            "IBD engine GC fence advanced {} → {} (between exports — compaction may GC spent pairs)",
+            prev,
+            height
+        );
+        true
+    } else {
+        false
+    }
 }
 
 // ─── Directory ───────────────────────────────────────────────────────────────
@@ -132,6 +199,54 @@ pub struct Directory {
     prefix_bits: u32,
 }
 
+/// Ceiling on directory prefix bits — a **RAM bound**, not a sizing policy.
+///
+/// `directory_prefix_bits` self-sizes to ~85 entries per bucket; this only caps how far
+/// it may go. Whenever the cap binds, bucket width — and therefore bytes pread per point
+/// lookup — grows linearly with segment size.
+///
+/// **20 was still binding.** R-273 live 340–370k averaged **29.9 KiB per pread** (max 273
+/// KiB) against the ~4.7 KB design target, which is 587 GB read between 180k and 370k and
+/// 1.13 GB/s sustained through the last band. Synthetic sweep at 100M entries in one
+/// segment, varying only this ceiling:
+///
+/// | bits | KiB/pread | disk_ms | directory RAM |
+/// |------|-----------|---------|---------------|
+/// | 16   | 83.5      | 11.5    | 0.25 MiB      |
+/// | 18   | 20.9      |  4.1    | 1 MiB         |
+/// | 20   |  5.2      |  2.3    | 4 MiB         |
+/// | 21   |  2.6      |  1.4    | 8 MiB         |
+///
+/// Every bit halves bytes read. 24 lets the formula self-size to ~1.4B entries and costs
+/// at most 64 MiB per mega segment (4 B per bucket); only mega segments ever reach it.
+///
+/// Safe to change: `prefix_bits` is derived from `entry_count` on every directory build,
+/// including segment load, and is never persisted.
+pub(crate) const DIRECTORY_PREFIX_BITS_MAX: u32 = 20;
+
+/// Sweep override for [`DIRECTORY_PREFIX_BITS_MAX`] (`BLVM_IBD_DIR_PREFIX_BITS_MAX`).
+///
+/// Safe to retune: `prefix_bits` is **derived** from `entry_count` every time a
+/// directory is built, including [`Directory::build_streaming`] on segment load, and is
+/// never persisted - there is no on-disk format to migrate.
+pub(crate) fn directory_prefix_bits_max() -> u32 {
+    std::env::var("BLVM_IBD_DIR_PREFIX_BITS_MAX")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DIRECTORY_PREFIX_BITS_MAX)
+        .clamp(4, 28)
+}
+
+/// Target ~85 entries per bucket (85 × 56 B ≈ 4.7 KB).
+pub(crate) fn directory_prefix_bits(entry_count: usize) -> u32 {
+    if entry_count <= 128 {
+        4
+    } else {
+        let ratio = (entry_count / 85).max(1);
+        (usize::BITS - ratio.leading_zeros()).clamp(4, directory_prefix_bits_max())
+    }
+}
+
 impl Directory {
     pub fn build(entries: &[OutputKV]) -> Self {
         if entries.is_empty() {
@@ -142,14 +257,7 @@ impl Directory {
         }
         // Target ~85 entries per bucket (85 × 52B ≈ 4420B ≈ 4 KB).
         let n = entries.len();
-        let raw_bits = if n <= 128 {
-            4u32
-        } else {
-            // ceil_log2(n / 85) clamped to [4, 16]
-            let ratio = (n / 85).max(1);
-            (usize::BITS - ratio.leading_zeros()).clamp(4, 16)
-        };
-        let prefix_bits = raw_bits;
+        let prefix_bits = directory_prefix_bits(n);
         let num_buckets = 1usize << prefix_bits;
         let mut buckets = vec![0u32; num_buckets + 1];
 
@@ -198,7 +306,7 @@ impl Directory {
 
     /// Build a directory by streaming `entry_count` entries from `reader`.
     /// The reader must be positioned at the first entry (i.e. just after the
-    /// segment header). Uses O(`2^prefix_bits`) memory — at most 256 KB.
+    /// segment header). Uses O(`2^prefix_bits`) memory — at most 4 MiB at 20 bits.
     pub(super) fn build_streaming(
         reader: &mut super::disk_segment::SegmentReader,
         entry_count: usize,
@@ -209,12 +317,7 @@ impl Directory {
                 prefix_bits: 1,
             });
         }
-        let prefix_bits = if entry_count <= 128 {
-            4u32
-        } else {
-            let ratio = (entry_count / 85).max(1);
-            (usize::BITS - ratio.leading_zeros()).clamp(4, 16)
-        };
+        let prefix_bits = directory_prefix_bits(entry_count);
         let num_buckets = 1usize << prefix_bits;
         let mut bucket_start = vec![0u32; num_buckets + 1];
         let mut cur_bucket = 0usize;
@@ -235,6 +338,49 @@ impl Directory {
             buckets: bucket_start,
             prefix_bits,
         })
+    }
+
+    /// dest-bc pair GC: size the bloom to **actual** entries, not `COMPACT_MAX` capacity
+    /// (20M-cap bloom for a 2M survivor chunk was leftover dest-bc index RAM).
+    pub(super) fn build_streaming_with_bloom(
+        reader: &mut super::disk_segment::SegmentReader,
+        entry_count: usize,
+    ) -> anyhow::Result<(Self, BloomFilter)> {
+        if entry_count == 0 {
+            return Ok((
+                Self {
+                    buckets: vec![0, 0],
+                    prefix_bits: 1,
+                },
+                BloomFilter::new_for_capacity(1),
+            ));
+        }
+        let prefix_bits = directory_prefix_bits(entry_count);
+        let num_buckets = 1usize << prefix_bits;
+        let mut bucket_start = vec![0u32; num_buckets + 1];
+        let mut cur_bucket = 0usize;
+        let mut i = 0usize;
+        let mut filter = BloomFilter::new_for_capacity(entry_count);
+        while let Some(kv) = reader.advance()? {
+            filter.insert(&kv.key);
+            let prefix = key_prefix(&kv.key, prefix_bits) as usize;
+            while cur_bucket <= prefix {
+                bucket_start[cur_bucket] = i as u32;
+                cur_bucket += 1;
+            }
+            i += 1;
+        }
+        while cur_bucket <= num_buckets {
+            bucket_start[cur_bucket] = entry_count as u32;
+            cur_bucket += 1;
+        }
+        Ok((
+            Self {
+                buckets: bucket_start,
+                prefix_bits,
+            },
+            filter,
+        ))
     }
 }
 
@@ -855,6 +1001,46 @@ mod tests {
         set_gc_fence(i32::MAX);
     }
 
+    /// R-352: between exports the fence follows validation unless an export scan is active;
+    /// the high-water mark remembers the highest finite fence so a later export cannot be
+    /// labelled below a height whose spent pairs may already be GC'd.
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn r352_fence_follows_validation_between_exports_and_keeps_high_water() {
+        set_gc_fence(300_000);
+        let hw0 = gc_fence_high_water();
+        assert!(hw0 >= 300_000);
+        // Export scan running: no advance.
+        set_next_checkpoint_target(400_000);
+        assert!(!advance_gc_fence_between_exports(310_000, true));
+        assert_eq!(gc_fence_snapshot(), 300_000);
+        // Unknown target: no advance.
+        set_next_checkpoint_target(0);
+        assert!(!advance_gc_fence_between_exports(310_000, false));
+        assert_eq!(gc_fence_snapshot(), 300_000);
+        // No export: advance, and the high-water follows.
+        set_next_checkpoint_target(400_000);
+        assert!(advance_gc_fence_between_exports(310_000, false));
+        assert_eq!(gc_fence_snapshot(), 310_000);
+        assert!(gc_fence_high_water() >= 310_000);
+        // Never past the next scheduled checkpoint (lagged export at 400k must stay valid).
+        assert!(advance_gc_fence_between_exports(450_000, false));
+        assert_eq!(gc_fence_snapshot(), 400_000);
+        assert!(!advance_gc_fence_between_exports(460_000, false));
+        assert_eq!(gc_fence_snapshot(), 400_000);
+        set_gc_fence(310_000);
+        // Monotonic.
+        assert!(!advance_gc_fence_between_exports(305_000, false));
+        assert_eq!(gc_fence_snapshot(), 310_000);
+        // A refused export lowers the live fence but not the high-water.
+        set_gc_fence(300_000);
+        assert_eq!(gc_fence_snapshot(), 300_000);
+        assert!(gc_fence_high_water() >= 310_000);
+        // "No fence" is not a high-water.
+        set_gc_fence(i32::MAX);
+        assert!(gc_fence_high_water() < i32::MAX);
+    }
+
     #[serial_test::serial(ibd)]
     #[test]
     fn test_bloom_no_false_negatives() {
@@ -909,6 +1095,60 @@ mod tests {
             let found = run.entries[lo..hi].iter().any(|e| e.key == k);
             assert!(found, "directory missed key {i}");
         }
+    }
+
+    /// dest-bc 660k avg 251 KiB pread with `preads≈cands` is a 16-bit mega-seg bucket,
+    /// not F19 glue. 20 bits brings that size back to dest-ba ~16 KiB.
+    #[test]
+    fn dest_bc_660k_megaseg_prefix_bits_20_matches_dest_ba_bucket() {
+        let kv = OutputKV::SIZE;
+        // dest-ba 660k ~15 KiB buckets stay under the old 16-bit clamp.
+        let small = directory_prefix_bits(10_000);
+        assert!(small <= 16, "10k-entry segs must not take the dest-bc mega clamp");
+
+        // dest-bc 251 KiB avg ≈ 300M uniform entries at 16 bits.
+        let n = 300_000_000usize;
+        // R-276 raised this ceiling to 24 so 300M would self-size to 22 instead of
+        // clamping. Live 340-370k went the wrong way (29.9 -> 34.1 KiB/pread, wall
+        // 1580s -> 1900s): the ceiling was not what bound the live mega-seg, so the
+        // synthetic model above does not describe it. Back at 20, which clamps.
+        assert_eq!(DIRECTORY_PREFIX_BITS_MAX, 20);
+        assert_eq!(directory_prefix_bits(n), DIRECTORY_PREFIX_BITS_MAX);
+        let bucket_16 = n / (1usize << 16);
+        let bucket_20 = n / (1usize << 20);
+        let kb_16 = bucket_16 * kv / 1024;
+        let kb_20 = bucket_20 * kv / 1024;
+        assert!(
+            kb_16 >= 200,
+            "16-bit clamp must reproduce dest-bc 251 KiB buckets, got {kb_16}"
+        );
+        assert!(
+            kb_20 <= 20,
+            "20-bit clamp must match dest-ba ~15 KiB buckets, got {kb_20}"
+        );
+        // 20M-entry spill (common mega) was 17 KiB @16 bits; 20 bits keeps ~4 KiB target.
+        let n20m = 20_000_000usize;
+        let bits_20m = directory_prefix_bits(n20m);
+        assert!(bits_20m >= 18);
+        let kb_20m = n20m / (1usize << bits_20m) * kv / 1024;
+        assert!(kb_20m <= 8, "20M-entry mega must stay ~4 KiB, got {kb_20m}");
+
+        // dest-bc leftover index RAM: 7×300M blooms vs dest-ba-like 20M chunks.
+        let bloom_mega = BloomFilter::new_for_capacity(n).mem_bytes();
+        let bloom_20m = BloomFilter::new_for_capacity(n20m).mem_bytes();
+        let bloom_2m = BloomFilter::new_for_capacity(2_000_000).mem_bytes();
+        assert!(
+            bloom_mega >= 400 * 1024 * 1024,
+            "300M dest-bc mega bloom must be ~450 MiB, got {bloom_mega}"
+        );
+        assert!(
+            bloom_20m * 10 < bloom_mega,
+            "20M compact-cap bloom must be ≪ mega bloom: 20M={bloom_20m} mega={bloom_mega}"
+        );
+        assert!(
+            bloom_2m < bloom_20m,
+            "pair-GC survivor bloom must not inherit 20M cap: 2M={bloom_2m} 20M={bloom_20m}"
+        );
     }
 
     #[serial_test::serial(ibd)]

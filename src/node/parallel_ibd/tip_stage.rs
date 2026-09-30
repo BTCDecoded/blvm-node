@@ -22,15 +22,19 @@
 //! lead made every tip roll look already late → sticky dual / W35 ahead stayed frozen
 //! while tip micro-advanced. Freeze trusts only `getdata >= needed` (post-roll).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
-use tracing::{debug, warn};
+use std::time::{Duration, Instant};
+use tracing::warn;
 
 /// Recent GetData / body wall-ms by height (survives tip-tracker roll).
 struct RecentStamps {
     getdata: HashMap<u64, u64>,
     body: HashMap<u64, u64>,
+    bytes: HashMap<u64, u64>,
+    /// First GetData peer for this height (B1 per-peer EWMA).
+    getdata_peer: HashMap<u64, String>,
 }
 
 fn recent_stamps() -> &'static Mutex<RecentStamps> {
@@ -39,6 +43,8 @@ fn recent_stamps() -> &'static Mutex<RecentStamps> {
         Mutex::new(RecentStamps {
             getdata: HashMap::new(),
             body: HashMap::new(),
+            bytes: HashMap::new(),
+            getdata_peer: HashMap::new(),
         })
     })
 }
@@ -100,6 +106,16 @@ static SOFT_RETRIES: AtomicU64 = AtomicU64::new(0);
 static GETDATA_BODY_EWMA_MS: AtomicU64 = AtomicU64::new(0);
 static GETDATA_BODY_EWMA_N: AtomicU64 = AtomicU64::new(0);
 
+struct PeerGdEwma {
+    ms: u64,
+    n: u64,
+}
+
+fn peer_gd_ewmas() -> &'static Mutex<HashMap<String, PeerGdEwma>> {
+    static M: OnceLock<Mutex<HashMap<String, PeerGdEwma>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Coordinator `live_body_tip` mirror — validation is in tip-crawl when `HEIGHT >` this.
 static WAN_BODY_TIP: AtomicU64 = AtomicU64::new(0);
 /// Wall-ms of last `[IBD_TIP_LOCAL_STREAM]` (disk fill at tip).
@@ -138,6 +154,263 @@ static DUTY_TIP_LAST_MS: AtomicU64 = AtomicU64::new(0);
 static DUTY_IA_SUM_MS: AtomicU64 = AtomicU64::new(0);
 static DUTY_IA_N: AtomicU64 = AtomicU64::new(0);
 static DUTY_LOG_LAST_MS: AtomicU64 = AtomicU64::new(0);
+/// Last emitted DUTY window (copy-and-zero). CRAWL reprints without resetting.
+static LAST_DUTY_MS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static LAST_DUTY_IA_AVG: AtomicU64 = AtomicU64::new(0);
+static LAST_DUTY_IA_N: AtomicU64 = AtomicU64::new(0);
+static LAST_DUTY_FRAC8_X10: AtomicU64 = AtomicU64::new(0);
+static LAST_DUTY_FRAC32_X10: AtomicU64 = AtomicU64::new(0);
+static LAST_BODY_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_BODY_IA_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_BODY_BYTES: AtomicU64 = AtomicU64::new(0);
+static LAST_GD_BODY_MS: AtomicU64 = AtomicU64::new(0);
+static BODY_IA_WIN_SUM_MS: AtomicU64 = AtomicU64::new(0);
+static BODY_IA_WIN_N: AtomicU64 = AtomicU64::new(0);
+
+/// Origin-arm n=5: fast owner IA median 3–5 ms vs slow 19 ms. Midpoint is 10 ms.
+pub(crate) const OWNER_IA_DEMOTE_MEDIAN_MS: u64 = 10;
+const OWNER_IA_RING: usize = 32;
+const OWNER_IA_DEMOTE_MIN_N: usize = 16;
+/// R-62: at most one empty-band sample trial before H=50k.
+static EMPTY_BAND_SAMPLE_TRIALS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn empty_band_sample_trials() -> u64 {
+    EMPTY_BAND_SAMPLE_TRIALS.load(Ordering::Relaxed)
+}
+
+pub(crate) fn note_empty_band_sample_trial() {
+    EMPTY_BAND_SAMPLE_TRIALS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Ignition H tournament: cap 4 on the same 1-32, n≥16 qualifies, close at 2s
+/// only for flood-class (IA≤1). Mesh IA stays open until H=64 (R-67: ia_ms=2 won).
+const TOURNAMENT_MIN_N: u64 = 16;
+const TOURNAMENT_FLOOD_IA_MS: u64 = 1;
+const TOURNAMENT_TIMEOUT: Duration = Duration::from_secs(2);
+
+struct TourRacer {
+    n: u64,
+    last: Instant,
+    ia_sum_ms: u64,
+}
+
+impl TourRacer {
+    fn ia_avg_ms(&self) -> Option<u64> {
+        if self.n < 2 {
+            return None;
+        }
+        Some(self.ia_sum_ms / self.n.saturating_sub(1))
+    }
+}
+
+struct Tournament {
+    closed: bool,
+    timeout: bool,
+    started: Option<Instant>,
+    winner: Option<String>,
+    racers: HashMap<String, TourRacer>,
+}
+
+impl Tournament {
+    fn new() -> Self {
+        Self {
+            closed: false,
+            timeout: false,
+            started: None,
+            winner: None,
+            racers: HashMap::new(),
+        }
+    }
+}
+
+fn tournament() -> &'static Mutex<Tournament> {
+    static T: OnceLock<Mutex<Tournament>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new(Tournament::new()))
+}
+
+pub(crate) fn tournament_closed() -> bool {
+    tournament().lock().map(|g| g.closed).unwrap_or(true)
+}
+
+pub(crate) fn tournament_winner() -> Option<String> {
+    tournament().lock().ok()?.winner.clone()
+}
+
+pub(crate) fn tournament_racer_ids() -> Vec<String> {
+    tournament()
+        .lock()
+        .map(|g| g.racers.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+pub(crate) fn tournament_note_assign(peer: &str) {
+    let Ok(mut g) = tournament().lock() else {
+        return;
+    };
+    if g.closed {
+        return;
+    }
+    if g.started.is_none() {
+        g.started = Some(Instant::now());
+        warn!(
+            "[IBD_TOURNAMENT_START] peer={} — ignition 1-32 cap=4",
+            peer
+        );
+    }
+    g.racers.entry(peer.to_string()).or_insert(TourRacer {
+        n: 0,
+        last: Instant::now(),
+        ia_sum_ms: 0,
+    });
+}
+
+pub(crate) fn tournament_note_body(peer: &str) {
+    let Ok(mut g) = tournament().lock() else {
+        return;
+    };
+    if g.closed {
+        return;
+    }
+    let now = Instant::now();
+    let r = g.racers.entry(peer.to_string()).or_insert(TourRacer {
+        n: 0,
+        last: now,
+        ia_sum_ms: 0,
+    });
+    if r.n >= 1 {
+        let dt = now.saturating_duration_since(r.last).as_millis() as u64;
+        r.ia_sum_ms = r.ia_sum_ms.saturating_add(dt);
+    }
+    r.n = r.n.saturating_add(1);
+    r.last = now;
+}
+
+#[derive(Debug)]
+pub(crate) enum TournamentPoll {
+    None,
+    Win { peer: String, ia_ms: u64, n: u64 },
+    Timeout,
+}
+
+pub(crate) fn tournament_poll() -> TournamentPoll {
+    let Ok(mut g) = tournament().lock() else {
+        return TournamentPoll::None;
+    };
+    if g.closed {
+        return TournamentPoll::None;
+    }
+    // R-66b closed at 36ms on ia_ms=0 n=16. Burst ≠ flood. List-head
+    // holds H until 2s. R-67 then exclusive'd ia_ms=2 → 461 mesh.
+    // WIN only if IA≤1. Else keep the 4 until H=64.
+    if !g.started.is_some_and(|t| t.elapsed() >= TOURNAMENT_TIMEOUT) {
+        return TournamentPoll::None;
+    }
+    let qualified: Vec<(String, u64, u64)> = g
+        .racers
+        .iter()
+        .filter_map(|(p, r)| {
+            if r.n < TOURNAMENT_MIN_N {
+                return None;
+            }
+            Some((p.clone(), r.ia_avg_ms()?, r.n))
+        })
+        .collect();
+    if let Some((peer, ia_ms, n)) = qualified
+        .iter()
+        .filter(|(_, ia, _)| *ia <= TOURNAMENT_FLOOD_IA_MS)
+        .cloned()
+        .min_by_key(|(_, ia, _)| *ia)
+    {
+        g.closed = true;
+        g.winner = Some(peer.clone());
+        warn!(
+            "[IBD_TOURNAMENT_WIN] peer={} ia_ms={} n={} — exclusive H",
+            peer, ia_ms, n
+        );
+        return TournamentPoll::Win { peer, ia_ms, n };
+    }
+    if HEIGHT.load(Ordering::Relaxed) < 64 {
+        return TournamentPoll::None;
+    }
+    g.closed = true;
+    g.timeout = true;
+    warn!("[IBD_TOURNAMENT_TIMEOUT] H>=64 no IA<=1 — cap 4 closed, preferred keeps H");
+    TournamentPoll::Timeout
+}
+
+pub(crate) fn tournament_timed_out() -> bool {
+    tournament().lock().map(|g| g.timeout).unwrap_or(false)
+}
+
+fn reset_tournament() {
+    if let Ok(mut g) = tournament().lock() {
+        *g = Tournament::new();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_seed_tournament_racer(peer: &str, ia_ms: u64, n: u64) {
+    let Ok(mut g) = tournament().lock() else {
+        return;
+    };
+    if g.started.is_none() {
+        g.started = Some(Instant::now());
+    }
+    let intervals = n.saturating_sub(1).max(1);
+    g.racers.insert(
+        peer.to_string(),
+        TourRacer {
+            n,
+            last: Instant::now(),
+            ia_sum_ms: ia_ms.saturating_mul(intervals),
+        },
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn test_backdate_tournament_start_ms(ms: u64) {
+    let Ok(mut g) = tournament().lock() else {
+        return;
+    };
+    g.started = Some(Instant::now() - Duration::from_millis(ms));
+}
+
+fn owner_ia_ring() -> &'static Mutex<VecDeque<u64>> {
+    static M: OnceLock<Mutex<VecDeque<u64>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(VecDeque::with_capacity(OWNER_IA_RING)))
+}
+
+fn note_owner_body_ia(ia_ms: u64) {
+    if let Ok(mut g) = owner_ia_ring().lock() {
+        if g.len() >= OWNER_IA_RING {
+            g.pop_front();
+        }
+        g.push_back(ia_ms);
+    }
+}
+
+/// Trailing-window median of owner body IA (ms). `None` until `min_n` samples.
+pub(crate) fn owner_body_ia_median() -> Option<(u64, usize)> {
+    let Ok(g) = owner_ia_ring().lock() else {
+        return None;
+    };
+    let n = g.len();
+    if n < OWNER_IA_DEMOTE_MIN_N {
+        return None;
+    }
+    let mut v: Vec<u64> = g.iter().copied().collect();
+    v.sort_unstable();
+    Some((v[n / 2], n))
+}
+
+pub(crate) fn clear_owner_body_ia() {
+    if let Ok(mut g) = owner_ia_ring().lock() {
+        g.clear();
+    }
+}
+/// Time-average in_flight range count (sampled under get_work lock).
+static PIPE_W_SUM: AtomicU64 = AtomicU64::new(0);
+static PIPE_W_N: AtomicU64 = AtomicU64::new(0);
 /// Sole GD_SLOW floor latch: after sole floor clamp, block deepen until EWMA
 /// leaves the slow band (`SOLE_FLOOR_RECOVER_MS`, default = gd-slow gate).
 static SOLE_FLOOR_LATCHED: AtomicBool = AtomicBool::new(false);
@@ -311,13 +584,21 @@ fn maybe_log_tip_hole_duty(now: u64) {
         return;
     }
     let pct = |ms: u64| -> f64 { 100.0 * (ms as f64) / (total as f64) };
-    let ia_n = DUTY_IA_N.load(Ordering::Relaxed);
-    let ia_avg = if ia_n > 0 {
-        DUTY_IA_SUM_MS.load(Ordering::Relaxed) / ia_n
-    } else {
-        0
-    };
-    debug!(
+    let ia_n = DUTY_IA_N.swap(0, Ordering::Relaxed);
+    let ia_sum = DUTY_IA_SUM_MS.swap(0, Ordering::Relaxed);
+    let ia_avg = if ia_n > 0 { ia_sum / ia_n } else { 0 };
+    DUTY_MS_B0.store(0, Ordering::Relaxed);
+    DUTY_MS_B1.store(0, Ordering::Relaxed);
+    DUTY_MS_B2.store(0, Ordering::Relaxed);
+    DUTY_MS_B3.store(0, Ordering::Relaxed);
+    DUTY_MS_B4.store(0, Ordering::Relaxed);
+    DUTY_MS_B5.store(0, Ordering::Relaxed);
+    LAST_DUTY_MS_TOTAL.store(total, Ordering::Relaxed);
+    LAST_DUTY_IA_AVG.store(ia_avg, Ordering::Relaxed);
+    LAST_DUTY_IA_N.store(ia_n, Ordering::Relaxed);
+    LAST_DUTY_FRAC8_X10.store((pct(b0) * 10.0) as u64, Ordering::Relaxed);
+    LAST_DUTY_FRAC32_X10.store((pct(b3) * 10.0) as u64, Ordering::Relaxed);
+    warn!(
         "[IBD_TIP_HOLE_DUTY] depth={} ms_total={} frac8={:.1}% frac16={:.1}% frac24={:.1}% frac32={:.1}% frac48={:.1}% frac_gt48={:.1}% tip_ia_avg_ms={} tip_ia_n={}",
         DUTY_DEPTH.load(Ordering::Relaxed),
         total,
@@ -330,6 +611,115 @@ fn maybe_log_tip_hole_duty(now: u64) {
         ia_avg,
         ia_n
     );
+}
+
+/// Last 5s DUTY window (grown-depth occupancy). Zeros until the first DUTY emit.
+pub(crate) fn last_duty_window() -> (u64, u64, u64, f64, f64) {
+    (
+        LAST_DUTY_MS_TOTAL.load(Ordering::Relaxed),
+        LAST_DUTY_IA_AVG.load(Ordering::Relaxed),
+        LAST_DUTY_IA_N.load(Ordering::Relaxed),
+        LAST_DUTY_FRAC8_X10.load(Ordering::Relaxed) as f64 / 10.0,
+        LAST_DUTY_FRAC32_X10.load(Ordering::Relaxed) as f64 / 10.0,
+    )
+}
+
+/// Swap-and-zero body-stamp inter-arrival window (CRAWL 5s).
+pub(crate) fn take_body_ia_window() -> (u64, u64) {
+    let n = BODY_IA_WIN_N.swap(0, Ordering::Relaxed);
+    let sum = BODY_IA_WIN_SUM_MS.swap(0, Ordering::Relaxed);
+    let avg = if n > 0 { sum / n } else { 0 };
+    (avg, n)
+}
+
+/// Peek body-IA window without consuming (MS_BREAKDOWN 2s).
+pub(crate) fn peek_body_ia_window() -> (u64, u64) {
+    let n = BODY_IA_WIN_N.load(Ordering::Relaxed);
+    let sum = BODY_IA_WIN_SUM_MS.load(Ordering::Relaxed);
+    let avg = if n > 0 { sum / n } else { 0 };
+    (avg, n)
+}
+
+/// Sample `in_flight` range count (call while already holding the assigner lock).
+pub(crate) fn note_pipe_w(ranges: u64) {
+    PIPE_W_SUM.fetch_add(ranges, Ordering::Relaxed);
+    PIPE_W_N.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Swap-and-zero time-average W (CRAWL 5s).
+pub(crate) fn take_pipe_w() -> f64 {
+    let n = PIPE_W_N.swap(0, Ordering::Relaxed);
+    let sum = PIPE_W_SUM.swap(0, Ordering::Relaxed);
+    if n > 0 { sum as f64 / n as f64 } else { 0.0 }
+}
+
+pub(crate) fn last_body_ia_ms() -> u64 {
+    LAST_BODY_IA_MS.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+pub(crate) fn test_reset_owner_body_ia() {
+    clear_owner_body_ia();
+}
+
+#[cfg(test)]
+pub(crate) fn test_seed_owner_body_ia(ia_ms: u64, n: usize) {
+    clear_owner_body_ia();
+    for _ in 0..n {
+        note_owner_body_ia(ia_ms);
+    }
+}
+
+pub(crate) fn last_body_bytes() -> u64 {
+    LAST_BODY_BYTES.load(Ordering::Relaxed)
+}
+
+/// Last tip `getdata→body` sojourn (ms). CRAWL `tip_gd_ms` vs global EWMA — B1 "if" visibility.
+pub(crate) fn last_getdata_body_ms() -> u64 {
+    LAST_GD_BODY_MS.load(Ordering::Relaxed)
+}
+
+fn last_gd_body_peer() -> &'static Mutex<Option<String>> {
+    static M: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(None))
+}
+
+pub(crate) fn last_getdata_body_peer_id() -> Option<String> {
+    last_gd_body_peer().lock().ok().and_then(|g| g.clone())
+}
+
+fn store_last_gd_body_peer(peer: Option<String>) {
+    if let Ok(mut g) = last_gd_body_peer().lock() {
+        *g = peer;
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_seed_last_getdata_body_ms(ms: u64) {
+    LAST_GD_BODY_MS.store(ms, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn test_seed_last_getdata_body(ms: u64, peer: &str) {
+    LAST_GD_BODY_MS.store(ms, Ordering::Relaxed);
+    store_last_gd_body_peer(Some(peer.to_string()));
+}
+
+/// Serialized size at `mark_body` (per-height; STAGE reads this height, not last-wins).
+pub(crate) fn note_body_bytes(h: u64, nbytes: u64) {
+    if nbytes == 0 {
+        return;
+    }
+    LAST_BODY_BYTES.store(nbytes, Ordering::Relaxed);
+    if let Ok(mut g) = recent_stamps().lock() {
+        g.bytes.insert(h, nbytes);
+        if g.bytes.len() > 768 {
+            let tip = HEIGHT.load(Ordering::Relaxed);
+            let lo = tip.saturating_sub(64);
+            let hi = tip.saturating_add(512);
+            g.bytes.retain(|&k, _| k >= lo && k <= hi);
+        }
+    }
 }
 
 /// Arm tip failover so ChunkAssigner may allow covering=2 until the tip arrives.
@@ -384,6 +774,17 @@ fn tip_awaiting_body_ms() -> u64 {
 #[inline]
 pub(crate) fn tip_awaiting_secs_for_cap() -> u64 {
     tip_awaiting_ms_for_cap() / 1000
+}
+
+/// First-wins GetData peer for `h`, if one is recorded (R-273 stale-cover re-race).
+///
+/// The incumbent must never re-race itself — a second GetData on the same socket is the
+/// same quiet pipe.
+pub(crate) fn getdata_peer_for(h: u64) -> Option<String> {
+    recent_stamps()
+        .lock()
+        .ok()
+        .and_then(|g| g.getdata_peer.get(&h).cloned())
 }
 
 /// C1t: same tip-wait clock as [`tip_awaiting_secs_for_cap`], in milliseconds.
@@ -685,6 +1086,32 @@ fn is_tracked(h: u64) -> bool {
     HEIGHT.load(Ordering::Relaxed) == h
 }
 
+fn note_peer_gd_ewma(peer: &str, ms: u64) {
+    if peer.is_empty() {
+        return;
+    }
+    let ms = ms.min(60_000);
+    let Ok(mut g) = peer_gd_ewmas().lock() else {
+        return;
+    };
+    let e = g
+        .entry(peer.to_string())
+        .or_insert(PeerGdEwma { ms: 0, n: 0 });
+    e.ms = if e.n == 0 {
+        ms
+    } else {
+        (e.ms.saturating_mul(7).saturating_add(ms)) / 8
+    };
+    e.n = e.n.saturating_add(1);
+    if g.len() > 48 {
+        let mut keys: Vec<(u64, String)> = g.iter().map(|(k, v)| (v.n, k.clone())).collect();
+        keys.sort_unstable_by_key(|(n, _)| *n);
+        for (_, k) in keys.into_iter().take(g.len().saturating_sub(32)) {
+            g.remove(&k);
+        }
+    }
+}
+
 fn note_getdata_body_ewma(ms: u64) {
     let ms = ms.min(60_000);
     let prev = GETDATA_BODY_EWMA_MS.load(Ordering::Relaxed);
@@ -695,6 +1122,17 @@ fn note_getdata_body_ewma(ms: u64) {
     };
     GETDATA_BODY_EWMA_MS.store(next, Ordering::Relaxed);
     GETDATA_BODY_EWMA_N.fetch_add(1, Ordering::Relaxed);
+    let h = HEIGHT.load(Ordering::Relaxed);
+    let peer = recent_stamps()
+        .lock()
+        .ok()
+        .and_then(|g| g.getdata_peer.get(&h).cloned());
+    if let Some(p) = peer {
+        note_peer_gd_ewma(&p, ms);
+        store_last_gd_body_peer(Some(p));
+    } else {
+        store_last_gd_body_peer(None);
+    }
 }
 
 /// Three IBD regimes — must never conflate on the tip90 / tip_crawl scoreboard.
@@ -796,16 +1234,50 @@ pub(crate) fn getdata_body_ewma_ms_min_n(min_n: u64) -> Option<(u64, u64)> {
     Some((GETDATA_BODY_EWMA_MS.load(Ordering::Relaxed), n))
 }
 
-#[cfg(test)]
-pub(crate) fn test_reset_getdata_body_ewma() {
+/// B1: this peer's getdata→body EWMA. None until that peer has `min_n` samples.
+/// Does **not** fall back to the global EWMA (mute must not freeze a replacement).
+pub(crate) fn getdata_body_ewma_ms_for_peer(peer: &str, min_n: u64) -> Option<(u64, u64)> {
+    if peer.is_empty() {
+        return None;
+    }
+    let Ok(g) = peer_gd_ewmas().lock() else {
+        return None;
+    };
+    let e = g.get(peer)?;
+    if e.n < min_n {
+        return None;
+    }
+    Some((e.ms, e.n))
+}
+
+/// Drop global getdata→body EWMA (n=0). Production: TRIAL_KEEP of a ≥80
+/// challenger — leftover mute samples were C1u-clamping the new owner 32→8
+/// (genesis-a 148k: KEEP 136.33 trial_bps=386 then HOLD 8→8 ewma=1003).
+/// Per-peer EWMAs stay (B1: hero RTT survives the trial).
+pub(crate) fn reset_getdata_body_ewma() {
     GETDATA_BODY_EWMA_MS.store(0, Ordering::Relaxed);
     GETDATA_BODY_EWMA_N.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn test_reset_getdata_body_ewma() {
+    reset_getdata_body_ewma();
+    if let Ok(mut g) = peer_gd_ewmas().lock() {
+        g.clear();
+    }
 }
 
 #[cfg(test)]
 pub(crate) fn test_seed_getdata_body_ewma(ms: u64, n: u64) {
     GETDATA_BODY_EWMA_MS.store(ms, Ordering::Relaxed);
     GETDATA_BODY_EWMA_N.store(n, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn test_seed_getdata_body_ewma_peer(peer: &str, ms: u64, n: u64) {
+    if let Ok(mut g) = peer_gd_ewmas().lock() {
+        g.insert(peer.to_string(), PeerGdEwma { ms, n });
+    }
 }
 
 /// Tip-band PIPE_FILL with `received=0` — arms A6m mute tenure bypass (§7.3).
@@ -873,6 +1345,26 @@ pub(crate) fn mark_getdata(h: u64) {
     let _ = GETDATA_MS.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
 }
 
+/// First-wins GetData peer for height `h` (B1). Safe if `peer` is empty.
+pub(crate) fn mark_getdata_from_peer(h: u64, peer: &str) {
+    mark_getdata(h);
+    if peer.is_empty() {
+        return;
+    }
+    if let Ok(mut guard) = recent_stamps().lock() {
+        guard
+            .getdata_peer
+            .entry(h)
+            .or_insert_with(|| peer.to_string());
+        if guard.getdata_peer.len() > 768 {
+            let tip = HEIGHT.load(Ordering::Relaxed);
+            let lo = tip.saturating_sub(64);
+            let hi = tip.saturating_add(512);
+            guard.getdata_peer.retain(|&k, _| k >= lo && k <= hi);
+        }
+    }
+}
+
 /// Soft-retry fired while waiting on this tip height.
 pub(crate) fn mark_soft_retry(h: u64) {
     // Always latch ahead-freeze — do not require tip_stage tracking. Live 2026-07-15:
@@ -892,7 +1384,16 @@ pub(crate) fn mark_body(h: u64) {
     if let Ok(mut guard) = recent_stamps().lock() {
         note_recent(&mut guard.body, h, now);
     }
+    let prev_body = LAST_BODY_MS.swap(now, Ordering::Relaxed);
+    if prev_body > 0 && now > prev_body {
+        let ia = now.saturating_sub(prev_body).min(60_000);
+        LAST_BODY_IA_MS.store(ia, Ordering::Relaxed);
+        BODY_IA_WIN_SUM_MS.fetch_add(ia, Ordering::Relaxed);
+        BODY_IA_WIN_N.fetch_add(1, Ordering::Relaxed);
+        note_owner_body_ia(ia);
+    }
     if !is_tracked(h) {
+        super::ms_breakdown::note_bulk_first_body(h);
         return;
     }
     let _ = BODY_MS.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
@@ -1030,6 +1531,7 @@ pub(crate) fn finish_validated(h: u64) {
 
     let gd_body = d(getdata, body);
     if gd_body >= 0 {
+        LAST_GD_BODY_MS.store(gd_body as u64, Ordering::Relaxed);
         note_getdata_body_ewma(gd_body as u64);
     }
     let need_body = d(needed, body);
@@ -1037,9 +1539,36 @@ pub(crate) fn finish_validated(h: u64) {
     let feeder_done = d(feeder, now);
     super::ms_breakdown::note_tip_stage(need_body, gd_body, body_feeder, feeder_done);
 
+    let (body_ia, nbytes) = match recent_stamps().lock() {
+        Ok(g) => {
+            let prev = h.saturating_sub(1);
+            let ia = match (
+                g.body.get(&prev),
+                if body > 0 {
+                    Some(body)
+                } else {
+                    g.body.get(&h).copied()
+                },
+            ) {
+                (Some(&p), Some(c)) if c > p => (c - p).min(60_000) as i64,
+                _ => LAST_BODY_IA_MS.load(Ordering::Relaxed) as i64,
+            };
+            let nbytes = g
+                .bytes
+                .get(&h)
+                .copied()
+                .unwrap_or_else(|| LAST_BODY_BYTES.load(Ordering::Relaxed));
+            (ia, nbytes)
+        }
+        Err(_) => (
+            LAST_BODY_IA_MS.load(Ordering::Relaxed) as i64,
+            LAST_BODY_BYTES.load(Ordering::Relaxed),
+        ),
+    };
+
     // W68: getdata→body includes pre-roll GetData lead; need→body is the true tip wait.
     warn!(
-        "[IBD_TIP_STAGE] h={} total_ms={} need→getdata={} getdata→body={} need→body={} body→feeder={} feeder→done={} soft_retries={} reorder_ms_set={} (needed={} getdata={} body={} reorder={} feeder={})",
+        "[IBD_TIP_STAGE] h={} total_ms={} need→getdata={} getdata→body={} need→body={} body→feeder={} feeder→done={} body_ia_ms={} bytes={} soft_retries={} reorder_ms_set={} (needed={} getdata={} body={} reorder={} feeder={})",
         h,
         d(needed, now),
         d(needed, getdata),
@@ -1047,6 +1576,8 @@ pub(crate) fn finish_validated(h: u64) {
         need_body,
         body_feeder,
         feeder_done,
+        body_ia,
+        nbytes,
         soft,
         if reorder == 0 { 0 } else { 1 },
         needed,
@@ -1117,10 +1648,31 @@ pub(crate) fn test_reset_tip_stage() {
     DUTY_IA_SUM_MS.store(0, Ordering::Relaxed);
     DUTY_IA_N.store(0, Ordering::Relaxed);
     DUTY_LOG_LAST_MS.store(0, Ordering::Relaxed);
+    LAST_DUTY_MS_TOTAL.store(0, Ordering::Relaxed);
+    LAST_DUTY_IA_AVG.store(0, Ordering::Relaxed);
+    LAST_DUTY_IA_N.store(0, Ordering::Relaxed);
+    LAST_DUTY_FRAC8_X10.store(0, Ordering::Relaxed);
+    LAST_DUTY_FRAC32_X10.store(0, Ordering::Relaxed);
+    LAST_BODY_MS.store(0, Ordering::Relaxed);
+    LAST_BODY_IA_MS.store(0, Ordering::Relaxed);
+    LAST_BODY_BYTES.store(0, Ordering::Relaxed);
+    LAST_GD_BODY_MS.store(0, Ordering::Relaxed);
+    store_last_gd_body_peer(None);
+    BODY_IA_WIN_SUM_MS.store(0, Ordering::Relaxed);
+    BODY_IA_WIN_N.store(0, Ordering::Relaxed);
+    clear_owner_body_ia();
+    EMPTY_BAND_SAMPLE_TRIALS.store(0, Ordering::Relaxed);
+    reset_tournament();
+    PIPE_W_SUM.store(0, Ordering::Relaxed);
+    PIPE_W_N.store(0, Ordering::Relaxed);
     if let Ok(mut g) = recent_stamps().lock() {
         g.getdata.clear();
         g.body.clear();
+        g.bytes.clear();
     }
+    super::IBD_FIRST_HOLE.store(0, Ordering::Relaxed);
+    super::IBD_FIRST_HOLE_AT.store(0, Ordering::Relaxed);
+    super::test_clear_lookahead_reserved();
 }
 
 #[cfg(test)]
@@ -1155,7 +1707,28 @@ mod tests {
         if let Ok(mut g) = recent_stamps().lock() {
             g.getdata.clear();
             g.body.clear();
+            g.getdata_peer.clear();
         }
+        if let Ok(mut g) = peer_gd_ewmas().lock() {
+            g.clear();
+        }
+        clear_owner_body_ia();
+    }
+
+    #[test]
+    fn owner_ia_median_separates_fast_3_5_from_slow_19() {
+        let _lock = test_lock();
+        test_seed_owner_body_ia(4, 16);
+        let (med, n) = owner_body_ia_median().expect("fast");
+        assert_eq!(n, 16);
+        assert_eq!(med, 4);
+        assert!(med < OWNER_IA_DEMOTE_MEDIAN_MS);
+        test_seed_owner_body_ia(19, 16);
+        let (med, _) = owner_body_ia_median().expect("slow");
+        assert_eq!(med, 19);
+        assert!(med >= OWNER_IA_DEMOTE_MEDIAN_MS);
+        test_reset_owner_body_ia();
+        assert!(owner_body_ia_median().is_none());
     }
 
     /// Phase 0b.3: forbid scoring wall_bps / dens as product tip_crawl.

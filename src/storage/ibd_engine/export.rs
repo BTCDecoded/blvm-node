@@ -47,6 +47,10 @@ pub struct CheckpointExportTimings {
     pub overlay_ms: u64,
     pub trim_ms: u64,
     pub wall_ms: u64,
+    /// Adds the export tee actually merged from disk (0 on legacy scan path).
+    pub tee_merged_entries: u64,
+    /// Cold disk segs at compact start (for first-persist refuse if tee==0).
+    pub cold_segs_at_start: usize,
 }
 #[cfg(target_os = "linux")]
 use libc;
@@ -61,25 +65,32 @@ const EXPORT_CHUNK_SIZE: usize = 500_000;
 ///
 /// Without this, each key-order chunk of 500k is offset-sorted locally but still spans the
 /// whole `utxo_table.bin` — ~N_chunks full-file random sweeps. Global sort → one monotonic pass.
+///
+/// Default **on** since R-349 (KEEP @500287 2026-07-26 was opt-in only by oversight). R-348 at
+/// 310k: the key-order fetch went to disk once the flat table fell out of the page cache —
+/// `fetch_ms` 305 s vs 28 s at 300k in R-347 — and the S0 compaction stretched to 355 s with
+/// 22 live segments (`eng_view` 4×). `BLVM_IBD_EXPORT_GLOBAL_OFFSET_SORT=0` restores the
+/// per-chunk fetch.
 fn export_global_offset_sort() -> bool {
+    !export_env_off("BLVM_IBD_EXPORT_GLOBAL_OFFSET_SORT")
+}
+
+/// `0` / `false` / `no` / `off` → false; unset or anything else → true.
+fn export_env_off(name: &str) -> bool {
     matches!(
-        std::env::var("BLVM_IBD_EXPORT_GLOBAL_OFFSET_SORT")
-            .ok()
-            .as_deref()
-            .map(str::trim),
-        Some("1") | Some("true") | Some("yes") | Some("on")
+        std::env::var(name).ok().as_deref().map(str::trim),
+        Some("0") | Some("false") | Some("no") | Some("off")
     )
 }
 
 /// E4: spill key-sorted encode runs, k-way merge, `MDB_APPEND` into empty ping-pong slot.
+///
+/// Default **on** since R-349 (KEEP + G2 PASS @501287). Keeps the 500k-row `bulk_load` txns
+/// out of the compaction window: the block-body persist lane and the coordinator flush share
+/// the env-wide writer lock with this export. `BLVM_IBD_EXPORT_APPEND_LOAD=0` restores
+/// per-chunk `bulk_load_sorted_kv`.
 fn export_append_load() -> bool {
-    matches!(
-        std::env::var("BLVM_IBD_EXPORT_APPEND_LOAD")
-            .ok()
-            .as_deref()
-            .map(str::trim),
-        Some("1") | Some("true") | Some("yes") | Some("on")
-    )
+    !export_env_off("BLVM_IBD_EXPORT_APPEND_LOAD")
 }
 
 /// E5: APPEND commit cadence. Unset → `500_000` (E4 KEEP). `0` = single txn (E5 REVERT @502287).
@@ -90,8 +101,18 @@ fn export_append_commit_every() -> usize {
         .unwrap_or(500_000)
 }
 
-fn export_tmpdir() -> PathBuf {
-    std::env::temp_dir()
+/// Spill directory for E3c/E4 runs. `BLVM_IBD_EXPORT_TMPDIR`, else the engine's own
+/// directory (next to `utxo_table.bin`, on the dest disk), else `std::env::temp_dir()`.
+/// `/tmp` is tmpfs on this host: a multi-GB spill there is anon memory competing with the
+/// page cache the export is trying to stay out of.
+fn export_tmpdir(db: &UtxoDatabase) -> PathBuf {
+    if let Some(p) = std::env::var_os("BLVM_IBD_EXPORT_TMPDIR") {
+        let p = PathBuf::from(p);
+        if !p.as_os_str().is_empty() {
+            return p;
+        }
+    }
+    db.table_dir().unwrap_or_else(std::env::temp_dir)
 }
 
 /// Piggyback disk compact + memory overlay export (default). Set `BLVM_IBD_EXPORT_PIGGYBACK=0`
@@ -170,7 +191,7 @@ impl<'a> CheckpointChunkWriter<'a> {
         }
         // Prefer disk-backed dir — std::env::temp_dir() is often tmpfs; a 9 GiB spill
         // there doubles as anon and fights the later load Vec.
-        let mut path = export_tmpdir();
+        let mut path = export_tmpdir(self.db);
         path.push(format!(
             "blvm-export-e3c-{}-{}.bin",
             self.checkpoint_height,
@@ -185,7 +206,7 @@ impl<'a> CheckpointChunkWriter<'a> {
 
     fn ensure_append_dir(&mut self) -> Result<&PathBuf> {
         if self.append_dir.is_none() {
-            let mut dir = export_tmpdir();
+            let mut dir = export_tmpdir(self.db);
             dir.push(format!(
                 "blvm-export-e4-{}-{}",
                 self.checkpoint_height,
@@ -480,13 +501,20 @@ impl<'a> CheckpointChunkWriter<'a> {
 
         let commit_every = export_append_commit_every();
         let t_append = std::time::Instant::now();
+        // R-349: the live stream carries equal keys — the pre-compact memory snapshot and
+        // the compaction tee can both emit the same Add (2.8M of 8.2M at ckpt 200000), plus
+        // the BIP30 duplicate coinbases. `put` overwrote them silently; MDB_APPEND returns
+        // MDB_KEYEXIST. Collapse runs of equal keys here (last wins, as `put` did).
+        let mut dups = 0u64;
         let written = {
             #[cfg(feature = "heed3")]
             {
                 if let Some(heed) = self.tree.as_heed3_tree() {
-                    heed.write_append_from_fn(commit_every, || {
+                    let mut pending: Option<(Vec<u8>, Vec<u8>)> = None;
+                    let dups_ref = &mut dups;
+                    let res = heed.write_append_from_fn(commit_every, || loop {
                         let Some(AppendHeapItem { key, value, run }) = heap.pop() else {
-                            return Ok(None);
+                            return Ok(pending.take());
                         };
                         if let Some((k, v)) = readers[run].next_pair()? {
                             heap.push(AppendHeapItem {
@@ -495,8 +523,30 @@ impl<'a> CheckpointChunkWriter<'a> {
                                 run,
                             });
                         }
-                        Ok(Some((key, value)))
-                    })?
+                        match pending.take() {
+                            Some((pk, pv)) if pk != key => {
+                                pending = Some((key, value));
+                                return Ok(Some((pk, pv)));
+                            }
+                            Some(_) => {
+                                *dups_ref += 1;
+                                pending = Some((key, value));
+                            }
+                            None => pending = Some((key, value)),
+                        }
+                    });
+                    match res {
+                        Ok(n) => n,
+                        Err(e) => {
+                            for p in &runs {
+                                let _ = std::fs::remove_file(p);
+                            }
+                            if let Some(d) = dir.as_ref() {
+                                let _ = std::fs::remove_dir_all(d);
+                            }
+                            return Err(e);
+                        }
+                    }
                 } else {
                     merge_append_bulk_fallback(self.tree, &mut readers, &mut heap)?
                 }
@@ -512,10 +562,13 @@ impl<'a> CheckpointChunkWriter<'a> {
         // merge+APPEND wall so PROFILE write_ms reflects the real LMDB cost.
         let merge_wall = t0.elapsed().as_millis() as u64;
         self.write_ms = merge_wall;
+        // Collapsed duplicates were counted when their chunk was encoded.
+        self.live_count = self.live_count.saturating_sub(dups as usize);
         info!(
-            "[IBD_EXPORT_E4] runs={} written={} merge_wall_ms={} append_commit_ms={} commit_every={}",
+            "[IBD_EXPORT_E4] runs={} written={} dups={} merge_wall_ms={} append_commit_ms={} commit_every={}",
             runs.len(),
             written,
+            dups,
             merge_wall,
             append_commit_ms,
             commit_every
@@ -890,10 +943,11 @@ fn run_checkpoint_export_piggyback(
 
     let (mem_adds, mem_deletes) = partition_memory_overlay(mem_snapshot, checkpoint_height);
     let mut writer = CheckpointChunkWriter::new(db, tree.as_ref(), codec, checkpoint_height);
-    let compact_ms = db.compact_for_checkpoint_sync_with_sink(
-        checkpoint_height,
-        Some(|kv: OutputKV| writer.absorb_live_add(kv)),
-    )?;
+    let (compact_ms, tee_merged_entries, cold_segs_at_start) = db
+        .compact_for_checkpoint_sync_with_sink(
+            checkpoint_height,
+            Some(|kv: OutputKV| writer.absorb_live_add(kv)),
+        )?;
 
     // E2.1: fold memory-age Adds into the same chunked bulk_load path as disk piggyback.
     // Per-key tree.insert overlay was the late-chain wall (export_h=500287 overlay≈1176s).
@@ -910,6 +964,8 @@ fn run_checkpoint_export_piggyback(
     let timings = CheckpointExportTimings {
         compact_ms,
         scan_prep_ms: 0,
+        // Tee is inside compact_ms (not a second scan). dest-bc stream_ms=0 meant the
+        // fan-in no-op; after the 1→1 fix, watch tee_merged / cold_segs instead.
         stream_ms: 0,
         clear_ms,
         fetch_ms,
@@ -918,6 +974,8 @@ fn run_checkpoint_export_piggyback(
         overlay_ms,
         trim_ms,
         wall_ms,
+        tee_merged_entries,
+        cold_segs_at_start,
     };
     log_checkpoint_export_timings(checkpoint_height, live_count, &timings, "piggyback");
     maybe_purge_after_export(checkpoint_height);
@@ -961,6 +1019,8 @@ fn run_checkpoint_export_legacy(
         overlay_ms: 0,
         trim_ms,
         wall_ms,
+        tee_merged_entries: 0,
+        cold_segs_at_start: 0,
     };
     log_checkpoint_export_timings(checkpoint_height, count, &timings, "replace");
     maybe_purge_after_export(checkpoint_height);
@@ -976,7 +1036,7 @@ fn log_checkpoint_export_timings(
     info!(
         "IBD engine checkpoint export ({label}) in {:.1}s (height={}, utxos={}, \
          compact_ms={}, scan_prep_ms={}, stream_ms={}, clear_ms={}, fetch_ms={}, encode_ms={}, \
-         write_ms={}, overlay_ms={}, trim_ms={}, wall_ms={})",
+         write_ms={}, overlay_ms={}, trim_ms={}, wall_ms={}, tee_merged={}, cold_segs={})",
         timings.wall_ms as f64 / 1000.0,
         checkpoint_height,
         count,
@@ -990,6 +1050,8 @@ fn log_checkpoint_export_timings(
         timings.overlay_ms,
         timings.trim_ms,
         timings.wall_ms,
+        timings.tee_merged_entries,
+        timings.cold_segs_at_start,
     );
 }
 
@@ -1391,6 +1453,94 @@ mod tests {
             muhash.serialize_running_state(),
             MuHash3072::new().serialize_running_state()
         );
+    }
+
+    /// R-349: E3c (global offset sort) + E4 (append merge-load) are tree defaults. The
+    /// piggyback replace path must land every live UTXO through the spill → sort → fetch →
+    /// merge route and leave no spill files behind in the engine directory.
+    #[test]
+    #[serial_test::serial(ibd)]
+    fn r349_piggyback_export_defaults_spill_sort_and_clean_up() {
+        assert!(export_global_offset_sort(), "E3c default on");
+        assert!(export_append_load(), "E4 default on");
+        let tmp = NamedTempFile::new().unwrap();
+        let db = UtxoDatabase::open(tmp.path(), 0).unwrap();
+        let tree: Arc<dyn Tree> = Arc::new(MockTree::new());
+        let mut txids = Vec::new();
+        for h in 1..=6i32 {
+            let txid = [h as u8 + 10; 32];
+            let block = make_block(vec![make_coinbase(1_000_000 * h as i64)]);
+            let _pin = db.append(&block, &[txid], h).unwrap();
+            txids.push(txid);
+        }
+        crate::storage::ibd_engine::set_gc_fence(6);
+        let (muhash, live, _t) =
+            run_checkpoint_export_replace(&db, &tree, 6, ValueCodec::Bincode).unwrap();
+        assert_eq!(live, 6, "six coinbase outputs live at ckpt 6");
+        for txid in &txids {
+            let key = outpoint_to_key(&OutPoint {
+                hash: *txid,
+                index: 0,
+            });
+            assert!(tree.get(&key).unwrap().is_some(), "utxo {:?} exported", &txid[..2]);
+        }
+        assert_ne!(
+            muhash.serialize_running_state(),
+            MuHash3072::new().serialize_running_state()
+        );
+        let dir = db.table_dir().expect("engine dir");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("blvm-export-"))
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .contains(&format!("-{}", std::process::id()))
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "spill files removed: {leftovers:?}");
+    }
+
+    /// R-349 failure: E4 runs carry equal keys (memory snapshot + compaction tee both emit
+    /// the same Add; BIP30 coinbases). `MDB_APPEND` returned `MDB_KEYEXIST` and every
+    /// export from 190k failed. The merge must collapse equal keys (last wins) on a real
+    /// heed3 tree and remove its scratch dir.
+    #[cfg(feature = "heed3")]
+    #[test]
+    #[serial_test::serial(ibd)]
+    fn r350_append_merge_collapses_duplicate_keys_on_heed3() {
+        use crate::storage::database::{create_database, default_backend};
+        let dir = tempfile::TempDir::new().unwrap();
+        let dbh = create_database(dir.path(), default_backend(), None).unwrap();
+        let tree: Arc<dyn Tree> = Arc::from(dbh.open_tree("ibd_utxos_ckpt_b").unwrap());
+        let tmp = NamedTempFile::new_in(dir.path()).unwrap();
+        let udb = UtxoDatabase::open(tmp.path(), 0).unwrap();
+        let mut w = CheckpointChunkWriter::new(&udb, tree.as_ref(), ValueCodec::Bincode, 10);
+        w.append_load = true;
+        let key = |i: u8| vec![i; 40];
+        // run 0: 1,2,3,3 (in-run dup)   run 1: 2,4,5   run 2: 5,5,6 → unique = 1..=6
+        w.kv_pairs = vec![
+            (key(1), b"a".to_vec()),
+            (key(2), b"b0".to_vec()),
+            (key(3), b"c0".to_vec()),
+            (key(3), b"c1".to_vec()),
+        ];
+        w.spill_append_run().unwrap();
+        w.kv_pairs = vec![(key(2), b"b1".to_vec()), (key(4), b"d".to_vec()), (key(5), b"e0".to_vec())];
+        w.spill_append_run().unwrap();
+        w.kv_pairs = vec![(key(5), b"e1".to_vec()), (key(5), b"e2".to_vec()), (key(6), b"f".to_vec())];
+        w.spill_append_run().unwrap();
+        w.live_count = 10;
+        let scratch = w.append_dir.clone().expect("append dir");
+        assert!(scratch.starts_with(dir.path()), "spill lives in the engine dir: {scratch:?}");
+        w.merge_append_load().unwrap();
+        assert_eq!(tree.len().unwrap(), 6, "one row per distinct key");
+        for i in 1u8..=6 {
+            assert!(tree.get(&key(i)).unwrap().is_some(), "key {i} present");
+        }
+        assert_eq!(w.live_count, 6, "live_count net of collapsed duplicates");
+        assert!(!scratch.exists(), "scratch dir removed after merge");
     }
 
     #[test]

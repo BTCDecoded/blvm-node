@@ -529,6 +529,30 @@ impl ChainState {
         }
     }
 
+    /// Prior accepted checkpoint UTXO count (the persist before the current export_utxo_count).
+    /// Repair 50% gate uses this so dest-ak 8.2M@516k is poison vs ~10M+ rather than vs itself.
+    pub fn get_engine_prev_accepted_utxo_count(&self) -> Result<Option<u64>> {
+        if let Some(data) = self.chain_info.get(b"ibd_engine_prev_accepted_utxo_count")? {
+            if data.len() < 8 {
+                return Ok(None);
+            }
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&data[..8]);
+            Ok(Some(u64::from_be_bytes(bytes)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Test/repair helper: set prior accepted count without a full checkpoint persist.
+    pub fn force_set_engine_prev_accepted_utxo_count(&self, count: u64) -> Result<()> {
+        self.chain_info.insert(
+            b"ibd_engine_prev_accepted_utxo_count",
+            &count.to_be_bytes(),
+        )?;
+        Ok(())
+    }
+
     /// Test/repair helper: set export UTXO count without a full checkpoint persist.
     pub fn force_set_engine_export_utxo_count(&self, count: u64) -> Result<()> {
         self.chain_info
@@ -593,6 +617,13 @@ impl ChainState {
             self.persist_ibd_utxo_muhash_running_only(muhash_running)?;
             return Ok(());
         }
+        let prev_count = self.get_engine_export_utxo_count()?.unwrap_or(0);
+        if prev_count > 0 {
+            self.chain_info.insert(
+                b"ibd_engine_prev_accepted_utxo_count",
+                &prev_count.to_be_bytes(),
+            )?;
+        }
         self.persist_ibd_utxo_flush_checkpoint(height, muhash_running)?;
         self.persist_engine_export_height(height)?;
         self.chain_info
@@ -621,6 +652,8 @@ impl ChainState {
         self.chain_info.insert(b"ibd_engine_ckpt_slot", &[0u8])?;
         self.chain_info
             .insert(b"ibd_engine_export_utxo_count", &0u64.to_be_bytes())?;
+        self.chain_info
+            .insert(b"ibd_engine_prev_accepted_utxo_count", &0u64.to_be_bytes())?;
         let _ = self.chain_info.remove(b"ibd_engine_export_muhash");
         let _ = self.chain_info.remove(b"ibd_engine_validation_tip");
         Ok(())
