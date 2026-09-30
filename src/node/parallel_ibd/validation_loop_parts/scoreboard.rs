@@ -997,6 +997,14 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     } else {
         DeferredDropper::disabled()
     };
+    // R-362: the `[IBD_TIP_SKIP]` force_sync moves to `ibd-tip-sync`.
+    let mut tip_syncer = if tip_sync_inline() {
+        info!("IBD: tip sync inline (BLVM_IBD_TIP_SYNC=inline; force_sync on the orchestrator, R-361 behaviour)");
+        TipSyncer::inline()
+    } else {
+        info!("IBD: tip sync thread enabled (ibd-tip-sync; force_sync off the orchestrator; opt out BLVM_IBD_TIP_SYNC=inline)");
+        TipSyncer::spawn(storage_clone.clone())
+    };
     let mut _validate_workers: Vec<JoinHandle<()>> = Vec::with_capacity(n_validate_workers);
     for i in 0..n_validate_workers {
         let rx = valjob_rx.clone();
@@ -3380,6 +3388,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             effective_end_height(),
                         )
                     {
+                        // R-362: timed as `drain_tipskip_sum`. The heed3 `force_sync` that used
+                        // to run here (an fsync of every dirty body page since the last one)
+                        // is handed to `ibd-tip-sync`; `update_tip` stays inline.
+                        let t_tipskip = Instant::now();
                         let durable = storage_clone
                             .chain()
                             .get_height()
@@ -3396,22 +3408,33 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                     "[IBD_TIP_SKIP] failed to advance chain_info tip {} → {}: {e:#}",
                                     durable, next_height
                                 );
-                            } else if let Err(e) = storage_clone.flush() {
-                                warn!(
-                                    "[IBD_TIP_SKIP] tip advanced to {} but flush failed: {e:#}",
-                                    next_height
-                                );
-                            } else if next_height % 1_000 == 0
-                                || next_height.saturating_add(64) > effective_end_height()
-                            {
-                                // Log every 1k as before; near tip log every 64 to avoid spam.
-                                info!(
-                                    "[IBD_TIP_SKIP] advanced durable chain_info tip {} → {} \
-                                     (body already on disk; flush path skipped)",
-                                    durable, next_height
-                                );
+                            } else {
+                                let sync_mode = if tip_syncer.request(next_height) {
+                                    "bg"
+                                } else if let Err(e) = storage_clone.flush() {
+                                    warn!(
+                                        "[IBD_TIP_SKIP] tip advanced to {} but flush failed: {e:#}",
+                                        next_height
+                                    );
+                                    "inline-failed"
+                                } else {
+                                    "inline"
+                                };
+                                if next_height % 1_000 == 0
+                                    || next_height.saturating_add(64) > effective_end_height()
+                                {
+                                    // Log every 1k as before; near tip log every 64 to avoid spam.
+                                    info!(
+                                        "[IBD_TIP_SKIP] advanced durable chain_info tip {} → {} \
+                                         (body already on disk; flush path skipped; sync={})",
+                                        durable, next_height, sync_mode
+                                    );
+                                }
                             }
                         }
+                        crate::node::parallel_ibd::ms_breakdown::note_drain_tipskip_us(
+                            t_tipskip.elapsed().as_micros() as u64,
+                        );
                     }
                     // Skip path: block_arc is not moved; force explicit drop NOW so entry.block_arc
                     // is the sole remaining reference. Confirms no leak from this scope.
@@ -4086,6 +4109,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // R-361: drain the deferred-drop queue before the workers are joined (frees are cheap;
     // this only guarantees no block outlives the loop).
     deferred_dropper.close_and_join();
+    // R-362: finish any queued tip sync before the shutdown flushes below (they re-sync anyway).
+    tip_syncer.close_and_join();
     for worker in _validate_workers {
         if let Err(e) = worker.join() {
             warn!("IBD validate worker join error: {:?}", e);

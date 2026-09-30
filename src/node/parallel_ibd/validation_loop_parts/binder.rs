@@ -1649,6 +1649,8 @@ impl DeferredDropper {
                 while let Ok(item) = rx.recv() {
                     let t0 = Instant::now();
                     drop(item);
+                    crate::node::parallel_ibd::ms_breakdown::DEFERRED_DROP_QUEUE
+                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     crate::node::parallel_ibd::ms_breakdown::note_deferred_drop_us(
                         t0.elapsed().as_micros() as u64,
                     );
@@ -1670,7 +1672,19 @@ impl DeferredDropper {
     /// (and drops inline) when the dropper is off or gone.
     fn send(&self, item: DeferredDrop) -> bool {
         match self.tx.as_ref() {
-            Some(tx) => tx.send(item).is_ok(),
+            Some(tx) => {
+                // R-362: gauge the backlog (`drop_q=` on MS_BREAKDOWN). Count before the send so
+                // the thread's decrement can never race it below zero.
+                let q = &crate::node::parallel_ibd::ms_breakdown::DEFERRED_DROP_QUEUE;
+                q.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                match tx.send(item) {
+                    Ok(()) => true,
+                    Err(_) => {
+                        q.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        false
+                    }
+                }
+            }
             None => false,
         }
     }
@@ -1685,6 +1699,105 @@ impl DeferredDropper {
 }
 
 impl Drop for DeferredDropper {
+    fn drop(&mut self) {
+        self.close_and_join();
+    }
+}
+
+/// R-362: the `[IBD_TIP_SKIP]` path (every 1000 blocks, and every block in the last 1024)
+/// called `Storage::flush()` on the orchestrator. For heed3 that is `env.force_sync()` — under
+/// `MDB_NOSYNC` an fsync of **every dirty page in the env**, i.e. the ~1000 block bodies the
+/// persist lane wrote since the previous one (≈ 57 MB at 120–200k, ≈ 450 MB at 340–370k),
+/// untimed, inside `drain`. R-361 drain/win: min 150–190 ms in every band (the per-block work),
+/// median 338 / 454 / 366 / 492 / 721 ms, p90 up to 1304, max 2254 — one variable event per
+/// window that scales with dirty bytes, which is exactly the fsync. `update_tip` (three small
+/// write txns) stays inline; the sync moves to one `ibd-tip-sync` thread with a depth-1 queue
+/// (a request that arrives while one is queued is folded into it — `force_sync` covers every
+/// commit before it, so the tip it was asked for is always included). Durability cadence is
+/// unchanged: same syncs, same heights, off the serial thread. `BLVM_IBD_TIP_SYNC=inline`
+/// restores R-361 (`request` returns `false`; the caller flushes inline).
+fn tip_sync_inline() -> bool {
+    match std::env::var("BLVM_IBD_TIP_SYNC") {
+        Ok(v) => {
+            let t = v.trim();
+            t.eq_ignore_ascii_case("inline") || t == "0" || t.eq_ignore_ascii_case("off")
+        }
+        Err(_) => false,
+    }
+}
+
+/// Owns the `ibd-tip-sync` thread; `Drop` closes the queue and joins (all exit paths).
+struct TipSyncer {
+    tx: Option<crossbeam_channel::Sender<u64>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl TipSyncer {
+    fn spawn(storage: Arc<Storage>) -> Self {
+        Self::spawn_with(move |_h| storage.flush())
+    }
+    /// `sync` runs on the `ibd-tip-sync` thread once per accepted request (coalesced).
+    fn spawn_with<F>(sync: F) -> Self
+    where
+        F: Fn(u64) -> anyhow::Result<()> + Send + 'static,
+    {
+        let (tx, rx) = crossbeam_channel::bounded::<u64>(1);
+        let handle = std::thread::Builder::new()
+            .name("ibd-tip-sync".into())
+            .spawn(move || {
+                while let Ok(mut h) = rx.recv() {
+                    // Fold anything that queued while we were syncing: one sync covers all.
+                    while let Ok(h2) = rx.try_recv() {
+                        h = h.max(h2);
+                    }
+                    let t0 = Instant::now();
+                    match sync(h) {
+                        Ok(()) => crate::node::parallel_ibd::ms_breakdown::note_tip_sync_bg_us(
+                            t0.elapsed().as_micros() as u64,
+                        ),
+                        Err(e) => warn!(
+                            "[IBD_TIP_SKIP] background sync after tip {} failed: {e:#}",
+                            h
+                        ),
+                    }
+                }
+            })
+            .expect("spawn IBD tip-sync thread");
+        Self {
+            tx: Some(tx),
+            handle: Some(handle),
+        }
+    }
+    fn inline() -> Self {
+        Self {
+            tx: None,
+            handle: None,
+        }
+    }
+    /// Ask for a sync covering `tip`. `true` = the sync will happen off-thread (either this
+    /// request was queued, or one already queued will run after this tip's commit and so covers
+    /// it). `false` = inline mode or the thread is gone; the caller must flush itself.
+    fn request(&self, tip: u64) -> bool {
+        match self.tx.as_ref() {
+            Some(tx) => match tx.try_send(tip) {
+                Ok(()) => true,
+                Err(crossbeam_channel::TrySendError::Full(_)) => true,
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => false,
+            },
+            None => false,
+        }
+    }
+    fn close_and_join(&mut self) {
+        drop(self.tx.take());
+        if let Some(h) = self.handle.take() {
+            if let Err(e) = h.join() {
+                warn!("IBD tip-sync join error: {:?}", e);
+            }
+        }
+    }
+}
+
+impl Drop for TipSyncer {
     fn drop(&mut self) {
         self.close_and_join();
     }

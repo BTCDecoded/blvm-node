@@ -163,6 +163,11 @@ struct Buckets {
     drain_flush_us: u64,
     /// R-361: `ibd-drop` thread — deallocation of the block's last refs, off the orchestrator.
     eng_drop_us: u64,
+    /// R-362: drain split — `[IBD_TIP_SKIP]` section on the orchestrator (`get_height` +
+    /// `update_tip` + sync request, or the inline `force_sync` when `BLVM_IBD_TIP_SYNC=inline`).
+    drain_tipskip_us: u64,
+    /// R-362: `ibd-tip-sync` thread — `Storage::flush()` (heed3 `force_sync`) time, off the orchestrator.
+    tipsync_bg_us: u64,
     /// Collect entered with head already in `pending_results` (no blocking recv).
     collect_ready_n: u64,
     /// Collect had to block on `valres_rx` for the head height.
@@ -365,6 +370,8 @@ impl Buckets {
             drain_skipchk_us: self.drain_skipchk_us.saturating_sub(prev.drain_skipchk_us),
             drain_flush_us: self.drain_flush_us.saturating_sub(prev.drain_flush_us),
             eng_drop_us: self.eng_drop_us.saturating_sub(prev.eng_drop_us),
+            drain_tipskip_us: self.drain_tipskip_us.saturating_sub(prev.drain_tipskip_us),
+            tipsync_bg_us: self.tipsync_bg_us.saturating_sub(prev.tipsync_bg_us),
             collect_ready_n: self.collect_ready_n.saturating_sub(prev.collect_ready_n),
             collect_block_n: self.collect_block_n.saturating_sub(prev.collect_block_n),
             collect_occ_n: self.collect_occ_n.saturating_sub(prev.collect_occ_n),
@@ -410,6 +417,23 @@ struct WallLocal {
     state: WallState,
     since: Instant,
     started: bool,
+    /// R-363: sub-millisecond remainder per state. Slices were truncated with `as_millis()` at
+    /// every state switch (≈ 4 per block), so sub-ms states read 0 and Σ`window_ms` fell short
+    /// of the band wall by 6–26 % (R-362: 16.6 / 13.6 / 13.0 / 9.0 / 10.2 s per band). Carry
+    /// the remainder so each state's sum is exact to < 1 ms over the run.
+    carry_us: [u64; 6],
+}
+
+#[inline]
+fn wall_state_idx(state: WallState) -> usize {
+    match state {
+        WallState::WaitFeeder => 0,
+        WallState::Dispatch => 1,
+        WallState::EngineAppend => 2,
+        WallState::CollectWait => 3,
+        WallState::Drain => 4,
+        WallState::Other => 5,
+    }
 }
 
 thread_local! {
@@ -417,6 +441,7 @@ thread_local! {
         state: WallState::Other,
         since: Instant::now(),
         started: false,
+        carry_us: [0; 6],
     });
 }
 
@@ -526,6 +551,7 @@ pub(crate) fn arm() {
         g.state = WallState::Other;
         g.since = Instant::now();
         g.started = true;
+        g.carry_us = [0; 6];
     });
     if let Ok(mut s) = shared().lock() {
         s.last_emit_at = Instant::now();
@@ -537,8 +563,11 @@ fn flush_wall_locked(local: &mut WallLocal, cum: &mut Buckets) {
         return;
     }
     let now = Instant::now();
-    let ms = now.saturating_duration_since(local.since).as_millis() as u64;
-    cum.add_wall(local.state, ms);
+    let idx = wall_state_idx(local.state);
+    let total_us = local.carry_us[idx]
+        .saturating_add(now.saturating_duration_since(local.since).as_micros() as u64);
+    cum.add_wall(local.state, total_us / 1000);
+    local.carry_us[idx] = total_us % 1000;
     local.since = now;
 }
 
@@ -720,6 +749,32 @@ pub(crate) fn note_deferred_drop_us(us: u64) {
     }
 }
 
+/// R-362: orchestrator time inside the `[IBD_TIP_SKIP]` section for one block (µs)
+/// (`drain_tipskip_sum`).
+pub(crate) fn note_drain_tipskip_us(us: u64) {
+    if !enabled() || us == 0 {
+        return;
+    }
+    if let Ok(mut s) = shared().lock() {
+        s.cum.drain_tipskip_us = s.cum.drain_tipskip_us.saturating_add(us);
+    }
+}
+
+/// R-362: `ibd-tip-sync` thread time for one `Storage::flush()` (heed3 `force_sync`) (µs)
+/// (`tipsync_bg_sum`) — the cost that left the orchestrator.
+pub(crate) fn note_tip_sync_bg_us(us: u64) {
+    if !enabled() || us == 0 {
+        return;
+    }
+    if let Ok(mut s) = shared().lock() {
+        s.cum.tipsync_bg_us = s.cum.tipsync_bg_us.saturating_add(us);
+    }
+}
+
+/// R-362: live depth of the `ibd-drop` queue (blocks handed off, not yet freed). Sampled on
+/// every MS_BREAKDOWN line as `drop_q=`; a value that grows across windows = dropper behind.
+pub(crate) static DEFERRED_DROP_QUEUE: AtomicU64 = AtomicU64::new(0);
+
 /// R-360: drain split for one block (µs): body-presence probe and the block-flush section
 /// (`drain_skipchk_sum` / `drain_flush_sum`).
 pub(crate) fn note_drain_split_us(skipchk_us: u64, flush_us: u64) {
@@ -786,7 +841,7 @@ fn emit_line(tag: &str, w: &Buckets, h: u64) {
     let (body_ia_avg, body_ia_n) = super::tip_stage::peek_body_ia_window();
     let body_ia_last = super::tip_stage::last_body_ia_ms();
     info!(
-        "[IBD_MS_BREAKDOWN] {} h={} window_ms={} | wall_wait_feeder={}ms({:.1}%) dispatch={}ms({:.1}%) eng_append_wall={}ms({:.1}%) collect_wait={}ms({:.1}%) drain={}ms({:.1}%) other={}ms({:.1}%) | wait_binder tip_hole={}ms gd_slow={}ms empty_tip={}ms starve={}ms thin={}ms failover={}ms engine={}ms pressure={}ms hole_absent={}ms hole_staged={}ms | tip_n={} tip_need_body_sum={}ms tip_gd_body_sum={}ms tip_body_feeder_sum={}ms tip_feeder_done_sum={}ms tip_need_body_avg={:.1} | eng_n={} eng_append_sum={}ms eng_view_sum={}ms eng_validate_sum={}ms eng_validate_avg={:.1} collect_ready_n={} collect_block_n={} | inflight_avg={:.1} inflight_max={} inflight_full_n={} inflight_hist={}/{}/{}/{}/{} | block_pending_avg={:.1} block_pending0_n={} | tip_supply_vs_wall={:.1}% | tip_body_ia_last_ms={} tip_body_ia_win_avg={} tip_body_ia_n={} | bulk_n={} bulk_gd_body_sum={}ms bulk_gd_body_avg={:.1} | peers_conn={} peers_inflight={} | eff_depth={} slow_pct={} | eng_muhash_sum={}ms disp_txid_sum={}ms disp_outcache_sum={}ms | eng_prep_sum={}ms drain_skipchk_sum={}ms drain_flush_sum={}ms eng_drop_sum={}ms",
+        "[IBD_MS_BREAKDOWN] {} h={} window_ms={} | wall_wait_feeder={}ms({:.1}%) dispatch={}ms({:.1}%) eng_append_wall={}ms({:.1}%) collect_wait={}ms({:.1}%) drain={}ms({:.1}%) other={}ms({:.1}%) | wait_binder tip_hole={}ms gd_slow={}ms empty_tip={}ms starve={}ms thin={}ms failover={}ms engine={}ms pressure={}ms hole_absent={}ms hole_staged={}ms | tip_n={} tip_need_body_sum={}ms tip_gd_body_sum={}ms tip_body_feeder_sum={}ms tip_feeder_done_sum={}ms tip_need_body_avg={:.1} | eng_n={} eng_append_sum={}ms eng_view_sum={}ms eng_validate_sum={}ms eng_validate_avg={:.1} collect_ready_n={} collect_block_n={} | inflight_avg={:.1} inflight_max={} inflight_full_n={} inflight_hist={}/{}/{}/{}/{} | block_pending_avg={:.1} block_pending0_n={} | tip_supply_vs_wall={:.1}% | tip_body_ia_last_ms={} tip_body_ia_win_avg={} tip_body_ia_n={} | bulk_n={} bulk_gd_body_sum={}ms bulk_gd_body_avg={:.1} | peers_conn={} peers_inflight={} | eff_depth={} slow_pct={} | eng_muhash_sum={}ms disp_txid_sum={}ms disp_outcache_sum={}ms | eng_prep_sum={}ms drain_skipchk_sum={}ms drain_flush_sum={}ms eng_drop_sum={}ms | drain_tipskip_sum={}ms tipsync_bg_sum={}ms drop_q={}",
         tag,
         h,
         wall,
@@ -873,6 +928,9 @@ fn emit_line(tag: &str, w: &Buckets, h: u64) {
         w.drain_skipchk_us / 1000,
         w.drain_flush_us / 1000,
         w.eng_drop_us / 1000,
+        w.drain_tipskip_us / 1000,
+        w.tipsync_bg_us / 1000,
+        DEFERRED_DROP_QUEUE.load(Ordering::Relaxed),
     );
 }
 
@@ -1015,6 +1073,37 @@ mod tests {
         assert_eq!(d.wait_feeder_ms, 20);
         assert_eq!(d.drain_ms, 0);
         assert_eq!(d.bulk_n, 0);
+    }
+
+    /// R-363: sub-ms slices must not be truncated away — the per-state remainder carries, so
+    /// Σ buckets + Σ carry equals the measured wall to the microsecond.
+    #[test]
+    fn r363_wall_slices_carry_sub_ms_remainder() {
+        let mut local = WallLocal {
+            state: WallState::Dispatch,
+            since: Instant::now(),
+            started: true,
+            carry_us: [0; 6],
+        };
+        let mut cum = Buckets::default();
+        let t0 = local.since;
+        // 40 slices of ~300 µs alternating Dispatch / Drain: the old `as_millis()` path read
+        // 0 for every one of them.
+        for i in 0..40 {
+            std::thread::sleep(std::time::Duration::from_micros(300));
+            flush_wall_locked(&mut local, &mut cum);
+            local.state = if i % 2 == 0 { WallState::Drain } else { WallState::Dispatch };
+        }
+        let measured_us = local.since.duration_since(t0).as_micros() as u64;
+        let accounted_us = cum.wall_total() * 1000 + local.carry_us.iter().sum::<u64>();
+        assert!(measured_us >= 12_000, "40 × 300 µs slept: {measured_us}");
+        // `as_micros()` still drops < 1 µs per slice; 40 slices → ≤ 40 µs (was ≤ 40 ms).
+        assert!(
+            measured_us - accounted_us <= 40,
+            "buckets + carry must equal the wall to ≤ 1 µs per slice: {accounted_us} vs {measured_us}"
+        );
+        assert!(cum.wall_total() >= 12, "≥ 12 ms must land in buckets (got {})", cum.wall_total());
+        assert!(local.carry_us.iter().all(|&c| c < 1000));
     }
 
     #[test]

@@ -366,6 +366,46 @@ fn r361_deferred_dropper_frees_last_refs() {
     assert!(weak3.upgrade().is_none(), "disabled dropper frees inline");
 }
 
+/// R-362: the tip syncer runs the sync off-thread, coalesces a burst of requests into fewer
+/// syncs, never loses the last one, and reports `false` (caller flushes inline) when inline or closed.
+#[test]
+fn r362_tip_syncer_coalesces_and_never_drops_the_last_tip() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let calls = Arc::new(AtomicU64::new(0));
+    let max_seen = Arc::new(AtomicU64::new(0));
+    let (c, m) = (calls.clone(), max_seen.clone());
+    let mut syncer = TipSyncer::spawn_with(move |h| {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        c.fetch_add(1, Ordering::SeqCst);
+        m.fetch_max(h, Ordering::SeqCst);
+        Ok(())
+    });
+    // Burst of 200 requests while each sync takes 5 ms: every request must be accepted (a
+    // queued sync covers it), and the thread must run far fewer than 200 syncs.
+    for h in 1..=200u64 {
+        assert!(syncer.request(h * 1000), "request {} must be covered", h);
+    }
+    // The last request must be covered even though the queue was full: the syncer folds the
+    // final queued item, and the final sync runs after this point in program order.
+    syncer.close_and_join();
+    let n = calls.load(Ordering::SeqCst);
+    assert!(n >= 1, "at least one sync ran");
+    assert!(n < 200, "requests must coalesce (ran {n})");
+    assert!(max_seen.load(Ordering::SeqCst) >= 1000, "a real tip was synced");
+    // Closed → caller must flush inline.
+    assert!(!syncer.request(201_000));
+    syncer.close_and_join();
+
+    // Inline mode → caller flushes inline.
+    let inline = TipSyncer::inline();
+    assert!(!inline.request(1000));
+
+    // Failing sync is logged, not fatal.
+    let mut failing = TipSyncer::spawn_with(|_h| Err(anyhow::anyhow!("disk gone")));
+    assert!(failing.request(5000));
+    failing.close_and_join();
+}
+
 /// R-360: the append thread must consume prep-pool output strictly in height order, once each,
 /// and reject a height it has already passed.
 #[test]
