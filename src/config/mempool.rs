@@ -147,6 +147,12 @@ pub struct MempoolPolicyConfig {
     #[serde(default = "default_min_relay_fee_rate")]
     pub min_relay_fee_rate: u64,
 
+    /// Weight units charged per sigop when sizing a transaction for relay and mining.
+    /// Virtual size is `ceil(max(weight, sigop_cost * bytes_per_sigop) / 4)`.
+    /// Default 20 matches Bitcoin Core `-bytespersigop` (5 vbytes per sigop).
+    #[serde(default = "default_bytes_per_sigop")]
+    pub bytes_per_sigop: u64,
+
     #[serde(default = "default_min_tx_fee")]
     pub min_tx_fee: u64,
 
@@ -211,6 +217,10 @@ fn default_min_relay_fee_rate() -> u64 {
     1
 }
 
+fn default_bytes_per_sigop() -> u64 {
+    20
+}
+
 fn default_min_tx_fee() -> u64 {
     1000
 }
@@ -273,6 +283,7 @@ impl Default for MempoolPolicyConfig {
             max_mempool_mb: 300,
             max_mempool_txs: 100_000,
             min_relay_fee_rate: 1,
+            bytes_per_sigop: 20,
             min_tx_fee: 1000,
             incremental_relay_fee: 1000,
             max_ancestor_count: 25,

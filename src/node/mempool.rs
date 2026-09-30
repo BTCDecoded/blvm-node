@@ -30,6 +30,8 @@ struct MempoolPool {
     transactions: HashMap<Hash, Transaction>,
     /// SegWit witness stacks per txid (one stack per input), when known at accept time.
     tx_witnesses: HashMap<Hash, Vec<Witness>>,
+    /// Sigop-adjusted virtual size recorded at accept time.
+    adjusted_vsize: HashMap<Hash, u64>,
     spent_outputs: HashSet<OutPoint>,
 }
 
@@ -92,6 +94,7 @@ impl MempoolManager {
             pool: Mutex::new(MempoolPool {
                 transactions: HashMap::new(),
                 tx_witnesses: HashMap::new(),
+                adjusted_vsize: HashMap::new(),
                 spent_outputs: HashSet::new(),
             }),
             mempool: RwLock::new(Mempool::new()),
@@ -117,6 +120,7 @@ impl MempoolManager {
             pool: Mutex::new(MempoolPool {
                 transactions: HashMap::new(),
                 tx_witnesses: HashMap::new(),
+                adjusted_vsize: HashMap::new(),
                 spent_outputs: HashSet::new(),
             }),
             mempool: RwLock::new(Mempool::new()),
@@ -808,7 +812,7 @@ impl MempoolManager {
             };
             if let Some(tx) = tx {
                 total_fee += self.calculate_transaction_fee(&tx, utxo_set) as i64;
-                total_vsize += self.transaction_virtual_size(&tx, hash) as u64;
+                total_vsize += self.pooled_vsize(hash, &tx, utxo_set);
             }
         }
         (total_fee, total_vsize)
@@ -835,6 +839,17 @@ impl MempoolManager {
         existing_tx: &Transaction,
         utxo_set: &UtxoSet,
         storage: Option<&crate::storage::Storage>,
+    ) -> Result<bool> {
+        self.check_rbf_replacement_with_witness(new_tx, existing_tx, utxo_set, storage, None)
+    }
+
+    fn check_rbf_replacement_with_witness(
+        &self,
+        new_tx: &Transaction,
+        existing_tx: &Transaction,
+        utxo_set: &UtxoSet,
+        storage: Option<&crate::storage::Storage>,
+        new_witnesses: Option<&[Witness]>,
     ) -> Result<bool> {
         use blvm_protocol::block::calculate_tx_id;
 
@@ -917,12 +932,12 @@ impl MempoolManager {
         } else {
             (
                 self.calculate_transaction_fee(existing_tx, utxo_set) as i64,
-                self.transaction_virtual_size(existing_tx, &existing_tx_hash) as u64,
+                self.pooled_vsize(&existing_tx_hash, existing_tx, utxo_set),
             )
         };
 
         let new_fee = self.calculate_transaction_fee(new_tx, utxo_set) as i64;
-        let new_tx_size = self.transaction_virtual_size(new_tx, &new_tx_hash) as u64;
+        let new_tx_size = self.admit_vsize(new_tx, new_witnesses, utxo_set).0;
 
         if new_tx_size == 0 || existing_tx_size == 0 {
             return Ok(false);
@@ -1037,17 +1052,20 @@ impl MempoolManager {
         tx: &Transaction,
         tx_hash: &Hash,
         policy: &MempoolPolicyConfig,
+        candidate_vsize: u64,
     ) -> Result<bool> {
-        use blvm_protocol::serialization::transaction::serialize_transaction;
-
-        // Calculate transaction size
-        let tx_size = serialize_transaction(tx).len() as u64;
-
-        // Find all ancestors (transactions this tx depends on)
-        // Optimization: Pre-allocate with estimated capacity (most txs have < 10 ancestors)
+        // The candidate is not in the pool yet. Seed the walk from its inputs.
         let mut ancestors = HashSet::with_capacity(10);
         let mut to_process = Vec::with_capacity(10);
-        to_process.push(*tx_hash);
+        {
+            let pool = self.pool_lock();
+            for input in &tx.inputs {
+                if pool.transactions.contains_key(&input.prevout.hash) {
+                    ancestors.insert(input.prevout.hash);
+                    to_process.push(input.prevout.hash);
+                }
+            }
+        }
         let mut processed = HashSet::with_capacity(10);
 
         while let Some(current_hash) = to_process.pop() {
@@ -1082,8 +1100,7 @@ impl MempoolManager {
             let pool = self.pool_lock();
             ancestors
                 .iter()
-                .filter_map(|h| pool.transactions.get(h))
-                .map(|t| serialize_transaction(t).len() as u64)
+                .map(|h| pool.adjusted_vsize.get(h).copied().unwrap_or(0))
                 .sum()
         };
 
@@ -1098,11 +1115,11 @@ impl MempoolManager {
             return Ok(false);
         }
 
-        if ancestor_size + tx_size > policy.max_ancestor_size {
+        if ancestor_size + candidate_vsize > policy.max_ancestor_size {
             warn!(
                 "Transaction {} exceeds max ancestor size: {} > {}",
                 hex::encode(tx_hash),
-                ancestor_size + tx_size,
+                ancestor_size + candidate_vsize,
                 policy.max_ancestor_size
             );
             return Ok(false);
@@ -1152,8 +1169,7 @@ impl MempoolManager {
             let pool = self.pool_lock();
             descendants
                 .iter()
-                .filter_map(|h| pool.transactions.get(h))
-                .map(|t| serialize_transaction(t).len() as u64)
+                .map(|h| pool.adjusted_vsize.get(h).copied().unwrap_or(0))
                 .sum()
         };
 
@@ -1168,11 +1184,11 @@ impl MempoolManager {
             return Ok(false);
         }
 
-        if descendant_size + tx_size > policy.max_descendant_size {
+        if descendant_size + candidate_vsize > policy.max_descendant_size {
             warn!(
                 "Transaction {} exceeds max descendant size: {} > {}",
                 hex::encode(tx_hash),
-                descendant_size + tx_size,
+                descendant_size + candidate_vsize,
                 policy.max_descendant_size
             );
             return Ok(false);
@@ -1306,10 +1322,23 @@ impl MempoolManager {
             .and_then(|arc| arc.try_lock().ok().map(|g| g.clone()))
             .unwrap_or_default();
 
+        let witness_ref = witnesses.as_deref();
+        let (candidate_vsize, sigop_cost) =
+            self.admit_vsize(&tx, witness_ref, &utxo_snapshot);
+        if sigop_cost > blvm_protocol::mempool::MAX_STANDARD_TX_SIGOPS_COST {
+            warn!(
+                "Transaction {} rejected: sigop cost {} exceeds standard limit {}",
+                hex::encode(tx_hash),
+                sigop_cost,
+                blvm_protocol::mempool::MAX_STANDARD_TX_SIGOPS_COST
+            );
+            return Ok(false);
+        }
+
         let mut fee_rate_sat_vb = 0u64;
         if !utxo_snapshot.is_empty() {
             let fee = self.calculate_transaction_fee(&tx, &utxo_snapshot);
-            let tx_size = self.transaction_virtual_size(&tx, &tx_hash) as u64;
+            let tx_size = candidate_vsize;
             fee_rate_sat_vb = if tx_size > 0 { fee / tx_size } else { 0 };
             if fee_rate_sat_vb < effective_policy.min_relay_fee_rate {
                 warn!(
@@ -1379,7 +1408,13 @@ impl MempoolManager {
                 let Some(ref existing_tx) = existing_clone else {
                     continue;
                 };
-                if !self.check_rbf_replacement(&tx, existing_tx, &utxo_snapshot, None)? {
+                if !self.check_rbf_replacement_with_witness(
+                    &tx,
+                    existing_tx,
+                    &utxo_snapshot,
+                    None,
+                    witness_ref,
+                )? {
                     debug!(
                         "RBF replacement rejected for conflicting tx {}",
                         hex::encode(existing_hash)
@@ -1438,7 +1473,12 @@ impl MempoolManager {
         }
 
         // Check ancestor/descendant limits before adding (uses effective_policy from above).
-        if !self.check_ancestor_descendant_limits(&tx, &tx_hash, &effective_policy)? {
+        if !self.check_ancestor_descendant_limits(
+            &tx,
+            &tx_hash,
+            &effective_policy,
+            candidate_vsize,
+        )? {
             warn!(
                 "Transaction {} rejected: exceeds ancestor/descendant limits",
                 hex::encode(tx_hash)
@@ -1450,6 +1490,7 @@ impl MempoolManager {
         {
             let mut pool = self.pool_lock();
             pool.transactions.insert(tx_hash, tx.clone());
+            pool.adjusted_vsize.insert(tx_hash, candidate_vsize);
             if let Some(wits) = witnesses {
                 if wits.len() == tx.inputs.len() {
                     pool.tx_witnesses.insert(tx_hash, wits);
@@ -1718,7 +1759,7 @@ impl MempoolManager {
 
             let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
             let fee = input_total.saturating_sub(output_total);
-            let size = self.transaction_virtual_size(tx, tx_hash);
+            let size = self.pooled_vsize(tx_hash, tx, utxo_set) as usize;
             let delta = self
                 .fee_deltas
                 .read()
@@ -1782,6 +1823,116 @@ impl MempoolManager {
 
         // Fee is difference (inputs - outputs)
         input_total.saturating_sub(output_total)
+    }
+
+    /// Sigop-adjusted virtual size and sigop cost for a transaction being admitted.
+    ///
+    /// Legacy sigops count without prevouts. P2SH and witness sigops use chain UTXOs,
+    /// and for a parent that exists only in this pool, that parent's `script_pubkey`.
+    /// The spending witness is `witnesses`, not the parent's witness.
+    fn admit_vsize(
+        &self,
+        tx: &Transaction,
+        witnesses: Option<&[Witness]>,
+        utxo_set: &UtxoSet,
+    ) -> (u64, u64) {
+        use blvm_protocol::mempool::{DEFAULT_BYTES_PER_SIGOP, sigop_adjusted_vsize};
+        use blvm_protocol::script::flags::SEGWIT_STANDARD_FLAGS;
+        use blvm_protocol::sigop::get_transaction_sigop_cost_with_utxos;
+        use blvm_protocol::UTXO;
+
+        let bytes_per_sigop = self
+            .policy_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|p| p.bytes_per_sigop)
+            .unwrap_or(DEFAULT_BYTES_PER_SIGOP);
+
+        // Empty chain snapshot: P2SH and witness terms stay zero. Legacy sigops still count.
+        // Non-empty snapshot: chain UTXO, else the unconfirmed parent's script_pubkey.
+        let owned_utxos: Vec<Option<UTXO>> = if utxo_set.is_empty() {
+            vec![None; tx.inputs.len()]
+        } else {
+            let pool = self.pool_lock();
+            tx.inputs
+                .iter()
+                .map(|input| {
+                    if let Some(utxo) = utxo_set.get(&input.prevout) {
+                        return Some((**utxo).clone());
+                    }
+                    pool.transactions
+                        .get(&input.prevout.hash)
+                        .and_then(|parent| parent.outputs.get(input.prevout.index as usize))
+                        .map(|output| UTXO {
+                            value: output.value,
+                            script_pubkey: output.script_pubkey.clone().into(),
+                            height: 0,
+                            is_coinbase: false,
+                        })
+                })
+                .collect()
+        };
+        let refs: Vec<Option<&UTXO>> = owned_utxos.iter().map(|utxo| utxo.as_ref()).collect();
+        let sigop_cost = get_transaction_sigop_cost_with_utxos(
+            tx,
+            &refs,
+            witnesses,
+            SEGWIT_STANDARD_FLAGS,
+        )
+        .unwrap_or_else(|_| blvm_protocol::sigop::get_legacy_sigop_count(tx) as u64 * 4);
+
+        let weight = self.transaction_weight(tx, witnesses);
+        (sigop_adjusted_vsize(weight, sigop_cost, bytes_per_sigop), sigop_cost)
+    }
+
+    /// Stored adjusted vsize for a pooled transaction, recomputed if the map has no entry.
+    fn pooled_vsize(&self, hash: &Hash, tx: &Transaction, utxo_set: &UtxoSet) -> u64 {
+        if let Some(vsize) = self.pool_lock().adjusted_vsize.get(hash).copied() {
+            return vsize;
+        }
+        let witnesses = self.pool_lock().tx_witnesses.get(hash).cloned();
+        self.admit_vsize(tx, witnesses.as_deref(), utxo_set).0
+    }
+
+    /// Transaction weight in weight units. Uses explicit witnesses when any stack is non-empty.
+    fn transaction_weight(&self, tx: &Transaction, witnesses: Option<&[Witness]>) -> u64 {
+        use blvm_protocol::serialization::serialize_transaction_with_witness;
+        use blvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_protocol::witness::calculate_transaction_weight_segwit;
+
+        if let Some(wits) = witnesses {
+            if wits.iter().any(|stack| !stack.is_empty()) {
+                let base_size = serialize_transaction(tx).len() as u64;
+                let total_size = serialize_transaction_with_witness(tx, wits).len() as u64;
+                return calculate_transaction_weight_segwit(base_size, total_size);
+            }
+        }
+        self.estimate_transaction_weight(tx)
+    }
+
+    /// Weight matching `estimate_transaction_size`: non-witness weight is `4 * vsize`.
+    fn estimate_transaction_weight(&self, tx: &Transaction) -> u64 {
+        let mut base_size: usize = 10;
+        let mut witness_size: usize = 0;
+        let mut segwit_inputs = 0usize;
+
+        for input in &tx.inputs {
+            base_size += 41 + input.script_sig.len();
+            if input.script_sig.is_empty() {
+                witness_size += 107;
+                segwit_inputs += 1;
+            }
+        }
+        for output in &tx.outputs {
+            base_size += 9 + output.script_pubkey.len();
+        }
+        if segwit_inputs > 0 {
+            witness_size += 2;
+            (base_size * 4 + witness_size) as u64
+        } else {
+            (base_size as u64).saturating_mul(4)
+        }
     }
 
     /// Virtual size for fee-rate and RBF comparisons (vbytes).
@@ -1852,6 +2003,7 @@ impl MempoolManager {
                 return false;
             };
             pool.tx_witnesses.remove(hash);
+            pool.adjusted_vsize.remove(hash);
             for input in &tx.inputs {
                 pool.spent_outputs.remove(&input.prevout);
             }

@@ -19,6 +19,9 @@ Maximum number of transactions in mempool. Default: 100,000
 #### `min_relay_fee_rate`
 Minimum relay fee rate in satoshis per virtual byte. Transactions with fee rate below this are not relayed. Default: 1 sat/vB
 
+#### `bytes_per_sigop`
+Weight units charged per signature operation when computing virtual size for relay, replacement, and ancestor/descendant limits. Virtual size is `ceil(max(weight, sigop_cost * bytes_per_sigop) / 4)`. Default: 20 (5 vbytes per sigop). A transaction whose sigop cost exceeds 16,000 is rejected.
+
 #### `min_tx_fee`
 Minimum transaction fee in satoshis (absolute minimum, regardless of size). Default: 1000 satoshis
 
