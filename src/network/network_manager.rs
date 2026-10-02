@@ -245,8 +245,8 @@ pub struct NetworkManager {
     replay_protection: Arc<super::replay_protection::ReplayProtection>,
     /// Pending ban shares (for periodic sharing)
     pending_ban_shares: Arc<Mutex<Vec<(SocketAddr, u64, String)>>>, // (addr, unban_timestamp, reason)
-    /// Ban list sharing configuration
-    ban_list_sharing_config: Option<crate::config::BanListSharingConfig>,
+    /// Ban list sharing configuration. `None` means sharing is off and GetBanList / BanList stay unhandled.
+    pub(crate) ban_list_sharing_config: Option<crate::config::BanListSharingConfig>,
     /// Spam violation tracking per peer (for spam-specific banning)
     /// Maps SocketAddr -> violation count
     peer_spam_violations: Arc<Mutex<HashMap<SocketAddr, usize>>>,
@@ -1679,7 +1679,7 @@ impl NetworkManager {
                             let pm = self.peer_manager.lock().await;
                             pm.peer_socket_addresses()
                         };
-                        if current.iter().any(|c| *c == addr) {
+                        if current.contains(&addr) {
                             continue;
                         }
                         if self.connect_to_peer(addr).await.is_ok() {
@@ -2531,10 +2531,7 @@ impl NetworkManager {
             let t0 = std::time::Instant::now();
             let parsed = ProtocolParser::parse_message(&data)?;
             if matches!(parsed, ProtocolMessage::Block(_)) {
-                crate::node::parallel_ibd::note_block_parse(
-                    t0.elapsed().as_millis() as u64,
-                    false,
-                );
+                crate::node::parallel_ibd::note_block_parse(t0.elapsed().as_millis() as u64, false);
             }
             parsed
         };
@@ -3217,10 +3214,7 @@ impl NetworkManager {
     /// (`handle_peer_disconnected`) did not — R-242 RST of covering hero
     /// `3.136.178.225` left inflight GetData parked until the 30–45s deadline,
     /// then TIP_WALK_PROMOTE retitled the corpse as owner of 186264.
-    pub async fn cancel_pending_block_requests_for_disconnected_peer(
-        &self,
-        sa: SocketAddr,
-    ) {
+    pub async fn cancel_pending_block_requests_for_disconnected_peer(&self, sa: SocketAddr) {
         let peer_ip = Self::block_request_key(sa);
         let mut pending = self.pending_block_requests.lock().await;
         pending.retain(|(ip, _), _| *ip != peer_ip);

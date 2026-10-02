@@ -655,6 +655,13 @@ impl NetworkManager {
                     .send(NetworkMessage::FilteredBlockReceived(data, peer_addr));
                 return Ok(());
             }
+            #[cfg(feature = "utxo-commitments")]
+            ProtocolMessage::GetFilteredBlock(_) => {
+                let _ = self
+                    .peer_tx()
+                    .send(NetworkMessage::GetFilteredBlockReceived(data, peer_addr));
+                return Ok(());
+            }
             ProtocolMessage::GetBlocks(getblocks) => {
                 if let Some(storage) = self.storage().as_ref() {
                     use crate::network::inventory::MSG_BLOCK;
@@ -741,6 +748,18 @@ impl NetworkManager {
                     }
                 }
 
+                return Ok(());
+            }
+            ProtocolMessage::GetBanList(msg) => {
+                if self.ban_list_sharing_config.is_some() {
+                    self.handle_get_ban_list(peer_addr, msg.clone()).await?;
+                }
+                return Ok(());
+            }
+            ProtocolMessage::BanList(msg) => {
+                if self.ban_list_sharing_config.is_some() {
+                    self.handle_ban_list(peer_addr, msg.clone()).await?;
+                }
                 return Ok(());
             }
             _ => {}
