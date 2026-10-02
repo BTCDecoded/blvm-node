@@ -390,7 +390,13 @@ impl ChunkAssigner {
         }
         // A6k: preferred sticky re-arms next span without clearing peer_ok floor.
         if wan {
-            if let Some(ref pref) = self.preferred_tip_owner.lock().unwrap().clone() {
+            // Clone first. The MutexGuard temporary would live for the whole
+            // if-let, and tip_sticky_usable locks this mutex again.
+            let pref_now = self.preferred_tip_owner();
+            if let Some(ref pref) = pref_now {
+                if self.unready_tournament_sticky_owns_h(pref) {
+                    return peer_id == pref;
+                }
                 if pref == peer_id && self.tip_sticky_usable(pref) {
                     return true;
                 }

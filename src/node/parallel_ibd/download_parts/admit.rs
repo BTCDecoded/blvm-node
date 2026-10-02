@@ -753,9 +753,7 @@ async fn enqueue_network_block_batch(
     }
 
     if !*first_block_logged {
-        if start_height == end_height {
-            log_hf_hot("batch", first_height);
-        } else {
+        if start_height != end_height {
             info!(
                 "[IBD] {} chunk {}-{}: batch-requested {} blocks starting at height {} (hash {})",
                 peer_id,

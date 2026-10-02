@@ -16,7 +16,6 @@ pub mod bitcoin_core_storage;
 pub mod bitcoin_detection;
 pub mod block_index;
 pub mod blockstore;
-pub mod buffered_store;
 pub mod chainstate;
 #[cfg(feature = "utxo-commitments")]
 pub mod commitment_store;
@@ -37,7 +36,6 @@ pub mod serialization_cache;
 pub mod txindex;
 pub mod utxo_value_codec;
 pub mod utxostore;
-pub mod wal;
 
 use crate::config::PruningConfig;
 use anyhow::{Context, Result};

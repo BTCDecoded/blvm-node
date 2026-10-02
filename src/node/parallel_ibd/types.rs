@@ -19,9 +19,6 @@ use crate::storage::ibd_utxo_store::IbdUtxoStore;
 /// Prefetched UTXOs keyed by outpoint key — shared via `Arc` in the pipeline (engine mode uses a static empty sentinel).
 pub type PrefetchedUtxoMap = Arc<FxHashMap<OutPointKey, Arc<UTXO>>>;
 
-/// Number of blocks to prefetch ahead
-pub const PREFETCH_LOOKAHEAD: usize = 10;
-
 /// Estimate in-memory bytes for a block + witnesses in the feeder buffer.
 ///
 /// Accounts for actual Rust struct layout, not just serialized size:

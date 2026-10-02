@@ -130,9 +130,7 @@ pub(crate) async fn download_chunk(
         }
     }
 
-    if start_height == end_height {
-        log_hf_hot("download", start_height);
-    } else {
+    if start_height != end_height {
         info!(
             "Downloading chunk from peer {}: heights {} to {}",
             peer_id, start_height, end_height
@@ -777,9 +775,6 @@ pub(crate) async fn download_chunk(
                         "[IBD_LEFTOVER_TRACE] step=try_load_miss start={start_height} h={height} peer={peer_id}"
                     );
                 }
-                if height <= confirmed_body_height || height <= validation_tip.saturating_add(256) {
-                    log_hf_hot("LOCAL_MISS", height);
-                }
                 net_batch_heights.push((height, block_hash));
                 net_batch_permits.push(permit);
 
@@ -1021,12 +1016,8 @@ pub(crate) async fn download_chunk(
         // mute CAP fired @186537 then Face 2 fat 136. R-187: under the flag, floor
         // 45s = R-185 first IBD_STALL after last apply. Sit still dies; 5s does
         // not abort a live fat GetData. Not u64::MAX.
-        let mut tip_cap_secs =
+        let tip_cap_secs =
             tip_gap_timeout_secs_for_chunk(ahead_buffered, start_height, end_height);
-        if crate::node::parallel_ibd::hash_fetch::enabled() {
-            const HF_SIT_CAP_SECS: u64 = 45;
-            tip_cap_secs = tip_cap_secs.max(HF_SIT_CAP_SECS);
-        }
         if next_to_send == tip_needed
             && in_flight_heights.contains(&next_to_send)
             && inflight_started
@@ -1326,7 +1317,6 @@ pub(crate) async fn download_chunk(
                         continue;
                     }
                     _ = wait_tip_enter_abort(&tip_enter, peer_id, start_height, end_height) => {
-                        log_hf_hot("TIP_ENTER", start_height);
                         flush_received_on_abort(
                             &mut received,
                             block_tx.as_ref(),
@@ -1534,7 +1524,6 @@ pub(crate) async fn download_chunk(
                     continue;
                 }
                 _ = wait_tip_enter_abort(&tip_enter, peer_id, start_height, end_height) => {
-                    log_hf_hot("TIP_ENTER", start_height);
                     flush_received_on_abort(
                         &mut received,
                         block_tx.as_ref(),
@@ -1918,52 +1907,6 @@ pub(crate) async fn download_chunk(
                         height
                     ));
                 }
-                if crate::node::parallel_ibd::hash_fetch::enabled() {
-                    match blockstore.get_header(&block_hash) {
-                        Ok(Some(hdr))
-                            if crate::node::parallel_ibd::tip_probe::verify_probe_body(
-                                &block,
-                                block_hash,
-                                hdr.merkle_root,
-                            ) => {}
-                        Ok(Some(_)) => {
-                            warn!(
-                                "[IBD_HASH_FETCH] merkle mismatch height {} hash {} — drop, re-request",
-                                height,
-                                hex::encode(block_hash)
-                            );
-                            peer_scorer.record_failure(peer_addr);
-                            flush_received_on_abort(
-                                &mut received,
-                                block_tx.as_ref(),
-                                start_height,
-                                end_height,
-                                next_to_send,
-                                validation_height.as_deref(),
-                            )
-                            .await;
-                            for &h in &in_flight_heights {
-                                if let Some(&h_hash) = block_hash_by_height.get(&h) {
-                                    network.cancel_block_request(peer_addr, h_hash);
-                                }
-                            }
-                            return Err(anyhow::anyhow!(
-                                "merkle mismatch at height {} - hash fetch retry",
-                                height
-                            ));
-                        }
-                        _ => {
-                            warn!(
-                                "[IBD_HASH_FETCH] missing stored header at height {} — cannot admit",
-                                height
-                            );
-                            return Err(anyhow::anyhow!(
-                                "missing header at height {} for hash-fetch admit",
-                                height
-                            ));
-                        }
-                    }
-                }
                 progress.record_progress(received_hash);
                 progress.reset_timeout();
                 let latency_ms = request_start.elapsed().as_secs_f64() * 1000.0;
@@ -2002,7 +1945,6 @@ pub(crate) async fn download_chunk(
                     }
                 }
                 note_download_block_bytes(peer_id, block_size);
-                crate::node::parallel_ibd::hash_fetch::note_bytes(peer_id, block_size);
                 peer_scorer.record_block(peer_addr, block_size, latency_ms);
                 // W7: empty-witness MSG_BLOCK of a *commitment* block must not enter
                 // `received` (stripped payload). Blocks without BIP141 commitment may
@@ -2193,26 +2135,6 @@ pub(crate) async fn download_chunk(
                     if let Some(ref a) = tip_enter {
                         if a.peer_lookahead_covers(peer_id, height) {
                             a.note_lookahead_stream(peer_id);
-                        }
-                    }
-                }
-                // S-8.1: first body wins — complete the height and drop losing GetDatas.
-                if crate::node::parallel_ibd::hash_fetch::enabled() {
-                    let losers: Vec<String> = crate::node::parallel_ibd::hash_fetch::complete(height)
-                        .into_iter()
-                        .filter(|p| p != peer_id)
-                        .collect();
-                    if losers.len() >= 2 {
-                        info!(
-                            "[IBD_HF_TIP_CANCEL] h={} winner={} losers={}",
-                            height,
-                            peer_id,
-                            losers.len()
-                        );
-                    }
-                    for loser in losers {
-                        if let Ok(addr) = loser.parse::<std::net::SocketAddr>() {
-                            network.cancel_block_request_force(addr, block_hash);
                         }
                     }
                 }

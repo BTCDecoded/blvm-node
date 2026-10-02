@@ -464,13 +464,6 @@ impl ChunkAssigner {
         self.bootstrap_complete.load(Ordering::Relaxed) && next_needed > body_tip
     }
 
-    /// R-32/R-34: refusing start>H collapsed 10–50k (1415 → 349). R-26/R-30
-    /// assigned 65–96 at tip=1 and lived. Dead. Do not restore.
-    #[allow(dead_code)]
-    fn wan_refuse_past_h(&self, _start: u64, _next_needed: u64) -> bool {
-        false
-    }
-
     /// R-307: freeze C1g on `tip_bridge_holes > 0` instead of `tip_missing`.
     /// Default **off** = today's `tip_missing` predicate (arm A byte-identical).
     /// Opt in: `BLVM_IBD_C1G_FREEZE_ON_HOLES=1`.
@@ -517,9 +510,9 @@ impl ChunkAssigner {
         raw.clamp(0, Self::tip_runway_stripe())
     }
 
-    /// Tournament 1-32 (cap 4) **or** R-62 live-H overlap (cap 2) while
-    /// H<50k and preferred is not flood-class. Tournament overwrite of this
-    /// door is why R-68 printed 552 vs R-62 3343. Not 4 on growing H.
+    /// Tournament 1-32 (cap 4) while H<50k and preferred is not flood-class.
+    /// Tournament overwrite of this door is why R-68 printed 552 vs R-62 3343.
+    /// Not 4 on growing H.
     pub(crate) fn ignition_second_h_ok(
         &self,
         wan_gap: bool,
@@ -529,20 +522,6 @@ impl ChunkAssigner {
         raw_covering: usize,
     ) -> bool {
         self.ignition_tournament_open(wan_gap, tip_missing, next_needed, raw_covering)
-            || self.r62_overlap_h_ok(wan_gap, tip_missing, next_needed, raw_covering)
-    }
-
-    /// Closed: R-78 cheese-hole at 1098. Second GetData on H is cheese.
-    /// Other peers pack owner_end+1 (`try_assign_lookahead_stripe`). Mute
-    /// (H,H) stays on C1t / distress only.
-    fn r62_overlap_h_ok(
-        &self,
-        _wan_gap: bool,
-        _tip_missing: bool,
-        _next_needed: u64,
-        _raw_covering: usize,
-    ) -> bool {
-        false
     }
 
     /// Ignition window still live (cap independent). Blocks distress (H,H) extras.
@@ -1152,8 +1131,6 @@ impl ChunkAssigner {
             }
             return None;
         }
-        // R-185: pick on get_work so HOLE warehouse can arm (EMPTY_REARM is covering=0).
-        self.maybe_hf_rate_pick(next_enter);
         self.export_owner_hold_tick();
         self.maybe_rotate_slow_h_sticky();
         // E1: while ladder export isolation is on, do not issue new GetData — let
@@ -1260,8 +1237,8 @@ impl ChunkAssigner {
         // GetData (H,H). Not dual (covering>0 skips). Not skip farms (other
         // peers still LOOKAHEAD). Not STORE_APPLY. Dump: preferred None / not
         // inflight → this is silent (R-194b occupancy stays get_work).
-        if self.hole_any_uncovered_ok(peer_id, &guard, next_needed) {
-            if self.try_insert_dynamic(&mut guard, peer_id, next_needed, next_needed) {
+        if self.hole_any_uncovered_ok(peer_id, &guard, next_needed)
+            && self.try_insert_dynamic(&mut guard, peer_id, next_needed, next_needed) {
                 drop(guard);
                 tracing::warn!(
                     "[IBD_HOLE_ANY] peer={} {}-{}",
@@ -1271,7 +1248,6 @@ impl ChunkAssigner {
                 );
                 return Some((next_needed, next_needed));
             }
-        }
         if self.tip_stale_cover_rerace_ok(peer_id, &guard, next_needed) {
             let waited = super::tip_stage::tip_awaiting_ms_for_cap();
             TIP_RERACE_HEIGHT.store(next_needed, Ordering::Relaxed);
@@ -1450,8 +1426,8 @@ impl ChunkAssigner {
                             .iter()
                             .any(|(s, e)| *s == next_needed && *e == next_needed)
                     });
-                    if !hh_inflight && self.peer_has_flight_capacity(peer_id, &guard) {
-                        if self.try_insert_dynamic(&mut guard, peer_id, next_needed, next_needed) {
+                    if !hh_inflight && self.peer_has_flight_capacity(peer_id, &guard)
+                        && self.try_insert_dynamic(&mut guard, peer_id, next_needed, next_needed) {
                             drop(guard);
                             tracing::warn!(
                                 "[IBD_LEFTOVER_HOLE] assign GetData {}-{} (ignore leftover covering)",
@@ -1460,7 +1436,6 @@ impl ChunkAssigner {
                             );
                             return Some((next_needed, next_needed));
                         }
-                    }
                 }
                 let raw_covering = Self::covering_next_count(&guard, next_needed);
                 let at_chunk_start = next_needed == cs;
@@ -1561,10 +1536,10 @@ impl ChunkAssigner {
                 // re-preempts the same spans 8–17×/s, feeder stays 0, wall ~6–8 blk/s (2026-07-23).
                 // Keep W40 for real soft-resume and for synth tip-crawl with delay>0.
                 let tip_missing = self.tip_gap_missing.load(Ordering::Relaxed);
-                let local_tip_hole = !wan_gap
+                let local_tip_hole = (super::synthetic_wan::injected_ia()
+                    || !super::synthetic_wan::enabled())
                     && tip_missing
-                    && !(super::synthetic_wan::enabled()
-                        && !super::synthetic_wan::injected_ia());
+                    && !wan_gap;
                 // Dense local W16 tip-fill (bootstrap / gap_preempt dens KEEP): body_tip=0
                 // makes wan_tip_gap_crawl true for genesis stall/nudge, but without a
                 // coordinator body/header tip and without tip_missing, tip-owner stays on
@@ -1697,9 +1672,7 @@ impl ChunkAssigner {
                     raw_covering,
                     peer_id,
                 );
-                let r62_h = !tournament_h
-                    && self.r62_overlap_h_ok(wan_gap, tip_missing, next_needed, raw_covering);
-                let ignition_second_h = tournament_h || r62_h;
+                let ignition_second_h = tournament_h;
                 match super::tip_stage::tournament_poll() {
                     super::tip_stage::TournamentPoll::Win { ref peer, .. } => {
                         self.note_tip_owner_assigned(peer);
@@ -1707,12 +1680,7 @@ impl ChunkAssigner {
                     super::tip_stage::TournamentPoll::Timeout => {}
                     super::tip_stage::TournamentPoll::None => {}
                 }
-                // R-62 second is on live H. Do not steal that peer onto
-                // lookahead (R-65 1447 / OUTRANK=0). Prefetch stays for a
-                // third peer after covering==2.
-                let disjoint_only = !r62_h
-                    && next_needed >= 64
-                    && next_needed < 50_000
+                let disjoint_only = (64..50_000).contains(&next_needed)
                     && self.preferred_tip_owner().as_deref() != Some(peer_id)
                     && self
                         .preferred_tip_owner()
@@ -1746,9 +1714,12 @@ impl ChunkAssigner {
                 // (try_assign_lookahead) or cheese (H,H) — R-84 holes=50.
                 // Farm warehouse covering H is not a tip pipe (R-112
                 // keep-full: covering_wait → flight_tip=0, 30–31k 8s).
+                // W65: a shallow walk-in (remain < deep min) is not a tip pipe.
+                // (H,H) micros are not either. Only a deep inflight cover waits.
                 let covering_wait = !Self::h_body_present()
                     && raw_covering >= 1
-                    && !self.inflight_cover_is_only_farm(&guard, hole);
+                    && !self.inflight_cover_is_only_farm(&guard, hole)
+                    && Self::find_inflight_deep_covering(&guard, next_needed).is_some();
                 let want_tip_owner = !disjoint_only
                     && (skip_hero_h
                     || ignition_second_h
@@ -1782,9 +1753,6 @@ impl ChunkAssigner {
                     } else if tournament_h {
                         // Same 1-32 for every racer. Not a second 1-64 range.
                         32u64.max(assign_h)
-                    } else if r62_h {
-                        // Tight live H. Not a mid-band 32-wide cheese stripe.
-                        assign_h
                     } else {
                         assign_h.saturating_add(preempt_batch.saturating_sub(1))
                     };
@@ -1863,8 +1831,6 @@ impl ChunkAssigner {
                         } else if tournament_h {
                             // Ignition tournament: same 1-32, cap 4. Not (H,H).
                             raw_covering < 4
-                        } else if r62_h {
-                            raw_covering < 2
                         } else if effective_healthy == 0 {
                             // Refuse overlap with another *deep* tip pipe (synth same-span
                             // storms). W28d/W65: shallow walk-in cover must NOT block deep
@@ -2122,8 +2088,7 @@ impl ChunkAssigner {
                                 && part_end >= part_start
                                 && !Self::range_overlaps_inflight(&guard, part_start, part_end)
                                 && !self.chunk_range_in_flight(&guard, part_start, part_end)
-                            {
-                                if self.try_insert_dynamic(&mut guard, peer_id, part_start, part_end)
+                                && self.try_insert_dynamic(&mut guard, peer_id, part_start, part_end)
                                 {
                                 Self::log_pipe_f(
                                     next_needed,
@@ -2143,7 +2108,6 @@ impl ChunkAssigner {
                                 );
                                 return Some((part_start, part_end));
                                 }
-                            }
                         }
                     }
                 }
@@ -2253,8 +2217,7 @@ impl ChunkAssigner {
                             if part_end >= part_start
                                 && !Self::range_overlaps_inflight(&guard, part_start, part_end)
                                 && !self.chunk_range_in_flight(&guard, part_start, part_end)
-                            {
-                                if self.try_insert_dynamic(&mut guard, peer_id, part_start, part_end)
+                                && self.try_insert_dynamic(&mut guard, peer_id, part_start, part_end)
                                 {
                                 Self::log_pipe_f(
                                     next_needed,
@@ -2305,7 +2268,6 @@ impl ChunkAssigner {
                                 );
                                 return Some((part_start, part_end));
                                 }
-                            }
                         } else {
                             // Non-WAN: ahead partitions stay at 32 with chunk-map clip.
                             // C1u: never multi-peer past body tip (live cheese: ahead
@@ -2355,8 +2317,7 @@ impl ChunkAssigner {
                                 if part_end >= part_start
                                     && !Self::range_overlaps_inflight(&guard, part_start, part_end)
                                     && !self.chunk_range_in_flight(&guard, part_start, part_end)
-                                {
-                                    if self.try_insert_dynamic(
+                                    && self.try_insert_dynamic(
                                         &mut guard, peer_id, part_start, part_end,
                                     ) {
                                     tracing::debug!(
@@ -2369,7 +2330,6 @@ impl ChunkAssigner {
                                     );
                                     return Some((part_start, part_end));
                                     }
-                                }
                             }
                         }
                     }
@@ -2712,6 +2672,13 @@ impl ChunkAssigner {
                 let stripe_end =
                     next_needed.saturating_add(Self::tip_runway_stripe().saturating_sub(1));
                 assign_end = assign_end.min(stripe_end);
+            }
+        }
+        if assign_start <= next_needed && next_needed <= assign_end {
+            if let Some(pref) = self.preferred_tip_owner() {
+                if pref != peer_id && self.unready_tournament_sticky_owns_h(&pref) {
+                    return None;
+                }
             }
         }
         if self.chunk_range_in_flight(&guard, assign_start, assign_end) {

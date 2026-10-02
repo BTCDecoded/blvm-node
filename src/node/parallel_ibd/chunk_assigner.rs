@@ -2,7 +2,7 @@
 //! chunks are re-queued on drop if not disarmed.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -710,7 +710,8 @@ impl Drop for ChunkGuard {
             if let Some(peer_id) = self.peer_id.take() {
                 self.assigner.on_chunk_complete_range(&peer_id, start, end);
             }
-            self.assigner.requeue_reason(start, end, exclude, "guard_drop");
+            self.assigner
+                .requeue_reason(start, end, exclude, "guard_drop");
         } else if let Some(peer_id) = self.peer_id.take() {
             self.assigner.on_chunk_complete(&peer_id);
         }

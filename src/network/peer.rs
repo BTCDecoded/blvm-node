@@ -9,7 +9,6 @@ use tracing::{debug, info, warn};
 
 use super::NetworkMessage;
 use super::transport::{TransportAddr, TransportConnection};
-use crate::network::protocol::cmd;
 use crate::utils::current_timestamp;
 
 /// Peer connection state
@@ -442,41 +441,6 @@ impl Peer {
         // Connection close is automatically detected by the read task in from_transport_connection
         // When recv() returns empty data or error, the task breaks and sends PeerDisconnected
         self.connected = false;
-        Ok(())
-    }
-
-    /// Process a received message
-    #[allow(dead_code)]
-    async fn process_message(&self, data: &[u8]) -> Result<()> {
-        if data.len() < 4 {
-            return Err(anyhow::anyhow!("Message too short"));
-        }
-
-        // Parse Bitcoin protocol message
-        let command = String::from_utf8_lossy(&data[4..12]);
-        debug!("Received command: {}", command);
-
-        match command.as_ref() {
-            c if c == cmd::BLOCK => {
-                let _ = self
-                    .message_tx
-                    .send(NetworkMessage::BlockReceived(data.to_vec()));
-            }
-            c if c == cmd::TX => {
-                let _ = self
-                    .message_tx
-                    .send(NetworkMessage::TransactionReceived(data.to_vec()));
-            }
-            c if c == cmd::INV => {
-                let _ = self
-                    .message_tx
-                    .send(NetworkMessage::InventoryReceived(data.to_vec(), self.addr));
-            }
-            _ => {
-                debug!("Unknown command: {}", command);
-            }
-        }
-
         Ok(())
     }
 

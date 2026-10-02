@@ -7,10 +7,9 @@
 //! configurable (default 128).
 
 use super::local_block::{
-    cached_feature_registry, empty_witness_unacceptable, has_real_witnesses,
-    ibd_stall_aborts_inflight_gap_fetch, is_local_witness_hole, try_load_local_ibd_block,
-    try_persist_gap_block_for_local_inject, try_persist_gap_block_for_local_inject_with_wire,
-    try_repair_missing_witness,
+    cached_feature_registry, empty_witness_unacceptable, ibd_stall_aborts_inflight_gap_fetch,
+    is_local_witness_hole, try_load_local_ibd_block, try_persist_gap_block_for_local_inject,
+    try_persist_gap_block_for_local_inject_with_wire, try_repair_missing_witness,
 };
 use super::types::{SharedBlock, SharedWitnesses};
 use crate::network::NetworkManager;
@@ -24,8 +23,8 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use hex;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tokio::sync::Semaphore;
 use tokio::sync::broadcast;
@@ -69,68 +68,6 @@ pub(crate) fn local_disk_peer_ids() -> Vec<String> {
             }
         })
         .collect()
-}
-
-/// Per-height HASH_FETCH lines (LOCAL_MISS / took / TIP_ENTER / batch / download)
-/// were ~86 KiB/block and 11G by 93k. Count them; emit one line per 5s.
-pub(crate) fn log_hf_hot(kind: &'static str, height: u64) {
-    use std::sync::atomic::AtomicU64;
-    static N_MISS: AtomicU64 = AtomicU64::new(0);
-    static N_TOOK: AtomicU64 = AtomicU64::new(0);
-    static N_ENTER: AtomicU64 = AtomicU64::new(0);
-    static N_BATCH: AtomicU64 = AtomicU64::new(0);
-    static N_DL: AtomicU64 = AtomicU64::new(0);
-    static LAST_MS: AtomicU64 = AtomicU64::new(0);
-    static LAST_H: AtomicU64 = AtomicU64::new(0);
-    match kind {
-        "LOCAL_MISS" => {
-            N_MISS.fetch_add(1, Ordering::Relaxed);
-        }
-        "took" => {
-            N_TOOK.fetch_add(1, Ordering::Relaxed);
-        }
-        "TIP_ENTER" => {
-            N_ENTER.fetch_add(1, Ordering::Relaxed);
-        }
-        "batch" => {
-            N_BATCH.fetch_add(1, Ordering::Relaxed);
-        }
-        "download" => {
-            N_DL.fetch_add(1, Ordering::Relaxed);
-        }
-        "idle" => {}
-        _ => {}
-    }
-    LAST_H.store(height, Ordering::Relaxed);
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let prev = LAST_MS.load(Ordering::Relaxed);
-    if now_ms.saturating_sub(prev) >= 5_000
-        && LAST_MS
-            .compare_exchange(prev, now_ms, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-    {
-        info!(
-            "[IBD_HF_LOG] local_miss={} took={} tip_enter={} batch={} download={} last_h={} hf_missing={} hf_inflight={} hf_peers={} hf_tip_expire={} hf_tip_dup={} hf_tip_esc={} {} {} {}",
-            N_MISS.load(Ordering::Relaxed),
-            N_TOOK.load(Ordering::Relaxed),
-            N_ENTER.load(Ordering::Relaxed),
-            N_BATCH.load(Ordering::Relaxed),
-            N_DL.load(Ordering::Relaxed),
-            LAST_H.load(Ordering::Relaxed),
-            crate::node::parallel_ibd::hash_fetch::missing_len(),
-            crate::node::parallel_ibd::hash_fetch::inflight_len(),
-            crate::node::parallel_ibd::hash_fetch::inflight_peer_count(),
-            crate::node::parallel_ibd::hash_fetch::tip_expire_count(),
-            crate::node::parallel_ibd::hash_fetch::tip_dup_count(),
-            crate::node::parallel_ibd::hash_fetch::tip_esc_count(),
-            crate::node::parallel_ibd::hash_fetch::gd_volume_suffix(),
-            crate::node::parallel_ibd::hash_fetch::byte_share_suffix(),
-            crate::node::parallel_ibd::hash_fetch::tip_state_suffix()
-        );
-    }
 }
 
 include!("download_parts/admit.rs");

@@ -1910,12 +1910,6 @@ async fn wait_tip_enter_abort(
     start_height: u64,
     end_height: u64,
 ) {
-    // F-1: HASH_FETCH take_work is lowest-missing and routinely start>next_needed.
-    // C1j then aborts every ahead (H,H) while genesis tip_gap_missing stays true.
-    if super::hash_fetch_skips_tip_enter_abort() {
-        std::future::pending::<()>().await;
-        return;
-    }
     let Some(assigner) = tip_enter.as_ref() else {
         std::future::pending::<()>().await;
         return;

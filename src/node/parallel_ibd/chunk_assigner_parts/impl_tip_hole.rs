@@ -4,7 +4,7 @@ const LINE_RATE_OWNER_BPS: f64 = 60.0;
 /// R-58: reserved lookahead past the hero window. Not R-45 flood-skip. Not latch.
 const LOOKAHEAD_OFFSET: u64 = 256;
 const LOOKAHEAD_WIDTH: u64 = 256;
-/// satd far pool is shuffled; HASH_FETCH is lowest-first (still HOL on H).
+/// satd far pool is shuffled (still HOL on H).
 /// Packed LOOKAHEAD width is **2048**, so the window must be **>width**.
 /// **8192** = 4 tiles. Not 50k. Dump LOOKAHEAD stays sequential (`<180k`).
 const SWARM_FAR_WINDOW: u64 = 8192;
@@ -41,25 +41,14 @@ const FARM_RECV_LO: u64 = 10_000;
 const FARM_RECV_TICK_SECS: u64 = 5;
 const FARM_RECV_STREAK: u32 = 3;
 /// Gap B: no new far tile at H≥floor while warehouse-full TIP_HOLE_AHEAD.
-/// Flag-off floor **300k**. Not 50k (R-140 fat **137**). Not 248k
+/// Floor **300k**. Not 50k (R-140 fat **137**). Not 248k
 /// (R-136 **193** / R-147 **155**). Not any-ahead (R-153). Ahead ≥ WIDTH.
-/// HASH_FETCH END=200k never reaches 300k. R-188 Face 2 at fat (HOLE
-/// **23/30**, reo **4096**, **121**). Flag-on floor **180k** — not genesis,
-/// not R-140. Flag-off stays 300k.
-/// R-189 `GAP_B` **0**: ahead≥WIDTH (2048) silent (fat reo p50 **256**).
-/// Flag-on warehouse floor **256**. Not R-153 (`ahead>0` / 64). Flag-off
-/// stays WIDTH.
+/// Ahead ≥ WIDTH (2048) stays silent (fat reo p50 **256**).
 const GAP_B_LO: u64 = 300_000;
-const GAP_B_LO_HASH_FETCH: u64 = 180_000;
-const GAP_B_AHEAD_HASH_FETCH: u64 = 256;
 const GAP_B_LOG_SECS: u64 = 5;
 const EMPTY_BAND_FLOOD_BPS: f64 = 2000.0;
 const EMPTY_BAND_IA_HOLD_MS: u64 = 1;
 const EMPTY_BAND_IA_SAMPLE_AFTER_MS: u64 = 2;
-/// R-61: empty-band first-pipe. R-53 10–50k 4801 had `flight_ahead=0`.
-/// R-60 walk cost 1079→629 on the same tree. Drop stale still runs.
-/// Do not arm / re-arm a live stripe until H is past the 4000 gate.
-const LOOKAHEAD_ARM_AFTER_H: u64 = 50_000;
 /// Before 50k: one disjoint 32-wide stripe (apply will consume). Not R-60 H+256 walk.
 /// Not overlapping H sample (duplicate GetData dropped).
 const EMPTY_BAND_AHEAD_WIDTH: u64 = 32;
@@ -174,7 +163,7 @@ pub(crate) fn starve_far_blocks_new_slid(
     part_start: u64,
     reorder_ahead: u64,
 ) -> bool {
-    if next_needed < STARVE_FAR_MIN_HEIGHT || next_needed >= GAP_B_LO {
+    if !(STARVE_FAR_MIN_HEIGHT..GAP_B_LO).contains(&next_needed) {
         return false;
     }
     // FAT_HOLD class: warehouse-full at 180k must still pack (r165).
@@ -248,8 +237,8 @@ const MUTE_DROP_SAME_H_MS: u64 = 8_000;
 
 impl ChunkAssigner {
     /// R-255: satd far download ⊥ sequential connect. Default **off**.
-    /// `BLVM_IBD_SWARM=1` spreads packed LOOKAHEAD across `[hole+LEAD, +8192)`
-    /// at ≥180k. Does **not** skip `get_work`. HASH_FETCH stays unset.
+    /// Env no-ops: `BLVM_IBD_SWARM=1` does not spread LOOKAHEAD.
+    /// Does **not** skip `get_work`.
     /// Not N peers on one stripe (R-27). Not covering=0 OPEN.
     fn swarm_far_enabled() -> bool {
         // R-245 restore: R-245 binary has no IBD_SWARM_FAR. Env no-ops.
@@ -285,14 +274,13 @@ impl ChunkAssigner {
     /// abort are unchanged.
     pub(crate) fn no_tip_abort_enabled() -> bool {
         let v = latch_env!(bool, {
-            match std::env::var("BLVM_IBD_NO_TIP_ABORT")
-                .ok()
-                .as_deref()
-                .map(str::trim)
-            {
-                Some("0") | Some("false") | Some("off") | Some("no") => false,
-                _ => true,
-            }
+            !matches!(
+                std::env::var("BLVM_IBD_NO_TIP_ABORT")
+                    .ok()
+                    .as_deref()
+                    .map(str::trim),
+                Some("0") | Some("false") | Some("off") | Some("no")
+            )
         });
         #[cfg(not(test))]
         {
@@ -781,9 +769,7 @@ impl ChunkAssigner {
         if !self.mute_single_cover_reopen(raw_covering) {
             return None;
         }
-        let Some(pref) = self.preferred_tip_owner() else {
-            return None;
-        };
+        let pref = self.preferred_tip_owner()?;
         let bps = self.wan_tip_stream_bps(&pref);
         let recv0 = super::tip_stage::pipe_fill_recv0_streak() > 0;
         // R-30 dest @224k: MUTE_DROP evicted a 20.6 BPS replacement because
@@ -791,9 +777,7 @@ impl ChunkAssigner {
         if bps >= 1.0 {
             return None;
         }
-        let Some(repl) = self.any_ready_active_worker_except(&pref) else {
-            return None;
-        };
+        let repl = self.any_ready_active_worker_except(&pref)?;
         // Caller is the mute (or a third peer) → wait. Do not drop into covering=0
         // or insert a zombie (H,H) the replacement never GetData'd.
         if caller != repl.as_str() {
@@ -1126,6 +1110,12 @@ impl ChunkAssigner {
         {
             return None;
         }
+        // Same door as LOOKAHEAD: a new near-cursor tile is a new far tile.
+        // Re-arm above still returns the reserved tile. R-165 warehouse at ≥300k.
+        if self.gap_b_blocks_new_far_tile(guard, &pref, next_needed) {
+            self.note_gap_b(next_needed);
+            return None;
+        }
         let zone_end = next_needed.saturating_add(PRIORITY_ZONE);
         let mut h = next_needed.saturating_add(1);
         while h <= zone_end {
@@ -1253,6 +1243,11 @@ impl ChunkAssigner {
             .get(peer_id)
             .is_some_and(|r| r.iter().any(|&(s, _)| s > next_needed))
         {
+            return None;
+        }
+        // New latch is a new far tile. Reserved retry above still re-arms.
+        if self.gap_b_blocks_new_far_tile(guard, &pref, next_needed) {
+            self.note_gap_b(next_needed);
             return None;
         }
         // Log-only: live R-251 owner_end was 2k past apply. Do not assign there.
@@ -1388,7 +1383,7 @@ impl ChunkAssigner {
     /// first_missing also packs (R-91 empty seat). Covering≥1 without the hero
     /// on the hole is not pack — R-84 @186k packed past an in-flight 64,
     /// `bridge_min=H+19`, holes=50, `KILL_HOLES`.
-    /// R-69 H+256 leftover on the sticky is closed. Hero never. Latch stays zero callers.
+    /// R-69 H+256 leftover on the sticky is closed. Hero never. Latch is live (R-245).
     fn try_assign_lookahead_stripe(
         &self,
         peer_id: &str,
@@ -1701,7 +1696,7 @@ impl ChunkAssigner {
         {
             let stripes = self.lookahead_stripes.lock().unwrap();
             for (p, s, e) in stripes.iter() {
-                if *s >= slid_from && pick.as_ref().map_or(true, |(_, ps, _)| *s > *ps) {
+                if *s >= slid_from && pick.as_ref().is_none_or(|(_, ps, _)| *s > *ps) {
                     pick = Some((p.clone(), *s, *e));
                 }
             }
@@ -1883,20 +1878,11 @@ impl ChunkAssigner {
             return false;
         }
         let ahead = super::IBD_REORDER_AHEAD.load(Ordering::Relaxed) as u64;
-        let need = if super::hash_fetch::enabled() {
-            GAP_B_AHEAD_HASH_FETCH
-        } else {
-            LEAPFROG_WIDTH
-        };
-        ahead >= need
+        ahead >= LEAPFROG_WIDTH
     }
 
     fn gap_b_lo() -> u64 {
-        if super::hash_fetch::enabled() {
-            GAP_B_LO_HASH_FETCH
-        } else {
-            GAP_B_LO
-        }
+        GAP_B_LO
     }
 
     /// New far tile only. Re-arm of an already-reserved stripe stays.
@@ -2316,17 +2302,12 @@ impl ChunkAssigner {
                 return Some(ch);
             }
         }
-        let Some((sticky_ms, sticky_n)) =
-            super::tip_stage::getdata_body_ewma_ms_for_peer(sticky, 8)
-        else {
-            return None;
-        };
+        let (sticky_ms, sticky_n) =
+            super::tip_stage::getdata_body_ewma_ms_for_peer(sticky, 8)?;
         if sticky_n < 8 {
             return None;
         }
-        let Some((top, top_bps, n)) = self.best_reserved_stream(Some(sticky)) else {
-            return None;
-        };
+        let (top, top_bps, n) = self.best_reserved_stream(Some(sticky))?;
         if n < 8 {
             return None;
         }
@@ -2352,10 +2333,7 @@ impl ChunkAssigner {
         {
             return None;
         }
-        let Some((top_ms, top_n)) = super::tip_stage::getdata_body_ewma_ms_for_peer(&top, 8)
-        else {
-            return None;
-        };
+        let (top_ms, top_n) = super::tip_stage::getdata_body_ewma_ms_for_peer(&top, 8)?;
         if top_n < 8 {
             return None;
         }
@@ -2427,7 +2405,7 @@ impl ChunkAssigner {
     /// `154.53`) and sat 20–30 BPS. No flood peer → keep sticky. One
     /// successful flood retitle per dest.
     pub(crate) fn maybe_fat_probe_retitle(&self, next_needed: u64) -> bool {
-        if next_needed < FAT_PROBE_RETITLE_LO || next_needed >= FAT_PROBE_RETITLE_HI {
+        if !(FAT_PROBE_RETITLE_LO..FAT_PROBE_RETITLE_HI).contains(&next_needed) {
             return false;
         }
         if self.fat_probe_retitle_done.load(Ordering::Relaxed) {
@@ -2665,10 +2643,10 @@ impl ChunkAssigner {
         if self.wan_tip_stream_bps(sticky) >= EMPTY_BAND_FLOOD_BPS {
             return false;
         }
-        match super::tip_stage::owner_body_ia_median() {
-            Some((ia, _)) if ia > EMPTY_BAND_IA_SAMPLE_AFTER_MS => true,
-            _ => false,
-        }
+        matches!(
+            super::tip_stage::owner_body_ia_median(),
+            Some((ia, _)) if ia > EMPTY_BAND_IA_SAMPLE_AFTER_MS
+        )
     }
 
     fn empty_band_sample_outranks(&self, sticky: &str) -> bool {
@@ -3623,16 +3601,6 @@ impl ChunkAssigner {
     /// Phase 2 EMPTY_TIP: covering=0 while tip missing — open tip-owner + re-arm SLA.
     /// Rate-limited (~80ms) so COVERING_ZERO thrash does not storm assigns.
     /// KEEP leaves sole-EMPTY release off (A51 deleted). Frontier dual on-path is gone (T2.5).
-    /// R-184: HASH_FETCH byte-rate picks preferred. get_work + W58 stay.
-    /// R-185: also from get_work — EMPTY_REARM is covering=0 only; Face 2 is HOLE.
-    /// First pin when preferred is none. One retitle if sticky is not lane-fast
-    /// (ema < best×0.7) and not line-rate. Not promote (15s farm-recv).
-    /// R-188: off. R-187 `HF_PICK` **8** then fat **108** thin-H. Sit CAP 45s
-    /// / get_work / W58 stay. Picker is Way B steal, not a mint.
-    pub(crate) fn maybe_hf_rate_pick(&self, next_needed: u64) {
-        let _ = next_needed;
-    }
-
     pub(crate) fn force_empty_tip_rearm(&self, next_needed: u64) {
         static LAST: Mutex<Option<Instant>> = Mutex::new(None);
         {
@@ -3647,7 +3615,6 @@ impl ChunkAssigner {
         if !self.wan_tip_gap_crawl(next_needed) {
             return;
         }
-        self.maybe_hf_rate_pick(next_needed);
         self.clear_all_tip_cover_claims();
         self.tip_owner_open.store(true, Ordering::Relaxed);
         // Prefer pinning a ready worker so get_work does not wait on lottery.
@@ -3829,11 +3796,10 @@ impl ChunkAssigner {
             // not steal window-hero identity from the preferred KEEP sticky.
             let pref = self.preferred_tip_owner();
             let mut h = self.last_stream_keep_hero.lock().unwrap();
-            if pref.as_deref() == Some(peer_id) || h.is_none() {
-                if h.as_deref() != Some(peer_id) {
+            if (pref.as_deref() == Some(peer_id) || h.is_none())
+                && h.as_deref() != Some(peer_id) {
                     *h = Some(peer_id.to_string());
                 }
-            }
         }
     }
 
@@ -5316,6 +5282,12 @@ impl ChunkAssigner {
             && self.preferred_tip_owner().as_deref() == Some(pref)
     }
 
+    /// R-66 / R-69: a not-ready winner or TIMEOUT preferred owns H before any
+    /// cover exists. A ready list-head must not take that span.
+    fn unready_tournament_sticky_owns_h(&self, pref: &str) -> bool {
+        !self.peer_is_ibd_ready(pref) && self.tip_sticky_usable(pref)
+    }
+
     /// Hold floor-sticky upgrade / walk-in abort this long after a tip `GAP_STREAM`.
     const TIP_STREAM_HOT_SECS: u64 = 15;
 
@@ -6189,15 +6161,11 @@ impl ChunkAssigner {
         if Self::line_rate_or_keep(self.wan_tip_stream_bps(peer_id)) {
             return false;
         }
-        match self.preferred_tip_owner() {
+        matches!(
+            self.preferred_tip_owner(),
             Some(pref)
-                if pref != peer_id
-                    && Self::line_rate_or_keep(self.wan_tip_stream_bps(&pref)) =>
-            {
-                true
-            }
-            _ => false,
-        }
+                if pref != peer_id && Self::line_rate_or_keep(self.wan_tip_stream_bps(&pref))
+        )
     }
 
     /// Convert an ahead walk-in that now covers `next_needed` into the tip-owner pipe.

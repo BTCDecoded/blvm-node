@@ -143,12 +143,6 @@ impl PaymentProcessor {
         self
     }
 
-    /// Get module registry (for internal use)
-    #[allow(dead_code)]
-    fn get_module_registry(&self) -> Option<&Arc<ModuleRegistry>> {
-        self.module_registry.as_ref()
-    }
-
     /// Generate payment ID from payment request
     fn generate_payment_id(request: &PaymentRequest) -> String {
         use sha2::{Digest, Sha256};

@@ -39,13 +39,6 @@ use anyhow::Result;
 /// barriers. Aligned with `TIDESDB_MAX_TXN_OPS` (200k) so a 200k-op flush is one batch.
 pub(crate) const MAX_BATCH_OPS: usize = 200_000;
 
-/// Don't evict outputs created in the last N blocks (likely to be spent soon).
-const EVICT_MIN_AGE_BLOCKS: u64 = 100;
-/// Prefer evicting outputs older than this (creation height < current - N).
-const EVICT_VERY_OLD_BLOCKS: u64 = 10_000;
-/// Dust threshold (satoshis) — eviction sort prefers lowest value first (dust).
-#[allow(dead_code)]
-const EVICT_DUST_THRESHOLD: i64 = 546;
 use blvm_protocol::transaction::is_coinbase;
 use blvm_protocol::types::{Block, Hash, OutPoint, UTXO};
 use rustc_hash::{FxHashMap, FxHashSet};

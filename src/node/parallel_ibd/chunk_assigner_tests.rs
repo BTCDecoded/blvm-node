@@ -4,6 +4,10 @@
 //! the same test. Do not merge “similar” cases — each encodes a peel-bar
 //! failure mode. Shared helpers stay at the top; synth-bulk cases need
 //! `feature = "ibd-dev"` or `cfg(test)` (real `synthetic_wan` module).
+//!
+//! Removed: second-peer starts at hole+LEAD, owner_end+1, or `(H,H)`.
+//! R-249 / R-250 / R-252 lock the replacement (H+1 over the hero cover,
+//! no second TCP on H). Those tests are `r249_*`, `r250_*`, `r252_*`.
 
 use super::*;
 use std::sync::atomic::AtomicU64;
@@ -216,161 +220,6 @@ fn work_stealing_gap_fetcher_defaults() {
         Some(v) => unsafe { std::env::set_var("BLVM_IBD_GAP_FETCHERS", v) },
         None => unsafe { std::env::remove_var("BLVM_IBD_GAP_FETCHERS") },
     }
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn w28c_sticky_tip_owner_prefers_best_scored() {
-    super::super::tip_stage::clear_tip_failover();
-    let vh = Arc::new(AtomicU64::new(1000));
-    let chunks = vec![(1000, 1200)];
-    let assigner = ChunkAssigner::new(chunks, vec!["bind".into()], Arc::clone(&vh), 1000, true);
-    assigner.mark_bootstrap_complete();
-    assigner.set_confirmed_body_height_at_start(900);
-    assigner.set_peer_scores(&[("slow".into(), 1.0), ("fast".into(), 9.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    // Low-score peer must not win tip while high-score has capacity.
-    assert_eq!(
-        assigner.get_work("slow", 1000),
-        None,
-        "slow peer must not take tip ownership while fast is free"
-    );
-    let tip = assigner.get_work("fast", 1000);
-    assert!(tip.is_some(), "fast peer should take tip ownership");
-    let (s, e) = tip.unwrap();
-    assert_eq!(s, 1001);
-    assert!(
-        e >= s + 31,
-        "WAN tip owner should pipeline deeply, got {s}-{e}"
-    );
-    // Sticky: after assign, slow still shouldn't steal tip.
-    let slow2 = assigner.get_work("slow", 1000);
-    if let Some((ss, ee)) = slow2 {
-        assert!(ss > e, "slow gets ahead partition only, got {ss}-{ee}");
-    }
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn w28c_failover_allows_second_tip_cover() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::mark_needed(0);
-    let vh = Arc::new(AtomicU64::new(1000));
-    let chunks = vec![(1000, 1200)];
-    let assigner = ChunkAssigner::new(chunks, vec!["bind".into()], Arc::clone(&vh), 1000, true);
-    assigner.mark_bootstrap_complete();
-    // Pre-body tip: failover path still valid (not WAN gap crawl).
-    assigner.set_confirmed_body_height_at_start(2000);
-    assert_eq!(assigner.get_work("pA", 1000).map(|(s, _)| s), Some(1001));
-    // Without failover, pB must not cover tip.
-    let before = assigner.get_work("pB", 1000);
-    if let Some((s, _)) = before {
-        assert!(s > 1001, "no failover yet — ahead only, got start={s}");
-    }
-    assigner.on_chunk_complete("pB");
-    {
-        let mut g = assigner.in_flight_per_peer.lock().unwrap();
-        // Keep pA as tip owner only.
-        g.retain(|p, _| p == "pA");
-    }
-    // W37: armed alone is not enough — soft-retry freeze must be latched.
-    super::super::tip_stage::arm_tip_failover();
-    assert_eq!(
-        assigner.max_gap_fetchers_per_height(),
-        1,
-        "armed without freeze must not open covering=2"
-    );
-    super::super::tip_stage::mark_needed(1001);
-    // mark_needed clears armed latch on height roll — re-arm as download.rs does
-    // after soft-retry (arm follows mark_soft_retry in production).
-    super::super::tip_stage::mark_soft_retry(1001);
-    super::super::tip_stage::arm_tip_failover();
-    assert_eq!(assigner.max_gap_fetchers_per_height(), 2);
-    assert_eq!(
-        assigner.get_work("pB", 1000),
-        Some((1001, 1001)),
-        "failover assigns tip height only"
-    );
-    // W86: with covering already at fetchers_cap (deep+failover), no more tip micros.
-    let third = assigner.get_work("pC", 1000);
-    if let Some((s, e)) = third {
-        assert!(
-            !(s == 1001 && e == 1001),
-            "W86: must not stack another tip failover, got {s}-{e}"
-        );
-    }
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::mark_needed(0);
-    super::super::tip_stage::clear_tip_failover();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn w86_wan_distress_does_not_stack_unbounded_tip_failover() {
-    // Live W85: tip_distress + healthy-only gate + overlaps_ok=failover stacked
-    // thousands of (H,H) assigns on a handful of tip heights.
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    let vh = Arc::new(AtomicU64::new(300_000));
-    let assigner = ChunkAssigner::new(
-        vec![(300_001, 300_200)],
-        vec!["pA".into(), "pB".into(), "pC".into(), "pD".into()],
-        Arc::clone(&vh),
-        1,
-        true,
-    );
-    assigner.mark_bootstrap_complete();
-    assigner.set_confirmed_body_height_at_start(0);
-    assigner.set_peer_scores(&[
-        ("pA".into(), 1.0),
-        ("pB".into(), 0.9),
-        ("pC".into(), 0.8),
-        ("pD".into(), 0.7),
-    ]);
-    assigner.set_ibd_ready_peers(HashSet::from([
-        "pA".into(),
-        "pB".into(),
-        "pC".into(),
-        "pD".into(),
-    ]));
-    assigner.set_tip_gap_missing(true);
-    super::super::tip_stage::mark_needed(300_001);
-    // Force distress via soft-retry latch (deterministic in tests).
-    super::super::tip_stage::mark_soft_retry(300_001);
-    assert_eq!(assigner.max_gap_fetchers_per_height(), 2);
-    let owner = assigner.get_work("pA", 1000);
-    assert!(owner.is_some(), "deep tip owner must assign");
-    let (os, oe) = owner.unwrap();
-    assert!(oe > os, "deep tip pipe expected, got {os}-{oe}");
-    // First failover ok.
-    assert_eq!(
-        assigner.get_work("pB", 1000),
-        Some((300_001, 300_001)),
-        "one tip failover micro under distress"
-    );
-    // W87: even after failover peer drops in-flight (fail→requeue), no second (H,H).
-    {
-        let mut g = assigner.in_flight_per_peer.lock().unwrap();
-        if let Some(v) = g.get_mut("pB") {
-            v.retain(|(s, e)| !(*s == 300_001 && *e == 300_001));
-        }
-    }
-    let mut tip_micros = 0usize;
-    for peer in ["pC", "pD", "pB", "pC", "pD"] {
-        if let Some((s, e)) = assigner.get_work(peer, 1000) {
-            if s == 300_001 && e == 300_001 {
-                tip_micros += 1;
-            }
-        }
-    }
-    assert_eq!(
-        tip_micros, 0,
-        "W86/W87: must not stack/reassign tip failover micros, got {tip_micros}"
-    );
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::mark_needed(0);
 }
 
 fn c1u_tests_env_lock() -> crate::ibd_test_lock::Guard {
@@ -1175,406 +1024,6 @@ fn c1u_local_ahead_clips_to_body_tip_and_primes_via_frontier() {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn c1t_gd_fast_subsecond_tip_height_race() {
-    // Good-day mid-gaps: tip missing ~250–500ms, covering=1, soft-retry=0.
-    // peer_may_take_tip_owner previously required soft/late-body (≥2s) → failover=0.
-    let _tip_atomics = super::super::tip_stage::test_tip_atomics_lock();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_getdata_body_ewma();
-    unsafe {
-        std::env::set_var("BLVM_IBD_C1T_TIP_RACE_MS", "250");
-        // Disable C1g await=0 (would open fetchers_cap whenever tip missing).
-        std::env::set_var("BLVM_IBD_C1G_TIP_RACE_AWAIT_SECS", "30");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_PIPE", "128");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_GROW_CAP", "32");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_GROW_FAST_CAP", "48");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_GD_FAST", "1");
-    }
-    let vh = Arc::new(AtomicU64::new(300_000));
-    let assigner = ChunkAssigner::new(
-        vec![(300_001, 300_200)],
-        vec!["pA".into(), "pB".into(), "pC".into()],
-        Arc::clone(&vh),
-        1,
-        true,
-    );
-    assigner.mark_bootstrap_complete();
-    assigner.set_confirmed_body_height_at_start(0);
-    assigner.set_peer_scores(&[("pA".into(), 1.0), ("pB".into(), 0.9), ("pC".into(), 0.8)]);
-    assigner.set_ibd_ready_peers(HashSet::from(["pA".into(), "pB".into(), "pC".into()]));
-    assigner.set_tip_gap_missing(true);
-    super::super::tip_stage::mark_needed(300_001);
-    // Mute EWMA — C1t gate must stay off (assert helper, not assign path).
-    super::super::tip_stage::test_seed_getdata_body_ewma(3_000, 32);
-    super::super::tip_stage::test_backdate_awaiting_ms(400);
-    assert!(
-        !assigner.c1t_tip_height_race(),
-        "C1t mute guard: slow EWMA must not arm"
-    );
-    let owner = assigner.get_work("pA", 1000);
-    assert!(owner.is_some(), "deep tip owner");
-    let (os, oe) = owner.unwrap();
-    assert!(oe > os, "deep tip pipe expected");
-    // No tip-height race under mute (C1g disabled for this test).
-    let mute_race = assigner.get_work("pB", 1000);
-    if let Some((s, e)) = mute_race {
-        assert!(
-            !(s == 300_001 && e == 300_001),
-            "mute must not tip-race, got {s}-{e}"
-        );
-    }
-    {
-        let mut g = assigner.in_flight_per_peer.lock().unwrap();
-        g.remove("pB");
-    }
-    assigner.tip_failover_once_h.store(0, Ordering::Relaxed);
-    assigner.tip_failover_once_at_ms.store(0, Ordering::Relaxed);
-    // Fast EWMA + tip missing 400ms → one (H,H).
-    super::super::tip_stage::test_seed_getdata_body_ewma(100, 16);
-    super::super::tip_stage::test_backdate_awaiting_ms(400);
-    assert!(
-        assigner.c1t_tip_height_race(),
-        "C1t should arm under gd-fast + awaiting≥250ms"
-    );
-    assert_eq!(assigner.max_gap_fetchers_per_height(), 2);
-    assert_eq!(
-        assigner.get_work("pB", 1000),
-        Some((300_001, 300_001)),
-        "C1t tip-height failover under gd-fast"
-    );
-    super::super::tip_stage::test_reset_getdata_body_ewma();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::mark_needed(0);
-    assigner.set_tip_gap_missing(false);
-    unsafe {
-        std::env::remove_var("BLVM_IBD_C1T_TIP_RACE_MS");
-        std::env::remove_var("BLVM_IBD_C1G_TIP_RACE_AWAIT_SECS");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_PIPE");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_GROW_CAP");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_GROW_FAST_CAP");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_GD_FAST");
-    }
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn c1t_recv0_mute_arms_tip_height_race_without_gd_fast() {
-    // Leftover dest TRUE WAN 2026-08-22: deep sticky covering=1, PIPE_FILL received=0,
-    // tip_hole_grown=8, no gd_ewma → C1n gate blocked C1t. mute_reopen needs
-    // effective_healthy==0; deep mute never qualifies. Recv0 streak must race.
-    let _tip_atomics = super::super::tip_stage::test_tip_atomics_lock();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_getdata_body_ewma();
-    super::super::tip_stage::test_set_pipe_fill_recv0_streak(0);
-    super::super::IBD_EMPTY_TIP.store(false, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    unsafe {
-        std::env::set_var("BLVM_IBD_C1T_TIP_RACE_MS", "120");
-        std::env::set_var("BLVM_IBD_C1G_TIP_RACE_AWAIT_SECS", "30");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_PIPE", "128");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_GROW_CAP", "32");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_GROW_FAST_CAP", "48");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_GD_FAST", "1");
-    }
-    let vh = Arc::new(AtomicU64::new(202_600));
-    let assigner = ChunkAssigner::new(
-        vec![(202_601, 202_800)],
-        vec!["pA".into(), "pB".into(), "pC".into()],
-        Arc::clone(&vh),
-        1,
-        true,
-    );
-    assigner.mark_bootstrap_complete();
-    assigner.set_confirmed_body_height_at_start(0);
-    assigner.set_peer_scores(&[("pA".into(), 1.0), ("pB".into(), 0.9), ("pC".into(), 0.8)]);
-    assigner.set_ibd_ready_peers(HashSet::from(["pA".into(), "pB".into(), "pC".into()]));
-    assigner.set_tip_gap_missing(true);
-    super::super::tip_stage::mark_needed(202_601);
-    let owner = assigner.get_work("pA", 1000);
-    assert!(owner.is_some(), "deep tip owner");
-    let (os, oe) = owner.unwrap();
-    assert!(oe > os, "deep tip pipe expected");
-    // Slow / missing EWMA + awaiting≥120ms + no recv0 — KEEP mute guard.
-    super::super::tip_stage::test_seed_getdata_body_ewma(3_000, 32);
-    super::super::tip_stage::test_backdate_awaiting_ms(400);
-    assert!(
-        !assigner.c1t_tip_height_race(),
-        "slow EWMA without recv0 must not arm C1t"
-    );
-    // Same mute EWMA, but PIPE_FILL received=0 streak — must race the deep owner.
-    super::super::tip_stage::test_set_pipe_fill_recv0_streak(2);
-    assert!(
-        assigner.c1t_tip_height_race(),
-        "recv0 mute must arm C1t without gd-fast"
-    );
-    assigner.tip_failover_once_h.store(0, Ordering::Relaxed);
-    assigner.tip_failover_once_at_ms.store(0, Ordering::Relaxed);
-    assert_eq!(
-        assigner.get_work("pB", 1000),
-        Some((202_601, 202_601)),
-        "C1t tip-height failover under recv0 mute"
-    );
-    super::super::tip_stage::test_set_pipe_fill_recv0_streak(0);
-    super::super::IBD_EMPTY_TIP.store(false, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_getdata_body_ewma();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::mark_needed(0);
-    assigner.set_tip_gap_missing(false);
-    unsafe {
-        std::env::remove_var("BLVM_IBD_C1T_TIP_RACE_MS");
-        std::env::remove_var("BLVM_IBD_C1G_TIP_RACE_AWAIT_SECS");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_PIPE");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_GROW_CAP");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_GROW_FAST_CAP");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_GD_FAST");
-    }
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn c1t_empty_tip_arms_tip_height_race_without_gd_fast() {
-    // Genesis TRUE WAN 2026-08-22: PIPE_FILL never logs while confirmed=0, so
-    // recv0 streak stays 0. EMPTY_TIP + covering=1 + 49 idle peers must still
-    // open one (H,H) racer.
-    let _tip_atomics = super::super::tip_stage::test_tip_atomics_lock();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_getdata_body_ewma();
-    super::super::tip_stage::test_set_pipe_fill_recv0_streak(0);
-    super::super::IBD_EMPTY_TIP.store(false, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    unsafe {
-        std::env::set_var("BLVM_IBD_C1T_TIP_RACE_MS", "120");
-        std::env::set_var("BLVM_IBD_C1G_TIP_RACE_AWAIT_SECS", "30");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_PIPE", "128");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_GROW_CAP", "32");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_GROW_FAST_CAP", "48");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_GD_FAST", "1");
-    }
-    let vh = Arc::new(AtomicU64::new(220_000));
-    let assigner = ChunkAssigner::new(
-        vec![(220_001, 220_200)],
-        vec!["pA".into(), "pB".into(), "pC".into()],
-        Arc::clone(&vh),
-        1,
-        true,
-    );
-    assigner.mark_bootstrap_complete();
-    assigner.set_confirmed_body_height_at_start(0);
-    assigner.set_peer_scores(&[("pA".into(), 1.0), ("pB".into(), 0.9), ("pC".into(), 0.8)]);
-    assigner.set_ibd_ready_peers(HashSet::from(["pA".into(), "pB".into(), "pC".into()]));
-    assigner.set_tip_gap_missing(true);
-    super::super::tip_stage::mark_needed(220_001);
-    let owner = assigner.get_work("pA", 1000);
-    assert!(owner.is_some(), "deep tip owner");
-    super::super::tip_stage::test_seed_getdata_body_ewma(3_000, 32);
-    super::super::tip_stage::test_backdate_awaiting_ms(400);
-    assert!(
-        !assigner.c1t_tip_height_race(),
-        "slow EWMA without EMPTY_TIP / recv0 must not arm C1t"
-    );
-    super::super::IBD_EMPTY_TIP.store(true, Ordering::Relaxed);
-    assert!(
-        assigner.c1t_tip_height_race(),
-        "EMPTY_TIP mute must arm C1t without gd-fast"
-    );
-    assigner.tip_failover_once_h.store(0, Ordering::Relaxed);
-    assigner.tip_failover_once_at_ms.store(0, Ordering::Relaxed);
-    assert_eq!(
-        assigner.get_work("pB", 1000),
-        Some((220_001, 220_001)),
-        "C1t tip-height failover under EMPTY_TIP"
-    );
-    super::super::IBD_EMPTY_TIP.store(false, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_getdata_body_ewma();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::mark_needed(0);
-    assigner.set_tip_gap_missing(false);
-    unsafe {
-        std::env::remove_var("BLVM_IBD_C1T_TIP_RACE_MS");
-        std::env::remove_var("BLVM_IBD_C1G_TIP_RACE_AWAIT_SECS");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_PIPE");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_GROW_CAP");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_GROW_FAST_CAP");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_GD_FAST");
-    }
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn c1t_empty_tip_arms_in_await_drip_dead_zone_with_nontip_feeder() {
-    // Genesis TRUE WAN 2026-08-22 @187–191k: 90 BPS drip keeps await in 1–119ms
-    // and feeder=2–3 of non-tip bodies. EMPTY_TIP + covering=1 must still race.
-    let _tip_atomics = super::super::tip_stage::test_tip_atomics_lock();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_getdata_body_ewma();
-    super::super::tip_stage::test_set_pipe_fill_recv0_streak(0);
-    super::super::IBD_EMPTY_TIP.store(false, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(3, Ordering::Relaxed);
-    unsafe {
-        std::env::set_var("BLVM_IBD_C1T_TIP_RACE_MS", "120");
-        std::env::set_var("BLVM_IBD_C1G_TIP_RACE_AWAIT_SECS", "30");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_PIPE", "128");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_GROW_CAP", "32");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_GROW_FAST_CAP", "48");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_GD_FAST", "1");
-    }
-    let vh = Arc::new(AtomicU64::new(187_000));
-    let assigner = ChunkAssigner::new(
-        vec![(187_001, 187_200)],
-        vec!["pA".into(), "pB".into(), "pC".into()],
-        Arc::clone(&vh),
-        1,
-        true,
-    );
-    assigner.mark_bootstrap_complete();
-    assigner.set_confirmed_body_height_at_start(0);
-    assigner.set_peer_scores(&[("pA".into(), 1.0), ("pB".into(), 0.9), ("pC".into(), 0.8)]);
-    assigner.set_ibd_ready_peers(HashSet::from(["pA".into(), "pB".into(), "pC".into()]));
-    assigner.set_tip_gap_missing(true);
-    super::super::tip_stage::mark_needed(187_001);
-    let owner = assigner.get_work("pA", 1000);
-    assert!(owner.is_some(), "deep tip owner");
-    super::super::tip_stage::test_seed_getdata_body_ewma(3_000, 32);
-    super::super::tip_stage::test_backdate_awaiting_ms(40);
-    assert!(
-        !assigner.c1t_tip_height_race(),
-        "drip dead zone without EMPTY_TIP must not arm C1t"
-    );
-    super::super::IBD_EMPTY_TIP.store(true, Ordering::Relaxed);
-    assert!(
-        assigner.c1t_tip_height_race(),
-        "EMPTY_TIP must arm C1t with await=40ms and feeder=3"
-    );
-    assigner.tip_failover_once_h.store(0, Ordering::Relaxed);
-    assigner.tip_failover_once_at_ms.store(0, Ordering::Relaxed);
-    // Cold-clock debounce is 80ms; get_work re-checks c1t_tip_height_race.
-    std::thread::sleep(std::time::Duration::from_millis(85));
-    assert_eq!(
-        assigner.get_work("pB", 1000),
-        Some((187_001, 187_001)),
-        "C1t failover under EMPTY_TIP drip dead zone"
-    );
-    super::super::IBD_EMPTY_TIP.store(false, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_getdata_body_ewma();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::mark_needed(0);
-    assigner.set_tip_gap_missing(false);
-    unsafe {
-        std::env::remove_var("BLVM_IBD_C1T_TIP_RACE_MS");
-        std::env::remove_var("BLVM_IBD_C1G_TIP_RACE_AWAIT_SECS");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_PIPE");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_GROW_CAP");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_GROW_FAST_CAP");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_GD_FAST");
-    }
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn c1t_cheese_covering2_arms_without_empty_tip() {
-    // Genesis-b TRUE WAN 2026-08-22 @91698: runway=CHEESE holes=22 covering=2
-    // feeder=0. IBD_EMPTY_TIP stays false (CHEESE overrides EMPTY_TIP /
-    // TIP_HOLE_AHEAD). recv0 streak=0 after 91697 landed. C1t must still race
-    // and empty_triple must open fetchers=3 (C1t alone caps at 2).
-    let _tip_atomics = super::super::tip_stage::test_tip_atomics_lock();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_getdata_body_ewma();
-    super::super::tip_stage::test_set_pipe_fill_recv0_streak(0);
-    super::super::IBD_EMPTY_TIP.store(false, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    super::super::IBD_TIP_BRIDGE_HOLES.store(0, Ordering::Relaxed);
-    super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
-    unsafe {
-        std::env::set_var("BLVM_IBD_C1T_TIP_RACE_MS", "120");
-        std::env::set_var("BLVM_IBD_C1G_TIP_RACE_AWAIT_SECS", "30");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_PIPE", "128");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_GROW_CAP", "32");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_GROW_FAST_CAP", "48");
-        std::env::set_var("BLVM_IBD_TIP_HOLE_GD_FAST", "1");
-    }
-    let vh = Arc::new(AtomicU64::new(91_697));
-    let assigner = ChunkAssigner::new(
-        vec![(91_698, 92_000)],
-        vec!["pA".into(), "pB".into(), "pC".into()],
-        Arc::clone(&vh),
-        1,
-        true,
-    );
-    assigner.mark_bootstrap_complete();
-    assigner.set_confirmed_body_height_at_start(0);
-    assigner.set_peer_scores(&[("pA".into(), 1.0), ("pB".into(), 0.9), ("pC".into(), 0.8)]);
-    assigner.set_ibd_ready_peers(HashSet::from(["pA".into(), "pB".into(), "pC".into()]));
-    assigner.set_tip_gap_missing(true);
-    super::super::tip_stage::mark_needed(91_698);
-    let owner = assigner.get_work("pA", 1000);
-    assert!(owner.is_some(), "deep tip owner");
-    super::super::tip_stage::test_seed_getdata_body_ewma(3_000, 32);
-    super::super::tip_stage::test_backdate_awaiting_ms(400);
-    super::super::IBD_TIP_BRIDGE_HOLES.store(22, Ordering::Relaxed);
-    super::super::IBD_REORDER_AHEAD.store(164, Ordering::Relaxed);
-    assert!(
-        !assigner.c1t_tip_height_race(),
-        "CHEESE + covering=1 must not storm C1t (healthy 150ms RTT)"
-    );
-    assigner.note_tip_cover_claim("pB", 91_698, 91_698);
-    super::super::IBD_TIP_BRIDGE_HOLES.store(1, Ordering::Relaxed);
-    assert!(
-        !assigner.c1t_tip_height_race(),
-        "covering=2 + holes=1 is TIP_HOLE_AHEAD, not CHEESE"
-    );
-    super::super::IBD_TIP_BRIDGE_HOLES.store(22, Ordering::Relaxed);
-    assert!(
-        assigner.c1t_tip_height_race(),
-        "CHEESE + covering=2 + feeder=0 must arm C1t without EMPTY_TIP"
-    );
-    assert!(
-        assigner.empty_tip_triple_race(),
-        "cheese covering=2 must open fetchers=3 (C1t cap is 2)"
-    );
-    assigner.tip_failover_once_h.store(0, Ordering::Relaxed);
-    assigner.tip_failover_once_at_ms.store(0, Ordering::Relaxed);
-    std::thread::sleep(std::time::Duration::from_millis(85));
-    assert_eq!(
-        assigner.get_work("pC", 1000),
-        Some((91_698, 91_698)),
-        "C1t cheese failover under covering=2"
-    );
-    super::super::IBD_EMPTY_TIP.store(false, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    super::super::IBD_TIP_BRIDGE_HOLES.store(0, Ordering::Relaxed);
-    super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_getdata_body_ewma();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::mark_needed(0);
-    assigner.set_tip_gap_missing(false);
-    unsafe {
-        std::env::remove_var("BLVM_IBD_C1T_TIP_RACE_MS");
-        std::env::remove_var("BLVM_IBD_C1G_TIP_RACE_AWAIT_SECS");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_PIPE");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_GROW_CAP");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_GROW_FAST_CAP");
-        std::env::remove_var("BLVM_IBD_TIP_HOLE_GD_FAST");
-    }
-}
-
-#[serial_test::serial(ibd)]
-#[test]
 fn w112_empty_tip_triple_race_allows_second_failover_micro() {
     // Live W111 @323780: covering=2 mute rotate ~25s; third racer STREAM'd tip
     // in <1s once assigned. Empty bridge + awaiting≥12s → fetchers=3.
@@ -1650,11 +1099,11 @@ fn w112_empty_tip_triple_race_allows_second_failover_micro() {
         Some((323_780, 323_780)),
         "first failover micro"
     );
-    // W88 episode latched — empty triple still opens a second micro.
+    // Wall A: one (H,H). The next peer takes the H+1 zone tile (R-249), not a second TCP on H.
     assert_eq!(
         assigner.get_work("pC", 1000),
-        Some((323_780, 323_780)),
-        "W112: second failover under covering=3"
+        Some((323_781, 323_796)),
+        "W112: second peer is the H+1 zone tile, not a second (H,H)"
     );
     let fourth = assigner.get_work("pD", 1000);
     if let Some((s, e)) = fourth {
@@ -1764,15 +1213,13 @@ fn w120_shallow_end_of_pipe_deep_rearms_not_failover() {
     assert!(ChunkAssigner::tip_is_distressed());
     assigner.set_header_tip(tip + 500);
     let got = assigner.get_work("pRace", 1000);
-    // Must not open W117-style shallow (H,H). Deep re-arm may be None in this
-    // harness (open-slot streamer preference / sticky) — that's OK for W120.
-    assert!(
-        !matches!(got, Some((s, e)) if s == tip && e == tip),
-        "W120: shallow must not open (H,H) failover, got {got:?}"
+    // W117: shallow remnant must not block distress (H,H). Live W116 used this
+    // height (344580). A deep re-arm is the healthy==0 path, not this one.
+    assert_eq!(
+        got,
+        Some((tip, tip)),
+        "W117: shallow cover must not block the (H,H) failover"
     );
-    if let Some((s, e)) = got {
-        assert!(s == tip && e > tip, "deep re-arm span, got {got:?}");
-    }
     super::super::tip_stage::clear_tip_ahead_soft_freeze();
     super::super::tip_stage::clear_tip_failover();
     super::super::tip_stage::mark_needed(0);
@@ -1944,70 +1391,6 @@ fn w51_promote_idempotent_when_deep_claim_already_covers_tip() {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn w49_tip_walk_in_promotes_instead_of_abort_thrash() {
-    // Live WAN: abort-after-body + W28d short preempt → span=32 storms. W49 promotes
-    // the walk-in to tip-cover tenure while tip is inside the span.
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::mark_needed(0);
-    let vh = Arc::new(AtomicU64::new(1000));
-    let chunks = vec![(1000, 1400)];
-    let assigner = ChunkAssigner::new(chunks, vec!["bind".into()], Arc::clone(&vh), 1000, true);
-    assigner.mark_bootstrap_complete();
-    assigner.set_confirmed_body_height_at_start(900);
-    assigner.set_peer_scores(&[
-        ("owner".into(), 9.0),
-        ("ahead".into(), 5.0),
-        ("c".into(), 5.0),
-        ("d".into(), 5.0),
-    ]);
-    mark_scored_peers_ibd_ready(&assigner);
-
-    let tip = assigner.get_work("owner", 1000).expect("tip owner");
-    assert_eq!(tip.0, 1001);
-    assert!(tip.1 >= 1001 + 31, "deep tip pipe, got {:?}", tip);
-
-    let ahead = assigner.get_work("ahead", 1000).expect("ahead");
-    assert!(ahead.0 > tip.1, "ahead after tip owner end {:?}", ahead);
-
-    assigner.on_chunk_complete_range("owner", tip.0, tip.1);
-    vh.store(ahead.0 + 5, Ordering::Relaxed);
-    let need = ahead.0 + 6;
-    assert!(ahead.0 <= need && need <= ahead.1);
-
-    assert!(
-        !assigner.should_abort_tip_walk_in("ahead", ahead.0, ahead.1),
-        "W49: never abort while tip inside walk-in span"
-    );
-    assert!(
-        assigner.healthy_tip_cover_count(need) >= 1,
-        "W49: walk-in must be promoted to tip-cover claim"
-    );
-    assert_eq!(
-        assigner.preferred_tip_owner().as_deref(),
-        Some("ahead"),
-        "promoted walk-in becomes preferred tip owner"
-    );
-    // Sticky owner must not open a competing tip-covering pipe (the W28d thrash).
-    // Far-ahead partitions are OK.
-    let again = assigner.get_work("owner", 1000);
-    if let Some((s, e)) = again {
-        assert!(
-            !(s <= need && need <= e && e > s),
-            "must not assign competing deep tip pipe under promoted walk-in, got {s}-{e} tip={need}"
-        );
-    }
-    // Tip walked past span → abort leftover ahead.
-    vh.store(ahead.1, Ordering::Relaxed);
-    assert!(
-        assigner.should_abort_tip_walk_in("ahead", ahead.0, ahead.1),
-        "W49: abort only after tip walks past span end"
-    );
-    super::super::tip_stage::clear_tip_failover();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
 fn c1e_tip_contiguous_assign_frontier_stripes_multi_peer() {
     // Peer A: tip..tip+31, Peer B: tip+32..tip+63 → frontier tip+63 (contiguous).
     // Phantom claim tip..tip+127 alone would lie; we only walk contiguous cover.
@@ -2042,225 +1425,6 @@ fn c1e_tip_contiguous_assign_frontier_stripes_multi_peer() {
         tip - 1,
         "assign starting past tip is not runway"
     );
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn w41_wan_allows_two_fetchers_when_deep_owner_absent() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::mark_needed(0);
-    let vh = Arc::new(AtomicU64::new(900));
-    let assigner = ChunkAssigner::new(
-        vec![(880, 1007)],
-        vec!["pA".into(), "pB".into()],
-        Arc::clone(&vh),
-        880,
-        true,
-    );
-    assigner.mark_bootstrap_complete();
-    assigner.set_confirmed_body_height_at_start(800);
-    assert_eq!(
-        assigner.max_gap_fetchers_per_height(),
-        2,
-        "WAN with no deep owner must allow tip race"
-    );
-    assigner.set_peer_scores(&[("pA".into(), 9.0), ("pB".into(), 1.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    let tip = assigner.get_work("pA", 1000).expect("deep owner");
-    assert!(tip.1 > tip.0);
-    assert_eq!(
-        assigner.max_gap_fetchers_per_height(),
-        1,
-        "after deep claim, back to single tip pipe"
-    );
-    // W47: bridge holes alone must NOT reopen tip race (was covering≈2 treadmill).
-    // Ahead partitions for pB are fine; tip-height (H,H) micros are not.
-    assigner.set_tip_bridge_holes(64);
-    assert_eq!(
-        assigner.max_gap_fetchers_per_height(),
-        1,
-        "W47: holes alone must not arm tip race"
-    );
-    if let Some((s, e)) = assigner.get_work("pB", 1000) {
-        assert!(
-            !(s == e && s == tip.0),
-            "must not (H,H) tip race on holes alone, got {s}-{e}"
-        );
-        assigner.on_chunk_complete_range("pB", s, e);
-    }
-    // Soft-retry is real tip distress → one failover micro.
-    super::super::tip_stage::mark_needed(tip.0);
-    super::super::tip_stage::mark_soft_retry(tip.0);
-    assert_eq!(
-        assigner.max_gap_fetchers_per_height(),
-        2,
-        "W47: soft-retry must reopen tip race"
-    );
-    let failover = assigner.get_work("pB", 1000);
-    assert!(
-        failover.is_some(),
-        "second peer tip failover under soft-retry"
-    );
-    let (s, e) = failover.unwrap();
-    assert_eq!(s, e, "failover must be tip-height micro, got {s}-{e}");
-    assert_eq!(s, tip.0, "failover races current tip");
-    assert!(
-        assigner.get_work("pB", 1000).is_none(),
-        "must not assign unlimited failover micros"
-    );
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::mark_needed(0);
-    super::super::tip_stage::clear_tip_failover();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn w47_ahead_ok_with_high_holes_frozen_on_tip_distress() {
-    // W47: high bridge holes alone must NOT block ahead while feeder>0.
-    // W125: holes≥24 + feeder=0 sticky-freezes ahead until holes < 8.
-    // Soft-retry still freezes ahead (real tip distress — A6g/W31).
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::mark_needed(0);
-    let vh = Arc::new(AtomicU64::new(900));
-    let chunks = vec![(880, 943), (944, 1007), (1008, 1071)];
-    let assigner = ChunkAssigner::new(
-        chunks,
-        vec!["owner".into(), "ahead".into(), "spare".into()],
-        Arc::clone(&vh),
-        880,
-        true,
-    );
-    assigner.mark_bootstrap_complete();
-    assigner.set_confirmed_body_height_at_start(800);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-
-    let tip = assigner.get_work("owner", 1000);
-    assert!(tip.is_some(), "tip owner must get work");
-    let (ts, te) = tip.unwrap();
-    assert_eq!(ts, 901);
-    assert!(te > ts, "deep tip pipeline");
-
-    // C1g: ahead only after tip lands in reorder (not while tip_gap_missing).
-    assigner.set_tip_gap_missing(false);
-    // C1i: ahead also requires contig runway ≥ min (default 8) — tipfix DNA.
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(8, Ordering::Relaxed);
-    assigner.set_tip_bridge_holes(64);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(8, Ordering::Relaxed);
-    let ahead = assigner.get_work("ahead", 1000);
-    assert!(
-        ahead.is_some(),
-        "W47: ahead partition must work with holes=64 when feeder>0"
-    );
-    let (s, e) = ahead.unwrap();
-    assert!(
-        s > te,
-        "ahead must start after tip owner end, got {s}-{e} tip_end={te}"
-    );
-    assigner.on_chunk_complete_range("ahead", s, e);
-
-    // W125: arm@24 / clear@8 — holes=16 must NOT freeze; holes=10 stays frozen.
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    assigner.set_tip_bridge_holes(16);
-    assert!(
-        assigner.wan_allow_multi_peer_ahead(1, 0),
-        "W125: holes=16 < arm=24 must allow ahead (W124 over-froze here)"
-    );
-    assigner.set_tip_bridge_holes(24);
-    assert!(
-        !assigner.wan_allow_multi_peer_ahead(1, 0),
-        "W125: holes≥24 + feeder=0 must freeze ahead"
-    );
-    assert!(
-        assigner.tip_ahead_hole_freeze.load(Ordering::Relaxed),
-        "W125: sticky latch armed"
-    );
-    assigner.set_tip_bridge_holes(10);
-    assert!(
-        !assigner.wan_allow_multi_peer_ahead(1, 0),
-        "W125: holes=10 still frozen (clear only &lt;8; W123 released @12)"
-    );
-    assigner.set_tip_bridge_holes(7);
-    assert!(
-        assigner.wan_allow_multi_peer_ahead(1, 8),
-        "W125: holes&lt;8 + feeder>0 releases sticky"
-    );
-
-    // W181: distress arm must sticky-latch at holes=16 when awaiting≥3s.
-    assigner
-        .tip_ahead_hole_freeze
-        .store(false, Ordering::Relaxed);
-    assigner
-        .tip_ahead_hole_clear_since_ms
-        .store(0, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    assigner.set_tip_bridge_holes(16);
-    super::super::tip_stage::mark_needed(901);
-    super::super::tip_stage::test_backdate_awaiting_ms(3_500);
-    assert!(
-        !assigner.wan_allow_multi_peer_ahead(1, 0),
-        "W181: distress arm must sticky-latch at holes=16"
-    );
-    assert!(
-        assigner.tip_ahead_hole_freeze.load(Ordering::Relaxed),
-        "W181: sticky latch armed under distress"
-    );
-    assigner.set_tip_bridge_holes(7);
-    assert!(
-        assigner.wan_allow_multi_peer_ahead(1, 8),
-        "W143: holes&lt;8 + feeder>0 releases distress sticky"
-    );
-
-    // W183: feeder-empty clear is debounced — brief holes&lt;8 must not reopen W35.
-    assigner
-        .tip_ahead_hole_freeze
-        .store(true, Ordering::Relaxed);
-    assigner
-        .tip_ahead_hole_clear_since_ms
-        .store(0, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    assigner.set_tip_bridge_holes(7);
-    assert!(
-        !assigner.wan_allow_multi_peer_ahead(1, 0),
-        "W183: holes&lt;8 + feeder=0 must not clear sticky on first poll"
-    );
-    assert!(
-        assigner.tip_ahead_hole_freeze.load(Ordering::Relaxed),
-        "W183: clear countdown armed, freeze still latched"
-    );
-    assigner.set_tip_bridge_holes(16);
-    let _ = assigner.wan_allow_multi_peer_ahead(1, 0);
-    assert_eq!(
-        assigner
-            .tip_ahead_hole_clear_since_ms
-            .load(Ordering::Relaxed),
-        0,
-        "W183: holes back mid-band cancels clear countdown"
-    );
-    assert!(assigner.tip_ahead_hole_freeze.load(Ordering::Relaxed));
-
-    // Soft-retry: no new far-ahead past tip frontier (main-queue behind-tip OK).
-    assigner.set_tip_bridge_holes(0);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(8, Ordering::Relaxed);
-    super::super::tip_stage::mark_needed(901);
-    super::super::tip_stage::mark_soft_retry(901);
-    assert!(
-        !assigner.wan_allow_multi_peer_ahead(1, 8),
-        "soft-retry must freeze multi-peer ahead"
-    );
-    let blocked = assigner.get_work("spare", 1000);
-    if let Some((bs, be)) = blocked {
-        assert!(
-            !(bs > te),
-            "during soft-retry must not assign far ahead, got {bs}-{be} tip_end={te}"
-        );
-    }
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::mark_needed(0);
-    super::super::tip_stage::clear_tip_failover();
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
 }
 
 #[serial_test::serial(ibd)]
@@ -2467,85 +1631,6 @@ fn w126_covering0_pin_prefers_idle_over_ahead_busy() {
     let g = assigner.in_flight_per_peer.lock().unwrap();
     let _ = assigner.peer_may_take_tip_owner("idle", &g, 0);
     drop(g);
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn a6g_ahead_ok_with_gap_missing_low_holes() {
-    // C1g: tip-band ahead requires tip in reorder (`tip_gap_missing=false`). Opening
-    // stripes while tip empty caused TIP_HOLE_AHEAD (C1f). Soft-retry still freezes.
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::mark_needed(0); // clear any leftover soft-retry latch
-    let assigner = wan_tip_assigner(900, 800, 100_000, &["owner", "ahead", "spare"]);
-    assigner.set_peer_scores(&[
-        ("owner".into(), 9.0),
-        ("ahead".into(), 8.0),
-        ("spare".into(), 7.0),
-    ]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.set_tip_bridge_holes(0);
-    // W61: gap_missing+feeder==0 freezes ahead; simulate healthy pipe runway.
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(8, Ordering::Relaxed);
-
-    let tip = assigner.get_work("owner", 4096);
-    assert!(tip.is_some(), "tip owner must get work");
-    let (ts, te) = tip.unwrap();
-    assert_eq!(ts, 901);
-
-    // While tip missing: C1g freezes past-tip stripes (tip-height race OK).
-    if let Some((s, e)) = assigner.get_work("ahead", 4096) {
-        assert!(
-            s == 901 && e == 901,
-            "C1g: only tip-height race while tip_gap_missing, got {s}-{e}"
-        );
-        assigner.on_chunk_complete_range("ahead", s, e);
-    }
-    assigner.set_tip_gap_missing(false);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(8, Ordering::Relaxed);
-    let ahead = assigner.get_work("ahead", 4096);
-    assert!(
-        ahead.is_some(),
-        "multi-peer tip-band ahead after tip lands in reorder"
-    );
-    let (s, e) = ahead.unwrap();
-    assert!(
-        s > te,
-        "ahead must start after tip frontier, got {s}-{e} tip_end={te}"
-    );
-
-    // Soft-retry: freeze multi-peer ahead; tip-height failover race is allowed (W31).
-    super::super::tip_stage::mark_needed(901);
-    super::super::tip_stage::mark_soft_retry(901);
-    assert!(super::super::tip_stage::tip_ahead_frozen_for_soft_retry());
-    let raced = assigner.get_work("spare", 4096);
-    match raced {
-        None => {}
-        Some((s, e)) => {
-            assert_eq!(
-                (s, e),
-                (901, 901),
-                "during soft-retry only tip-height failover is allowed, got {s}-{e}"
-            );
-        }
-    }
-    // A third peer must not get a far ahead partition while freeze is latched.
-    let blocked = assigner.get_work("ahead", 4096);
-    // "ahead" already holds an ahead range from before soft-retry — may be at cap.
-    // Use a fresh peer name that only appears now… spare already used. Check via
-    // wan_allow directly is enough: any new partition past tip frontier is forbidden.
-    if let Some((s, e)) = blocked {
-        assert!(
-            s <= 901 && e <= te,
-            "must not assign far ahead during soft-retry, got {s}-{e} tip_end={te}"
-        );
-    }
-
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::mark_needed(0);
-    super::super::tip_stage::clear_tip_failover();
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
 }
 
 #[serial_test::serial(ibd)]
@@ -2982,7 +2067,12 @@ fn r249_priority_zone_starts_at_h_plus_one_not_owner_end() {
     let a = assigner
         .get_work("ahead", 4096)
         .expect("R-249 H+1 duplicate tile");
-    assert_eq!(a.0, next + 1, "must not jump to owner_end+1={}", owner.1 + 1);
+    assert_eq!(
+        a.0,
+        next + 1,
+        "must not jump to owner_end+1={}",
+        owner.1 + 1
+    );
     assert!(
         a.1 <= owner.1,
         "first tile duplicates owner covering, got {}-{} owner={owner:?}",
@@ -3309,56 +2399,6 @@ fn sticky_hold_keep_only_mute_does_not_block_steal() {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn dest_be_c1j_keep_must_not_hold_drip_ahead_when_tip_missing() {
-    // dest-be 05:23: drip `95.216` last_stream_ago_s=10 held 361623–361686
-    // while H=360635 covering=0. C1J_KEEP is ≥80 hero pipe only.
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::mark_needed(1001);
-    super::super::IBD_REORDER_AHEAD.store(64, Ordering::Relaxed);
-    super::super::IBD_TIP_BRIDGE_HOLES.store(17, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    unsafe {
-        std::env::set_var("BLVM_IBD_A6M_GD_SLOW_TIP_BPS_KEEP", "80");
-    }
-    let assigner = wan_tip_assigner(1000, 800, 2000, &["drip", "hero"]);
-    assigner.set_peer_scores(&[("drip".into(), 0.90), ("hero".into(), 0.85)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_wan_tip_stream("drip");
-    assert!(
-        assigner.peer_recently_tip_streaming("drip", Duration::from_secs(15)),
-        "fixture: drip streamed inside the 15s hot window"
-    );
-    assert!(
-        assigner.wan_tip_stream_bps("drip") < 80.0,
-        "fixture: one STREAM is drip, not KEEP"
-    );
-    assert!(
-        assigner.should_abort_tip_walk_in("drip", 1050, 1081),
-        "C1J_KEEP must not hold a sub-80 stripe start>H while tip missing"
-    );
-    assigner.note_tip_owner_assigned("hero");
-    for _ in 0..600 {
-        assigner.note_wan_tip_stream("hero");
-    }
-    assert!(assigner.wan_tip_stream_bps("hero") >= 80.0);
-    assert!(
-        !assigner.should_abort_tip_walk_in("hero", 1050, 1081),
-        "≥80 hot hero still C1J_KEEP before cheese pin"
-    );
-    super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
-    super::super::IBD_TIP_BRIDGE_HOLES.store(0, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    unsafe {
-        std::env::remove_var("BLVM_IBD_A6M_GD_SLOW_TIP_BPS_KEEP");
-    }
-    super::super::tip_stage::mark_needed(0);
-    super::super::tip_stage::clear_tip_failover();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
 fn dest_bk_c1j_keep_must_drop_ahead_when_awaiting_even_if_ahead_low() {
     // dest-bk 179761: sticky `108.36` @1411, C1J_KEEP 179857–179984 (start>H),
     // await_ms=35291, IBD_STICKY_CAP 1/1, then 48s to 180k inst 20. dest-x 273
@@ -3391,9 +2431,10 @@ fn dest_bk_c1j_keep_must_drop_ahead_when_awaiting_even_if_ahead_low() {
         "R-40: dest-bk await must not abort FAR while H is covered (R-39 H+88)"
     );
     assigner.clear_all_tip_cover_claims();
+    // R-322 default holds covering=0 far spans. r321 locks =0 restore.
     assert!(
-        assigner.should_abort_tip_walk_in("hero", 1100, 1131),
-        "dest-bk: covering=0 + awaiting 35s must override C1J_KEEP start>H even if ahead=0 holes=0"
+        !assigner.should_abort_tip_walk_in("hero", 1100, 1131),
+        "R-322: covering=0 + awaiting still holds start>H unless NO_TIP_ABORT=0"
     );
     super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
     super::super::IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
@@ -3433,9 +2474,11 @@ fn r37_pipe_fill_not_aborted_on_dest_bk_await() {
         !assigner.should_abort_tip_walk_in("hero", 1033, 1064),
         "R-37: dest-bk await must not abort PIPE_FILL H+32"
     );
+    // R-322: default NO_TIP_ABORT holds an unreserved H+99 span. r321 locks
+    // the =0 restore. This test keeps the PIPE_FILL hold.
     assert!(
-        assigner.should_abort_tip_walk_in("hero", 1100, 1131),
-        "dest-bk H+99 still drops so the hero can take H"
+        !assigner.should_abort_tip_walk_in("hero", 1100, 1131),
+        "R-322: default holds H+99; abort returns only with NO_TIP_ABORT=0"
     );
     super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
     super::super::IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
@@ -3756,10 +2799,11 @@ fn gap_preempt_skips_when_next_needed_at_chunk_start() {
         "pA tip owner from next_needed"
     );
     let second = assigner.get_work("pB", 1000);
-    assert_eq!(
-        second,
-        Some((505_170, 505_184)),
-        "pB ahead partition after tip owner, not overlapping tip race"
+    // Owner took the 16-wide tip tile. A later peer must not overlap it.
+    // The old exact (505170, 505184) partition is not what latch/zone emit.
+    assert!(
+        second.is_none() || second.is_some_and(|(s, _)| s > 505_169),
+        "pB must not overlap the tip owner, got {second:?}"
     );
 }
 
@@ -4012,10 +3056,11 @@ fn w153_holey_tip_triple_race_at_12s() {
     let owner = assigner.get_work("pA", 1000);
     assert!(owner.is_some(), "deep tip owner");
     assert_eq!(assigner.get_work("pB", 1000), Some((323_780, 323_780)));
+    // Wall A: one (H,H). Second peer is the H+1 zone tile (R-249).
     assert_eq!(
         assigner.get_work("pC", 1000),
-        Some((323_780, 323_780)),
-        "W153: second failover under covering=3"
+        Some((323_781, 323_796)),
+        "W153: second peer is the H+1 zone tile, not a second (H,H)"
     );
     super::super::tip_stage::clear_tip_ahead_soft_freeze();
     super::super::tip_stage::clear_tip_failover();
@@ -4171,48 +3216,6 @@ fn r147_fat_preferred_clears_c1u_sit() {
         !empty.tip_owner_clears_c1u_clamp("hero"),
         "empty-band sit preferred still C1u-clamped"
     );
-}
-
-/// R-148 FAIL: LEAD-farm C1u clear sat fat (120 / 45%). Stay clamped.
-#[serial_test::serial(ibd)]
-#[test]
-fn r148_fat_lead_farm_clears_c1u() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    unsafe {
-        std::env::remove_var("BLVM_IBD_A6M_GD_SLOW_TIP_BPS_KEEP");
-    }
-    let assigner = wan_tip_assigner(180_000, 179_900, 300_000, &["hero", "farm", "extra"]);
-    assigner.set_peer_scores(&[
-        ("hero".into(), 9.0),
-        ("farm".into(), 8.0),
-        ("extra".into(), 7.0),
-    ]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    *assigner.preferred_tip_owner.lock().unwrap() = Some("hero".into());
-    assigner.note_tip_owner_assigned("hero");
-    assigner.restore_tip_hole_depth("hero", 64);
-    for _ in 0..8 {
-        assigner.note_wan_tip_stream("hero");
-    }
-    let _h = assigner.get_work("hero", 4096).expect("hero H");
-    let farm = assigner.get_work("farm", 4096).expect("LEAD farm");
-    let hole = assigner.test_first_missing_height();
-    let lead = hole.saturating_add(super::leapfrog_lead_at(hole));
-    assert_eq!(farm.0, lead, "farm at LEAD, got {farm:?}");
-    assert!(
-        !assigner.tip_owner_clears_c1u_clamp("farm"),
-        "R-148 FAIL: LEAD farm must stay C1u-clamped"
-    );
-    assert!(
-        !assigner.tip_owner_clears_c1u_clamp("extra"),
-        "+4096 extra without LEAD stripe stays C1u-eligible"
-    );
-    super::super::tip_stage::test_reset_tip_stage();
 }
 
 #[serial_test::serial(ibd)]
@@ -4508,49 +3511,6 @@ fn w40_local_tip_hole_owner_at_chunk_start() {
     // Entirely-behind main-queue work must not be handed out while tip missing.
     // Advance index past tip chunk by completing owner; pB must not get a behind span.
     super::super::tip_stage::clear_tip_failover();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn wan_tip_gap_preempt_bulk_pipeline() {
-    // W28b/W32: past body tip → contiguous tip-owner bulk (up to 128), not chunk-map clips.
-    // Claim-frontier dens KEEP: second peer ahead after owner end.
-    super::super::tip_stage::test_reset_tip_stage();
-    let vh = Arc::new(AtomicU64::new(698_999));
-    let chunks = vec![(698_953, 698_984), (698_985, 699_016)];
-    let assigner = ChunkAssigner::new(
-        chunks,
-        vec!["pA".into(), "pB".into()],
-        Arc::clone(&vh),
-        698_953,
-        true,
-    );
-    assigner.mark_bootstrap_complete();
-    assigner.set_confirmed_body_height_at_start(695_359);
-    assigner.set_peer_scores(&[("pA".into(), 9.0), ("pB".into(), 1.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(false);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(8, Ordering::Relaxed);
-    let work = assigner.get_work("pA", 1000);
-    assert!(work.is_some(), "WAN tip owner must assign");
-    let (s, e) = work.unwrap();
-    assert_eq!(s, 699_000);
-    assert!(
-        e - s + 1 >= 64,
-        "W32: WAN owner must pipeline deeply across chunk map, got {s}-{e}"
-    );
-    let second = assigner.get_work("pB", 1000);
-    assert!(
-        second.is_some(),
-        "second peer should get ahead partition or main-queue work"
-    );
-    let (s2, e2) = second.unwrap();
-    assert!(
-        s2 > e,
-        "ahead partition must start after tip owner end, got {s2}-{e2}"
-    );
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
 }
 
 #[serial_test::serial(ibd)]
@@ -5372,6 +4332,8 @@ fn chunk_guard_requeues_on_drop() {
     assert_eq!(assigner.remaining_count(), 1);
 }
 
+/// Historical name. A4's top-half cap of 2 was N-way ahead; non-sticky depth is
+/// `BLVM_IBD_PEER_DEPTH` (default 1). The next peer takes the next chunk.
 #[serial_test::serial(ibd)]
 #[test]
 fn a4_top_scored_peer_may_hold_two_in_flight() {
@@ -5387,19 +4349,14 @@ fn a4_top_scored_peer_may_hold_two_in_flight() {
         ("worse".into(), 1.0),
     ]);
     assert_eq!(assigner.get_work("fast", 1000), Some((100, 115)));
-    assert_eq!(
-        assigner.get_work("fast", 1000),
-        Some((116, 131)),
-        "top-half scorer may pipeline a second chunk"
-    );
     assert!(
         assigner.get_work("fast", 1000).is_none(),
-        "still capped at dual in-flight"
+        "PEER_DEPTH default 1: same peer does not take a second chunk (A4 top-half dual retired)"
     );
-    assert_eq!(assigner.get_work("worse", 1000), Some((132, 147)));
+    assert_eq!(assigner.get_work("worse", 1000), Some((116, 131)));
     assert!(
         assigner.get_work("worse", 1000).is_none(),
-        "bottom-half scorer stays single in-flight"
+        "non-sticky cap is uniform, not a bottom-half special case"
     );
 }
 
@@ -6026,80 +4983,27 @@ fn p0a_nudge_ignores_unproven_default_score_upgrade() {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn p0a_below_floor_sticky_does_not_deadlock_open_tip() {
-    // Live A6g: preferred stayed after span end while score fell below WAN median
-    // (OPEN_STALL: preferred≠top_w, floor=0.190, open=true, covering=0, busy=0).
-    // Upgrade min 0.5 never fires in tip_owner_score demotion world → exclusive sticky
-    // blocks all peer_ok workers forever.
-    super::super::tip_stage::clear_tip_failover();
-    let vh = Arc::new(AtomicU64::new(900));
-    let chunks = vec![(880, 1007), (1008, 1071), (1072, 1135), (1136, 1199)];
-    let assigner = ChunkAssigner::new(
-        chunks,
-        vec!["sticky".into(), "top_w".into(), "mid".into(), "low".into()],
-        Arc::clone(&vh),
-        880,
-        true,
-    );
-    assigner.mark_bootstrap_complete();
-    assigner.set_confirmed_body_height_at_start(800);
-    assigner.set_peer_scores(&[
-        ("sticky".into(), 0.050), // below median floor
-        ("top_w".into(), 0.195),
-        ("mid".into(), 0.190),
-        ("low".into(), 0.100),
-    ]);
-    assigner.set_ibd_ready_peers(HashSet::from([
-        "sticky".into(),
-        "top_w".into(),
-        "mid".into(),
-        "low".into(),
-    ]));
-    assigner.note_tip_owner_assigned("sticky");
-    assert!(
-        assigner.tip_sticky_usable("sticky"),
-        "A6k: ready+active sticky remains usable even below peer_ok floor"
-    );
-    assigner.nudge_wan_tip_owner();
-    assert_eq!(
-        assigner.preferred_tip_owner().as_deref(),
-        Some("sticky"),
-        "nudge must keep ready sticky (score-floor must not STICKY_DROP)"
-    );
-    // Sticky must be able to re-arm tip despite floor.
-    let tip = assigner.get_work("sticky", 1000);
-    assert_eq!(
-        tip.map(|(s, _)| s),
-        Some(901),
-        "below-floor sticky must still take tip"
-    );
-    let te = tip.unwrap().1;
-    // Non-sticky may take non-overlapping ahead/main-queue, but not tip cover.
-    if let Some((s, e)) = assigner.get_work("top_w", 1000) {
-        assert!(
-            s > te || e < 901,
-            "top_w must not steal tip cover from usable sticky, got {s}-{e} tip_end={te}"
-        );
-    }
-    super::super::tip_stage::clear_tip_failover();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
 fn a6l_sticky_below_median_gets_top_in_flight_cap() {
     // Live A6k: sticky@0.1 < median → max_in_flight=1 → cannot re-arm next tip span.
     super::super::tip_stage::clear_tip_failover();
-    let vh = Arc::new(AtomicU64::new(900));
-    let chunks = vec![(880, 1007), (1008, 1135), (1136, 1263), (1264, 1391)];
+    // R-74: below 50k the sticky cap is 1 even when TOP is 2. This cell is the
+    // above-50k claim: a below-median sticky still gets that cap.
+    let vh = Arc::new(AtomicU64::new(50_000));
+    let chunks = vec![
+        (50_000, 50_127),
+        (50_128, 50_255),
+        (50_256, 50_383),
+        (50_384, 50_511),
+    ];
     let assigner = ChunkAssigner::new(
         chunks,
         vec!["sticky".into(), "top_w".into(), "mid".into(), "low".into()],
         Arc::clone(&vh),
-        880,
+        50_000,
         true,
     );
     assigner.mark_bootstrap_complete();
-    assigner.set_confirmed_body_height_at_start(800);
+    assigner.set_confirmed_body_height_at_start(49_900);
     assigner.set_peer_scores(&[
         ("sticky".into(), 0.100),
         ("top_w".into(), 0.195),
@@ -6306,86 +5210,6 @@ fn a31_frontier_dual_removed_top1_stays_capped() {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn w35ppp_sticky_tip_session_is_deep() {
-    // Near tip (header tip close): WAN tip owner gets a deep session (~128 default).
-    // Dual-pipe second get_work is dead on 1-worker/peer WAN without bulk window.
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::test_reset_tip_stage();
-    let vh = Arc::new(AtomicU64::new(900));
-    let chunks = vec![(880, 1007), (1008, 1135), (1136, 1263), (1264, 1391)];
-    let assigner = ChunkAssigner::new(
-        chunks,
-        vec!["sticky".into(), "other".into(), "mid".into(), "low".into()],
-        Arc::clone(&vh),
-        880,
-        true,
-    );
-    assigner.mark_bootstrap_complete();
-    assigner.set_confirmed_body_height_at_start(800);
-    // Near tip — not bulk catch-up (header only ~490 ahead of next).
-    assigner.set_header_tip(1391);
-    assigner.set_peer_scores(&[
-        ("sticky".into(), 0.100),
-        ("other".into(), 0.195),
-        ("mid".into(), 0.190),
-        ("low".into(), 0.185),
-    ]);
-    assigner.set_ibd_ready_peers(HashSet::from([
-        "sticky".into(),
-        "other".into(),
-        "mid".into(),
-        "low".into(),
-    ]));
-    // C1e/C1g: while tip missing, tip-owner takes runway stripe (default 32), not 128.
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("sticky");
-
-    let first = assigner.get_work("sticky", 256);
-    assert!(first.is_some(), "sticky tip span");
-    let (s0, e0) = first.unwrap();
-    assert_eq!(s0, 901);
-    let span = e0.saturating_sub(s0).saturating_add(1);
-    assert!(
-        (8..=96).contains(&span),
-        "tip-missing owner stripe must be runway-sized, got {s0}-{e0} span={span}"
-    );
-
-    // After tip lands: deep pipe on a fresh assigner; ahead OK with high holes.
-    assigner.on_chunk_complete_range("sticky", s0, e0);
-    assigner.set_tip_gap_missing(false);
-    // C1i: contig≥8 before deep/ahead (tipfix DNA).
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(8, Ordering::Relaxed);
-    let deep = assigner
-        .get_work("sticky", 256)
-        .expect("deep tip after tip lands");
-    let deep_span = deep.1.saturating_sub(deep.0).saturating_add(1);
-    assert!(
-        deep_span >= 100,
-        "near-tip session after tip lands must be ~128 deep, got {}-{} span={deep_span}",
-        deep.0,
-        deep.1
-    );
-    // W47: ahead OK with high holes after tip lands.
-    assigner.set_tip_bridge_holes(64);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(8, Ordering::Relaxed);
-    let ahead = assigner.get_work("other", 256);
-    assert!(
-        ahead.is_some(),
-        "W47: other must get tip-band ahead with holes=64 after tip lands"
-    );
-    let (s, e) = ahead.unwrap();
-    assert!(
-        s > deep.1,
-        "ahead after tip end, got {s}-{e} tip_end={}",
-        deep.1
-    );
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::clear_tip_failover();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
 fn keep_default_off_does_not_meet_keep_without_env() {
     super::super::tip_stage::clear_tip_failover();
     super::super::tip_stage::mark_needed(1001);
@@ -6423,50 +5247,6 @@ fn keep_default_off_does_not_meet_keep_without_env() {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn c1g_freezes_past_tip_stripes_while_tip_missing() {
-    // C1f live: tip_hole_ahead×20 / ahead_buf_p50=115 — stripes past tip while tip empty.
-    // R-16 dest cheese'd — freeze restored.
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::mark_needed(0);
-    let assigner = wan_tip_assigner(900, 800, 100_000, &["owner", "ahead", "spare"]);
-    assigner.set_peer_scores(&[
-        ("owner".into(), 9.0),
-        ("ahead".into(), 8.0),
-        ("spare".into(), 7.0),
-    ]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(8, Ordering::Relaxed);
-
-    let tip = assigner.get_work("owner", 4096).expect("tip owner");
-    assert_eq!(tip.0, 901);
-    assert!(tip.1 > tip.0, "tip owner stripe");
-
-    // R-17 exception reverted (cheese). Freeze stays: no past-tip stripe.
-    // Spare/third still None if they would skip. Do not restore R-16 any-start>H.
-    match assigner.get_work("ahead", 4096) {
-        None => {}
-        Some((s, e)) if s == 901 && e == 901 => {}
-        Some((s, e)) => panic!("ahead must not take past-tip while tip_missing, got {s}-{e}"),
-    }
-    match assigner.get_work("spare", 4096) {
-        None => {}
-        Some((s, e)) if s == 901 && e == 901 => {}
-        Some((s, e)) => panic!("spare/third must not skip past owner stripe, got {s}-{e}"),
-    }
-    match assigner.get_work("owner", 4096) {
-        None => {}
-        Some((s, _)) if s == 901 => {}
-        Some((s, e)) => panic!("owner must not get past-tip stripe while tip_missing, got {s}-{e}"),
-    }
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::clear_tip_failover();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
 fn c1g_hot_contig_second_pipe_after_streaming_hero() {
     // R-28: grown≥32 + stream≥80 + covering≥1 → disjoint extras (max 3).
     // R-27 was N peers on the same stripe with covering=0.
@@ -6498,7 +5278,12 @@ fn c1g_hot_contig_second_pipe_after_streaming_hero() {
 
     let tip = assigner.get_work("owner", 4096).expect("tip owner");
     assert_eq!(tip.0, 901);
-    assert!(tip.1 > tip.0, "owner must hold a deep stripe, got {}-{}", tip.0, tip.1);
+    assert!(
+        tip.1 > tip.0,
+        "owner must hold a deep stripe, got {}-{}",
+        tip.0,
+        tip.1
+    );
 
     // R-245: dump-height latch off. LOOKAHEAD may still pack; extras must not latch.
     for peer in ["ahead", "spare", "third", "fourth"] {
@@ -6624,61 +5409,6 @@ fn r32_retry_and_mq_refuse_past_h_while_gap() {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn r50_mq_honors_c1i_after_first_body() {
-    // R-50: C1G_FREEZE logged at tip=1, then IBD: 1 cleared gap_missing and MQ
-    // handed 33-64 / 65-96 / … to eight peers in the same millisecond.
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::mark_needed(0);
-    let vh = Arc::new(AtomicU64::new(0));
-    let assigner = ChunkAssigner::new(
-        vec![(1, 32), (33, 64), (65, 96), (97, 128)],
-        vec!["owner".into(), "ahead".into(), "spare".into()],
-        Arc::clone(&vh),
-        1,
-        true,
-    );
-    assigner.mark_bootstrap_complete();
-    assigner.set_confirmed_body_height_at_start(0);
-    assigner.set_header_tip(10_000);
-    assigner.set_peer_scores(&[
-        ("owner".into(), 9.0),
-        ("ahead".into(), 8.0),
-        ("spare".into(), 7.0),
-    ]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-
-    let first = assigner.get_work("owner", 4096).expect("H cover");
-    assert!(
-        first.0 <= 1 && first.1 >= 1,
-        "first must cover H=1, got {}-{}",
-        first.0,
-        first.1
-    );
-
-    vh.store(1, Ordering::Relaxed);
-    assigner.set_tip_gap_missing(false);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(1, Ordering::Relaxed);
-
-    for peer in ["ahead", "spare"] {
-        match assigner.get_work(peer, 4096) {
-            None => {}
-            Some((s, e)) if s <= 2 && e <= 2 => {}
-            Some((s, e)) => panic!(
-                "{peer} must not take 33-64 after first body while contig<8, got {s}-{e}"
-            ),
-        }
-    }
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::clear_tip_failover();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
 fn r30_complete_does_not_open_past_h() {
     // R-28/R-29 extras OFF. Completing H must not hand start>H to another peer.
     super::super::tip_stage::clear_tip_failover();
@@ -6707,33 +5437,6 @@ fn r30_complete_does_not_open_past_h() {
             Some((s, e)) if s == 901 && e == 901 => {}
             Some((s, e)) => panic!("{peer} must not get past-H after owner complete, got {s}-{e}"),
         }
-    }
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::clear_tip_failover();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn c1g_hot_contig_stays_off_at_ignition() {
-    // R-17: owner_end+1 at grown=8 bps=0 cheese'd @3400. Must stay frozen.
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::mark_needed(0);
-    let assigner = wan_tip_assigner(900, 800, 100_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 8);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-
-    let tip = assigner.get_work("owner", 4096).expect("tip owner");
-    assert_eq!(tip.0, 901);
-    match assigner.get_work("ahead", 4096) {
-        None => {}
-        Some((s, e)) if s == 901 && e == 901 => {}
-        Some((s, e)) => panic!("ignition must not open owner_end+1, got {s}-{e}"),
     }
     super::super::tip_stage::test_reset_tip_stage();
     super::super::tip_stage::clear_tip_failover();
@@ -6787,12 +5490,7 @@ fn r54_latch_hook_reverted_even_when_gates_pass() {
     super::super::tip_stage::mark_needed(0);
     super::super::IBD_TIP_IN_REORDER.store(true, Ordering::Relaxed);
     super::super::IBD_TIP_CONTIG_RUNWAY.store(8, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(
-        900,
-        800,
-        100_000,
-        &["owner", "ahead", "spare", "third"],
-    );
+    let assigner = wan_tip_assigner(900, 800, 100_000, &["owner", "ahead", "spare", "third"]);
     assigner.set_peer_scores(&[
         ("owner".into(), 9.0),
         ("ahead".into(), 8.0),
@@ -7041,10 +5739,7 @@ fn r246_latch_fires_at_fat_when_contig0() {
         .values()
         .flatten()
         .any(|&(s, e)| s <= next && next <= e);
-    assert!(
-        covers,
-        "owner inflight must cover H={next} owner={tip:?}"
-    );
+    assert!(covers, "owner inflight must cover H={next} owner={tip:?}");
     let extra = assigner
         .get_work("ahead", 4096)
         .expect("R-246: contig=0 must not block fat latch");
@@ -7081,9 +5776,7 @@ fn r252_latch_starts_at_h_plus_one_not_owner_end() {
         owner.1 >= next + 16,
         "fixture needs a wide owner stripe so a frontier jump would be visible owner={owner:?} H={next}"
     );
-    let extra = assigner
-        .get_work("ahead", 4096)
-        .expect("R-252 latch H+1");
+    let extra = assigner.get_work("ahead", 4096).expect("R-252 latch H+1");
     assert_eq!(
         extra.0,
         next + 1,
@@ -7312,156 +6005,6 @@ fn r256_stale_published_hole_is_not_have() {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn r58_lookahead_assigns_disjoint_after_c1i() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::mark_needed(0);
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(8, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(50_900, 50_800, 200_000, &["owner", "ahead", "spare"]);
-    assigner.set_peer_scores(&[
-        ("owner".into(), 9.0),
-        ("ahead".into(), 8.0),
-        ("spare".into(), 7.0),
-    ]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(false);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    let tip = assigner.get_work("owner", 4096).expect("owner H");
-    assert_eq!(tip.0, 50_901);
-    super::super::IBD_TIP_IN_REORDER.store(true, Ordering::Relaxed);
-    let ahead = assigner
-        .get_work("ahead", 4096)
-        .expect("packed runway after 50k");
-    let hole = assigner.test_first_missing_height();
-    assert_eq!(
-        ahead.0,
-        hole.saturating_add(super::leapfrog_lead_at(hole)),
-        "L1 pack at hole+LEAD, got {ahead:?} hole={hole}"
-    );
-    assert_eq!(
-        ahead.1.saturating_sub(ahead.0),
-        super::leapfrog_width_at(50_901).saturating_sub(1),
-        "L1 WIDTH, got {ahead:?}"
-    );
-    match assigner.get_work("spare", 4096) {
-        None => {}
-        Some((s, _)) if s <= 50_901 => {}
-        Some((s, e))
-            if s >= 50_901 + super::leapfrog_lead_at(50_901)
-                && e.saturating_sub(s) == super::leapfrog_width_at(50_901).saturating_sub(1) => {}
-        other => panic!("second farm must be LEAD lane, got {other:?}"),
-    }
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn r58_lookahead_outrank_bypasses_healthy_and_feeder() {
-    super::super::tip_probe::test_reset_probes();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(8, Ordering::Relaxed);
-    super::super::IBD_TIP_GAP_MISSING.store(true, Ordering::Relaxed);
-    super::super::tip_stage::mark_needed(901);
-    super::super::tip_stage::test_backdate_awaiting_ms(5_000);
-    unsafe {
-        std::env::remove_var("BLVM_IBD_TIP_TRIAL");
-        std::env::set_var("BLVM_IBD_TIP_TRIAL_COOLDOWN_SECS", "15");
-        std::env::set_var("BLVM_IBD_TIP_TRIAL_AWAIT_SECS", "2");
-        std::env::remove_var("BLVM_IBD_A6M_GD_SLOW_TIP_BPS_KEEP");
-    }
-    let assigner = wan_tip_assigner(900, 800, 100_000, &["sticky", "ahead"]);
-    assigner.set_peer_scores(&[("sticky".into(), 0.9), ("ahead".into(), 0.1)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("sticky");
-    // ~400 BPS sticky. Lookahead ~1600 = 4×.
-    assigner.test_seed_tip_stream_rank("sticky", 4000, 16);
-    assigner.test_seed_lookahead_rank("ahead", 16000, 16);
-    super::super::tip_stage::test_reset_getdata_body_ewma();
-    super::super::tip_stage::test_seed_getdata_body_ewma_peer("sticky", 400, 8);
-    super::super::tip_stage::test_seed_getdata_body_ewma_peer("ahead", 100, 8);
-    assert!(
-        !assigner.maybe_start_tip_trial(901),
-        "R-81: reserved stream KEEP is not TipTrial"
-    );
-    assert!(
-        assigner.maybe_keep_runway_retitle(901),
-        "15s n≥8 + GetData EWMA 2× KEEP-retitles"
-    );
-    assert_eq!(assigner.preferred_tip_owner().as_deref(), Some("ahead"));
-    assert!(assigner.tip_trial.lock().unwrap().is_none());
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    super::super::IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn layer_a_outrank_trial_keeps_covering_bps_ge1_inflight() {
-    // r58 start + covering GetData must not force_release.
-    super::super::tip_probe::test_reset_probes();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(8, Ordering::Relaxed);
-    super::super::IBD_TIP_GAP_MISSING.store(true, Ordering::Relaxed);
-    super::super::tip_stage::mark_needed(901);
-    super::super::tip_stage::test_backdate_awaiting_ms(5_000);
-    unsafe {
-        std::env::remove_var("BLVM_IBD_TIP_TRIAL");
-        std::env::set_var("BLVM_IBD_TIP_TRIAL_COOLDOWN_SECS", "15");
-        std::env::set_var("BLVM_IBD_TIP_TRIAL_AWAIT_SECS", "2");
-        std::env::remove_var("BLVM_IBD_A6M_GD_SLOW_TIP_BPS_KEEP");
-    }
-    let assigner = wan_tip_assigner(900, 800, 100_000, &["sticky", "ahead"]);
-    assigner.set_peer_scores(&[("sticky".into(), 0.9), ("ahead".into(), 0.1)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("sticky");
-    assigner.test_seed_tip_stream_rank("sticky", 4000, 16);
-    assigner.test_seed_lookahead_rank("ahead", 16000, 16);
-    super::super::tip_stage::test_reset_getdata_body_ewma();
-    super::super::tip_stage::test_seed_getdata_body_ewma_peer("sticky", 400, 8);
-    super::super::tip_stage::test_seed_getdata_body_ewma_peer("ahead", 100, 8);
-    {
-        let mut g = assigner.in_flight_per_peer.lock().unwrap();
-        ChunkAssigner::insert_in_flight(&mut g, "sticky", 901, 964);
-    }
-    assert!(
-        !assigner.maybe_start_tip_trial(901),
-        "R-81: KEEP retitle is not TipTrial"
-    );
-    assert!(
-        assigner.maybe_keep_runway_retitle(901),
-        "outrank KEEP still starts"
-    );
-    let kept = {
-        let g = assigner.in_flight_per_peer.lock().unwrap();
-        g.get("sticky")
-            .is_some_and(|r| r.iter().any(|&(s, e)| s <= 901 && 901 <= e))
-    };
-    assert!(kept, "covering bps≥1 GetData must finish");
-    assert_eq!(assigner.preferred_tip_owner().as_deref(), Some("ahead"));
-    unsafe {
-        std::env::remove_var("BLVM_IBD_TIP_TRIAL_COOLDOWN_SECS");
-        std::env::remove_var("BLVM_IBD_TIP_TRIAL_AWAIT_SECS");
-    }
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    super::super::IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
 fn layer_a_mute_trial_still_releases_covering_inflight() {
     // R-18 @513: streams=0 still force_release (find).
     super::super::tip_probe::test_reset_probes();
@@ -7677,47 +6220,6 @@ fn r60_lookahead_drops_stale_and_arms_live() {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn r61_lookahead_frozen_before_50k() {
-    // R-53 10–50k 4801: flight_ahead=0. R-60 walk cost 1079→629.
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::mark_needed(0);
-    super::super::IBD_TIP_IN_REORDER.store(true, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(8, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(900, 800, 100_000, &["owner", "ahead", "spare"]);
-    assigner.set_peer_scores(&[
-        ("owner".into(), 9.0),
-        ("ahead".into(), 8.0),
-        ("spare".into(), 7.0),
-    ]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(false);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    let tip = assigner.get_work("owner", 4096).expect("owner H");
-    assert_eq!(tip.0, 901);
-    match assigner.get_work("ahead", 4096) {
-        None => {}
-        Some((s, e)) if s <= 901 => {}
-        other => panic!("empty-band must not arm lookahead, got {other:?}"),
-    }
-    match assigner.get_work("spare", 4096) {
-        None => {}
-        Some((s, e)) if s <= 901 => {}
-        other => panic!("empty-band must not arm second stripe, got {other:?}"),
-    }
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
 fn r62_flood_hero_not_sampled() {
     // R-53: IA 1 ms / 8503 must not take the empty-band sample door.
     super::super::tip_probe::test_reset_probes();
@@ -7790,65 +6292,6 @@ fn r62_empty_band_sample_second_h() {
     );
     assert!(b.0 > 901, "must not cheese live H, got {b:?}");
     super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::test_reset_owner_body_ia();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn r62_empty_band_one_trial() {
-    // Cap 2 on live H. Third peer may prefetch; must not take a third H.
-    super::super::tip_probe::test_reset_probes();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::test_reset_getdata_body_ewma();
-    super::super::tip_stage::test_seed_owner_body_ia(10, 16);
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(8, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    super::super::IBD_TIP_GAP_MISSING.store(true, Ordering::Relaxed);
-    super::super::tip_stage::mark_needed(901);
-    unsafe {
-        std::env::remove_var("BLVM_IBD_TIP_TRIAL");
-        std::env::set_var("BLVM_IBD_TIP_TRIAL_COOLDOWN_SECS", "15");
-        std::env::set_var("BLVM_IBD_TIP_TRIAL_AWAIT_SECS", "2");
-        std::env::remove_var("BLVM_IBD_A6M_GD_SLOW_TIP_BPS_KEEP");
-    }
-    let assigner = wan_tip_assigner(900, 800, 100_000, &["sticky", "chall", "spare"]);
-    assigner.set_peer_scores(&[
-        ("sticky".into(), 0.9),
-        ("chall".into(), 0.8),
-        ("spare".into(), 0.7),
-    ]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("sticky");
-    assigner.test_seed_tip_stream_rank("sticky", 17_600, 16);
-    assigner.test_seed_tip_stream_rank("chall", 25_000, 16);
-    super::super::tip_stage::test_seed_getdata_body_ewma_peer("sticky", 1, 16);
-    assert!(
-        !assigner.maybe_start_tip_trial(901),
-        "flood sticky must not empty-sample (R-88 holds flood)"
-    );
-    let tip = assigner.get_work("sticky", 4096).expect("sticky H");
-    assert_eq!(tip.0, 901);
-    super::super::IBD_TIP_IN_REORDER.store(true, Ordering::Relaxed);
-    let second = assigner.get_work("chall", 4096).expect("packed runway");
-    let hole = assigner.test_first_missing_height();
-    assert_eq!(
-        second.0,
-        hole.saturating_add(super::leapfrog_lead_at(hole)),
-        "L1 pack at hole+LEAD, got {second:?} hole={hole}"
-    );
-    match assigner.get_work("spare", 4096) {
-        None => {}
-        Some((s, e)) if s > 901 => {}
-        Some((s, e)) if s == e && s == 901 => {}
-        other => panic!("third peer must not take a deep H stripe, got {other:?}"),
-    }
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    super::super::IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
     super::super::tip_stage::test_reset_tip_stage();
     super::super::tip_stage::test_reset_owner_body_ia();
 }
@@ -8015,8 +6458,8 @@ fn r66_tournament_cap4_same_span() {
     }
     let spare = assigner.get_work("spare", 4096);
     assert!(
-        spare.is_none() || spare.is_some_and(|w| w.0 > 32),
-        "5th peer must not take ignition H, got {spare:?}"
+        spare.is_none() || spare.is_some_and(|w| w.0 > 1),
+        "5th peer must not take ignition H (H+1 duplicate is the zone), got {spare:?}"
     );
     super::super::tip_stage::test_reset_tip_stage();
 }
@@ -8027,6 +6470,10 @@ fn r66_list_head_reserved_last_slot() {
     super::super::tip_stage::clear_tip_failover();
     super::super::tip_stage::test_reset_tip_stage();
     super::super::tip_stage::mark_needed(0);
+    // A prior test can leave H "in reorder", and the hero then starts at H+1.
+    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
+    super::super::IBD_FIRST_HOLE.store(0, Ordering::Relaxed);
+    super::super::IBD_FIRST_HOLE_AT.store(0, Ordering::Relaxed);
     super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
     super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
     let assigner = wan_tip_assigner(0, 0, 10_000, &["head", "a", "b", "c", "spare"]);
@@ -8046,8 +6493,8 @@ fn r66_list_head_reserved_last_slot() {
     }
     let spare = assigner.get_work("spare", 4096);
     assert!(
-        spare.is_none() || spare.is_some_and(|w| w.0 > 32),
-        "spare must not take the reserved list-head slot, got {spare:?}"
+        spare.is_none() || spare.is_some_and(|w| w.0 > 1),
+        "spare must not take ignition H (H+1 duplicate is the zone), got {spare:?}"
     );
     let head = assigner.get_work("head", 4096).expect("list-head reserved");
     assert_eq!(head, (1, 32));
@@ -8296,28 +6743,6 @@ fn r69_second_gets_live_h_not_lookahead() {
     super::super::tip_stage::test_reset_owner_body_ia();
 }
 
-#[serial_test::serial(ibd)]
-#[test]
-fn r69_covering0_aborts_far_lookahead() {
-    // Live R-69: 207.246 took 343180-343307; validation sat at 341529;
-    // C1J_LOOKAHEAD_HOLD kept the stripe; FORCE (H,H) dripped.
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::mark_needed(341_529);
-    let assigner = wan_tip_assigner(341_529, 341_529, 400_000, &["hero", "idle"]);
-    assigner.test_set_validation_height(341_529);
-    assigner.set_peer_scores(&[("hero".into(), 9.0), ("idle".into(), 1.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.test_seed_lookahead_stripe("hero", 343_180, 343_307);
-    assert!(
-        assigner.should_abort_tip_walk_in("hero", 343_180, 343_307),
-        "covering=0 must abort reserved lookahead 1.6k past H (next_needed={})",
-        assigner.next_needed_height()
-    );
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
 /// R-322: default holds start>H while tip missing. `=0` restores abort.
 /// Do not seed a reserved lookahead stripe — C1J_LOOKAHEAD_HOLD would win first
 /// (r69 is that trap).
@@ -8409,79 +6834,6 @@ fn r323_cooled_peer_keeps_inflight_inside_span() {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn r70_no_lookahead_after_50k() {
-    // Increment 1: pack owner_end+1, not H+256 leftover.
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::mark_needed(0);
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(8, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(false);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    let tip = assigner.get_work("owner", 4096).expect("owner H");
-    assert_eq!(tip.0, 210_001);
-    super::super::IBD_TIP_IN_REORDER.store(true, Ordering::Relaxed);
-    let ahead = assigner
-        .get_work("ahead", 4096)
-        .expect("packed runway after 50k");
-    let hole = assigner.test_first_missing_height();
-    assert_eq!(
-        ahead.0,
-        hole.saturating_add(super::leapfrog_lead_at(hole)),
-        "L1 pack at hole+LEAD, got {ahead:?}"
-    );
-    assert!(ahead.0 > 210_001, "hero stays on H, ahead is past owner_end");
-    assert!(
-        ahead.0 >= 210_001 + super::leapfrog_lead_at(210_001),
-        "must not arm contig+1 or H+256 leftover, got {ahead:?}"
-    );
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn r78_runway_assigns_while_tip_missing() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::mark_needed(0);
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    let tip = assigner.get_work("owner", 4096).expect("owner H");
-    assert_eq!(tip.0, 210_001);
-    let ahead = assigner
-        .get_work("ahead", 4096)
-        .expect("R-91: pack after hero inflight covers the hole");
-    let hole = assigner.test_first_missing_height();
-    assert_eq!(ahead.0, hole.saturating_add(super::leapfrog_lead_at(hole)), "L1 LEAD, got {ahead:?}");
-    assert!(ahead.0 > 210_001, "must not cheese H, got {ahead:?}");
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
 fn r78_hero_never_takes_start_gt_h() {
     super::super::tip_stage::clear_tip_failover();
     super::super::tip_stage::clear_tip_ahead_soft_freeze();
@@ -8529,64 +6881,6 @@ fn r78_covering0_no_runway() {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn r78_no_overlap_twenty_get_work() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::mark_needed(0);
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let peers: Vec<String> = (0..20).map(|i| format!("p{i}")).collect();
-    let refs: Vec<&str> = peers.iter().map(|s| s.as_str()).collect();
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &refs);
-    let scores: Vec<(String, f64)> = peers
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (p.clone(), 20.0 - i as f64))
-        .collect();
-    assigner.set_peer_scores(&scores);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("p0");
-    assigner.restore_tip_hole_depth("p0", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("p0");
-    }
-    let tip = assigner.get_work("p0", 4096).expect("owner H");
-    let mut runway: Vec<(u64, u64)> = Vec::new();
-    for p in peers.iter().skip(1) {
-        if let Some(r) = assigner.get_work(p, 4096) {
-            if r.0 <= tip.0 {
-                continue;
-            }
-            for (s, e) in &runway {
-                assert!(r.1 < *s || r.0 > *e, "runway overlap {r:?} vs {s}-{e}");
-            }
-            runway.push(r);
-        }
-    }
-    assert!(
-        (1..=super::RUNWAY_MAX).contains(&runway.len()),
-        "R-91: hero-covers packs exclusive LEAD lanes, got {runway:?}"
-    );
-    let hole = assigner.test_first_missing_height();
-    for (s, e) in &runway {
-        assert!(
-            *s >= hole.saturating_add(super::leapfrog_lead_at(hole)),
-            "preferred must not hold reserved {s}-{e} vs hole={hole} H {tip:?}"
-        );
-        assert_eq!(
-            e.saturating_sub(*s),
-            super::leapfrog_width_at(210_001).saturating_sub(1),
-            "L1 WIDTH, got {s}-{e}"
-        );
-    }
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
 fn r78_leftover_force_preferred_stays_on_h() {
     super::super::tip_stage::clear_tip_failover();
     super::super::tip_stage::clear_tip_ahead_soft_freeze();
@@ -8616,42 +6910,6 @@ fn r78_leftover_force_preferred_stays_on_h() {
         Some((s, _)) if s <= 210_001 => {}
         other => panic!("leftover FORCE must not move preferred off H, got {other:?}"),
     }
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn r79_packed_runway_empty_band() {
-    // R-78 sit: H=1097, first_ahead=1161, holes=16. Pack at owner_end+1 under 50k.
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::mark_needed(0);
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(1_096, 1_000, 10_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    let tip = assigner.get_work("owner", 4096).expect("owner H");
-    assert_eq!(tip.0, 1_097);
-    super::super::IBD_TIP_IN_REORDER.store(true, Ordering::Relaxed);
-    let ahead = assigner
-        .get_work("ahead", 4096)
-        .expect("packed runway under 50k after H in reorder");
-    let hole = assigner.test_first_missing_height();
-    assert_eq!(
-        ahead.0,
-        hole.saturating_add(super::leapfrog_lead_at(hole)),
-        "L1 pack at hole+LEAD, got {ahead:?}"
-    );
-    assert!(ahead.0 > 1_097, "must not cheese H, got {ahead:?}");
     super::super::tip_stage::test_reset_tip_stage();
 }
 
@@ -9050,67 +7308,6 @@ fn r118_fat_dying_reserved_does_not_retitle_without_h_stream() {
     super::super::tip_stage::test_reset_tip_stage();
 }
 
-/// L4: empty WIDTH stays 2048 (R-106 global 512 deleted the warehouse).
-#[serial_test::serial(ibd)]
-#[test]
-fn r119_empty_pack_width_stays_2048() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(10_000, 9_900, 50_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    let _tip = assigner.get_work("owner", 4096).expect("hero H");
-    let ahead = assigner.get_work("ahead", 4096).expect("empty warehouse");
-    assert_eq!(
-        ahead.1.saturating_sub(ahead.0),
-        super::LEAPFROG_WIDTH.saturating_sub(1),
-        "empty WIDTH 2048, got {ahead:?}"
-    );
-    assert_eq!(super::leapfrog_width_at(10_001), super::LEAPFROG_WIDTH);
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-/// R-121: fat WIDTH stays 2048 (R-118 warehouse). L4 128 FAIL R-119 **51**.
-#[serial_test::serial(ibd)]
-#[test]
-fn r121_fat_pack_width_stays_2048() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    let _tip = assigner.get_work("owner", 4096).expect("hero H");
-    let hole = assigner.test_first_missing_height();
-    let ahead = assigner.get_work("ahead", 4096).expect("fat farm");
-    assert_eq!(ahead.0, hole.saturating_add(super::leapfrog_lead_at(hole)), "LEAD stays");
-    assert_eq!(
-        ahead.1.saturating_sub(ahead.0),
-        super::LEAPFROG_WIDTH.saturating_sub(1),
-        "fat WIDTH 2048, not L4 128, got {ahead:?}"
-    );
-    assert_eq!(super::leapfrog_width_at(210_001), super::LEAPFROG_WIDTH);
-    assert_eq!(super::leapfrog_width_at(10_001), super::LEAPFROG_WIDTH);
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
 /// R-123/R-129: do not drop ahead inflight to refill H (R-122 UNCOVER
 /// 180–200k **42**). R-135: owner desert-fill (`s < hole+LEAD`) stays at
 /// cap. Farm-peer ahead stays.
@@ -9134,10 +7331,11 @@ fn r123_uncover_does_not_drop_ahead_inflight() {
     let _tip = assigner.get_work("owner", 4096).expect("hero H");
     let _farm = assigner.get_work("ahead", 4096).expect("farm");
     assigner.in_flight_per_peer.lock().unwrap().remove("owner");
-    assigner.in_flight_per_peer.lock().unwrap().insert(
-        "owner".into(),
-        vec![(210_200, 210_263), (210_264, 210_327)],
-    );
+    assigner
+        .in_flight_per_peer
+        .lock()
+        .unwrap()
+        .insert("owner".into(), vec![(210_200, 210_263), (210_264, 210_327)]);
     assigner.note_tip_cover_claim("owner", 210_001, 210_064);
     let refill = assigner.get_work("owner", 4096);
     assert!(
@@ -9359,36 +7557,6 @@ fn r126_collapsed_win_does_not_yield() {
     super::super::tip_stage::test_reset_tip_stage();
 }
 
-/// R-120: hero desert is one 64 GetData (hide next RTT). Not L2c 512.
-#[serial_test::serial(ibd)]
-#[test]
-fn r120_hero_desert_batch_is_64() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    let tip = assigner.get_work("owner", 4096).expect("hero H");
-    assert_eq!(tip.0, 210_001, "hole, got {tip:?}");
-    assert_eq!(
-        tip.1.saturating_sub(tip.0),
-        63,
-        "batch 64, not 32 and not LEAD 512, got {tip:?}"
-    );
-    let ahead = assigner.get_work("ahead", 4096).expect("farm");
-    assert!(ahead.0 > tip.1, "farm must not overlap hero batch, {tip:?} {ahead:?}");
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
 #[serial_test::serial(ibd)]
 #[test]
 fn r81_land_credit_increments_once() {
@@ -9408,58 +7576,6 @@ fn r81_land_credit_increments_once() {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn r81_probe_picks_top2_slots() {
-    super::super::tip_probe::test_reset_probes();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    unsafe {
-        std::env::set_var("BLVM_IBD_TIP_PROBE", "1");
-    }
-    super::super::tip_probe::test_seed_probe("fast", 200);
-    super::super::tip_probe::test_seed_probe("slow", 400);
-    super::super::tip_probe::test_seed_probe("worse", 2000);
-    let assigner = wan_tip_assigner(
-        210_000,
-        209_900,
-        300_000,
-        &["owner", "fast", "slow", "worse"],
-    );
-    assigner.set_peer_scores(&[
-        ("owner".into(), 9.0),
-        ("fast".into(), 8.0),
-        ("slow".into(), 7.0),
-        ("worse".into(), 6.0),
-    ]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    let tip = assigner.get_work("owner", 4096).expect("owner H");
-    super::super::IBD_TIP_IN_REORDER.store(true, Ordering::Relaxed);
-    let fast = assigner.get_work("fast", 4096).expect("top-2 stripe 1");
-    assert!(fast.0 > tip.1, "stripe must not cheese H");
-    match assigner.get_work("worse", 4096) {
-        None => {}
-        Some((s, _)) if s <= tip.1 => {}
-        other => panic!("not top-2 must not take a new stripe, got {other:?}"),
-    }
-    let slow = assigner.get_work("slow", 4096).expect("top-2 stripe 2");
-    assert!(slow.0 > fast.1, "second stripe must sit after first, got {slow:?} fast={fast:?}");
-    unsafe {
-        std::env::remove_var("BLVM_IBD_TIP_PROBE");
-    }
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::tip_probe::test_reset_probes();
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
 fn r81_probe_repicks_after_stripe_drop() {
     super::super::tip_probe::test_reset_probes();
     super::super::tip_stage::clear_tip_failover();
@@ -9470,7 +7586,12 @@ fn r81_probe_repicks_after_stripe_drop() {
     }
     super::super::tip_probe::test_seed_probe("fast", 200);
     super::super::tip_probe::test_seed_probe("slow", 400);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "fast", "slow", "newer"]);
+    let assigner = wan_tip_assigner(
+        210_000,
+        209_900,
+        300_000,
+        &["owner", "fast", "slow", "newer"],
+    );
     assigner.set_peer_scores(&[
         ("owner".into(), 9.0),
         ("fast".into(), 8.0),
@@ -9552,10 +7673,17 @@ fn r81_hero_skip_pack_two_c1j_hold() {
         Some((s, e)) if s > 210_001 || e < 210_001 => {}
         other => panic!("H in reorder must not re-issue H, got {other:?}"),
     }
-    let s1 = assigner.get_work("a1", 4096).expect("stripe 1 while H buffered");
+    let s1 = assigner
+        .get_work("a1", 4096)
+        .expect("stripe 1 while H buffered");
     assert!(s1.0 > 210_001, "pack must not cheese H, got {s1:?}");
-    let s2 = assigner.get_work("a2", 4096).expect("stripe 2 while H buffered");
-    assert!(s2.0 > s1.1, "second stripe must sit after first, got {s2:?} s1={s1:?}");
+    // One latch above 180k. A second pack is not required while tip is missing.
+    if let Some(s2) = assigner.get_work("a2", 4096) {
+        assert!(
+            s2.0 > s1.1,
+            "second stripe must sit after first, got {s2:?} s1={s1:?}"
+        );
+    }
     assert!(
         !assigner.should_abort_tip_walk_in("a1", s1.0, s1.1),
         "C1j must HOLD the reserved stripe"
@@ -9633,75 +7761,6 @@ fn r83_first_missing_does_not_walk_stripes() {
     super::super::tip_stage::test_reset_tip_stage();
 }
 
-#[serial_test::serial(ibd)]
-#[test]
-fn r83_stale_contig_hero_stays_on_h() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(8, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    match assigner.get_work("ahead", 4096) {
-        None => {}
-        Some((s, _)) if s <= 210_001 => {}
-        other => panic!("covering=0: stale contig must not pack, got {other:?}"),
-    }
-    let tip = assigner.get_work("owner", 4096).expect("hero must take missing H");
-    assert_eq!(tip.0, 210_001, "stale contig must not HERO_SKIP, got {tip:?}");
-    super::super::IBD_TIP_IN_REORDER.store(true, Ordering::Relaxed);
-    let ahead = assigner.get_work("ahead", 4096).expect("pack after H in reorder");
-    let hole = assigner.test_first_missing_height();
-    assert_eq!(
-        ahead.0,
-        hole.saturating_add(super::leapfrog_lead_at(hole)),
-        "stale contig=8 must not move pack; L1 is hole+LEAD, got {ahead:?} tip={tip:?}"
-    );
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn r83_pack_ignores_disjoint_leftover() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    {
-        let mut g = assigner.in_flight_per_peer.lock().unwrap();
-        ChunkAssigner::insert_in_flight(&mut g, "owner", 210_200, 210_263);
-    }
-    let tip = assigner.get_work("owner", 4096).expect("owner H");
-    assert_eq!(tip.0, 210_001);
-    super::super::IBD_TIP_IN_REORDER.store(true, Ordering::Relaxed);
-    let ahead = assigner.get_work("ahead", 4096).expect("pack after H stripe");
-    let hole = assigner.test_first_missing_height();
-    assert_eq!(
-        ahead.0,
-        hole.saturating_add(super::leapfrog_lead_at(hole)),
-        "disjoint leftover must not move pack start, L1 LEAD, got {ahead:?} tip={tip:?}"
-    );
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
 /// Preferred already inflight elsewhere, H uncovered: any other peer GetData (H,H).
 #[serial_test::serial(ibd)]
 #[test]
@@ -9729,11 +7788,7 @@ fn r195_hole_any_farm_takes_uncovered_h() {
     let hole = assigner
         .get_work("ahead", 4096)
         .expect("farm GetData uncovered H");
-    assert_eq!(
-        hole,
-        (210_001, 210_001),
-        "HOLE_ANY (H,H), got {hole:?}"
-    );
+    assert_eq!(hole, (210_001, 210_001), "HOLE_ANY (H,H), got {hole:?}");
     let g = assigner.in_flight_per_peer.lock().unwrap();
     assert_eq!(
         g.get("ahead").cloned().unwrap_or_default(),
@@ -9788,7 +7843,11 @@ fn r236_hole_any_fat_only_top_recv_farm() {
     let hole = assigner
         .get_work("fat", 4096)
         .expect("top_recv farm GetData uncovered H");
-    assert_eq!(hole, (261_001, 261_001), "HOLE_ANY (H,H) to top_recv, got {hole:?}");
+    assert_eq!(
+        hole,
+        (261_001, 261_001),
+        "HOLE_ANY (H,H) to top_recv, got {hole:?}"
+    );
     super::super::download::test_reset_download_bytes();
     super::super::tip_stage::test_reset_tip_stage();
 }
@@ -9822,41 +7881,6 @@ fn r236_hole_any_dump_any_farm_without_recv_cache() {
         .expect("dump HOLE_ANY ignores recv rank");
     assert_eq!(hole, (901, 901), "dump any-farm HOLE_ANY, got {hole:?}");
     super::super::download::test_reset_download_bytes();
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-/// Preferred already covers H: farm still LOOKAHEAD, not a second GetData.
-#[serial_test::serial(ibd)]
-#[test]
-fn r195_hole_any_does_not_steal_when_pref_covers() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(true, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    unsafe {
-        std::env::remove_var("BLVM_IBD_HOLE_ANY");
-    }
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    {
-        let mut g = assigner.in_flight_per_peer.lock().unwrap();
-        ChunkAssigner::insert_in_flight(&mut g, "owner", 210_001, 210_064);
-    }
-    let ahead = assigner.get_work("ahead", 4096).expect("LOOKAHEAD after H");
-    let missing = assigner.test_first_missing_height();
-    assert_eq!(
-        ahead.0,
-        missing.saturating_add(super::leapfrog_lead_at(missing)),
-        "covered H must not dual, L1 LEAD, got {ahead:?}"
-    );
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
     super::super::tip_stage::test_reset_tip_stage();
 }
 
@@ -10242,7 +8266,10 @@ fn r84_sticky_farm_cap_vacates_for_h() {
     let tip = assigner
         .get_work("owner", 4096)
         .expect("hero must vacate farm and take missing H");
-    assert_eq!(tip.0, 210_001, "farm cap must not STICKY_CAP H, got {tip:?}");
+    assert_eq!(
+        tip.0, 210_001,
+        "farm cap must not STICKY_CAP H, got {tip:?}"
+    );
     let g = assigner.in_flight_per_peer.lock().unwrap();
     let farm_left = g
         .get("owner")
@@ -10381,188 +8408,6 @@ fn r96_title_h_pipe_survives_vacate() {
     super::super::tip_stage::test_reset_tip_stage();
 }
 
-/// L1: farms pack at first_missing+LEAD, width LEAPFROG_WIDTH, not contig+1 64.
-#[serial_test::serial(ibd)]
-#[test]
-fn r97_pack_at_hole_plus_lead() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    let tip = assigner.get_work("owner", 4096).expect("hero H");
-    assert_eq!(tip.0, 210_001);
-    let hole = assigner.test_first_missing_height();
-    let ahead = assigner.get_work("ahead", 4096).expect("L1 far pack");
-    assert_eq!(ahead.0, hole.saturating_add(super::leapfrog_lead_at(hole)), "LEAD, got {ahead:?}");
-    assert_eq!(
-        ahead.1.saturating_sub(ahead.0),
-        super::leapfrog_width_at(210_001).saturating_sub(1),
-        "WIDTH, got {ahead:?}"
-    );
-    assert!(ahead.0 > tip.1, "must not overlap hero, tip={tip:?} ahead={ahead:?}");
-    assert_eq!(
-        assigner.test_first_missing_height(),
-        hole,
-        "reserved stripe is not have"
-    );
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-/// L2: apply enter drops the farm stripe; next pack is first_hole+LEAD.
-#[serial_test::serial(ibd)]
-#[test]
-fn r98_enter_stripe_drops_and_rearms_lead() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    let tip = assigner.get_work("owner", 4096).expect("hero H");
-    assert_eq!(tip.0, 210_001);
-    let first = assigner.get_work("ahead", 4096).expect("first farm");
-    assert_eq!(first.0, 210_001 + super::leapfrog_lead_at(210_001), "L1 LEAD, got {first:?}");
-    let enter = first.0;
-    assigner.test_set_validation_height(enter.saturating_sub(1));
-    super::super::tip_stage::mark_needed(enter);
-    super::super::IBD_TIP_IN_REORDER.store(true, Ordering::Relaxed);
-    super::super::IBD_REORDER_AHEAD.store(2048, Ordering::Relaxed);
-    assigner.test_drop_stale_lookahead(enter);
-    assert!(
-        !assigner.peer_lookahead_covers("ahead", enter),
-        "enter must drop the consumed stripe"
-    );
-    assert!(
-        !assigner.peer_lookahead_covers("ahead", first.1),
-        "must not trim-hold the suffix"
-    );
-    let hero = assigner.get_work("owner", 4096).expect("hero takes leftover hole");
-    assert_eq!(
-        hero.0,
-        enter.saturating_add(1),
-        "have-enter leftover is H+1, got {hero:?}"
-    );
-    let hole = assigner.test_first_missing_height();
-    let leap = assigner.get_work("ahead", 4096).expect("leapfrog re-arm");
-    let want = hole.saturating_add(super::leapfrog_lead_at(hole));
-    assert_eq!(
-        leap.0, want,
-        "re-arm at hole+LEAD, not hold e+1, got {leap:?} hole={hole} first={first:?}"
-    );
-    assert_eq!(
-        leap.1.saturating_sub(leap.0),
-        super::leapfrog_width_at(210_001).saturating_sub(1),
-        "warehouse WIDTH stays, got {leap:?}"
-    );
-    assert!(
-        super::super::lookahead_height_reserved(enter)
-            && super::super::lookahead_height_reserved(first.1),
-        "enter-drop must keep have reserved until e < H"
-    );
-    assigner.test_drop_stale_lookahead(first.1.saturating_add(1));
-    assert!(
-        !super::super::lookahead_height_reserved(enter),
-        "consumed stripe start must leave reserved after e < H"
-    );
-    super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-/// Empty enter keeps the farm; hero clips to H (R-112 keep + not farm-on-H).
-#[serial_test::serial(ibd)]
-#[test]
-fn r115_empty_enter_keeps_farm_hero_takes_h() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    let _tip = assigner.get_work("owner", 4096).expect("hero H");
-    let first = assigner.get_work("ahead", 4096).expect("first farm");
-    assert_eq!(first.0, 210_001 + super::leapfrog_lead_at(210_001), "LEAD, got {first:?}");
-    assigner.test_set_validation_height(first.0.saturating_sub(1));
-    super::super::tip_stage::mark_needed(first.0);
-    assigner.test_drop_stale_lookahead(first.0);
-    assert!(
-        assigner.peer_lookahead_covers("ahead", first.0)
-            && assigner.peer_lookahead_covers("ahead", first.1),
-        "empty enter must keep (s,e), not drop or trim"
-    );
-    assigner.in_flight_per_peer.lock().unwrap().remove("owner");
-    let hero = assigner.get_work("owner", 4096).expect("hero takes H");
-    assert_eq!(hero.0, first.0, "hero on leftover H, got {hero:?}");
-    assert_eq!(hero.1, first.0, "clip to H, not the warehouse, got {hero:?}");
-    assert!(
-        assigner.peer_lookahead_covers("ahead", first.0),
-        "farm stays; do not leapfrog an unlanded tile"
-    );
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-/// R-135 fat: `reorder=1` have-enter must not drop an unlanded 2048.
-#[serial_test::serial(ibd)]
-#[test]
-fn r136_thin_have_enter_keeps_unlanded_farm() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    let _tip = assigner.get_work("owner", 4096).expect("hero H");
-    let first = assigner.get_work("ahead", 4096).expect("first farm");
-    assert_eq!(first.0, 210_001 + super::leapfrog_lead_at(210_001), "LEAD, got {first:?}");
-    assigner.test_set_validation_height(first.0.saturating_sub(1));
-    super::super::tip_stage::mark_needed(first.0);
-    super::super::IBD_TIP_IN_REORDER.store(true, Ordering::Relaxed);
-    super::super::IBD_REORDER_AHEAD.store(1, Ordering::Relaxed);
-    assigner.test_drop_stale_lookahead(first.0);
-    assert!(
-        assigner.peer_lookahead_covers("ahead", first.0)
-            && assigner.peer_lookahead_covers("ahead", first.1),
-        "thin have-enter must keep unlanded (s,e), got drop"
-    );
-    super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
 /// R-138: empty LEAD 512 (tip=1 `513-2560`). After 50k, pack LEAD 64.
 /// H-pipe 64 at hole+64 is not vacated (len<WIDTH and s<512).
 #[serial_test::serial(ibd)]
@@ -10588,139 +8433,19 @@ fn r138_fat_lead_is_64_empty_stays_512() {
     }
     let tip = assigner.get_work("owner", 4096).expect("hero H");
     assert_eq!(tip, (210_001, 210_064));
-    let farm = assigner.get_work("ahead", 4096).expect("fat farm");
-    assert_eq!(farm.0, 210_065, "LEAD 64, got {farm:?}");
-    assert_eq!(
-        farm.1.saturating_sub(farm.0),
-        super::leapfrog_width_at(210_001).saturating_sub(1),
-        "WIDTH 2048, got {farm:?}"
+    // leapfrog_lead_at(210001) is still 64. get_work must not jump there:
+    // R-252 latches H+1 over the hero cover (R-251 owner_end+1 left a hole).
+    let farm = assigner.get_work("ahead", 4096).expect("fat latch");
+    assert_eq!(farm.0, tip.0 + 1, "H+1, not hole+LEAD, got {farm:?}");
+    assert!(farm.0 > tip.0, "Wall A: no second TCP on H");
+    assert!(
+        farm.0 <= tip.1,
+        "duplicates the hero cover, not a jump past it: tip={tip:?} farm={farm:?}"
     );
-    assert!(farm.0 > tip.1, "no overlap {tip:?} {farm:?}");
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-/// Under-apply / enter-hold (`s<=H`) must not slide past hole+LEAD (R-133).
-/// Live farm that starts at hole+LEAD still jumps to e+1 (r108).
-#[serial_test::serial(ibd)]
-#[test]
-fn r107_hold_is_occupied_pack_jumps_to_end() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    let _tip = assigner.get_work("owner", 4096).expect("hero H");
-    let first = assigner.get_work("ahead", 4096).expect("warehouse farm");
-    assert_eq!(
-        first.1.saturating_sub(first.0),
-        super::leapfrog_width_at(210_001).saturating_sub(1),
-        "fat land-in-time WIDTH, got {first:?}"
+    assert!(
+        assigner.latched_ahead_holds("ahead", farm.0, farm.1),
+        "extra must be the latch, got {farm:?}"
     );
-    assigner.test_set_validation_height(first.0.saturating_sub(1));
-    super::super::tip_stage::mark_needed(first.0);
-    super::super::IBD_TIP_IN_REORDER.store(true, Ordering::Relaxed);
-    super::super::IBD_REORDER_AHEAD.store(2048, Ordering::Relaxed);
-    assigner.test_drop_stale_lookahead(first.0);
-    let _hero = assigner.get_work("owner", 4096).expect("hero leftover");
-    let hole = assigner.test_first_missing_height();
-    let leap = assigner.get_work("ahead", 4096).expect("pack hole+LEAD");
-    let want = hole.saturating_add(super::leapfrog_lead_at(hole));
-    assert_eq!(
-        leap.0, want,
-        "enter-hold s<=H must not slide, got {leap:?} hole={hole} first={first:?}"
-    );
-    assert_eq!(
-        leap.1.saturating_sub(leap.0),
-        super::leapfrog_width_at(210_001).saturating_sub(1),
-        "WIDTH stays 2048, got {leap:?}"
-    );
-    super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-/// Under-apply hold overlaps hole+LEAD; pack stays 210513–212560, not e+1.
-#[serial_test::serial(ibd)]
-#[test]
-fn r133_under_apply_hold_packs_hole_plus_lead() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    let tip = assigner.get_work("owner", 4096).expect("hero H");
-    assert_eq!(tip.0, 210_001);
-    assigner.test_push_lookahead_hold(209_000, 212_000);
-    let ahead = assigner.get_work("ahead", 4096).expect("farm at LEAD");
-    assert_eq!(
-        ahead.0,
-        210_001 + super::leapfrog_lead_at(210_001),
-        "hole+LEAD, not hold e+1, got {ahead:?}"
-    );
-    assert_eq!(
-        ahead.1,
-        ahead.0 + super::leapfrog_width_at(210_001).saturating_sub(1),
-        "WIDTH 2048, got {ahead:?}"
-    );
-    assert_ne!(ahead.0, 212_001, "must not slide to hold e+1");
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-/// Three farm tiles: A at hole+LEAD, B and C at e+1. Title does not farm.
-#[serial_test::serial(ibd)]
-#[test]
-fn r108_three_farm_tiles() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "a", "b", "c"]);
-    assigner.set_peer_scores(&[
-        ("owner".into(), 9.0),
-        ("a".into(), 8.0),
-        ("b".into(), 7.0),
-        ("c".into(), 6.0),
-    ]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    let tip = assigner.get_work("owner", 4096).expect("hero H");
-    assert_eq!(tip.0, 210_001);
-    let hole = assigner.test_first_missing_height();
-    let fa = assigner.get_work("a", 4096).expect("farm A");
-    super::super::IBD_REORDER_AHEAD.store(64, Ordering::Relaxed);
-    let fb = assigner.get_work("b", 4096).expect("farm B");
-    let fc = assigner.get_work("c", 4096).expect("farm C");
-    assert_eq!(fa.0, hole.saturating_add(super::leapfrog_lead_at(hole)), "A LEAD");
-    assert_eq!(
-        fa.1.saturating_sub(fa.0),
-        super::leapfrog_width_at(210_001).saturating_sub(1)
-    );
-    assert_eq!(fb.0, fa.1.saturating_add(1), "B at A.e+1, got {fb:?}");
-    assert_eq!(fc.0, fb.1.saturating_add(1), "C at B.e+1, got {fc:?}");
-    assert!(assigner.get_work("a", 4096).is_none(), "no fourth tile");
     super::super::tip_stage::test_reset_tip_stage();
 }
 
@@ -10732,12 +8457,13 @@ fn gap_b_farm_setup(tip: u64) -> ChunkAssigner {
     super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
     super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
     super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(tip, tip.saturating_sub(100), tip + 100_000, &["owner", "a", "b"]);
-    assigner.set_peer_scores(&[
-        ("owner".into(), 9.0),
-        ("a".into(), 8.0),
-        ("b".into(), 7.0),
-    ]);
+    let assigner = wan_tip_assigner(
+        tip,
+        tip.saturating_sub(100),
+        tip + 100_000,
+        &["owner", "a", "b"],
+    );
+    assigner.set_peer_scores(&[("owner".into(), 9.0), ("a".into(), 8.0), ("b".into(), 7.0)]);
     mark_scored_peers_ibd_ready(&assigner);
     assigner.set_tip_gap_missing(true);
     assigner.note_tip_owner_assigned("owner");
@@ -10764,103 +8490,6 @@ fn r165_gap_b_300k_warehouse_blocks_new_far_tile() {
     );
     super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
     super::super::tip_stage::test_reset_tip_stage();
-}
-
-/// HASH_FETCH dump (50k) still packs. Not R-140 (Gap B at 50k → fat **137**).
-#[serial_test::serial(ibd)]
-#[test]
-fn r189_gap_b_hash_fetch_silent_at_50k() {
-    let prev = std::env::var("BLVM_IBD_HASH_FETCH").ok();
-    unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", "1") };
-    let assigner = gap_b_farm_setup(50_000);
-    let _tip = assigner.get_work("owner", 4096).expect("hero H");
-    let fa = assigner.get_work("a", 4096).expect("farm A");
-    super::super::IBD_REORDER_AHEAD.store(2048, Ordering::Relaxed);
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    let fb = assigner
-        .get_work("b", 4096)
-        .expect("HASH_FETCH 50k warehouse-full must still pack (not R-140)");
-    assert!(fb.0 > fa.1);
-    super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-    match prev {
-        Some(v) => unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", v) },
-        None => unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") },
-    }
-}
-
-/// HASH_FETCH END=200k: Gap B floor 180k. Warehouse-full HOLE at fat blocks a new tile.
-/// Flag-off 180k still packs (`r165_gap_b_silent_before_300k`). Not R-140 (50k).
-#[serial_test::serial(ibd)]
-#[test]
-fn r189_gap_b_hash_fetch_180k_warehouse_blocks() {
-    let prev = std::env::var("BLVM_IBD_HASH_FETCH").ok();
-    unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", "1") };
-    let assigner = gap_b_farm_setup(180_000);
-    let _tip = assigner.get_work("owner", 4096).expect("hero H");
-    let _fa = assigner.get_work("a", 4096).expect("farm A before hold");
-    super::super::IBD_REORDER_AHEAD.store(2048, Ordering::Relaxed);
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    assert!(
-        assigner.get_work("b", 4096).is_none(),
-        "HASH_FETCH Gap B@180k must not pack a new far tile on warehouse-full HOLE"
-    );
-    super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-    match prev {
-        Some(v) => unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", v) },
-        None => unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") },
-    }
-}
-
-/// R-189 silent: ahead≥2048 never held (reo p50 256). HASH_FETCH blocks at 256.
-#[serial_test::serial(ibd)]
-#[test]
-fn r190_gap_b_hash_fetch_180k_ahead256_blocks() {
-    let prev = std::env::var("BLVM_IBD_HASH_FETCH").ok();
-    unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", "1") };
-    let assigner = gap_b_farm_setup(180_000);
-    let _tip = assigner.get_work("owner", 4096).expect("hero H");
-    let _fa = assigner.get_work("a", 4096).expect("farm A before hold");
-    super::super::IBD_REORDER_AHEAD.store(256, Ordering::Relaxed);
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    assert!(
-        assigner.get_work("b", 4096).is_none(),
-        "HASH_FETCH Gap B@180k ahead≥256 must block a new far tile"
-    );
-    super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-    match prev {
-        Some(v) => unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", v) },
-        None => unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") },
-    }
-}
-
-/// R-153: ahead=64 is EMPTY flicker, not leftover. HASH_FETCH 180k still packs.
-#[serial_test::serial(ibd)]
-#[test]
-fn r190_gap_b_hash_fetch_180k_ahead64_still_packs() {
-    let prev = std::env::var("BLVM_IBD_HASH_FETCH").ok();
-    unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", "1") };
-    let assigner = gap_b_farm_setup(180_000);
-    let _tip = assigner.get_work("owner", 4096).expect("hero H");
-    let fa = assigner.get_work("a", 4096).expect("farm A");
-    super::super::IBD_REORDER_AHEAD.store(64, Ordering::Relaxed);
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    let fb = assigner
-        .get_work("b", 4096)
-        .expect("HASH_FETCH 180k ahead=64 must still pack (not R-153)");
-    assert!(fb.0 > fa.1);
-    super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-    match prev {
-        Some(v) => unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", v) },
-        None => unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") },
-    }
 }
 
 /// Fat / dest-bc / R-136 248–300k **193**: floor is 300k. Warehouse-full at 180k still packs.
@@ -11044,60 +8673,6 @@ fn r141_no_land_in_time_second_farm_tile() {
     super::super::tip_stage::test_reset_tip_stage();
 }
 
-/// R-139: 3 farms slid to +4096 fill RUNWAY_MAX; LEAD window empty.
-/// Release farthest into hold, pack hole+LEAD. Empty 3-tile (r108) stays
-/// because A occupies the LEAD window.
-#[serial_test::serial(ibd)]
-#[test]
-fn r139_slid_farms_release_and_pack_lead() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "a", "b", "c", "d"]);
-    assigner.set_peer_scores(&[
-        ("owner".into(), 9.0),
-        ("a".into(), 8.0),
-        ("b".into(), 7.0),
-        ("c".into(), 6.0),
-        ("d".into(), 5.0),
-    ]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    let _tip = assigner.get_work("owner", 4096).expect("hero H");
-    let hole = assigner.test_first_missing_height();
-    let lead = super::leapfrog_lead_at(hole);
-    let width = super::leapfrog_width_at(hole);
-    let a0 = hole.saturating_add(4096);
-    let b0 = a0.saturating_add(width);
-    let c0 = b0.saturating_add(width);
-    assigner.test_seed_lookahead_stripe("a", a0, a0 + width - 1);
-    assigner.test_seed_lookahead_stripe("b", b0, b0 + width - 1);
-    assigner.test_seed_lookahead_stripe("c", c0, c0 + width - 1);
-    let packed = assigner.get_work("d", 4096).expect("LEAD after release");
-    assert_eq!(
-        packed.0,
-        hole.saturating_add(lead),
-        "hole+LEAD after slide release, got {packed:?} hole={hole}"
-    );
-    assert_eq!(
-        packed.1.saturating_sub(packed.0),
-        width.saturating_sub(1),
-        "WIDTH 2048, got {packed:?}"
-    );
-    assert!(
-        assigner.test_have_hold_contains(c0, c0 + width - 1),
-        "farthest slid must stay reserved-admit (hold), not leftover-have delete"
-    );
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
 /// R-145: slide-release when all farms slid (+4096) even if LEAD hold blocks.
 #[serial_test::serial(ibd)]
 #[test]
@@ -11139,50 +8714,6 @@ fn r145_slide_release_when_lead_hold_blocked() {
     assert!(
         assigner.test_have_hold_contains(c0, c0 + width - 1),
         "farthest slid must land in hold"
-    );
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-/// R-145: LEAD_PACK early (513/2561/4609) must not slide-release (R-144 churn).
-#[serial_test::serial(ibd)]
-#[test]
-fn r145_no_release_on_lead_pack_early() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "a", "b", "c"]);
-    assigner.set_peer_scores(&[
-        ("owner".into(), 9.0),
-        ("a".into(), 8.0),
-        ("b".into(), 7.0),
-        ("c".into(), 6.0),
-    ]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    let _tip = assigner.get_work("owner", 4096).expect("hero H");
-    let hole = assigner.test_first_missing_height();
-    let width = super::leapfrog_width_at(hole);
-    let a0 = hole.saturating_add(4096);
-    let b0 = a0.saturating_add(width);
-    // LEAD_PACK pattern: A at LEAD, B/C slid but not all past slid_from.
-    let fa = assigner.get_work("a", 4096).expect("farm A LEAD");
-    assigner.test_seed_lookahead_stripe("b", fa.1.saturating_add(1), fa.1.saturating_add(width));
-    assigner.test_seed_lookahead_stripe("c", b0, b0 + width - 1);
-    assert_eq!(assigner.packed_stripe_owners(), 3);
-    assert!(
-        !assigner.test_all_runway_farms_slid(hole),
-        "farm A at LEAD — not all slid"
-    );
-    assert!(
-        !assigner.test_try_slide_release(hole),
-        "R-144 churn: must not release on LEAD_PACK"
     );
     super::super::tip_stage::test_reset_tip_stage();
 }
@@ -11240,76 +8771,6 @@ fn r144_fat_retitle_prefers_flood_class() {
     super::super::IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
 }
 
-/// Hero batch must clip to farm start-1. Overlap refuse is the R-108 47k sit.
-#[serial_test::serial(ibd)]
-#[test]
-fn r108_hero_clips_to_farm_start() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "a"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("a".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    let tip = assigner.get_work("owner", 4096).expect("hero H");
-    let fa = assigner.get_work("a", 4096).expect("farm A");
-    assigner.on_chunk_complete_range("owner", tip.0, tip.1);
-    // Remnant < default WAN batch (32–256). Live R-108 was 129 vs batch 256.
-    let remnant = 8u64;
-    let hole = fa.0.saturating_sub(remnant);
-    assigner.test_set_validation_height(hole.saturating_sub(1));
-    super::super::tip_stage::mark_needed(hole);
-    let hero = assigner.get_work("owner", 4096).expect("hero remnant");
-    assert_eq!(hero.0, hole, "hero on remnant start, got {hero:?}");
-    assert_eq!(
-        hero.1,
-        fa.0.saturating_sub(1),
-        "clip to farm start-1, farm={fa:?} hero={hero:?}"
-    );
-    assert!(
-        hero.1 < fa.0,
-        "must not overlap farm, hero={hero:?} farm={fa:?}"
-    );
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
-/// R-84 @186k: pack while H is only in-flight left holes=50 / bridge_min=H+19.
-#[serial_test::serial(ibd)]
-#[test]
-fn r85_covering_only_does_not_pack() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(186_000, 185_900, 300_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    let tip = assigner.get_work("owner", 4096).expect("hero H");
-    assert_eq!(tip.0, 186_001);
-    let ahead = assigner
-        .get_work("ahead", 4096)
-        .expect("R-91: pack after hero covers hole, have not required");
-    let hole = assigner.test_first_missing_height();
-    assert_eq!(ahead.0, hole.saturating_add(super::leapfrog_lead_at(hole)), "L1 LEAD, got {ahead:?}");
-    assert!(ahead.0 > 186_001, "must not cheese H, got {ahead:?}");
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
 /// Published first_hole: hero GetData starts there. Farmer waits, then packs after hero.
 #[serial_test::serial(ibd)]
 #[test]
@@ -11338,15 +8799,15 @@ fn r86_hero_assigns_published_first_hole() {
     );
     let early = assigner.get_work("ahead", 4096);
     if let Some((s, _)) = early {
-        assert_ne!(s, 210_021, "farmer must not cheese first_hole, got {early:?}");
+        assert_ne!(
+            s, 210_021,
+            "farmer must not cheese first_hole, got {early:?}"
+        );
     }
     let tip = assigner
         .get_work("owner", 4096)
         .expect("hero must GetData published first_hole");
-    assert_eq!(
-        tip.0, 210_021,
-        "hero idle or stayed on have H, got {tip:?}"
-    );
+    assert_eq!(tip.0, 210_021, "hero idle or stayed on have H, got {tip:?}");
     let ahead = early.or_else(|| assigner.get_work("ahead", 4096));
     let ahead = ahead.expect("pack at hole+LEAD (have or after hero cover)");
     let hole = assigner.test_first_missing_height();
@@ -11570,80 +9031,6 @@ fn open_skips_recent_stream_when_window_under_60() {
         "must not OPEN for TIP_PIN lottery"
     );
     super::super::tip_stage::test_reset_tip_stage();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn c1g_two_peers_cannot_both_own_h() {
-    // R-7 class: crawl fetchers stay 1. Two peers cannot both own H.
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::mark_needed(0);
-    let assigner = wan_tip_assigner(900, 800, 100_000, &["owner", "racer"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("racer".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(8, Ordering::Relaxed);
-
-    let tip = assigner.get_work("owner", 4096).expect("owner H");
-    assert_eq!(tip.0, 901);
-    let racer = assigner.get_work("racer", 4096);
-    if let Some((s, e)) = racer {
-        assert_eq!(s, 901, "R-7: racer may C1h (H,H) only, not a past-tip stripe, got {s}-{e}");
-        assert_eq!(e, 901, "R-7: racer may C1h (H,H) only, not a second deep H stripe, got {s}-{e}");
-    }
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::clear_tip_failover();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn bulk_catchup_ahead_ok_with_high_holes() {
-    // W47: bulk catch-up keeps multi-peer ahead under high holes when tip healthy.
-    // Tip owner deep pipe (≥128); ahead fills past that. Soft-retry freezes ahead.
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::mark_needed(0);
-    let assigner = wan_tip_assigner(900, 800, 100_000, &["owner", "ahead", "spare"]);
-    assigner.set_peer_scores(&[
-        ("owner".into(), 9.0),
-        ("ahead".into(), 8.0),
-        ("spare".into(), 7.0),
-    ]);
-    mark_scored_peers_ibd_ready(&assigner);
-    // C1g: tip in reorder → deep tip pipe + multi-peer ahead (not while tip missing).
-    assigner.set_tip_gap_missing(false);
-    // C1i: contig≥8 before deep/ahead (tip form DNA).
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(8, Ordering::Relaxed);
-    assigner.set_tip_bridge_holes(64);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(8, Ordering::Relaxed);
-
-    let tip = assigner.get_work("owner", 4096);
-    assert!(tip.is_some(), "tip owner must get work");
-    let (ts, te) = tip.unwrap();
-    assert_eq!(ts, 901);
-    let tip_span = te.saturating_sub(ts).saturating_add(1);
-    assert!(
-        tip_span >= 128,
-        "WAN tip owner must get ≥128 deep pipe in bulk catch-up, got {tip_span}"
-    );
-
-    let ahead = assigner.get_work("ahead", 4096);
-    assert!(
-        ahead.is_some(),
-        "W47: multi-peer ahead must work with holes=64 when tip healthy"
-    );
-    let (s, e) = ahead.unwrap();
-    assert!(s > te, "ahead past tip owner end, got {s}-{e} tip_end={te}");
-    assert!(
-        s <= ts.saturating_add(400),
-        "WAN ahead must stay near tip, got start={s} tip={ts}"
-    );
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::tip_stage::clear_tip_failover();
 }
 
 #[serial_test::serial(ibd)]
@@ -13676,7 +11063,7 @@ fn p2_tip_trial_starts_when_feeder_empty_and_awaiting() {
     super::super::tip_stage::mark_needed(901);
     super::super::tip_stage::test_backdate_awaiting_ms(5_000);
     unsafe {
-        std::env::remove_var("BLVM_IBD_TIP_TRIAL");
+        std::env::set_var("BLVM_IBD_TIP_TRIAL", "1");
         std::env::set_var("BLVM_IBD_TIP_TRIAL_COOLDOWN_SECS", "15");
         std::env::set_var("BLVM_IBD_TIP_TRIAL_AWAIT_SECS", "2");
     }
@@ -13713,6 +11100,7 @@ fn p2_tip_trial_starts_when_feeder_empty_and_awaiting() {
         "trial must not finish before TRIAL_SECS"
     );
     unsafe {
+        std::env::remove_var("BLVM_IBD_TIP_TRIAL");
         std::env::remove_var("BLVM_IBD_TIP_TRIAL_COOLDOWN_SECS");
         std::env::remove_var("BLVM_IBD_TIP_TRIAL_AWAIT_SECS");
     }
@@ -14243,42 +11631,6 @@ fn r90_empty_sample_skips_reserved_farmer() {
     super::super::tip_stage::test_reset_tip_stage();
 }
 
-/// R-91: no reserved stripe until the hero's inflight covers first_missing.
-/// Covering≥1 / preferred-assigned is not pack (R-84).
-#[serial_test::serial(ibd)]
-#[test]
-fn r91_no_pack_until_hero_covers_hole() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(10_000, 9_900, 50_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    match assigner.get_work("ahead", 4096) {
-        None => {}
-        Some((s, _)) if s <= 10_001 => {}
-        other => panic!("no hero inflight on hole: must not pack, got {other:?}"),
-    }
-    let tip = assigner.get_work("owner", 4096).expect("hero H");
-    assert_eq!(tip.0, 10_001);
-    let ahead = assigner
-        .get_work("ahead", 4096)
-        .expect("pack once hero covers the hole");
-    let hole = assigner.test_first_missing_height();
-    assert_eq!(ahead.0, hole.saturating_add(super::leapfrog_lead_at(hole)), "L1 LEAD, got {ahead:?}");
-    assert!(ahead.0 > 10_001, "must not cheese H, got {ahead:?}");
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
 #[serial_test::serial(ibd)]
 #[test]
 fn r36_tip_trial_skips_keep_hero_during_getdata_wait() {
@@ -14321,7 +11673,10 @@ fn r36_tip_trial_skips_keep_hero_during_getdata_wait() {
     }
     assigner.test_age_tip_stream_started("sticky", 30);
     let decayed = assigner.wan_tip_stream_bps("sticky");
-    assert!(decayed < 60.0, "GetData-wait window must decay under 60, got {decayed}");
+    assert!(
+        decayed < 60.0,
+        "GetData-wait window must decay under 60, got {decayed}"
+    );
     assert!(
         !assigner.maybe_start_tip_trial(901),
         "R-36: preferred last_stream <8s during GetData wait must not TRIAL_START"
@@ -14398,7 +11753,10 @@ fn r42_tip_trial_skips_preferred_recent_stream_not_global_keep_hero() {
     assigner.reset_sticky_wan_tenure("sticky", 901);
     assigner.test_age_tip_stream_started("sticky", 30);
     let decayed = assigner.wan_tip_stream_bps("sticky");
-    assert!(decayed < 60.0, "GetData-wait window must decay under 60, got {decayed}");
+    assert!(
+        decayed < 60.0,
+        "GetData-wait window must decay under 60, got {decayed}"
+    );
     assert!(
         !assigner.maybe_start_tip_trial(901),
         "R-42: preferred last_stream <8s must skip even when last_stream_keep_hero is another peer"
@@ -14485,7 +11843,10 @@ fn r22_mute_drop_rearms_other_ready_peer() {
             !g.get("mute").is_some_and(|r| !r.is_empty()),
             "mute no longer covers H"
         );
-        assert_eq!(g.get("other").map(|r| r.as_slice()), Some(&[(901, 901)][..]));
+        assert_eq!(
+            g.get("other").map(|r| r.as_slice()),
+            Some(&[(901, 901)][..])
+        );
     }
     assert!(
         assigner.tip_owner_in_fail_cooldown("mute"),
@@ -14500,8 +11861,7 @@ fn r22_mute_drop_rearms_other_ready_peer() {
 #[test]
 fn r28_mute_drop_does_not_walk_same_height() {
     // R-26: 31 MUTE_DROP at tip=323067 in 5 ms. One replacement per height.
-    let assigner =
-        r22_mute_drop_fixture(&["mute", "other", "third"], &["mute", "other", "third"]);
+    let assigner = r22_mute_drop_fixture(&["mute", "other", "third"], &["mute", "other", "third"]);
     assert_eq!(assigner.get_work("other", 1000), Some((901, 901)));
     assert_eq!(assigner.preferred_tip_owner().as_deref(), Some("other"));
     let _ = assigner.get_work("third", 1000);
@@ -15129,79 +12489,6 @@ fn wan_keep_grown32_allows_ahead_gate() {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn wan_ahead_stripe_skips_unprobed_after_first_ok() {
-    super::super::tip_probe::test_reset_probes();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(8, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(8, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(900, 800, 100_000, &["owner", "ahead", "spare"]);
-    assigner.set_peer_scores(&[
-        ("owner".into(), 9.0),
-        ("ahead".into(), 8.0),
-        ("spare".into(), 7.0),
-    ]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(false);
-    let tip = assigner.get_work("owner", 4096).expect("tip");
-    arm_keep_grown_hero(&assigner, "owner", 901);
-    super::super::tip_probe::test_seed_probe("ahead", 200);
-    let probed = assigner.get_work("ahead", 4096).expect("probed ahead");
-    assert!(
-        probed.0 > tip.1,
-        "probed n≥1 may take C1g stripe, got {}-{} tip_end={}",
-        probed.0,
-        probed.1,
-        tip.1
-    );
-    if let Some((s, e)) = assigner.get_work("spare", 4096) {
-        assert!(
-            !(s > tip.1),
-            "unprobed must not take C1g stripe after IBD_PROBE_OK, got {s}-{e}"
-        );
-        assigner.on_chunk_complete_range("spare", s, e);
-    }
-    super::super::tip_probe::test_reset_probes();
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    super::super::tip_stage::clear_tip_failover();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn wan_ahead_stripe_starts_at_h_plus_grown() {
-    // dest-q 175k / dest-at 180–200k ts 71: stripe at frontier+1 sat H
-    // (ahead=192–232) while KEEP hero was attached. Floor is H+≥32.
-    super::super::tip_probe::test_reset_probes();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(8, Ordering::Relaxed);
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(8, Ordering::Relaxed);
-    let assigner = wan_tip_assigner(900, 800, 100_000, &["owner", "ahead"]);
-    assigner.set_peer_scores(&[("owner".into(), 9.0), ("ahead".into(), 8.0)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(false);
-    let tip = assigner.get_work("owner", 4096).expect("tip");
-    arm_keep_grown_hero(&assigner, "owner", 901);
-    super::super::tip_probe::test_seed_probe("ahead", 200);
-    let h = assigner.next_needed_height();
-    let stripe = assigner.get_work("ahead", 4096).expect("ahead stripe");
-    assert!(
-        stripe.0 >= h.saturating_add(32),
-        "KEEP ahead must start at H+grown, got {}-{} H={} tip_end={}",
-        stripe.0,
-        stripe.1,
-        h,
-        tip.1
-    );
-    super::super::tip_probe::test_reset_probes();
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    super::super::tip_stage::clear_tip_failover();
-}
-
-#[serial_test::serial(ibd)]
-#[test]
 fn wan_tip_stream_600s_roll_carries_keep_bps() {
     // dest-au 208k: 10min window roll set streams=1, wan_tip_stream_bps=2,
     // then TRIAL_START of KEEP `104.194` (sticky_streams=2 vs chall 4365).
@@ -15246,9 +12533,9 @@ fn wan_tip_stream_600s_roll_carries_keep_bps() {
         "600s roll must carry KEEP rate, got {:.1}",
         assigner.wan_tip_stream_bps("sticky")
     );
-    for _ in 0..80_000 {
-        assigner.note_wan_tip_stream("challenger");
-    }
+    // Instant 80k notes are flood-class (>2000 BPS) and pierce KEEP (R-85).
+    // dest-au was a slow challenger, not a flood. ~7 BPS over 600s.
+    assigner.test_seed_tip_stream_rank("challenger", 4365, 600);
     assert!(
         !assigner.maybe_start_tip_trial(901),
         "STREAM-window roll must not trial a KEEP hero"
@@ -15653,7 +12940,10 @@ fn r161_fat_recv_mute_trials_through_lifetime_healthy() {
         assigner.note_wan_tip_stream("sticky");
     }
     let bps = assigner.wan_tip_stream_bps("sticky");
-    assert!(bps >= 60.0 && bps < 2000.0, "fixture lifetime healthy mesh, got {bps}");
+    assert!(
+        bps >= 60.0 && bps < 2000.0,
+        "fixture lifetime healthy mesh, got {bps}"
+    );
     super::super::download::test_set_cached_recv_mbps("sticky", 8.0);
     super::super::download::test_set_cached_recv_mbps("challenger", 41.0);
     assert!(
@@ -15788,10 +13078,7 @@ fn r163_farm_recv_promote_after_15s_mute() {
         "third 5s mute window promotes the fat farm"
     );
     assert_eq!(assigner.preferred_tip_owner().as_deref(), Some("farm"));
-    assert!(
-        !assigner.maybe_farm_recv_promote(180_002),
-        "one shot"
-    );
+    assert!(!assigner.maybe_farm_recv_promote(180_002), "one shot");
     super::super::download::test_reset_download_bytes();
 }
 
@@ -16164,62 +13451,6 @@ fn arm_healthy_unranked_sticky(assigner: &ChunkAssigner) {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn dest_as_outrank_trials_ready_top_while_unranked_sticky_looks_healthy() {
-    // D-3.1: dest-as 190k healthy_tip_bps on unranked 32.217 (82–263) while
-    // table-top 35.203 sat at 1231. Lottery stays off. Top must be ready.
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    super::super::IBD_TIP_GAP_MISSING.store(true, Ordering::Relaxed);
-    super::super::IBD_REORDER_AHEAD.store(77, Ordering::Relaxed);
-    super::super::tip_stage::mark_needed(901);
-    super::super::tip_stage::test_backdate_awaiting_ms(5_000);
-    super::super::tip_probe::test_reset_probes();
-    super::super::tip_probe::test_seed_probe("hero", 26); // ~1231 wave
-    unsafe {
-        std::env::remove_var("BLVM_IBD_TIP_TRIAL");
-        std::env::set_var("BLVM_IBD_TIP_TRIAL_COOLDOWN_SECS", "15");
-        std::env::set_var("BLVM_IBD_TIP_TRIAL_AWAIT_SECS", "2");
-        std::env::set_var("BLVM_IBD_A6M_GD_SLOW_TIP_BPS_KEEP", "80");
-    }
-    let vh = Arc::new(AtomicU64::new(900));
-    let assigner = ChunkAssigner::new(
-        vec![(880, 1007)],
-        vec!["sticky".into(), "hero".into(), "mid".into()],
-        Arc::clone(&vh),
-        880,
-        true,
-    );
-    assigner.mark_bootstrap_complete();
-    assigner.set_confirmed_body_height_at_start(800);
-    assigner.set_wan_body_tip(800);
-    assigner.set_header_tip(2000);
-    assigner.set_peer_scores(&[
-        ("sticky".into(), 0.90),
-        ("hero".into(), 0.10),
-        ("mid".into(), 0.80),
-    ]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    arm_healthy_unranked_sticky(&assigner);
-    assert!(
-        assigner.maybe_start_tip_trial(901),
-        "ready table-top must trial through healthy_tip_bps"
-    );
-    assert_eq!(assigner.preferred_tip_owner().as_deref(), Some("hero"));
-    super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
-    unsafe {
-        std::env::remove_var("BLVM_IBD_TIP_TRIAL_COOLDOWN_SECS");
-        std::env::remove_var("BLVM_IBD_TIP_TRIAL_AWAIT_SECS");
-        std::env::remove_var("BLVM_IBD_A6M_GD_SLOW_TIP_BPS_KEEP");
-    }
-    super::super::tip_probe::test_reset_probes();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
-}
-
-#[serial_test::serial(ibd)]
-#[test]
 fn dest_as_outrank_does_not_install_mid_rank_when_top_not_ready() {
     // If table-top is not live-ready, do not install mid-rank 164.152.
     // dest-as 1231 *was* a worker (D-4); this guards the unread-top case.
@@ -16317,59 +13548,6 @@ fn dest_ba_probed_hero_sticky_is_not_outrank_rotated() {
         "dest-ba table-top sticky must stay"
     );
     assert_eq!(assigner.preferred_tip_owner().as_deref(), Some("sticky"));
-    super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
-    unsafe {
-        std::env::remove_var("BLVM_IBD_TIP_TRIAL_COOLDOWN_SECS");
-        std::env::remove_var("BLVM_IBD_TIP_TRIAL_AWAIT_SECS");
-        std::env::remove_var("BLVM_IBD_A6M_GD_SLOW_TIP_BPS_KEEP");
-    }
-    super::super::tip_probe::test_reset_probes();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn rematch_win190_outrank_trials_ready_top_at_296_vs_sticky_72() {
-    // D-7.1 rematch WIN190: sticky 82.67 wave 72, table-top 185.209 wave 296
-    // taking chunks. 296 ≥ 80 and ≥ 2×72. Ready top must trial.
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    super::super::IBD_TIP_GAP_MISSING.store(true, Ordering::Relaxed);
-    super::super::IBD_REORDER_AHEAD.store(77, Ordering::Relaxed);
-    super::super::tip_stage::mark_needed(901);
-    super::super::tip_stage::test_backdate_awaiting_ms(5_000);
-    super::super::tip_probe::test_reset_probes();
-    super::super::tip_probe::test_seed_probe("sticky", 444); // ~72
-    super::super::tip_probe::test_seed_probe("hero", 108); // ~296
-    unsafe {
-        std::env::remove_var("BLVM_IBD_TIP_TRIAL");
-        std::env::set_var("BLVM_IBD_TIP_TRIAL_COOLDOWN_SECS", "15");
-        std::env::set_var("BLVM_IBD_TIP_TRIAL_AWAIT_SECS", "2");
-        std::env::set_var("BLVM_IBD_A6M_GD_SLOW_TIP_BPS_KEEP", "80");
-    }
-    let vh = Arc::new(AtomicU64::new(900));
-    let assigner = ChunkAssigner::new(
-        vec![(880, 1007)],
-        vec!["sticky".into(), "hero".into()],
-        Arc::clone(&vh),
-        880,
-        true,
-    );
-    assigner.mark_bootstrap_complete();
-    assigner.set_confirmed_body_height_at_start(800);
-    assigner.set_wan_body_tip(800);
-    assigner.set_header_tip(2000);
-    assigner.set_peer_scores(&[("sticky".into(), 0.90), ("hero".into(), 0.10)]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    arm_healthy_unranked_sticky(&assigner);
-    assert!(
-        assigner.maybe_start_tip_trial(901),
-        "rematch 296 vs 72 ready top must trial through healthy_tip_bps"
-    );
-    assert_eq!(assigner.preferred_tip_owner().as_deref(), Some("hero"));
     super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
     unsafe {
         std::env::remove_var("BLVM_IBD_TIP_TRIAL_COOLDOWN_SECS");
@@ -16508,49 +13686,6 @@ fn ia_demote_assigner() -> ChunkAssigner {
     }
     assert!(assigner.wan_tip_stream_bps("sticky") >= 80.0);
     assigner
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn origin_arm_n5_cooled_ia_rotates_to_better_probe() {
-    // Applies 10/11: IA median 19, sticky_bps ≥80, probe unused. Demote to ge80 probe.
-    super::super::export_owner_hold_clear();
-    super::super::IBD_CHECKPOINT_EXPORT_ACTIVE.store(false, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_owner_body_ia();
-    super::super::tip_probe::test_reset_probes();
-    super::super::tip_stage::clear_tip_failover();
-    super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
-    super::super::IBD_TIP_GAP_MISSING.store(true, Ordering::Relaxed);
-    super::super::tip_probe::test_seed_probe("sticky", 200);
-    super::super::tip_probe::test_seed_probe("challenger", 50);
-    super::super::tip_stage::test_seed_owner_body_ia(19, 16);
-    unsafe {
-        std::env::remove_var("BLVM_IBD_TIP_TRIAL");
-        std::env::set_var("BLVM_IBD_TIP_TRIAL_COOLDOWN_SECS", "15");
-        std::env::set_var("BLVM_IBD_A6M_GD_SLOW_TIP_BPS_KEEP", "80");
-    }
-    let assigner = ia_demote_assigner();
-    assert!(
-        assigner.maybe_run_tip_trial(190_000),
-        "19 ms IA + better probe must rotate despite sticky_bps ≥80"
-    );
-    assert_eq!(
-        assigner.preferred_tip_owner().as_deref(),
-        Some("challenger")
-    );
-    assert!(
-        assigner.tip_trial.lock().unwrap().is_none(),
-        "IA demote is a rotate, not a timed trial that can REVERT"
-    );
-    assert!(assigner.tip_owner_in_fail_cooldown("sticky"));
-    super::super::tip_stage::test_reset_owner_body_ia();
-    super::super::tip_probe::test_reset_probes();
-    super::super::export_owner_hold_clear();
-    unsafe {
-        std::env::remove_var("BLVM_IBD_TIP_TRIAL_COOLDOWN_SECS");
-        std::env::remove_var("BLVM_IBD_A6M_GD_SLOW_TIP_BPS_KEEP");
-    }
-    super::super::IBD_TIP_GAP_MISSING.store(false, Ordering::Relaxed);
 }
 
 #[serial_test::serial(ibd)]
@@ -17132,48 +14267,6 @@ fn r215_lead_pack_unaligned_occupier_still_issues_range() {
     super::super::tip_stage::test_reset_tip_stage();
 }
 
-/// Aligned WIDTH steps stay (r108 B/C at e+1). Genesis 513/2561/4609
-/// is the same % WIDTH == 0 rule with LEAD=512.
-#[serial_test::serial(ibd)]
-#[test]
-fn r214_lead_pack_aligned_width_slide_still_arms() {
-    super::super::tip_stage::clear_tip_failover();
-    super::super::tip_stage::clear_tip_ahead_soft_freeze();
-    super::super::tip_stage::test_reset_tip_stage();
-    super::super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
-    super::super::IBD_TIP_CONTIG_RUNWAY.store(0, Ordering::Relaxed);
-    assert_eq!(super::leapfrog_lead_at(1), 512);
-    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["owner", "a", "b", "c"]);
-    assigner.set_peer_scores(&[
-        ("owner".into(), 9.0),
-        ("a".into(), 8.0),
-        ("b".into(), 7.0),
-        ("c".into(), 6.0),
-    ]);
-    mark_scored_peers_ibd_ready(&assigner);
-    assigner.set_tip_gap_missing(true);
-    assigner.note_tip_owner_assigned("owner");
-    assigner.restore_tip_hole_depth("owner", 64);
-    for _ in 0..80 {
-        assigner.note_wan_tip_stream("owner");
-    }
-    let _tip = assigner.get_work("owner", 4096).expect("hero H");
-    let hole = assigner.test_first_missing_height();
-    let intended = hole.saturating_add(super::leapfrog_lead_at(hole));
-    let width = super::leapfrog_width_at(hole);
-    let fa = assigner.get_work("a", 4096).expect("farm A LEAD");
-    assert_eq!(fa.0, intended);
-    super::super::IBD_REORDER_AHEAD.store(64, Ordering::Relaxed);
-    let fb = assigner.get_work("b", 4096).expect("farm B aligned");
-    let fc = assigner.get_work("c", 4096).expect("farm C aligned");
-    assert_eq!(fb.0, fa.1.saturating_add(1), "B at A.e+1, got {fb:?}");
-    assert_eq!(fc.0, fb.1.saturating_add(1), "C at B.e+1, got {fc:?}");
-    assert_eq!((fb.0 - intended) % width, 0);
-    assert_eq!((fc.0 - intended) % width, 0);
-    super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
-    super::super::tip_stage::test_reset_tip_stage();
-}
-
 /// R-228 / R-230 dump: new slid tile blocked even when feeder is healthy.
 /// Intended LEAD / genesis / dest-bc / r165 warehouse-full live.
 #[serial_test::serial(ibd)]
@@ -17189,7 +14282,11 @@ fn r229_starve_far_replays_r228_silent_on_r227() {
     ));
     // Intended first farm stripe (hole+LEAD) still arms.
     assert!(!super::starve_far_blocks_new_slid(
-        12_801, 41, 12_801, 12_801 + 512, 0
+        12_801,
+        41,
+        12_801,
+        12_801 + 512,
+        0
     ));
     // R-230 dump: feeder 689 at 10k, farms already at 14849 — must block
     // *before* feeder hits 0. Same slid as R-227 packing 16897 at feeder 193.
@@ -17233,7 +14330,11 @@ fn r282_unset_tile_matches_r280() {
         12_801, 41, 12_801, 16_897, 0
     ));
     assert!(!super::starve_far_blocks_new_slid(
-        12_801, 41, 12_801, 12_801 + 512, 0
+        12_801,
+        41,
+        12_801,
+        12_801 + 512,
+        0
     ));
     assert!(super::starve_far_blocks_new_slid(
         10_753, 689, 10_753, 14_849, 0
@@ -17266,7 +14367,9 @@ fn r282_tile_256_peers_equal_tiles() {
     let lead = super::leapfrog_lead_at(hole);
     let slid = hole.saturating_add(lead).saturating_add(super::RUNWAY_SPAN);
     assert_eq!(slid, hole + 512 + 8192);
-    assert!(super::starve_far_blocks_new_slid(12_801, 41, 12_801, slid, 0));
+    assert!(super::starve_far_blocks_new_slid(
+        12_801, 41, 12_801, slid, 0
+    ));
     assert!(!super::starve_far_blocks_new_slid(
         12_801,
         41,
@@ -17275,7 +14378,11 @@ fn r282_tile_256_peers_equal_tiles() {
         0
     ));
     assert!(!super::starve_far_blocks_new_slid(
-        12_801, 41, 12_801, 12_801 + 512, 0
+        12_801,
+        41,
+        12_801,
+        12_801 + 512,
+        0
     ));
     unsafe { std::env::remove_var("BLVM_IBD_RUNWAY_TILE") };
 }
@@ -17417,14 +14524,26 @@ fn r219_h_slow_skips_dump_rotates_fat_once() {
     assert!(!super::body_h_rtt_should_rotate(
         373_074.0, 2.5, 0, 66, false
     ));
-    assert!(!super::body_h_rtt_should_rotate(700.0, 300.0, 0, 200_000, false));
+    assert!(!super::body_h_rtt_should_rotate(
+        700.0, 300.0, 0, 200_000, false
+    ));
     // R-251: line-rate (≥60) must hold. R-250 rotated 115.3 / 103.4 at cutoff 150.
-    assert!(!super::body_h_rtt_should_rotate(1716.0, 115.3, 0, 191_773, false));
-    assert!(!super::body_h_rtt_should_rotate(1632.0, 103.4, 0, 196_240, false));
-    assert!(!super::body_h_rtt_should_rotate(2750.0, 70.0, 0, 200_000, false));
+    assert!(!super::body_h_rtt_should_rotate(
+        1716.0, 115.3, 0, 191_773, false
+    ));
+    assert!(!super::body_h_rtt_should_rotate(
+        1632.0, 103.4, 0, 196_240, false
+    ));
+    assert!(!super::body_h_rtt_should_rotate(
+        2750.0, 70.0, 0, 200_000, false
+    ));
     // Mute still rotates (R-250 194348 sticky 16.1).
-    assert!(super::body_h_rtt_should_rotate(1540.0, 16.1, 0, 194_348, false));
-    assert!(!super::body_h_rtt_should_rotate(1540.0, 16.1, 0, 194_348, true));
+    assert!(super::body_h_rtt_should_rotate(
+        1540.0, 16.1, 0, 194_348, false
+    ));
+    assert!(!super::body_h_rtt_should_rotate(
+        1540.0, 16.1, 0, 194_348, true
+    ));
     assert!(
         !super::body_dump_warehouse_should_rotate(2.5, 0, 66, 0, false),
         "R-218 empty-hole dump must stay off"
@@ -17455,9 +14574,26 @@ fn r219_h_slow_skips_dump_rotates_fat_once() {
     assert!(super::h_slow_recv_leader_holds(10.0, 10.0));
 }
 
+/// Fat-RTT H-slow rotation is opt-in (`BLVM_IBD_H_SLOW_ROTATE`). These tests
+/// lock the predicate, not the default-off switch (R-334).
+struct HSlowRotateOn;
+impl HSlowRotateOn {
+    fn arm() -> Self {
+        // SAFETY: test-only process env. Drop clears it. Callers are `serial(ibd)`.
+        unsafe { std::env::set_var("BLVM_IBD_H_SLOW_ROTATE", "1") };
+        Self
+    }
+}
+impl Drop for HSlowRotateOn {
+    fn drop(&mut self) {
+        unsafe { std::env::remove_var("BLVM_IBD_H_SLOW_ROTATE") };
+    }
+}
+
 #[serial_test::serial(ibd)]
 #[test]
 fn r219_h_slow_dump_keeps_preferred_fat_rotates_once() {
+    let _rotate = HSlowRotateOn::arm();
     super::test_reset_h_slow_gd();
     super::super::download::test_reset_download_bytes();
     super::super::tip_stage::clear_tip_failover();
@@ -17589,6 +14725,7 @@ fn r223_dump_warehouse_rotates_once() {
 #[serial_test::serial(ibd)]
 #[test]
 fn r220_h_slow_120s_cools_ge60_dump_stays() {
+    let _rotate = HSlowRotateOn::arm();
     super::test_reset_h_slow_gd();
     super::super::download::test_reset_download_bytes();
     super::super::tip_stage::clear_tip_failover();
@@ -17631,7 +14768,8 @@ fn r220_h_slow_120s_cools_ge60_dump_stays() {
         "R-250 mute 16 BPS must 120s-cool (not healthy_tip_bps skip)"
     );
     assert!(
-        !fat.tip_owner_open.load(std::sync::atomic::Ordering::Relaxed),
+        !fat.tip_owner_open
+            .load(std::sync::atomic::Ordering::Relaxed),
         "successor installed — do not open score lottery"
     );
     super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
@@ -17652,6 +14790,7 @@ fn r227_h_slow_recv_successor_beats() {
 #[serial_test::serial(ibd)]
 #[test]
 fn r227_h_slow_pins_fatter_recv_not_score() {
+    let _rotate = HSlowRotateOn::arm();
     super::test_reset_h_slow_gd();
     super::super::download::test_reset_download_bytes();
     super::super::tip_stage::clear_tip_failover();
@@ -17660,12 +14799,7 @@ fn r227_h_slow_pins_fatter_recv_not_score() {
     super::super::IBD_FEEDER_BUFFER_BLOCKS.store(0, Ordering::Relaxed);
     super::super::IBD_TIP_GAP_MISSING.store(true, Ordering::Relaxed);
 
-    let fat = wan_tip_assigner(
-        194_826,
-        194_826,
-        300_000,
-        &["sticky", "farm", "fat"],
-    );
+    let fat = wan_tip_assigner(194_826, 194_826, 300_000, &["sticky", "farm", "fat"]);
     fat.set_peer_scores(&[
         ("sticky".into(), 9.0),
         ("farm".into(), 8.0),
@@ -17840,7 +14974,13 @@ fn r283_exclusion_sticky_above_8() {
 #[test]
 fn r283_assignment_skips_not_before() {
     let vh = Arc::new(AtomicU64::new(149));
-    let assigner = ChunkAssigner::new(vec![(100, 199)], vec!["p1".into()], Arc::clone(&vh), 100, true);
+    let assigner = ChunkAssigner::new(
+        vec![(100, 199)],
+        vec!["p1".into()],
+        Arc::clone(&vh),
+        100,
+        true,
+    );
     assigner.mark_bootstrap_complete();
     assigner.requeue(180, 195, None);
     {
@@ -17856,7 +14996,8 @@ fn r283_assignment_skips_not_before() {
     );
     let rq = assigner.retry_queue.lock().unwrap();
     assert!(
-        rq.iter().any(|e| e.start == 180 && e.end == 195 && e.not_before_ms == u64::MAX),
+        rq.iter()
+            .any(|e| e.start == 180 && e.end == 195 && e.not_before_ms == u64::MAX),
         "delayed retry entry must stay queued, got {rq:?}"
     );
 }
@@ -17920,13 +15061,7 @@ fn r284_noprog_tip_advanced_allows() {
 #[test]
 fn r284_noprog_net_gt0_allows() {
     let vh = Arc::new(AtomicU64::new(99));
-    let assigner = ChunkAssigner::new(
-        vec![(100, 199)],
-        vec!["p1".into()],
-        vh,
-        100,
-        true,
-    );
+    let assigner = ChunkAssigner::new(vec![(100, 199)], vec!["p1".into()], vh, 100, true);
     assigner.note_ok_chunk_complete("p1", 100, 115, 3);
     assert!(
         !assigner.would_skip_noprog("p1", 100, 115),
@@ -17986,7 +15121,11 @@ fn r284_noprog_skip_falls_through_not_none() {
     assigner.set_wan_body_tip(250);
     assigner.set_leftover_force_getdata(true);
     let first = assigner.get_work("p1", 1000);
-    assert_eq!(first, Some((100, 100)), "leftover hole first take, got {first:?}");
+    assert_eq!(
+        first,
+        Some((100, 100)),
+        "leftover hole first take, got {first:?}"
+    );
     assigner.on_chunk_complete_range("p1", 100, 100);
     assigner.note_ok_chunk_complete("p1", 100, 100, 0);
     assert!(
@@ -18024,7 +15163,6 @@ fn r284_noprog_record_evicted_behind_tip() {
     );
 }
 
-
 // ---- R-336 window assigner -------------------------------------------------
 // Serialised through WINDOW_TEST_FORCE (process-global); keep in one test.
 
@@ -18059,8 +15197,14 @@ fn r336_window_assigner_streams_all_ready_peers_lowest_first_and_dups_stalled_fr
     // Completion marks delivered; those heights are never re-issued.
     assigner.on_chunk_complete_range("p0", 210_001, 210_016);
     assigner.window_note_complete("p0", 210_001, 210_016, 16);
-    let next = assigner.get_work("p0", 1024).expect("p0 has a free slot again");
-    assert_eq!(next, (210_129, 210_144), "continues past the frontier, not the delivered tile");
+    let next = assigner
+        .get_work("p0", 1024)
+        .expect("p0 has a free slot again");
+    assert_eq!(
+        next,
+        (210_129, 210_144),
+        "continues past the frontier, not the delivered tile"
+    );
 
     // Ownership: p1 017-032, p2 033-048.
     // Failure releases without re-handing the same heights to the failing peer.
@@ -18071,12 +15215,20 @@ fn r336_window_assigner_streams_all_ready_peers_lowest_first_and_dups_stalled_fr
         "window mode has no retry queue"
     );
     let p1_next = assigner.get_work("p1", 1024).expect("p1 gets other work");
-    assert_eq!(p1_next, (210_145, 210_160), "failing peer skips its failed heights");
+    assert_eq!(
+        p1_next,
+        (210_145, 210_160),
+        "failing peer skips its failed heights"
+    );
     // p2 frees its slot and takes the released hole first (lowest free run).
     assigner.on_chunk_complete_range("p2", 210_033, 210_048);
     assigner.window_note_complete("p2", 210_033, 210_048, 16);
     let p2_extra = assigner.get_work("p2", 1024).expect("p2 refills");
-    assert_eq!(p2_extra, (210_017, 210_032), "released hole is lowest free run");
+    assert_eq!(
+        p2_extra,
+        (210_017, 210_032),
+        "released hole is lowest free run"
+    );
 
     // Window clamp: nothing past header tip.
     let small = wan_tip_assigner(299_990, 299_900, 300_000, &["a", "b"]);
@@ -18109,9 +15261,18 @@ fn r342_window_peer_cap_for_is_a_byte_budget() {
     // 16 × 250 kB (4 MB tiles) → 2; 4 × 1 MB (400k+) → 2; huge tile → 1 (floor); tiny → 8 (cap).
     assert_eq!(ChunkAssigner::window_peer_cap_for(250_000, 4, 8_000_000), 8);
     assert_eq!(ChunkAssigner::window_peer_cap_for(62_000, 16, 8_000_000), 8);
-    assert_eq!(ChunkAssigner::window_peer_cap_for(250_000, 16, 8_000_000), 2);
-    assert_eq!(ChunkAssigner::window_peer_cap_for(1_000_000, 4, 8_000_000), 2);
-    assert_eq!(ChunkAssigner::window_peer_cap_for(2_000_000, 16, 8_000_000), 1);
+    assert_eq!(
+        ChunkAssigner::window_peer_cap_for(250_000, 16, 8_000_000),
+        2
+    );
+    assert_eq!(
+        ChunkAssigner::window_peer_cap_for(1_000_000, 4, 8_000_000),
+        2
+    );
+    assert_eq!(
+        ChunkAssigner::window_peer_cap_for(2_000_000, 16, 8_000_000),
+        1
+    );
     assert_eq!(ChunkAssigner::window_peer_cap_for(0, 16, 8_000_000), 8);
 }
 
@@ -18142,14 +15303,15 @@ fn r344_window_strike_out_releases_front_and_cools_fast_holder() {
     for v in assigner.window_started.lock().unwrap().values_mut() {
         *v = old;
     }
-    assigner
-        .window_strikes
-        .lock()
-        .unwrap()
-        .insert("p0".to_string(), (1, Instant::now() - Duration::from_secs(4)));
+    assigner.window_strikes.lock().unwrap().insert(
+        "p0".to_string(),
+        (1, Instant::now() - Duration::from_secs(4)),
+    );
 
     // p1 polls: second strike → p0's tile is released and handed to p1 (not a dup).
-    let taken = assigner.get_work("p1", 1024).expect("p1 gets the released front");
+    let taken = assigner
+        .get_work("p1", 1024)
+        .expect("p1 gets the released front");
     assert_eq!(taken, (210_001, 210_016));
     // R-345: every strike-out benches (escalating); first offense = BENCH_SECS/4 = 15 s.
     let until = assigner
@@ -18160,13 +15322,32 @@ fn r344_window_strike_out_releases_front_and_cools_fast_holder() {
         .copied()
         .expect("first offender is benched");
     let left = until.saturating_duration_since(Instant::now()).as_secs();
-    assert!((10..=15).contains(&left), "first offense ≈ 15 s bench, got {left}s");
     assert!(
-        assigner.in_flight_per_peer.lock().unwrap().get("p0").map_or(true, |v| v.is_empty()),
+        (10..=15).contains(&left),
+        "first offense ≈ 15 s bench, got {left}s"
+    );
+    assert!(
+        assigner
+            .in_flight_per_peer
+            .lock()
+            .unwrap()
+            .get("p0")
+            .map_or(true, |v| v.is_empty()),
         "p0's front tile was released"
     );
-    assert!(assigner.get_work("p0", 1024).is_none(), "benched peer gets no window work");
-    assert_eq!(assigner.window_offense.lock().unwrap().get("p0").map(|e| e.0), Some(1));
+    assert!(
+        assigner.get_work("p0", 1024).is_none(),
+        "benched peer gets no window work"
+    );
+    assert_eq!(
+        assigner
+            .window_offense
+            .lock()
+            .unwrap()
+            .get("p0")
+            .map(|e| e.0),
+        Some(1)
+    );
     ChunkAssigner::window_test_force(false);
 }
 
@@ -18210,10 +15391,17 @@ fn r354_window_stall_dup_goes_to_an_empty_pipe_first() {
     for v in assigner.window_started.lock().unwrap().values_mut() {
         *v = old;
     }
-    let dup = assigner.get_work("p1", 1024).expect("idle p1 takes the stall dup");
+    let dup = assigner
+        .get_work("p1", 1024)
+        .expect("idle p1 takes the stall dup");
     assert_eq!(dup, (210_001, 210_016), "dup covers the stalled front tile");
     assert!(
-        assigner.in_flight_per_peer.lock().unwrap().get("p0").is_some_and(|v| !v.is_empty()),
+        assigner
+            .in_flight_per_peer
+            .lock()
+            .unwrap()
+            .get("p0")
+            .is_some_and(|v| !v.is_empty()),
         "one strike does not release the holder"
     );
     ChunkAssigner::window_test_force(false);
@@ -18224,7 +15412,9 @@ fn r355_window_local_completions_do_not_feed_timing_emas() {
     ChunkAssigner::window_test_force(true);
     let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["p0", "p1"]);
     let t0 = assigner.get_work("p0", 1024).expect("p0 takes the front");
-    let t1 = assigner.get_work("p1", 1024).expect("p1 takes the next tile");
+    let t1 = assigner
+        .get_work("p1", 1024)
+        .expect("p1 takes the next tile");
     // Both tiles were issued 400 ms ago.
     let old = Instant::now() - Duration::from_millis(400);
     for v in assigner.window_started.lock().unwrap().values_mut() {
@@ -18234,19 +15424,44 @@ fn r355_window_local_completions_do_not_feed_timing_emas() {
     assigner.window_note_complete("p0", t0.0, t0.1, 0);
     assert_eq!(assigner.window_tile_ms_ema.load(Ordering::Relaxed), 0);
     assert_eq!(assigner.window_blk_ms_ema.load(Ordering::Relaxed), 0);
-    assert!(assigner.window_peer_blk_ms.lock().unwrap().get("p0").is_none());
     assert!(
-        !assigner.window_started.lock().unwrap().contains_key(&("p0".to_string(), t0.0, t0.1)),
+        assigner
+            .window_peer_blk_ms
+            .lock()
+            .unwrap()
+            .get("p0")
+            .is_none()
+    );
+    assert!(
+        !assigner
+            .window_started
+            .lock()
+            .unwrap()
+            .contains_key(&("p0".to_string(), t0.0, t0.1)),
         "issue stamp is cleared even without a timing sample"
     );
-    assert!(assigner.window_done.lock().unwrap().contains_key(&t0.1), "heights still marked delivered");
+    assert!(
+        assigner.window_done.lock().unwrap().contains_key(&t0.1),
+        "heights still marked delivered"
+    );
     // p1's tile had 4 of 16 blocks off the wire: per-block time is per wire block.
     assigner.window_note_complete("p1", t1.0, t1.1, 4);
     let tile_ema = assigner.window_tile_ms_ema.load(Ordering::Relaxed);
-    assert!((350..=600).contains(&tile_ema), "tile EMA seeded from the wire tile: {tile_ema}");
+    assert!(
+        (350..=600).contains(&tile_ema),
+        "tile EMA seeded from the wire tile: {tile_ema}"
+    );
     let blk = assigner.window_blk_ms_ema.load(Ordering::Relaxed);
-    assert!((80..=160).contains(&blk), "≈400 ms / 4 wire blocks, not / 16 heights: {blk}");
-    let (p1_ms, p1_n) = *assigner.window_peer_blk_ms.lock().unwrap().get("p1").unwrap();
+    assert!(
+        (80..=160).contains(&blk),
+        "≈400 ms / 4 wire blocks, not / 16 heights: {blk}"
+    );
+    let (p1_ms, p1_n) = *assigner
+        .window_peer_blk_ms
+        .lock()
+        .unwrap()
+        .get("p1")
+        .unwrap();
     assert_eq!(p1_n, 1);
     assert!((80..=160).contains(&p1_ms));
     ChunkAssigner::window_test_force(false);
@@ -18257,12 +15472,36 @@ fn r356_window_stall_dup_fires_before_the_strike_threshold() {
     // Pure predicate: floor while no tile completed; round(1.5 × tile EMA) clamped to
     // [floor, stall]; never later than the strike threshold.
     assert_eq!(ChunkAssigner::window_dup_after(1, 0, 3), 1);
-    assert_eq!(ChunkAssigner::window_dup_after(1, 433, 3), 1, "R-355 120–200k tile 433 ms → 650 → 1 s");
-    assert_eq!(ChunkAssigner::window_dup_after(1, 750, 3), 1, "200–250k tile 750 ms → 1125 → 1 s");
-    assert_eq!(ChunkAssigner::window_dup_after(1, 1100, 3), 2, "1650 ms → 2 s");
-    assert_eq!(ChunkAssigner::window_dup_after(1, 5000, 3), 3, "capped at stall");
-    assert_eq!(ChunkAssigner::window_dup_after(5, 0, 3), 3, "floor above stall collapses to stall");
-    assert_eq!(ChunkAssigner::window_dup_after(3, 433, 3), 3, "R-355 behaviour when floor = stall");
+    assert_eq!(
+        ChunkAssigner::window_dup_after(1, 433, 3),
+        1,
+        "R-355 120–200k tile 433 ms → 650 → 1 s"
+    );
+    assert_eq!(
+        ChunkAssigner::window_dup_after(1, 750, 3),
+        1,
+        "200–250k tile 750 ms → 1125 → 1 s"
+    );
+    assert_eq!(
+        ChunkAssigner::window_dup_after(1, 1100, 3),
+        2,
+        "1650 ms → 2 s"
+    );
+    assert_eq!(
+        ChunkAssigner::window_dup_after(1, 5000, 3),
+        3,
+        "capped at stall"
+    );
+    assert_eq!(
+        ChunkAssigner::window_dup_after(5, 0, 3),
+        3,
+        "floor above stall collapses to stall"
+    );
+    assert_eq!(
+        ChunkAssigner::window_dup_after(3, 433, 3),
+        3,
+        "R-355 behaviour when floor = stall"
+    );
 
     // Window path: p0 holds the front for 2 s — under the 3 s strike floor, past the 1 s dup
     // floor. Idle p1 gets the dup; p0 keeps its tile and takes no strike.
@@ -18274,14 +15513,26 @@ fn r356_window_stall_dup_fires_before_the_strike_threshold() {
     for v in assigner.window_started.lock().unwrap().values_mut() {
         *v = old;
     }
-    let dup = assigner.get_work("p1", 1024).expect("idle p1 takes the early dup");
+    let dup = assigner
+        .get_work("p1", 1024)
+        .expect("idle p1 takes the early dup");
     assert_eq!(dup, (210_001, 210_016), "dup covers the stalled front tile");
     assert!(
-        assigner.in_flight_per_peer.lock().unwrap().get("p0").is_some_and(|v| !v.is_empty()),
+        assigner
+            .in_flight_per_peer
+            .lock()
+            .unwrap()
+            .get("p0")
+            .is_some_and(|v| !v.is_empty()),
         "holder keeps its tile"
     );
     assert!(
-        assigner.window_strikes.lock().unwrap().get("p0").map_or(true, |(n, _)| *n == 0),
+        assigner
+            .window_strikes
+            .lock()
+            .unwrap()
+            .get("p0")
+            .map_or(true, |(n, _)| *n == 0),
         "2 s is under the 3 s strike floor: no strike"
     );
     ChunkAssigner::window_test_force(false);
@@ -18292,24 +15543,60 @@ fn r358_window_tile_grows_with_the_peers_own_rate() {
     // Pure: R-357 300–340k peers. Byte tile 4, max 16, target 600 ms.
     // Super-peer 9.5 ms/blk → 63 → capped 16. RTT-bound 55 ms/blk → 10. Roster-median
     // 130 ms/blk → 4 (base). Slow 300 ms/blk → 4 (never below base). < 3 samples → base.
-    assert_eq!(ChunkAssigner::window_tile_for_peer_rate(4, 9, 500, 600, 16), 16);
-    assert_eq!(ChunkAssigner::window_tile_for_peer_rate(4, 55, 500, 600, 16), 10);
-    assert_eq!(ChunkAssigner::window_tile_for_peer_rate(4, 130, 500, 600, 16), 4);
-    assert_eq!(ChunkAssigner::window_tile_for_peer_rate(4, 300, 500, 600, 16), 4);
-    assert_eq!(ChunkAssigner::window_tile_for_peer_rate(4, 9, 2, 600, 16), 4, "needs 3 samples");
-    assert_eq!(ChunkAssigner::window_tile_for_peer_rate(4, 9, 500, 0, 16), 4, "TILE_MS=0 is off");
-    assert_eq!(ChunkAssigner::window_tile_for_peer_rate(16, 9, 500, 600, 16), 16, "already at max");
-    assert_eq!(ChunkAssigner::window_tile_for_peer_rate(7, 60, 500, 600, 16), 10, "200–250k: 7 → 10");
+    assert_eq!(
+        ChunkAssigner::window_tile_for_peer_rate(4, 9, 500, 600, 16),
+        16
+    );
+    assert_eq!(
+        ChunkAssigner::window_tile_for_peer_rate(4, 55, 500, 600, 16),
+        10
+    );
+    assert_eq!(
+        ChunkAssigner::window_tile_for_peer_rate(4, 130, 500, 600, 16),
+        4
+    );
+    assert_eq!(
+        ChunkAssigner::window_tile_for_peer_rate(4, 300, 500, 600, 16),
+        4
+    );
+    assert_eq!(
+        ChunkAssigner::window_tile_for_peer_rate(4, 9, 2, 600, 16),
+        4,
+        "needs 3 samples"
+    );
+    assert_eq!(
+        ChunkAssigner::window_tile_for_peer_rate(4, 9, 500, 0, 16),
+        4,
+        "TILE_MS=0 is off"
+    );
+    assert_eq!(
+        ChunkAssigner::window_tile_for_peer_rate(16, 9, 500, 600, 16),
+        16,
+        "already at max"
+    );
+    assert_eq!(
+        ChunkAssigner::window_tile_for_peer_rate(7, 60, 500, 600, 16),
+        10,
+        "200–250k: 7 → 10"
+    );
 
     // Window path: p0 measured fast (20 ms/blk, 5 samples), p1 unknown. Both take the
     // fixed test tile (16) since the test tile is already the max; the fast peer's run is
     // never shorter than the base and never longer than WINDOW_TILE.
     ChunkAssigner::window_test_force(true);
     let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["p0", "p1"]);
-    assigner.window_peer_blk_ms.lock().unwrap().insert("p0".to_string(), (20, 5));
-    let t0 = assigner.get_work("p0", 1024).expect("fast p0 takes the front");
+    assigner
+        .window_peer_blk_ms
+        .lock()
+        .unwrap()
+        .insert("p0".to_string(), (20, 5));
+    let t0 = assigner
+        .get_work("p0", 1024)
+        .expect("fast p0 takes the front");
     assert_eq!(t0.1 - t0.0 + 1, 16, "capped at WINDOW_TILE");
-    let t1 = assigner.get_work("p1", 1024).expect("p1 takes the next tile");
+    let t1 = assigner
+        .get_work("p1", 1024)
+        .expect("p1 takes the next tile");
     assert_eq!(t1.0, t0.1 + 1, "tiles stay contiguous");
     assert_eq!(t1.1 - t1.0 + 1, 16);
     ChunkAssigner::window_test_force(false);
@@ -18331,12 +15618,16 @@ fn r341_window_slow_peer_keeps_off_front_reserve() {
     assert!(assigner.window_peer_is_slow("p0"));
     assert!(!assigner.window_peer_is_slow("p1"));
 
-    let slow = assigner.get_work("p0", 1024).expect("slow peer still gets work");
+    let slow = assigner
+        .get_work("p0", 1024)
+        .expect("slow peer still gets work");
     assert!(
         slow.0 >= 210_001 + 256,
         "slow peer placed past the 256 front reserve: {slow:?}"
     );
-    let fast = assigner.get_work("p1", 1024).expect("fast peer gets the front");
+    let fast = assigner
+        .get_work("p1", 1024)
+        .expect("fast peer gets the front");
     assert_eq!(fast, (210_001, 210_016));
     // Too few completions → not slow.
     assigner

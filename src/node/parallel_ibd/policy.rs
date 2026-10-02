@@ -19,10 +19,6 @@ use super::latch_env;
 
 /// One GetData in flight to the tip owner. Dual-slot floods Mode T.
 pub const TOP_PEER_IN_FLIGHT: usize = 1;
-/// Second after-tip stripe while tip is covered. KEEP off.
-pub const TIP_FRONTIER_DUAL: bool = false;
-/// Release zombie EMPTY_TIP cover. KEEP off (unset in go.sh).
-pub const SOLE_EMPTY_RELEASE: bool = false;
 /// Tip-glue / sticky flight clamp. KEEP off.
 pub const SOLE_TIP_PRIORITY: bool = false;
 /// Second download worker per WAN peer so sticky dual-pipe can arm. KEEP on.
@@ -383,8 +379,6 @@ mod tests {
     #[test]
     fn keep_table_is_r29od_peel() {
         assert_eq!(TOP_PEER_IN_FLIGHT, 1);
-        assert!(!TIP_FRONTIER_DUAL);
-        assert!(!SOLE_EMPTY_RELEASE);
         assert!(!SOLE_TIP_PRIORITY);
         assert!(STICKY_DUAL_WORKER);
         assert_eq!(TIP_HOLE_PIPE, 128);

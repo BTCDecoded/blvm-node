@@ -160,12 +160,8 @@ fn catch_up_flush_path_on_disk(blockstore: &BlockStore) {
             Ok(true) => {}
             _ => break,
         }
-        match FLUSH_PATH_BODY_TIP.compare_exchange(
-            tip,
-            next,
-            Ordering::Release,
-            Ordering::Relaxed,
-        ) {
+        match FLUSH_PATH_BODY_TIP.compare_exchange(tip, next, Ordering::Release, Ordering::Relaxed)
+        {
             Ok(_) => tip = next,
             Err(actual) => {
                 if actual > tip {
@@ -383,12 +379,6 @@ pub fn gc_pruned_window_gap_persist(blockstore: &BlockStore, gc_height: u64) -> 
     if gc_height == 0 {
         return Ok(false);
     }
-    // Hash-fetch ahead window lives above validation. Never delete it.
-    if crate::node::parallel_ibd::hash_fetch::enabled()
-        && crate::node::parallel_ibd::hash_fetch::is_ahead_of_validation(gc_height)
-    {
-        return Ok(false);
-    }
     let Some(hash) = blockstore.get_hash_by_height(gc_height)? else {
         return Ok(false);
     };
@@ -587,9 +577,14 @@ pub fn try_persist_gap_block_for_local_inject_with_wire(
     )? {
         GapPersistGate::Skip => Ok(false),
         GapPersistGate::OnDisk(repaired) => Ok(repaired),
-        GapPersistGate::Write => {
-            gap_persist_write_one(blockstore, height, block_hash, block, witnesses, wire_payload)
-        }
+        GapPersistGate::Write => gap_persist_write_one(
+            blockstore,
+            height,
+            block_hash,
+            block,
+            witnesses,
+            wire_payload,
+        ),
     }
 }
 
@@ -795,7 +790,9 @@ pub fn store_apply_count() -> u64 {
 }
 
 pub fn note_store_apply(height: u64) {
-    let n = STORE_APPLY_N.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+    let n = STORE_APPLY_N
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
     if n <= 3 || n % 256 == 0 {
         info!("[IBD_STORE_APPLY] h={} n={}", height, n);
     }
@@ -1140,16 +1137,16 @@ mod tests {
         };
         let hash = blockstore.get_block_hash(&block);
         blockstore.store_height(1, &hash).unwrap();
-        blockstore
-            .store_block_with_witness(&block, &[], 1)
-            .unwrap();
+        blockstore.store_block_with_witness(&block, &[], 1).unwrap();
         let loaded = leftover_stall_try_load(&blockstore, 1, ProtocolVersion::BitcoinV1)
             .unwrap()
             .expect("body on disk");
         assert_eq!(blockstore.get_block_hash(loaded.0.as_ref()), hash);
-        assert!(leftover_stall_try_load(&blockstore, 2, ProtocolVersion::BitcoinV1)
-            .unwrap()
-            .is_none());
+        assert!(
+            leftover_stall_try_load(&blockstore, 2, ProtocolVersion::BitcoinV1)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1568,13 +1565,13 @@ mod tests {
         note_available_body(2);
         assert_eq!(flush_path_body_tip(), 2, "sequential availability bumps");
         note_available_body(4);
+        assert_eq!(flush_path_body_tip(), 2, "hole at 3 must not jump");
+        note_available_body(3);
         assert_eq!(
             flush_path_body_tip(),
-            2,
-            "hole at 3 must not jump"
+            3,
+            "fill 3; 4 is not auto-caught without disk"
         );
-        note_available_body(3);
-        assert_eq!(flush_path_body_tip(), 3, "fill 3; 4 is not auto-caught without disk");
         reset_flush_path_body_tip_for_test();
     }
 
@@ -1603,11 +1600,7 @@ mod tests {
         );
         store_body_at(&blockstore, 4);
         note_flush_path_bodies(&blockstore, &[4]);
-        assert_eq!(
-            flush_path_body_tip(),
-            5,
-            "catch-up reaches 5 after 4 lands"
-        );
+        assert_eq!(flush_path_body_tip(), 5, "catch-up reaches 5 after 4 lands");
         reset_flush_path_body_tip_for_test();
     }
 
@@ -1746,7 +1739,8 @@ mod tests {
         let bs = temp_blockstore();
         let blocks: Vec<Block> = (100u64..132).map(toy_block_at).collect();
         for (i, b) in blocks.iter().enumerate() {
-            bs.store_height(100 + i as u64, &bs.get_block_hash(b)).unwrap();
+            bs.store_height(100 + i as u64, &bs.get_block_hash(b))
+                .unwrap();
         }
         let empty: Vec<Vec<blvm_protocol::segwit::Witness>> = Vec::new();
         let items: Vec<(&Block, &[Vec<blvm_protocol::segwit::Witness>], u64)> = blocks
@@ -1760,20 +1754,34 @@ mod tests {
             let h = 100 + i as u64;
             let hash = bs.get_block_hash(b);
             assert!(bs.has_block_body(&hash).unwrap(), "body {h} on disk");
-            let (got, _w) = try_load_local_ibd_block_with_reason(&bs, h, hash, ProtocolVersion::BitcoinV1)
-                .unwrap()
-                .unwrap_or_else(|m| panic!("load {h}: {m:?}"));
+            let (got, _w) =
+                try_load_local_ibd_block_with_reason(&bs, h, hash, ProtocolVersion::BitcoinV1)
+                    .unwrap()
+                    .unwrap_or_else(|m| panic!("load {h}: {m:?}"));
             assert_eq!(got.header.timestamp, b.header.timestamp);
-            let gate = gap_persist_gate(&bs, Some(&vh), h, hash, b, &[], ProtocolVersion::BitcoinV1)
-                .unwrap();
-            assert!(matches!(gate, GapPersistGate::OnDisk(_)), "gate after batch: {gate:?}");
+            let gate =
+                gap_persist_gate(&bs, Some(&vh), h, hash, b, &[], ProtocolVersion::BitcoinV1)
+                    .unwrap();
+            assert!(
+                matches!(gate, GapPersistGate::OnDisk(_)),
+                "gate after batch: {gate:?}"
+            );
         }
         // A fresh height still asks to be written.
         let nb = toy_block_at(200);
         let nh = bs.get_block_hash(&nb);
         bs.store_height(200, &nh).unwrap();
         assert_eq!(
-            gap_persist_gate(&bs, Some(&vh), 200, nh, &nb, &[], ProtocolVersion::BitcoinV1).unwrap(),
+            gap_persist_gate(
+                &bs,
+                Some(&vh),
+                200,
+                nh,
+                &nb,
+                &[],
+                ProtocolVersion::BitcoinV1
+            )
+            .unwrap(),
             GapPersistGate::Write
         );
     }

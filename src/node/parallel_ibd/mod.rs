@@ -16,20 +16,19 @@ mod chunk_assigner;
 mod download;
 mod env_latch;
 pub(crate) use env_latch::latch_env;
+pub(crate) mod body_dup;
 mod feeder;
 mod feeder_miss;
-mod hash_fetch;
 mod headers;
 #[cfg(feature = "production")]
 mod ibd_staging;
-pub mod local_block;
-pub(crate) mod body_dup;
 pub(crate) mod late_body;
-pub(crate) mod wire_hash_gate;
+pub mod local_block;
 mod memory;
 mod ms_breakdown;
 mod muhash_fold;
 pub(crate) mod persist_lane;
+pub(crate) mod wire_hash_gate;
 pub(crate) fn note_block_parse(ms: u64, offload: bool) {
     ms_breakdown::note_block_parse(ms, offload);
 }
@@ -60,34 +59,25 @@ pub(crate) use validation_loop::IbdRetireWork;
 use chunk_assigner::{ChunkAssigner, ChunkGuard, create_chunks as create_chunks_impl};
 
 pub use chunk_assigner::BlockChunk;
-use download::{
-    download_chunk, is_local_disk_peer, is_snapshot_sourced_peer, local_disk_peer_ids,
-};
+use download::{download_chunk, is_snapshot_sourced_peer, local_disk_peer_ids};
 use feeder::{new_feeder_state, run_feeder_thread};
 use local_block::{
     body_warehouse_enabled, contiguous_body_range_tip, coordinator_inject_local_gap,
     flush_path_body_tip, ibd_local_gap_fill_enabled, ibd_local_gap_fill_max_height,
     probe_confirmed_body_height, probe_highest_stored_body_height,
 };
-use memory::{IbdTuningContext, MemoryGuard, TIDESDB_MAX_TXN_OPS};
+use memory::{IbdTuningContext, MemoryGuard};
 #[cfg(feature = "production")]
 use types::PrefetchWorkItemV2;
-use types::{
-    ChunkWorkItem, FeederBufferValue, ReadyItem, SharedBlock, SharedWitnesses, estimate_block_bytes,
-};
+use types::{ReadyItem, SharedBlock, SharedWitnesses};
 
 use crate::network::NetworkManager;
 use crate::network::peer_scoring::is_lan_peer;
-use crate::network::protocol::{
-    GetHeadersMessage, HeadersMessage, ProtocolMessage, ProtocolParser,
-};
-use crate::node::block_processor::validate_block_with_context;
 use crate::storage::Storage;
 use crate::storage::blockstore::{BlockMetadata, BlockStore, block_height_row_key};
-use crate::storage::database::{IBD_UTXO_STORE_SUBDIR, Tree};
+use crate::storage::database::IBD_UTXO_STORE_SUBDIR;
 use crate::storage::disk_utxo::{
-    OutPointKey, SyncBatch, block_input_keys_and_tx_ids_filtered, block_input_keys_batch_into_arc,
-    compute_tx_ids_only, key_to_outpoint, outpoint_to_key,
+    OutPointKey, block_input_keys_and_tx_ids_filtered, compute_tx_ids_only,
 };
 #[cfg(feature = "production")]
 use crate::storage::ibd_utxo_store::IbdUtxoStore;
@@ -98,8 +88,6 @@ use blvm_protocol::{
     BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet, ValidationResult, segwit::Witness,
 };
 
-use blvm_protocol::serialization::varint::decode_varint;
-use blvm_protocol::types::{OutPoint, UTXO};
 use crossbeam_channel;
 /// Set to `true` by the process-level signal handler when SIGTERM/SIGINT is received.
 ///
@@ -151,7 +139,8 @@ pub(crate) static IBD_FIRST_HOLE: AtomicU64 = AtomicU64::new(0);
 pub(crate) static IBD_FIRST_HOLE_AT: AtomicU64 = AtomicU64::new(0);
 /// L1 leapfrog: exclusive farm ranges. Admit/evict bypass these heights only.
 /// Unreserved far heights still drop (B2 / W28d). Published by the assigner.
-static IBD_LOOKAHEAD_RESERVED: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
+static IBD_LOOKAHEAD_RESERVED: std::sync::Mutex<Vec<(u64, u64)>> =
+    std::sync::Mutex::new(Vec::new());
 
 pub(crate) fn publish_lookahead_reserved(ranges: Vec<(u64, u64)>) {
     *IBD_LOOKAHEAD_RESERVED
@@ -423,10 +412,6 @@ pub(crate) fn leftover_hole_needs_getdata(
         }
 }
 
-/// R-259: floor back to leftover **248k**. R-258 **180k** dump 0–10k **0.63 FAIL**;
-/// leftover lie **0** that dest — occupancy, not this gate. Dump `<248k` keeps W22.
-pub(crate) const LEFTOVER_W22_CURSOR_LIE_HEIGHT: u64 = 248_000;
-
 /// Cursor-ahead with no feeder, no GetData of H, not taken by validation.
 ///
 /// R-256 300–340k: `bridge_next=H+1 ∧ feeder=0` **76%**, `HANDOFF_MISS` **0**. W22 treated
@@ -442,7 +427,13 @@ pub(crate) fn leftover_w22_cursor_lie(
     // R-245 restore: W22 always delivered. R-257–R-261 dested the lie and
     // either missed fat (248k) or killed dump (180k / occupancy rematch).
     // Step 2 leftover improve is leftover_inject_should_feeder, not this.
-    let _ = (next_needed, bridge_next, tip_in_feeder, tip_taken, flight_tip);
+    let _ = (
+        next_needed,
+        bridge_next,
+        tip_in_feeder,
+        tip_taken,
+        flight_tip,
+    );
     false
 }
 
@@ -500,30 +491,13 @@ pub(crate) fn leftover_force_aborts_inflight_stripe(
         && stall_or_need <= body_tip.saturating_add(1)
 }
 
-/// HASH_FETCH owns inflight tenure. Assigner C1j / leftover / walk-in / cheese
-/// abort is flag-off DNA and must not cancel HASH_FETCH GetData.
-///
-/// Genesis WAN hang archive `wan-650k-hf-93k-hang`: `[IBD_C1J_ABORT]` every 5s
-/// from height 4 through 93k. Predicate `tip_gap_missing && start > next_needed`.
-/// On genesis `tip_gap_missing` is permanently true, so every HASH_FETCH height
-/// above apply is aborted. 93063 hang: tip frozen at 93063, C1j aborting
-/// 93064+. Do not edit `should_abort_tip_walk_in` (assigner cheese-hero).
-pub(crate) fn hash_fetch_skips_tip_enter_abort() -> bool {
-    hash_fetch::enabled()
-}
-
-/// S-12: peer disconnected. HASH_FETCH peer_id is `ip:port`.
-pub(crate) fn hash_fetch_peer_gone(peer: &str) {
-    hash_fetch::peer_gone(peer);
-}
-
 /// Live WAN assigner for TCP-down (Weak so IBD end cannot leak).
 static LIVE_ASSIGNER: std::sync::OnceLock<
     std::sync::Mutex<Option<std::sync::Weak<chunk_assigner::ChunkAssigner>>>,
 > = std::sync::OnceLock::new();
 
-fn live_assigner_slot() -> &'static std::sync::Mutex<Option<std::sync::Weak<chunk_assigner::ChunkAssigner>>>
-{
+fn live_assigner_slot()
+-> &'static std::sync::Mutex<Option<std::sync::Weak<chunk_assigner::ChunkAssigner>>> {
     LIVE_ASSIGNER.get_or_init(|| std::sync::Mutex::new(None))
 }
 
@@ -535,11 +509,8 @@ pub(crate) fn clear_live_assigner() {
     *live_assigner_slot().lock().unwrap() = None;
 }
 
-/// TCP down: HASH_FETCH + assigner inflight/sticky. Dispatch RST used to only
-/// call HASH_FETCH (off on these dests) while TIP_WALK_PROMOTE retitled the
-/// corpse (R-242 `3.136.178.225` @186264).
+/// TCP down: drop assigner inflight and sticky state for this peer.
 pub(crate) fn ibd_peer_gone(peer: &str) {
-    hash_fetch_peer_gone(peer);
     let Some(assigner) = live_assigner_slot()
         .lock()
         .ok()
@@ -812,9 +783,7 @@ pub(crate) fn tip_hedge_observe_and_should_assign(
     if n < 2 || covering == 0 {
         return false;
     }
-    let mut g = tip_hedge_live()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut g = tip_hedge_live().lock().unwrap_or_else(|e| e.into_inner());
     if g.as_ref().is_some_and(|l| l.h != h) {
         *g = None;
     }
@@ -844,9 +813,7 @@ pub(crate) fn tip_hedge_observe_and_should_assign(
 }
 
 pub(crate) fn tip_hedge_mark_issued(h: u64, peer_id: &str) {
-    let mut g = tip_hedge_live()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut g = tip_hedge_live().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(live) = g.as_mut() {
         if live.h == h {
             live.issued = live.issued.saturating_add(1);
@@ -857,9 +824,7 @@ pub(crate) fn tip_hedge_mark_issued(h: u64, peer_id: &str) {
 
 /// First body for a hedged height: WIN if a non-original peer landed first.
 pub(crate) fn tip_hedge_note_body(h: u64, peer: &str) {
-    let mut g = tip_hedge_live()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut g = tip_hedge_live().lock().unwrap_or_else(|e| e.into_inner());
     let Some(live) = g.as_ref() else {
         return;
     };
@@ -1098,38 +1063,6 @@ pub(crate) fn tip_runway_mode(
     } else {
         "UNKNOWN"
     }
-}
-
-/// q 175→176k: `FEEDER_STARVE` CHEESE sat **50s** because Case C skipped
-/// force at covering=1 (stripe delivered past H; 220 ahead in reorder).
-/// r lottery FORCE at covering=1 piled C1t to 3. Gate is gap + ahead≥8 —
-/// not 150ms healthy RTT cheese (caller must also wait ≥2s). Caller pins
-/// `(H,H)` to preferred ≥80; do **not** requeue-lottery.
-pub(crate) fn cheese_starve_should_force_tip_h(
-    gap_missing: bool,
-    ahead_buffered: usize,
-    covering: usize,
-) -> bool {
-    gap_missing && ahead_buffered >= 8 && covering <= 1
-}
-
-/// holes≥5 only. `first ≥ H+8` was dest-ba PIPE_FILL (R-36+ 82–97).
-/// dest-s @449 / dest-t @7596 (holes=0) no longer pin. first=H+1 stays false.
-/// Coordinator starve path does not call pin (R-35 DNA).
-///
-/// ac FAIL: dropping `ahead_buffered≥8` 180–200k **120 ≺ ab 522**. Restore
-/// dest-ab / dest-x KEEP gate. Do **not** re-land sparse-cheese pin.
-pub(crate) fn cheese_starve_should_pin_hero(
-    gap_missing: bool,
-    ahead_buffered: usize,
-    holes: u64,
-    _first_ahead: Option<u64>,
-    _tip: u64,
-) -> bool {
-    if !gap_missing || ahead_buffered < 8 {
-        return false;
-    }
-    holes >= 5
 }
 
 /// dest-ab @255073: ≥80 hero, holes=17, first=+64, reorder=3, 49s sit.
@@ -1800,33 +1733,6 @@ fn defer_bridge_ahead_dispatch(
     gap_missing && h > next_needed.saturating_add(window)
 }
 
-/// R-190 sit: covering=0, H not in `dispatched`, `TIMEOUT_CAP` **0**,
-/// `EMPTY_REARM` **0**, `TIP_DEDUP_REARM` **0**. CAP needs H in-flight.
-/// COVERING_ZERO rearm only ran when dispatched. First `IBD_STALL` was
-/// ~45s (same clock as sit CAP). Not immediate rearm (preferred steal).
-#[inline]
-fn hf_undispatched_empty_rearm_due(
-    covering: usize,
-    dispatched: bool,
-    elapsed: Option<std::time::Duration>,
-) -> bool {
-    const HF_EMPTY_REARM_SIT_SECS: u64 = 45;
-    hash_fetch::enabled()
-        && !dispatched
-        && covering == 0
-        && elapsed.is_some_and(|d| d >= std::time::Duration::from_secs(HF_EMPTY_REARM_SIT_SECS))
-}
-
-/// R-191 fat **91** EMPTY **36/42**. get_work first-claim stayed thin.
-/// R-178 `take_hole` at all heights + farms dump **54**. Only fat + H missing.
-/// Dump stays `get_work`. Not skip-`get_work` (R-179 **246**).
-#[inline]
-fn hf_fat_empty_take_hole(val: u64) -> bool {
-    hash_fetch::enabled()
-        && val >= 180_000
-        && !IBD_TIP_IN_REORDER.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 /// Insert into reorder under S2/S2b gap-aware admission. Returns false if dropped / below tip.
 ///
 /// Throttle far-ahead admission when the buffer is ≥ half capacity **and** either:
@@ -1858,10 +1764,7 @@ pub(crate) fn insert_reorder_gap_aware(
     // W29: while tip is missing, always enforce the admit window — do not wait until the
     // buffer is half full (live: reorder≈270 with limit≈2k never hit half-throttle).
     let throttle = gap_missing || (bridge_full && reorder_buffer.len() >= half);
-    if throttle
-        && h > next_needed.saturating_add(window)
-        && !lookahead_height_reserved(h)
-    {
+    if throttle && h > next_needed.saturating_add(window) && !lookahead_height_reserved(h) {
         body_dup::note_discard(body_dup::DiscardReason::AdmitDrop, Some(h), 0);
         let n = memory::GAP_ADMIT_DROP_BLOCKS.fetch_add(1, Ordering::Relaxed) + 1;
         if n == 1 || n % 64 == 0 {
@@ -2282,10 +2185,11 @@ pub(crate) fn adaptive_checkpoint_interval(
 /// 130s was >200; sit floor 15 then let 21.8 replace it and dump on
 /// covering=0. Burst EMA (>200) only yields to a sample ≥80.
 pub(crate) fn adopt_checkpoint_bps_sample(prev: f64, sample: f64) -> f64 {
-    if prev > CHECKPOINT_EXPORT_BURST_BPS && sample <= CHECKPOINT_EXPORT_BURST_BPS {
-        if sample < CHECKPOINT_BPS_BURST_CLEAR {
-            return prev;
-        }
+    if prev > CHECKPOINT_EXPORT_BURST_BPS
+        && sample <= CHECKPOINT_EXPORT_BURST_BPS
+        && sample < CHECKPOINT_BPS_BURST_CLEAR
+    {
+        return prev;
     }
     if sample >= CHECKPOINT_BPS_SIT_FLOOR || prev <= 0.0 {
         sample
@@ -2485,17 +2389,13 @@ impl Drop for IbdNosyncGuard<'_> {
     }
 }
 use dashmap::DashMap;
-use futures::stream::{FuturesUnordered, StreamExt};
-use hex;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex};
-use std::thread;
 use tokio::sync::Semaphore;
 use tokio::sync::broadcast;
-use tokio::sync::oneshot;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, error, info, warn};
 
@@ -2865,14 +2765,6 @@ pub(crate) fn filter_ibd_download_peers(
     }
 }
 
-/// Block download request
-#[derive(Debug, Clone)]
-struct BlockRequest {
-    height: u64,
-    hash: Hash,
-    peer_id: String,
-}
-
 /// Options for [`ParallelIBD::do_flush_to_storage`].
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct IbdBlockFlushOpts {
@@ -2985,7 +2877,6 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
     const MAX_CONSECUTIVE_TIMEOUT_FAILURES: u32 = 1;
 
     loop {
-        let hash_mode = hash_fetch::enabled();
         let maybe_work = loop {
             // Exit early if this worker's own peer has been permanently evicted.
             // Staying alive just causes the worker to grab a chunk, hit the
@@ -2999,34 +2890,6 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
                             peer_id
                         );
                         break None;
-                    }
-                }
-            }
-            if hash_mode {
-                if IBD_SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
-                    break None;
-                }
-                // S-7.3: HASH_FETCH skipped is_done / validation_reached_ibd_end.
-                // After apply=END, refill kept inserting [val+1, val+ahead].
-                if assigner_clone.is_done() {
-                    break None;
-                }
-                let val = validation_height_clone.load(std::sync::atomic::Ordering::Relaxed);
-                hash_fetch::refill_from_store(&blockstore_clone, val);
-                // R-182: do not take_work_span / take_store_ready at all heights.
-                // R-179 skip-get_work dump 246. R-178 take_hole + get_work Face 2 / 54.
-                // R-204 take_persist_prefix at H: dump **358** (20–30k sit). Reverted.
-                // R-192: fat EMPTY only — H via take_hole_span; dump still get_work.
-                if hf_fat_empty_take_hole(val) {
-                    if let Some((lo, hi)) = hash_fetch::take_hole_span(&peer_id, val) {
-                        tracing::warn!(
-                            "[IBD_HF_HOLE] peer={} {}-{} val={}",
-                            peer_id,
-                            lo,
-                            hi,
-                            val
-                        );
-                        break Some((lo, hi));
                     }
                 }
             }
@@ -3076,7 +2939,6 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
         let (mut start, mut end) = match maybe_work {
             Some(x) => x,
             None => {
-                hash_fetch::peer_gone(&peer_id);
                 info!(
                     "[IBD] Worker {} exiting: queue empty (chunks_completed={}, blocks_downloaded={})",
                     peer_id, chunks_completed, blocks_downloaded
@@ -3131,9 +2993,7 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
             peer_id.clone(),
             assigner_clone.clone(),
         ));
-        if start == end {
-            download::log_hf_hot("took", start);
-        } else {
+        if start != end {
             info!("[IBD] {} took chunk {}-{}", peer_id, start, end);
         }
         {
@@ -3348,7 +3208,13 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
                         {
                             warn!(
                                 "[IBD_PEER_ROTATE] evict {} recv={:.2}mbps assigned={} seated={} bench={} top3={:.2} sticky={} — roster swap, not bench",
-                                v.peer, v.recv_mbps, v.assigned, v.seated, v.bench, v.top3_frac, sticky
+                                v.peer,
+                                v.recv_mbps,
+                                v.assigned,
+                                v.seated,
+                                v.bench,
+                                v.top3_frac,
+                                sticky
                             );
                             // Prune first: if this is a ghost (disconnected, bytes frozen)
                             // it must not be re-picked as slowest on every interval.
@@ -3373,12 +3239,7 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
                         ts_ms
                     );
                 }
-                assigner_clone.note_ok_chunk_complete(
-                    &peer_id,
-                    start,
-                    end,
-                    chunk.net_block_count,
-                );
+                assigner_clone.note_ok_chunk_complete(&peer_id, start, end, chunk.net_block_count);
                 info!(
                     "[IBD] {} complete chunk {}-{} net={} local={}",
                     peer_id,
@@ -3415,7 +3276,12 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
                         start,
                         end
                     );
-                    assigner_clone.requeue_reason(start, stripe0_end, Some(peer_id.clone()), "eviction");
+                    assigner_clone.requeue_reason(
+                        start,
+                        stripe0_end,
+                        Some(peer_id.clone()),
+                        "eviction",
+                    );
                     for (s, e) in &extra_ranges {
                         assigner_clone.requeue_reason(*s, *e, Some(peer_id.clone()), "eviction");
                     }
@@ -3629,7 +3495,6 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
         }
     }
 
-    hash_fetch::peer_gone(&peer_id);
     info!(
         "Peer {} done: {} chunks, {} blocks",
         peer_id, chunks_completed, blocks_downloaded
@@ -4347,13 +4212,6 @@ impl ParallelIBD {
         assigner.set_tip_gap_missing(true);
         // P5/A4: score-prefer gap races + dual in-flight for top half of peers.
         assigner.set_peer_scores(&scored_peers);
-        hash_fetch::session_start();
-        if hash_fetch::enabled() {
-            info!(
-                "[IBD_HASH_FETCH] startup mode fetch_ahead={} — assigner get_work owns H+farms; sit CAP 45s; no HF pick; Gap B@180k ahead256; EMPTY_REARM @45s; fat EMPTY take_hole",
-                hash_fetch::fetch_ahead()
-            );
-        }
         if filtered_peers.iter().any(|p| is_snapshot_sourced_peer(p)) {
             assigner.set_ibd_ready_peers(
                 filtered_peers
@@ -5342,7 +5200,11 @@ impl ParallelIBD {
         if sequential {
             info!("Coordinator: sequential mode (single peer) — passthrough, no reorder buffer");
         }
-        feeder_miss::log_startup(num_peers, sequential, local_block::gap_inject_lookahead_pub());
+        feeder_miss::log_startup(
+            num_peers,
+            sequential,
+            local_block::gap_inject_lookahead_pub(),
+        );
         // The OrderedReadyBridge enforces strict-ascending delivery to the feeder. Initialize its
         // `next_expected` to start_height so prefetch worker completions are emitted starting there.
         // Prefetch workers complete out of order; without this seeding the first completion would
@@ -5638,7 +5500,6 @@ impl ParallelIBD {
             // clear/requeue during this window or GAP_STREAM storms kill tip crawl.
             let mut tip_inflight_since: Option<(u64, std::time::Instant)> = None;
             // R-190: covering=0 and H not dispatched (STREAM then drop).
-            let mut empty_undispatched_since: Option<(u64, std::time::Instant)> = None;
             // W22: bridge cursor ahead of validation (tip emitted, not yet consumed / lost).
             let mut bridge_ahead_since: Option<(u64, std::time::Instant)> = None;
             let tip_inflight_grace = Duration::from_secs(
@@ -5795,73 +5656,75 @@ impl ParallelIBD {
                     ) {
                         tip_follow_poll_at = std::time::Instant::now();
                         if let Some(ref net) = network_for_coord {
-                        let follow = async {
-                            let Some(peer_tip) = net.get_highest_peer_start_height_async().await
-                            else {
-                                return;
-                            };
-                            let current_end = effective_end_live_for_coord.load(Ordering::Relaxed);
-                            let stored_ht = blockstore_for_coord
-                                .highest_stored_height()
-                                .ok()
-                                .flatten()
-                                .unwrap_or(0);
-                            if peer_tip > stored_ht && !tip_follow_headers_busy {
-                                tip_follow_headers_busy = true;
-                                let header_start = stored_ht.saturating_add(1);
-                                match headers::download_headers(
-                                    Arc::clone(&peer_scorer_for_coord),
-                                    header_start,
-                                    peer_tip,
-                                    &follow_tip_peer_ids_for_coord,
-                                    blockstore_for_coord.as_ref(),
-                                    Some(Arc::clone(net)),
-                                    headers_timeout_secs_for_coord,
-                                    headers_max_failures_for_coord,
-                                    None,
-                                )
-                                .await
-                                {
-                                    Ok(result) => {
-                                        assigner_for_coord.set_header_tip(result.tip_height);
-                                        info!(
-                                            "[IBD_TIP_FOLLOW] headers refreshed {} → {}",
-                                            stored_ht, result.tip_height
-                                        );
+                            let follow = async {
+                                let Some(peer_tip) =
+                                    net.get_highest_peer_start_height_async().await
+                                else {
+                                    return;
+                                };
+                                let current_end =
+                                    effective_end_live_for_coord.load(Ordering::Relaxed);
+                                let stored_ht = blockstore_for_coord
+                                    .highest_stored_height()
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or(0);
+                                if peer_tip > stored_ht && !tip_follow_headers_busy {
+                                    tip_follow_headers_busy = true;
+                                    let header_start = stored_ht.saturating_add(1);
+                                    match headers::download_headers(
+                                        Arc::clone(&peer_scorer_for_coord),
+                                        header_start,
+                                        peer_tip,
+                                        &follow_tip_peer_ids_for_coord,
+                                        blockstore_for_coord.as_ref(),
+                                        Some(Arc::clone(net)),
+                                        headers_timeout_secs_for_coord,
+                                        headers_max_failures_for_coord,
+                                        None,
+                                    )
+                                    .await
+                                    {
+                                        Ok(result) => {
+                                            assigner_for_coord.set_header_tip(result.tip_height);
+                                            info!(
+                                                "[IBD_TIP_FOLLOW] headers refreshed {} → {}",
+                                                stored_ht, result.tip_height
+                                            );
+                                        }
+                                        Err(e) => {
+                                            warn!("[IBD_TIP_FOLLOW] header refresh failed: {e:#}");
+                                        }
                                     }
-                                    Err(e) => {
-                                        warn!("[IBD_TIP_FOLLOW] header refresh failed: {e:#}");
-                                    }
+                                    tip_follow_headers_busy = false;
                                 }
-                                tip_follow_headers_busy = false;
-                            }
-                            let header_tip = blockstore_for_coord
-                                .highest_stored_height()
-                                .ok()
-                                .flatten()
-                                .unwrap_or(stored_ht);
-                            if let Some(new_end) =
-                                tip_follow_new_effective_end(current_end, peer_tip, header_tip)
-                            {
-                                effective_end_live_for_coord.store(new_end, Ordering::Release);
-                                assigner_for_coord.set_ibd_end_height(new_end);
-                                let vh = validation_height_for_coord.load(Ordering::Relaxed);
-                                info!(
-                                    "[IBD_TIP_FOLLOW] extended effective_end {} → {} \
+                                let header_tip = blockstore_for_coord
+                                    .highest_stored_height()
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or(stored_ht);
+                                if let Some(new_end) =
+                                    tip_follow_new_effective_end(current_end, peer_tip, header_tip)
+                                {
+                                    effective_end_live_for_coord.store(new_end, Ordering::Release);
+                                    assigner_for_coord.set_ibd_end_height(new_end);
+                                    let vh = validation_height_for_coord.load(Ordering::Relaxed);
+                                    info!(
+                                        "[IBD_TIP_FOLLOW] extended effective_end {} → {} \
                                      (vh={} peer_tip={} header_tip={})",
-                                    current_end, new_end, vh, peer_tip, header_tip
+                                        current_end, new_end, vh, peer_tip, header_tip
+                                    );
+                                }
+                            };
+                            if tokio::time::timeout(Duration::from_secs(5), follow)
+                                .await
+                                .is_err()
+                            {
+                                tip_follow_headers_busy = false;
+                                warn!(
+                                    "[IBD_TIP_FOLLOW_TIMEOUT] 5s — skipped to keep tip channel draining (W73)"
                                 );
                             }
-                        };
-                        if tokio::time::timeout(Duration::from_secs(5), follow)
-                            .await
-                            .is_err()
-                        {
-                            tip_follow_headers_busy = false;
-                            warn!(
-                                "[IBD_TIP_FOLLOW_TIMEOUT] 5s — skipped to keep tip channel draining (W73)"
-                            );
-                        }
                         }
                     }
                 }
@@ -6190,11 +6053,7 @@ impl ParallelIBD {
                                     }
                                 );
                             }
-                            // r 37011 FAIL: lottery FORCE covering=1 at 2s → C1t covering=3.
-                            // R-36 pinned here. dest-bd `keep_stream=none` aborts the
-                            // tip GetData (R-40: 240 none / 236 cheese_hh, 10–50k 82.7).
-                            // R-35 logged starve and did not pin (554). R-30: no pin
-                            // (1415). Predicate stays for tests. Do not call pin.
+                            // Pin maze deleted. Starve preds deleted. Starve logs only.
                         }
                     } else {
                         feeder_starve_since = None;
@@ -6893,10 +6752,7 @@ impl ParallelIBD {
                                     prefetch::engine_empty_spec_adds(),
                                 );
                                 if let Some(ref bridge) = ready_bridge_for_coord {
-                                    bridge.force_emit_tip_to_feeder(
-                                        ready,
-                                        &feeder_state_for_coord,
-                                    );
+                                    bridge.force_emit_tip_to_feeder(ready, &feeder_state_for_coord);
                                     static LEFTOVER_FEEDER_LOG_MS: std::sync::atomic::AtomicU64 =
                                         std::sync::atomic::AtomicU64::new(0);
                                     let now_ms = std::time::SystemTime::now()
@@ -7330,13 +7186,6 @@ impl ParallelIBD {
                             } else {
                                 tip_inflight_since = None;
                                 bridge_ahead_since = None;
-                                match empty_undispatched_since {
-                                    Some((h, _)) if h == next_needed => {}
-                                    _ => {
-                                        empty_undispatched_since =
-                                            Some((next_needed, std::time::Instant::now()));
-                                    }
-                                }
                             }
 
                             if allow_requeue {
@@ -7365,27 +7214,7 @@ impl ParallelIBD {
                                             // non-force skip left genesis stuck at 262716.
                                             assigner_for_coord
                                                 .requeue_stall_gaps_force(next_needed, None);
-                                            let elapsed = empty_undispatched_since
-                                                .filter(|(h, _)| *h == next_needed)
-                                                .map(|(_, t)| t.elapsed());
-                                            if hf_undispatched_empty_rearm_due(
-                                                covering,
-                                                dispatched.contains(&next_needed),
-                                                elapsed,
-                                            ) {
-                                                warn!(
-                                                    "[IBD_TIP_COVERING_ZERO] tip {} not dispatched covering=0 ≥45s — EMPTY_REARM",
-                                                    next_needed
-                                                );
-                                                assigner_for_coord
-                                                    .force_empty_tip_rearm(next_needed);
-                                                empty_undispatched_since = Some((
-                                                    next_needed,
-                                                    std::time::Instant::now(),
-                                                ));
-                                            }
                                         } else {
-                                            empty_undispatched_since = None;
                                             // R-212: covering≥1 zombie (TIP_WALK_PROMOTE
                                             // 250126-251888) + non-force is P0-B no-op on
                                             // WAN → STALL 11 / FORCE 0 / sit @250127.
@@ -7460,12 +7289,8 @@ impl ParallelIBD {
                             tip_crawl_logged_at = Some(std::time::Instant::now());
                             let feeder_len = IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed);
                             let max_ahead_now = max_ahead_live.load(Ordering::Relaxed);
-                            let (covering, mut flight_ranges, mut busy_peers) =
+                            let (covering, flight_ranges, busy_peers) =
                                 assigner_for_coord.tip_flight_diag();
-                            if hash_fetch::enabled() {
-                                flight_ranges = hash_fetch::inflight_len();
-                                busy_peers = hash_fetch::inflight_peer_count();
-                            }
                             IBD_TIP_COVERING.store(covering, Ordering::Relaxed);
                             IBD_TIP_IN_FLIGHT_RANGES.store(flight_ranges, Ordering::Relaxed);
                             let (healthy, _raw, _) = assigner_for_coord.tip_flight_diag_healthy();
@@ -7763,8 +7588,7 @@ impl ParallelIBD {
                             let tip_missing = gap_missing_dispatch;
                             const SEQ_REORDER_BAND: u64 = 32;
                             if tip_missing && h != tip {
-                                feeder_miss::SEQ_SKIP_TIP_MISSING
-                                    .fetch_add(1, Ordering::Relaxed);
+                                feeder_miss::SEQ_SKIP_TIP_MISSING.fetch_add(1, Ordering::Relaxed);
                                 continue;
                             }
                             if !tip_missing && h > tip.saturating_add(SEQ_REORDER_BAND) {
@@ -7835,10 +7659,7 @@ impl ParallelIBD {
                         }
                         reorder_emitted += 1;
                     }
-                    feeder_miss::note_dispatch_emit(
-                        reorder_emitted as u64,
-                        gap_missing_dispatch,
-                    );
+                    feeder_miss::note_dispatch_emit(reorder_emitted as u64, gap_missing_dispatch);
                     {
                         let want = feeder_miss::ORCH_WANT.load(Ordering::Relaxed);
                         let has = want > 0 && reorder_buffer.contains_key(&want);
@@ -7993,11 +7814,7 @@ impl ParallelIBD {
                     // (C1q / C1i freeze). Hero hole walks feeder ∪ reorder.
                     let have_c = {
                         let g = feeder_state_for_coord.0.lock();
-                        have_contig_runway(
-                            &reorder_buffer,
-                            |h| g.0.get(h).is_some(),
-                            next_needed,
-                        )
+                        have_contig_runway(&reorder_buffer, |h| g.0.get(h).is_some(), next_needed)
                     };
                     let first_hole = next_needed.saturating_add(have_c.max(pipeline_c));
                     IBD_FIRST_HOLE.store(first_hole, Ordering::Relaxed);
@@ -8105,17 +7922,6 @@ impl ParallelIBD {
                     // Tip in reorder must fall through to W19 handoff / dispatch — do not
                     // spin here while dispatched stays sticky (live: GAP_STREAM → reorder,
                     // then continue forever with feeder=0).
-                    if !reorder_buffer.contains_key(&next_needed_poll) {
-                        tokio::task::yield_now().await;
-                        continue;
-                    }
-                }
-                // HASH_FETCH: empty missing set means the store already holds
-                // [val+1, val+ahead]. Flag-off wakes via block_tx recv; this path
-                // never sends, so do not sit out gap_poll. Notify the feeder
-                // Condvar the same way insert_ready_into_feeder does.
-                if hash_fetch::enabled() && gap_poll && hash_fetch::missing_len() == 0 {
-                    feeder_state_for_coord.1.notify_one();
                     if !reorder_buffer.contains_key(&next_needed_poll) {
                         tokio::task::yield_now().await;
                         continue;

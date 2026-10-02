@@ -826,8 +826,11 @@ impl BlockStore {
         };
         #[cfg(not(feature = "block-compression"))]
         let block_data = data;
-        // `block-compression` yields `Vec<u8>`; otherwise `&[u8]` — both AsRef<[u8]>.
+        // `block-compression` yields `Vec<u8>`; otherwise `&[u8]`.
+        #[cfg(feature = "block-compression")]
         let block: Block = bincode::deserialize(block_data.as_ref())?;
+        #[cfg(not(feature = "block-compression"))]
+        let block: Block = bincode::deserialize(block_data)?;
         Ok(block)
     }
 
@@ -1196,7 +1199,7 @@ impl BlockStore {
     }
 
     // ============================================================
-    // Tree accessors for batch operations (used by BufferedBlockStore)
+    // Tree accessors for batch operations
     // ============================================================
 
     /// Get reference to blocks tree for batch operations

@@ -68,28 +68,6 @@ fn a4_tip_admit_tight_opt_in_ignores_bulk_catchup() {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn hash_fetch_skips_tip_enter_abort_only_when_flag_on() {
-    // Archive wan-650k-hf-93k-hang: C1j `tip_gap_missing && start > next_needed`
-    // aborted every HASH_FETCH (H,H) above apply. Flag-off assigner C1j stays.
-    let prev = std::env::var("BLVM_IBD_HASH_FETCH").ok();
-    unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") };
-    assert!(
-        !hash_fetch_skips_tip_enter_abort(),
-        "flag-off keeps assigner TIP_ENTER / C1j"
-    );
-    unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", "1") };
-    assert!(
-        hash_fetch_skips_tip_enter_abort(),
-        "HASH_FETCH must not C1j-abort take_work ahead of next_needed (93k hang)"
-    );
-    match prev {
-        Some(v) => unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", v) },
-        None => unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") },
-    }
-}
-
-#[serial_test::serial(ibd)]
-#[test]
 fn hole_under_sparse_confirmed_does_not_hide_wan_gap() {
     // Live 2026-08-20: confirmed=185817 (binary-search cheese) / contiguous=70669 /
     // hole at 70713. Using confirmed as live_body_tip made wan_gap=false and
@@ -256,8 +234,12 @@ fn hole_under_sparse_confirmed_does_not_hide_wan_gap() {
         leftover_inject_should_feeder(true, false, 1, 0, 249_000),
         "R-272 300–340k sit: flight_tip=1 must not block store_has emit"
     );
-    assert!(!leftover_inject_should_feeder(true, true, 0, 90_000, 249_000));
-    assert!(!leftover_inject_should_feeder(false, false, 0, 90_000, 249_000));
+    assert!(!leftover_inject_should_feeder(
+        true, true, 0, 90_000, 249_000
+    ));
+    assert!(!leftover_inject_should_feeder(
+        false, false, 0, 90_000, 249_000
+    ));
 }
 
 #[test]
@@ -554,50 +536,6 @@ fn c1f_tip_runway_mode_classifies_tip_hole_ahead() {
         "FILLED_RUNWAY",
         "tip in feeder must not be classified as tip hole"
     );
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn cheese_starve_forces_tip_h_when_covering_one() {
-    // q 175715: 220 ahead, covering=1, feeder=0 — must (H,H), not wait covering=0.
-    assert!(cheese_starve_should_force_tip_h(true, 220, 1));
-    assert!(cheese_starve_should_force_tip_h(true, 8, 0));
-    assert!(
-        !cheese_starve_should_force_tip_h(true, 220, 2),
-        "W73: covering>1 must not stripe-force"
-    );
-    assert!(
-        !cheese_starve_should_force_tip_h(true, 7, 1),
-        "ahead<8 is not the 2s CHEESE proof"
-    );
-    assert!(!cheese_starve_should_force_tip_h(false, 220, 1));
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn cheese_starve_pins_hero_only_on_holes() {
-    // Contiguous first=H+1 is healthy — do not pin.
-    assert!(!cheese_starve_should_pin_hero(true, 64, 0, Some(450), 449));
-    assert!(!cheese_starve_should_pin_hero(true, 7, 17, Some(176), 100));
-    assert!(!cheese_starve_should_pin_hero(
-        false,
-        220,
-        17,
-        Some(200),
-        100
-    ));
-    // q / s@3425: holes≥5.
-    assert!(cheese_starve_should_pin_hero(true, 220, 5, None, 175_715));
-    assert!(cheese_starve_should_pin_hero(
-        true,
-        128,
-        32,
-        Some(3457),
-        3425
-    ));
-    // s@449 / t@7596: holes=0 first=+64/+86 is PIPE_FILL, not pin.
-    assert!(!cheese_starve_should_pin_hero(true, 64, 0, Some(513), 449));
-    assert!(!cheese_starve_should_pin_hero(true, 19, 0, Some(7682), 7596));
 }
 
 #[serial_test::serial(ibd)]
@@ -1923,7 +1861,9 @@ fn checkpoint_export_does_not_exit_when_vh_or_cl_hit_end_while_export_lags() {
     assert!(!checkpoint_export_thread_should_exit(
         957804, 957000, 957804, 880000, 10000
     ));
-    assert!(!checkpoint_export_thread_should_exit(957804, 0, 957804, 0, 10000));
+    assert!(!checkpoint_export_thread_should_exit(
+        957804, 0, 957804, 0, 10000
+    ));
 }
 
 #[serial_test::serial(ibd)]
@@ -1983,9 +1923,24 @@ fn tip_follow_extends_when_peer_advances() {
 #[serial_test::serial(ibd)]
 #[test]
 fn r238_tip_follow_does_not_park_hungry_apply() {
-    assert!(!tip_follow_may_block_coord(0, 25_493, 370_000, Some(370_000)));
-    assert!(!tip_follow_may_block_coord(64, 25_493, 370_000, Some(370_000)));
-    assert!(!tip_follow_may_block_coord(689, 10_000, 370_000, Some(370_000)));
+    assert!(!tip_follow_may_block_coord(
+        0,
+        25_493,
+        370_000,
+        Some(370_000)
+    ));
+    assert!(!tip_follow_may_block_coord(
+        64,
+        25_493,
+        370_000,
+        Some(370_000)
+    ));
+    assert!(!tip_follow_may_block_coord(
+        689,
+        10_000,
+        370_000,
+        Some(370_000)
+    ));
     assert!(!tip_follow_may_block_coord(64, 25_493, 370_000, None));
     assert!(tip_follow_may_block_coord(64, 960_000, 965_000, None));
     assert!(!tip_follow_may_block_coord(0, 960_000, 965_000, None));
@@ -2916,96 +2871,6 @@ fn r102_unreserved_far_still_deferred() {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn r192_hf_fat_empty_take_hole_gate() {
-    let prev = std::env::var("BLVM_IBD_HASH_FETCH").ok();
-    unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", "1") };
-    IBD_TIP_IN_REORDER.store(false, std::sync::atomic::Ordering::Relaxed);
-    assert!(
-        !hf_fat_empty_take_hole(50_000),
-        "dump must stay get_work (not R-178)"
-    );
-    assert!(
-        hf_fat_empty_take_hole(180_000),
-        "fat EMPTY must take_hole"
-    );
-    IBD_TIP_IN_REORDER.store(true, std::sync::atomic::Ordering::Relaxed);
-    assert!(
-        !hf_fat_empty_take_hole(180_000),
-        "H in reorder is not EMPTY take_hole"
-    );
-    IBD_TIP_IN_REORDER.store(false, std::sync::atomic::Ordering::Relaxed);
-    unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") };
-    assert!(
-        !hf_fat_empty_take_hole(180_000),
-        "flag-off stays get_work"
-    );
-    match prev {
-        Some(v) => unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", v) },
-        None => unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") },
-    }
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn r191_hf_undispatched_empty_rearm_due() {
-    use std::time::Duration;
-    let prev = std::env::var("BLVM_IBD_HASH_FETCH").ok();
-    unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", "1") };
-    assert!(
-        !hf_undispatched_empty_rearm_due(0, false, Some(Duration::from_secs(44))),
-        "under 45s must not rearm"
-    );
-    assert!(
-        hf_undispatched_empty_rearm_due(0, false, Some(Duration::from_secs(45))),
-        "R-190: covering=0 !dispatched ≥45s must EMPTY_REARM"
-    );
-    assert!(
-        !hf_undispatched_empty_rearm_due(0, true, Some(Duration::from_secs(45))),
-        "dispatched covering=0 is COVERING_ZERO, not this path"
-    );
-    assert!(
-        !hf_undispatched_empty_rearm_due(1, false, Some(Duration::from_secs(45))),
-        "covering>0 must not rearm"
-    );
-    unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") };
-    assert!(
-        !hf_undispatched_empty_rearm_due(0, false, Some(Duration::from_secs(45))),
-        "flag-off stays silent"
-    );
-    match prev {
-        Some(v) => unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", v) },
-        None => unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") },
-    }
-}
-
-#[serial_test::serial(ibd)]
-#[test]
-fn defer_bridge_ahead_w58_holds_under_hash_fetch() {
-    // R-182: HASH_FETCH skip of W58 reprinted Face 2. Flag on still defers ahead.
-    let prev = std::env::var("BLVM_IBD_HASH_FETCH").ok();
-    unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", "1") };
-    let next = 60_000u64;
-    let window = 256u64;
-    assert!(
-        !defer_bridge_ahead_dispatch(next, next, true, true, window, true, false, true),
-        "tip itself always admitted"
-    );
-    assert!(
-        defer_bridge_ahead_dispatch(next + 32, next, true, true, window, true, false, true),
-        "HASH_FETCH must W58-defer next+32 when tip missing"
-    );
-    assert!(
-        defer_bridge_ahead_dispatch(next + 65, next, true, true, window, true, false, true),
-        "W58 still defers past next+64"
-    );
-    match prev {
-        Some(v) => unsafe { std::env::set_var("BLVM_IBD_HASH_FETCH", v) },
-        None => unsafe { std::env::remove_var("BLVM_IBD_HASH_FETCH") },
-    }
-}
-
-#[serial_test::serial(ibd)]
-#[test]
 fn wan_bulk_catchup_threshold() {
     assert!(!wan_bulk_catchup(0, 60_000));
     assert!(!wan_bulk_catchup(60_100, 60_000)); // only 100 ahead
@@ -3019,10 +2884,7 @@ fn r305_wide_runway_default_off_clamps_tip_gap_at_2048() {
     unsafe {
         std::env::remove_var("BLVM_IBD_WIDE_RUNWAY");
         std::env::set_var("BLVM_IBD_WAN_BULK_TIP_GAP_AHEAD", "8192");
-        assert!(
-            !wide_runway_enabled(),
-            "WIDE_RUNWAY unset must stay off"
-        );
+        assert!(!wide_runway_enabled(), "WIDE_RUNWAY unset must stay off");
         assert_eq!(
             wan_bulk_tip_gap_ahead_cap(),
             2048,
@@ -3272,8 +3134,8 @@ fn r290_rotate_evicts_worst_seated_not_the_bench() {
     download::test_note_download_block_bytes("4.4.4.4:8333", 800_000);
     download::test_rotate_backdate_secs(2);
 
-    let v = download::download_rotate_slowest("1.1.1.1:8333", 2)
-        .expect("three seated ≥ min_scored=2");
+    let v =
+        download::download_rotate_slowest("1.1.1.1:8333", 2).expect("three seated ≥ min_scored=2");
     assert_eq!(
         v.peer, "3.3.3.3:8333",
         "R-289 evicted 13/13 at recv=0.00 — those peers were never assigned \
