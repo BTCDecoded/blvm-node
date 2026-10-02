@@ -125,6 +125,7 @@ impl RequestValidator {
             // Chain API - read-only
             | RequestPayload::GetChainInfo
             | RequestPayload::GetBlockByHeight { .. }
+            | RequestPayload::GetBlockAndWitnesses { .. }
             // Lightning API - read-only
             | RequestPayload::GetLightningNodeUrl
             | RequestPayload::GetLightningInfo

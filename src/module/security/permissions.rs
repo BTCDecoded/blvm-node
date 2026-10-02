@@ -247,6 +247,7 @@ impl PermissionChecker {
             // Chain API
             RequestPayload::GetChainInfo => Permission::ReadChainState,
             RequestPayload::GetBlockByHeight { .. } => Permission::ReadBlockchain,
+            RequestPayload::GetBlockAndWitnesses { .. } => Permission::ReadBlockchain,
             // Lightning API
             RequestPayload::GetLightningNodeUrl => Permission::ReadLightning,
             RequestPayload::GetLightningInfo => Permission::ReadLightning,

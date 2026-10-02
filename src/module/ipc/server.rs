@@ -1152,6 +1152,17 @@ impl ModuleIpcServer {
                     ResponsePayload::BlockByHeight(block),
                 ))
             }
+            RequestPayload::GetBlockAndWitnesses { hash } => {
+                let pair = node_api.get_block_and_witnesses(hash).await?;
+                let (block, witnesses) = match pair {
+                    Some((block, witnesses)) => (Some(block), witnesses),
+                    None => (None, Vec::new()),
+                };
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::BlockAndWitnesses { block, witnesses },
+                ))
+            }
             // Lightning API
             RequestPayload::GetLightningNodeUrl => {
                 let url = node_api.get_lightning_node_url().await?;

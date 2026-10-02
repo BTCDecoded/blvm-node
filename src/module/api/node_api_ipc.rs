@@ -105,6 +105,7 @@ impl NodeApiIpc {
             RequestPayload::GetNetworkPeers => MessageType::GetNetworkPeers,
             RequestPayload::GetChainInfo => MessageType::GetChainInfo,
             RequestPayload::GetBlockByHeight { .. } => MessageType::GetBlockByHeight,
+            RequestPayload::GetBlockAndWitnesses { .. } => MessageType::GetBlockAndWitnesses,
             RequestPayload::GetLightningNodeUrl => MessageType::GetLightningNodeUrl,
             RequestPayload::GetLightningInfo => MessageType::GetLightningInfo,
             RequestPayload::GetPaymentState { .. } => MessageType::GetPaymentState,
@@ -379,6 +380,24 @@ impl NodeAPI for NodeApiIpc {
             RequestPayload::GetBlockByHeight { height },
             |payload| match payload {
                 ResponsePayload::BlockByHeight(block) => Ok(block),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn get_block_and_witnesses(
+        &self,
+        hash: &Hash,
+    ) -> Result<Option<(Block, Vec<Vec<blvm_protocol::segwit::Witness>>)>, ModuleError> {
+        self.request(
+            RequestPayload::GetBlockAndWitnesses { hash: *hash },
+            |payload| match payload {
+                ResponsePayload::BlockAndWitnesses { block, witnesses } => {
+                    Ok(block.map(|b| (b, witnesses)))
+                }
                 _ => Err(ModuleError::OperationError(
                     "Unexpected response type".to_string(),
                 )),

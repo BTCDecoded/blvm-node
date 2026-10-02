@@ -238,6 +238,15 @@ pub trait NodeAPI: Send + Sync {
     /// Get block by height
     async fn get_block_by_height(&self, height: u64) -> Result<Option<Block>, ModuleError>;
 
+    /// Block body plus per-transaction witnesses. Default `Ok(None)` so older mocks compile.
+    /// The live node loads both from the block store.
+    async fn get_block_and_witnesses(
+        &self,
+        _hash: &Hash,
+    ) -> Result<Option<(Block, Vec<Vec<blvm_protocol::segwit::Witness>>)>, ModuleError> {
+        Ok(None)
+    }
+
     // === Lightning API Methods (for Lightning module) ===
     /// Get Lightning node connection info
     async fn get_lightning_node_url(&self) -> Result<Option<String>, ModuleError>;

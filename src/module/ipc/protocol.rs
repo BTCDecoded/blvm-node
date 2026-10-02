@@ -10,6 +10,7 @@ use crate::module::traits::{
     PaymentState, PeerInfo, SyncStatus, TxServeDenylistSnapshot,
 };
 use crate::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
+use blvm_protocol::segwit::Witness;
 
 /// Correlation ID for matching requests with responses
 pub type CorrelationId = u64;
@@ -80,6 +81,7 @@ pub enum MessageType {
     // Chain API
     GetChainInfo,
     GetBlockByHeight,
+    GetBlockAndWitnesses,
     // Lightning API
     GetLightningNodeUrl,
     GetLightningInfo,
@@ -217,6 +219,9 @@ pub enum RequestPayload {
     GetChainInfo,
     GetBlockByHeight {
         height: u64,
+    },
+    GetBlockAndWitnesses {
+        hash: Hash,
     },
     // Lightning API
     GetLightningNodeUrl,
@@ -510,6 +515,10 @@ pub enum ResponsePayload {
     // Chain API responses
     ChainInfo(ChainInfo),
     BlockByHeight(Option<Block>),
+    BlockAndWitnesses {
+        block: Option<Block>,
+        witnesses: Vec<Vec<Witness>>,
+    },
     // Lightning API responses
     LightningNodeUrl(Option<String>),
     LightningInfo(Option<LightningInfo>),

@@ -290,6 +290,14 @@ impl ModuleApiHub {
                 let block = self.node_api.get_block_by_height(*height).await?;
                 ResponsePayload::BlockByHeight(block)
             }
+            RequestPayload::GetBlockAndWitnesses { hash } => {
+                let pair = self.node_api.get_block_and_witnesses(hash).await?;
+                let (block, witnesses) = match pair {
+                    Some((block, witnesses)) => (Some(block), witnesses),
+                    None => (None, Vec::new()),
+                };
+                ResponsePayload::BlockAndWitnesses { block, witnesses }
+            }
             // Lightning API
             RequestPayload::GetLightningNodeUrl => {
                 let url = self.node_api.get_lightning_node_url().await?;
@@ -512,7 +520,7 @@ impl ModuleApiHub {
                         declared_txids.clone(),
                     )
                     .await?;
-                    ResponsePayload::BlockTemplate(template)
+                ResponsePayload::BlockTemplate(template)
             }
             RequestPayload::SubmitMempoolTransaction { tx, witnesses } => {
                 let added = self
@@ -672,15 +680,14 @@ impl ModuleApiHub {
             RequestPayload::GetNetworkPeers => "get_network_peers",
             RequestPayload::GetChainInfo => "get_chain_info",
             RequestPayload::GetBlockByHeight { .. } => "get_block_by_height",
+            RequestPayload::GetBlockAndWitnesses { .. } => "get_block_and_witnesses",
             RequestPayload::GetLightningNodeUrl => "get_lightning_node_url",
             RequestPayload::GetLightningInfo => "get_lightning_info",
             RequestPayload::GetPaymentState { .. } => "get_payment_state",
             RequestPayload::CheckTransactionInMempool { .. } => "check_transaction_in_mempool",
             RequestPayload::GetFeeEstimate { .. } => "get_fee_estimate",
             RequestPayload::GetBlockTemplate { .. } => "get_block_template",
-            RequestPayload::GetBlockTemplateWithOutputs { .. } => {
-                "get_block_template_with_outputs"
-            }
+            RequestPayload::GetBlockTemplateWithOutputs { .. } => "get_block_template_with_outputs",
             RequestPayload::GetBlockTemplateDeclared { .. } => "get_block_template_declared",
             RequestPayload::SubmitMempoolTransaction { .. } => "submit_mempool_transaction",
             RequestPayload::SubmitBlock { .. } => "submit_block",

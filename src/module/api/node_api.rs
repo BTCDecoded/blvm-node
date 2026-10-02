@@ -359,12 +359,7 @@ impl NodeApiImpl {
     }
 
     async fn try_commons_gbt_outputs(&self) -> Result<Option<Vec<(i64, Vec<u8>)>>, ModuleError> {
-        if self
-            .is_module_available("blvm-commons-pool")
-            .await
-            .ok()
-            != Some(true)
-        {
+        if self.is_module_available("blvm-commons-pool").await.ok() != Some(true) {
             return Ok(None);
         }
         let raw = match self
@@ -378,9 +373,8 @@ impl NodeApiImpl {
             Ok(r) => r,
             Err(_) => return Ok(None),
         };
-        let v: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| {
-            ModuleError::OperationError(format!("commons outputs json: {e}"))
-        })?;
+        let v: serde_json::Value = serde_json::from_slice(&raw)
+            .map_err(|e| ModuleError::OperationError(format!("commons outputs json: {e}")))?;
         Self::commons_gbt_outputs(&v)
     }
 
@@ -901,6 +895,24 @@ impl NodeAPI for NodeApiImpl {
                             .transpose()
                     })
                     .transpose()
+            }
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
+    }
+
+    async fn get_block_and_witnesses(
+        &self,
+        hash: &Hash,
+    ) -> Result<Option<(Block, Vec<Vec<blvm_protocol::segwit::Witness>>)>, ModuleError> {
+        let hash = *hash;
+        tokio::task::spawn_blocking({
+            let storage = Arc::clone(&self.storage);
+            move || {
+                storage
+                    .blocks()
+                    .get_block_and_witnesses(&hash)
+                    .map_err(|e| ModuleError::op_err("Failed to get block and witnesses", e))
             }
         })
         .await
@@ -2093,7 +2105,10 @@ impl NodeAPI for NodeApiImpl {
                 "transaction {} rejected by mempool policy",
                 hex::encode(txid)
             ))),
-            Err(e) => Err(ModuleError::op_err("Failed to add transaction to mempool", e)),
+            Err(e) => Err(ModuleError::op_err(
+                "Failed to add transaction to mempool",
+                e,
+            )),
         }
     }
 
