@@ -2704,6 +2704,18 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 &mut recent_snap_buf,
                 Vec::with_capacity(12),
             ));
+            // R-365: the BIP113 window advances at *dispatch*, not at drain. Dispatch is
+            // strictly sequential (`h`, then `next_validation_height = h + 1`), so after the
+            // snapshot for `h` the window must hold `h` itself for the job at `h + 1`. The
+            // drain-time push lagged by up to `pipeline_depth` (64) blocks, so every job saw
+            // an MTP that was 1–63 blocks stale — lower than `MTP(h-1)` — and post-CSV the
+            // locktime cutoff rejected a mainnet block (R-364: 419436 "non-final transaction").
+            blvm_protocol::types::ARC_BLOCKHEADER_CREATED
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            push_dispatched_header(
+                &mut recent_headers_buf,
+                Arc::new(block_arc_d.header.clone()),
+            );
             // Per-job wall clock for header validation (reject future blocks). Cheap vs ECDSA work.
             let cached_network_time = current_timestamp();
             let block_work = get_block_proof(block_arc_d.header.bits).unwrap_or(U256::zero());
@@ -3313,11 +3325,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     .map(|tx| tx.inputs.len())
                     .sum();
 
-                // Track recent headers for BIP113 MTP (keep last 11). Clone header before moving
-                // `block_arc` into `pending_blocks` so flush `Arc::try_unwrap` usually succeeds.
-                blvm_protocol::types::ARC_BLOCKHEADER_CREATED
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let header_rc = Arc::new(block_arc.header.clone());
+                // BIP113 window: advanced at dispatch (R-365), not here.
                 // Skip writing blocks already on disk (contiguous replay cap or sparse per-height
                 // body). Re-serializing into heed3 during local gap replay caused redundant heap
                 // alloc + LMDB write pressure when probe_confirmed_body_height returned 0.
@@ -3469,10 +3477,6 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     drop(witnesses_storage);
                     drop(entry);
                     let _ = deferred_dropper.send(item);
-                }
-                recent_headers_buf.push_back(header_rc);
-                if recent_headers_buf.len() > 11 {
-                    recent_headers_buf.pop_front();
                 }
 
                 // Update shared validation height (allows download workers to track progress)

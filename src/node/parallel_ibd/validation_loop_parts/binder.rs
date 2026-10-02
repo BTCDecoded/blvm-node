@@ -2542,6 +2542,26 @@ pub(crate) fn mtp_tip_window_fallback_ok(start_height: u64, tip_height: u64) -> 
     tip_height > 0 && start_height.saturating_add(64) > tip_height
 }
 
+/// BIP113 window length: `MTP(h-1)` is the median of the 11 headers `h-11..=h-1`.
+pub(crate) const MTP_WINDOW_HEADERS: usize = 11;
+
+/// Advance the orchestrator's BIP113 window by the header of the block just **dispatched**.
+///
+/// Invariant (R-365): the window snapshot handed to the job for height `h` holds exactly the
+/// headers `h-11..=h-1` (fewer only below height 11), so the worker computes `MTP(h-1)` — the
+/// value Bitcoin's `ContextualCheckBlock` uses for the locktime cutoff and the H05 timestamp
+/// rule. Pushing at drain instead lags by the pipeline depth and produces a stale, lower MTP.
+#[inline]
+pub(crate) fn push_dispatched_header(
+    window: &mut VecDeque<Arc<BlockHeader>>,
+    header: Arc<BlockHeader>,
+) {
+    window.push_back(header);
+    while window.len() > MTP_WINDOW_HEADERS {
+        window.pop_front();
+    }
+}
+
 /// Parameters for the validation loop. Holds all captured state from the spawn closure.
 pub struct ValidationParams {
     pub feeder_state: FeederState,

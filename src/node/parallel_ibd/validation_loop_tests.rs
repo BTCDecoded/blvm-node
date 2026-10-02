@@ -343,7 +343,10 @@ fn r361_deferred_dropper_frees_last_refs() {
         undo_log: Some(blvm_consensus::reorganization::BlockUndoLog::new()),
     }));
     dropper.close_and_join();
-    assert!(weak.upgrade().is_none(), "dropper must have freed the block");
+    assert!(
+        weak.upgrade().is_none(),
+        "dropper must have freed the block"
+    );
     // A second close is a no-op; a send after close reports false and drops inline.
     dropper.close_and_join();
     let block2 = mk();
@@ -391,7 +394,10 @@ fn r362_tip_syncer_coalesces_and_never_drops_the_last_tip() {
     let n = calls.load(Ordering::SeqCst);
     assert!(n >= 1, "at least one sync ran");
     assert!(n < 200, "requests must coalesce (ran {n})");
-    assert!(max_seen.load(Ordering::SeqCst) >= 1000, "a real tip was synced");
+    assert!(
+        max_seen.load(Ordering::SeqCst) >= 1000,
+        "a real tip was synced"
+    );
     // Closed → caller must flush inline.
     assert!(!syncer.request(201_000));
     syncer.close_and_join();
@@ -404,6 +410,79 @@ fn r362_tip_syncer_coalesces_and_never_drops_the_last_tip() {
     let mut failing = TipSyncer::spawn_with(|_h| Err(anyhow::anyhow!("disk gone")));
     assert!(failing.request(5000));
     failing.close_and_join();
+}
+
+/// R-365: the BIP113 window handed to the job for height `h` must be exactly `h-11..=h-1`
+/// regardless of pipeline depth. R-364 died at 419436 ("non-final transaction") because the
+/// window advanced at drain, so with `PIPELINE_DEPTH=64` every dispatched job saw an MTP that
+/// was 1–63 blocks stale (lower than `MTP(h-1)`), and the post-CSV locktime cutoff rejected a
+/// mainnet block.
+#[test]
+fn r365_mtp_window_tracks_dispatch_not_drain() {
+    use blvm_protocol::bip113::get_median_time_past;
+    use std::collections::VecDeque;
+    // Timestamps strictly increasing: 600 s per block, so MTP(h-1) is a strict function of h.
+    let ts = |h: u64| 1_400_000_000u64 + h * 600;
+    let hdr = |h: u64| {
+        Arc::new(BlockHeader {
+            version: 4,
+            timestamp: ts(h),
+            ..Default::default()
+        })
+    };
+    // Seed as the orchestrator does for `start_height = 100`: headers 89..=99.
+    let start: u64 = 100;
+    let mut window: VecDeque<Arc<BlockHeader>> = VecDeque::with_capacity(12);
+    for h in start - 11..start {
+        push_dispatched_header(&mut window, hdr(h));
+    }
+    assert_eq!(window.len(), MTP_WINDOW_HEADERS);
+
+    // Correct dispatch sequencing: snapshot for `h`, then push `h`. The snapshot is `h-11..=h-1`
+    // and its median is the median of exactly those timestamps (the sorted middle, index 5).
+    let depth = 64usize;
+    let mut drained_push_window: VecDeque<Arc<BlockHeader>> = window.clone();
+    let mut pending: VecDeque<Arc<BlockHeader>> = VecDeque::new();
+    for h in start..start + 500 {
+        let snap: Vec<Arc<BlockHeader>> = window.iter().cloned().collect();
+        assert_eq!(snap.len(), MTP_WINDOW_HEADERS, "h={h}");
+        assert_eq!(
+            snap.last().unwrap().timestamp,
+            ts(h - 1),
+            "last header must be h-1 at h={h}"
+        );
+        assert_eq!(
+            snap[0].timestamp,
+            ts(h - 11),
+            "first header must be h-11 at h={h}"
+        );
+        assert_eq!(
+            get_median_time_past(&snap),
+            ts(h - 6),
+            "MTP(h-1) is the 6th of 11 at h={h}"
+        );
+        push_dispatched_header(&mut window, hdr(h));
+
+        // The pre-R-365 ordering: the header reaches the window only when the block drains,
+        // `depth` dispatches later. The snapshot the job for `h` actually saw is lower.
+        let stale_snap: Vec<Arc<BlockHeader>> = drained_push_window.iter().cloned().collect();
+        pending.push_back(hdr(h));
+        if pending.len() > depth {
+            push_dispatched_header(&mut drained_push_window, pending.pop_front().unwrap());
+        }
+        if h >= start + depth as u64 {
+            let stale = get_median_time_past(&stale_snap);
+            assert!(
+                stale < ts(h - 6),
+                "drain-time window must be strictly stale at depth {depth} (h={h}): {stale} vs {}",
+                ts(h - 6)
+            );
+            // A locktime in (stale_mtp, MTP(h-1)) is final under Bitcoin's rule and non-final
+            // under the stale window — exactly the R-364 class of false reject.
+            let lock_time = ts(h - 6) - 1;
+            assert!(lock_time >= stale && lock_time < ts(h - 6));
+        }
+    }
 }
 
 /// R-360: the append thread must consume prep-pool output strictly in height order, once each,
