@@ -1020,8 +1020,7 @@ impl DiskIndex {
                     let any_hot = r.iter().any(|s| s.has_hot_body());
                     let cold: Vec<_> = r.iter().filter(|s| !s.has_hot_body()).collect();
                     let cold_entries = cold.iter().map(|s| s.entry_count).sum::<usize>();
-                    if !any_hot && checkpoint_allcold_write_ok(cold.len(), cold_entries, fan, max)
-                    {
+                    if !any_hot && checkpoint_allcold_write_ok(cold.len(), cold_entries, fan, max) {
                         (CompactScope::AllCold, None)
                     } else {
                         // Clone while the compact lock is still held. Background

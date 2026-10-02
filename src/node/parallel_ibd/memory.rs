@@ -536,16 +536,16 @@ pub(crate) fn sync_reorder_buffer_stats(
 /// `stats.retained` alone was 5–8 GB). Threshold compares retained VA held back
 /// from the OS.
 ///
-/// Disabled under `cfg(test)`: jemalloc is not the global allocator in tests
-/// (`lib.rs` gates it with `not(test)`), so linking `_rjem_mallctl` fails.
-#[cfg(all(feature = "jemalloc", not(test)))]
+/// Disabled under `cfg(test)` and on Windows: `lib.rs` does not install the
+/// jemalloc global allocator there, so linking `_rjem_mallctl` fails.
+#[cfg(all(feature = "jemalloc", not(test), not(target_os = "windows")))]
 pub(crate) fn jemalloc_retained_excess_gb() -> u64 {
     jemalloc_stats_snapshot()
         .map(|s| s.retained_gb)
         .unwrap_or(0)
 }
 
-#[cfg(all(feature = "jemalloc", not(test)))]
+#[cfg(all(feature = "jemalloc", not(test), not(target_os = "windows")))]
 #[derive(Clone, Copy, Debug)]
 struct JemallocStatsSnap {
     retained_gb: u64,
@@ -558,12 +558,12 @@ struct JemallocStatsSnap {
     narenas: u32,
 }
 
-#[cfg(all(feature = "jemalloc", not(test)))]
+#[cfg(all(feature = "jemalloc", not(test), not(target_os = "windows")))]
 fn jemalloc_stats_snapshot() -> Option<JemallocStatsSnap> {
     use std::os::raw::c_void;
     unsafe extern "C" {
         fn _rjem_mallctl(
-            name: *const i8,
+            name: *const std::ffi::c_char,
             oldp: *mut c_void,
             oldlenp: *mut usize,
             newp: *mut c_void,
@@ -652,14 +652,14 @@ fn jemalloc_stats_snapshot() -> Option<JemallocStatsSnap> {
     }
 }
 
-#[cfg(any(not(feature = "jemalloc"), test))]
+#[cfg(any(not(feature = "jemalloc"), test, target_os = "windows"))]
 pub(crate) fn jemalloc_retained_excess_gb() -> u64 {
     0
 }
 
 /// Purge jemalloc retained pages when `stats.retained` exceeds env threshold (default 16 GB).
 /// Returns true if purge ran. Rate-limited to ≤1/60s.
-#[cfg(all(feature = "jemalloc", not(test)))]
+#[cfg(all(feature = "jemalloc", not(test), not(target_os = "windows")))]
 pub(crate) fn maybe_purge_jemalloc_retained(reason: &str) -> bool {
     let threshold_gb: u64 = std::env::var("BLVM_IBD_JEMALLOC_RETAINED_PURGE_GB")
         .ok()
@@ -685,7 +685,7 @@ pub(crate) fn maybe_purge_jemalloc_retained(reason: &str) -> bool {
     use std::os::raw::c_void;
     unsafe extern "C" {
         fn _rjem_mallctl(
-            name: *const i8,
+            name: *const std::ffi::c_char,
             oldp: *mut c_void,
             oldlenp: *mut usize,
             newp: *mut c_void,
@@ -726,7 +726,7 @@ pub(crate) fn maybe_purge_jemalloc_retained(reason: &str) -> bool {
         rcs.push((
             "decay_all".into(),
             _rjem_mallctl(
-                decay_all.as_ptr() as *const i8,
+                decay_all.as_ptr() as *const std::ffi::c_char,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
@@ -736,7 +736,7 @@ pub(crate) fn maybe_purge_jemalloc_retained(reason: &str) -> bool {
         rcs.push((
             "purge_all".into(),
             _rjem_mallctl(
-                purge_all.as_ptr() as *const i8,
+                purge_all.as_ptr() as *const std::ffi::c_char,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
@@ -748,7 +748,7 @@ pub(crate) fn maybe_purge_jemalloc_retained(reason: &str) -> bool {
         for i in 0..before.narenas.min(256) {
             let decay = format!("arena.{i}.decay\0");
             let _ = _rjem_mallctl(
-                decay.as_ptr() as *const i8,
+                decay.as_ptr() as *const std::ffi::c_char,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
@@ -756,7 +756,7 @@ pub(crate) fn maybe_purge_jemalloc_retained(reason: &str) -> bool {
             );
             let purge = format!("arena.{i}.purge\0");
             let rc = _rjem_mallctl(
-                purge.as_ptr() as *const i8,
+                purge.as_ptr() as *const std::ffi::c_char,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
@@ -813,7 +813,7 @@ pub(crate) fn maybe_purge_jemalloc_retained(reason: &str) -> bool {
     true
 }
 
-#[cfg(any(not(feature = "jemalloc"), test))]
+#[cfg(any(not(feature = "jemalloc"), test, target_os = "windows"))]
 pub(crate) fn maybe_purge_jemalloc_retained(_reason: &str) -> bool {
     false
 }
