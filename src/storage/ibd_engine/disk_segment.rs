@@ -154,11 +154,7 @@ pub(crate) fn disk_pread_max_kb_from_env() -> u64 {
         .ok()
         .and_then(|s| {
             let t = s.trim();
-            if t.is_empty() {
-                None
-            } else {
-                t.parse().ok()
-            }
+            if t.is_empty() { None } else { t.parse().ok() }
         })
         .unwrap_or(DISK_PREAD_MAX_KB_DEFAULT)
 }
@@ -245,7 +241,10 @@ where
             break;
         }
     }
-    Ok((a.saturating_sub(page).max(lo), b.saturating_add(page).min(hi)))
+    Ok((
+        a.saturating_sub(page).max(lo),
+        b.saturating_add(page).min(hi),
+    ))
 }
 
 /// Coalesce sorted candidate `[lo, hi)` spans into pread ranges.
@@ -292,6 +291,64 @@ fn advise_willneed_range(file: &File, byte_offset: u64, byte_count: usize) {
                 libc::POSIX_FADV_WILLNEED,
             );
         }
+    }
+    #[cfg(not(all(unix, feature = "libc")))]
+    {
+        let _ = (file, byte_offset, byte_count);
+    }
+}
+
+/// Compact input stream only. Default off (R-368 view regression).
+/// `BLVM_IBD_COMPACT_DONTNEED=1/on/true` enables it.
+fn compact_dontneed_enabled() -> bool {
+    matches!(
+        std::env::var("BLVM_IBD_COMPACT_DONTNEED")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1") | Some("on") | Some("true") | Some("yes")
+    )
+}
+
+/// One line when the UTXO engine opens, so a dest log shows the default without a compact.
+pub(super) fn log_compact_dontneed_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::info!(
+            "[IBD_COMPACT_DONTNEED] compact input DONTNEED {}",
+            if compact_dontneed_enabled() {
+                "on"
+            } else {
+                "off"
+            }
+        );
+    });
+}
+
+#[cfg(test)]
+static TEST_DONTNEED_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Drop a sequential compact-input range from the page cache. Failure is non-fatal.
+fn advise_dontneed_range(file: &File, byte_offset: u64, byte_count: usize) {
+    if byte_count == 0 {
+        return;
+    }
+    #[cfg(test)]
+    {
+        TEST_DONTNEED_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    #[cfg(all(unix, feature = "libc"))]
+    {
+        use std::os::unix::io::AsRawFd;
+        let _rc = unsafe {
+            libc::posix_fadvise(
+                file.as_raw_fd(),
+                byte_offset as libc::off_t,
+                byte_count as libc::off_t,
+                libc::POSIX_FADV_DONTNEED,
+            )
+        };
+        let _ = _rc;
     }
     #[cfg(not(all(unix, feature = "libc")))]
     {
@@ -1119,8 +1176,7 @@ impl DiskSegment {
                 candidates.sort_unstable_by_key(|c| c.lo);
 
                 let max_entries = disk_pread_max_entries();
-                let spans: Vec<(usize, usize)> =
-                    candidates.iter().map(|c| (c.lo, c.hi)).collect();
+                let spans: Vec<(usize, usize)> = candidates.iter().map(|c| (c.lo, c.hi)).collect();
                 for (read_lo, read_hi, span_ci, span_cj) in
                     coalesce_pread_spans(&spans, max_entries)
                 {
@@ -1209,12 +1265,8 @@ impl DiskSegment {
                                 if clo >= chi {
                                     continue;
                                 }
-                                let (nlo, nhi) = probe_narrow(
-                                    clo,
-                                    chi,
-                                    PROBE_PAGE_ENTRIES,
-                                    &c.key,
-                                    |a, b| {
+                                let (nlo, nhi) =
+                                    probe_narrow(clo, chi, PROBE_PAGE_ENTRIES, &c.key, |a, b| {
                                         self.read_bucket_into(a, b, &mut bucket)?;
                                         note_pread((b - a) * OutputKV::SIZE);
                                         let first = bucket.first().map(|e| e.key);
@@ -1227,8 +1279,7 @@ impl DiskSegment {
                                                 b
                                             ),
                                         }
-                                    },
-                                )?;
+                                    })?;
                                 self.read_bucket_into(nlo, nhi, &mut bucket)?;
                                 note_pread((nhi - nlo) * OutputKV::SIZE);
                                 resolve_key_in_slice(&bucket, &c.key, c.idx, ids, since, before);
@@ -1372,7 +1423,11 @@ impl SegmentReader {
             off += n;
             foff += n as u64;
         }
+        let consumed_off = self.file_offset;
         self.file_offset += byte_count as u64;
+        if compact_dontneed_enabled() {
+            advise_dontneed_range(&self.file, consumed_off, byte_count);
+        }
         self.buf.clear();
         self.buf.reserve(to_read);
         for chunk in raw.chunks_exact(OutputKV::SIZE) {
@@ -1408,8 +1463,8 @@ impl SegmentReader {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::{OutputId, OutputKV};
+    use super::*;
 
     fn key_at(i: usize) -> [u8; 36] {
         let mut k = [0u8; 36];
@@ -1448,9 +1503,7 @@ mod tests {
         // Directory buckets are ~80 entries (~4 KiB). dest-bc glue is chaining them.
         let piece = 80usize;
         let n = dest_bc_avg_entries / piece;
-        let spans: Vec<(usize, usize)> = (0..n)
-            .map(|i| (i * piece, (i + 1) * piece))
-            .collect();
+        let spans: Vec<(usize, usize)> = (0..n).map(|i| (i * piece, (i + 1) * piece)).collect();
         let unlimited = coalesce_pread_spans(&spans, usize::MAX);
         assert_eq!(unlimited.len(), 1);
         assert_eq!(unlimited[0].0, 0);
@@ -1473,9 +1526,7 @@ mod tests {
         // dest-bc max_pread_kb=1755: 4 KiB buckets chained vs 64 KiB.
         let max_entries = (1755 * 1024) / kv;
         let n_max = max_entries / piece;
-        let chain: Vec<(usize, usize)> = (0..n_max)
-            .map(|i| (i * piece, (i + 1) * piece))
-            .collect();
+        let chain: Vec<(usize, usize)> = (0..n_max).map(|i| (i * piece, (i + 1) * piece)).collect();
         let unlimited_max = coalesce_pread_spans(&chain, usize::MAX);
         assert_eq!(unlimited_max.len(), 1);
         let capped_max = coalesce_pread_spans(&chain, cap_64);
@@ -1501,6 +1552,70 @@ mod tests {
             1,
             "dest-ba 660k 15 KiB average must still coalesce under 64 KiB"
         );
+    }
+
+    /// R-367: compact input stream advises DONTNEED per consumed range. Lookup pread does not.
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn r367_compact_input_dontneed_counts_when_enabled() {
+        unsafe {
+            std::env::remove_var("BLVM_IBD_DISK_MMAP");
+            std::env::remove_var("BLVM_IBD_HOT_PIN");
+            std::env::set_var("BLVM_IBD_COMPACT_DONTNEED", "0");
+        }
+        TEST_DONTNEED_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let entries: Vec<OutputKV> = (0..10)
+            .map(|i| OutputKV::new_add(key_at(i), 100, 1000 + i as u64))
+            .collect();
+        let seg = DiskSegment::write_from_slice(tmp.path(), 0, (100, 100), &entries)
+            .expect("write_from_slice");
+        let mut reader = seg.stream();
+        let mut n = 0usize;
+        while reader.advance().expect("advance").is_some() {
+            n += 1;
+        }
+        assert_eq!(n, 10);
+        assert_eq!(
+            TEST_DONTNEED_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "BLVM_IBD_COMPACT_DONTNEED=0 must not advise"
+        );
+        TEST_DONTNEED_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let keys: Vec<_> = (0..10).map(key_at).collect();
+        let mut ids = vec![OutputId::MAX; keys.len()];
+        seg.batch_lookup(&keys, &mut ids, 0, 200).expect("lookup");
+        assert_eq!(
+            TEST_DONTNEED_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "lookup pread must not DONTNEED"
+        );
+        unsafe {
+            std::env::remove_var("BLVM_IBD_COMPACT_DONTNEED");
+        }
+        TEST_DONTNEED_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut reader = seg.stream();
+        while reader.advance().expect("advance").is_some() {}
+        assert_eq!(
+            TEST_DONTNEED_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "unset must not advise"
+        );
+        unsafe {
+            std::env::set_var("BLVM_IBD_COMPACT_DONTNEED", "1");
+        }
+        TEST_DONTNEED_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut reader = seg.stream();
+        while reader.advance().expect("advance").is_some() {}
+        assert_eq!(
+            TEST_DONTNEED_CALLS.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "BLVM_IBD_COMPACT_DONTNEED=1 must advise the one consumed range"
+        );
+        unsafe {
+            std::env::remove_var("BLVM_IBD_COMPACT_DONTNEED");
+        }
+        std::mem::forget(tmp);
     }
 
     #[serial_test::serial(ibd)]
@@ -1543,7 +1658,8 @@ mod tests {
 
         reset_disk_io_stats();
         let mut ids = vec![OutputId::MAX; keys.len()];
-        seg.batch_lookup(&keys, &mut ids, 0, 200).expect("unlimited");
+        seg.batch_lookup(&keys, &mut ids, 0, 200)
+            .expect("unlimited");
         let (preads_unlim, kb_unlim, max_unlim, _, _) = take_disk_io_stats();
         for (j, &i) in query_idx.iter().enumerate() {
             assert_eq!(ids[j], 1000 + i as u64, "unlimited miss at {i}");
@@ -1558,7 +1674,8 @@ mod tests {
         }
         reset_disk_io_stats();
         let mut ids_cap = vec![OutputId::MAX; keys.len()];
-        seg.batch_lookup(&keys, &mut ids_cap, 0, 200).expect("capped");
+        seg.batch_lookup(&keys, &mut ids_cap, 0, 200)
+            .expect("capped");
         let (preads_cap, _kb_cap, max_cap, _, _) = take_disk_io_stats();
         for (j, &i) in query_idx.iter().enumerate() {
             assert_eq!(ids_cap[j], 1000 + i as u64, "capped miss at {i}");
@@ -1637,7 +1754,10 @@ mod tests {
             let first = keys.partition_point(|k| *k < key);
             let last = keys.partition_point(|k| *k <= key);
             if first < last {
-                assert!(lo <= first && last <= hi, "run {first}..{last} not in {lo}..{hi} v={v}");
+                assert!(
+                    lo <= first && last <= hi,
+                    "run {first}..{last} not in {lo}..{hi} v={v}"
+                );
             }
             assert!(hi - lo <= 5 * page, "window too wide {}", hi - lo);
         }
@@ -1683,28 +1803,39 @@ mod tests {
         for &vout in &[0u32, 1, 4000, 4241, 4243, 7998, 7999] {
             reset_disk_io_stats();
             let mut ids = vec![OutputId::MAX; 1];
-            seg.batch_lookup(&[fat_key(vout)], &mut ids, 0, 200).expect("lookup");
+            seg.batch_lookup(&[fat_key(vout)], &mut ids, 0, 200)
+                .expect("lookup");
             let (preads, kb, max_kb, cands, _) = take_disk_io_stats();
             assert_eq!(ids[0], 5000 + vout as u64, "vout {vout}");
             assert_eq!(cands, 1);
-            assert!(kb <= 64, "vout {vout}: read {kb} KiB in {preads} preads (max {max_kb})");
-            assert!(preads >= 2, "vout {vout}: expected page probes, got {preads} preads");
+            assert!(
+                kb <= 64,
+                "vout {vout}: read {kb} KiB in {preads} preads (max {max_kb})"
+            );
+            assert!(
+                preads >= 2,
+                "vout {vout}: expected page probes, got {preads} preads"
+            );
         }
         // Spent in-segment → DELETED sentinel.
         let mut ids = vec![OutputId::MAX; 1];
-        seg.batch_lookup(&[fat_key(4242)], &mut ids, 0, 200).expect("lookup");
+        seg.batch_lookup(&[fat_key(4242)], &mut ids, 0, 200)
+            .expect("lookup");
         assert_eq!(ids[0], OUTPUT_ID_DELETED);
         // Height window excludes the Delete → the Add is visible.
         let mut ids = vec![OutputId::MAX; 1];
-        seg.batch_lookup(&[fat_key(4242)], &mut ids, 0, 120).expect("lookup");
+        seg.batch_lookup(&[fat_key(4242)], &mut ids, 0, 120)
+            .expect("lookup");
         assert_eq!(ids[0], 5000 + 4242);
         // Absent vout (bloom may pass) → stays MAX.
         let mut ids = vec![OutputId::MAX; 1];
-        seg.batch_lookup(&[fat_key(9_000_000)], &mut ids, 0, 200).expect("lookup");
+        seg.batch_lookup(&[fat_key(9_000_000)], &mut ids, 0, 200)
+            .expect("lookup");
         assert_eq!(ids[0], OutputId::MAX);
         // Ordinary small bucket still resolves.
         let mut ids = vec![OutputId::MAX; 1];
-        seg.batch_lookup(&[key_at(777)], &mut ids, 0, 200).expect("lookup");
+        seg.batch_lookup(&[key_at(777)], &mut ids, 0, 200)
+            .expect("lookup");
         assert_eq!(ids[0], 1000 + 777);
         std::mem::forget(tmp);
     }
@@ -1759,13 +1890,17 @@ mod tests {
         let keys2: Vec<_> = vouts2.iter().map(|&v| fat_key(v)).collect();
         reset_disk_io_stats();
         let mut ids2 = vec![OutputId::MAX; keys2.len()];
-        seg.batch_lookup(&keys2, &mut ids2, 0, 200).expect("lookup dense");
+        seg.batch_lookup(&keys2, &mut ids2, 0, 200)
+            .expect("lookup dense");
         let (preads2, _kb2, _, cands2, _) = take_disk_io_stats();
         for (j, &v) in vouts2.iter().enumerate() {
             assert_eq!(ids2[j], 7000 + v as u64, "dense vout {v}");
         }
         assert_eq!(cands2, 400);
-        assert_eq!(preads2, 1, "dense candidates fall back to one whole-bucket read");
+        assert_eq!(
+            preads2, 1,
+            "dense candidates fall back to one whole-bucket read"
+        );
         std::mem::forget(tmp);
     }
 }
