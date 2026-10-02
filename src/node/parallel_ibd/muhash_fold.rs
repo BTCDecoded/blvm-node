@@ -85,14 +85,26 @@ mod tests {
         let mut acc = MuHash3072::new();
 
         // Out of order: 12 and 11 arrive before 10 — nothing may fold yet.
-        folder.push(MuHashSub { height: 12, sub: sub_for(12), compute_us: 300 });
-        folder.push(MuHashSub { height: 11, sub: sub_for(11), compute_us: 200 });
+        folder.push(MuHashSub {
+            height: 12,
+            sub: sub_for(12),
+            compute_us: 300,
+        });
+        folder.push(MuHashSub {
+            height: 11,
+            sub: sub_for(11),
+            compute_us: 200,
+        });
         assert_eq!(folder.fold_ready(&mut acc), 0);
         assert_eq!(folder.folded_through(), 9);
         assert_eq!(folder.pending_len(), 2);
 
         // 10 arrives: 10, 11, 12 fold in one call and report the summed compute time.
-        folder.push(MuHashSub { height: 10, sub: sub_for(10), compute_us: 100 });
+        folder.push(MuHashSub {
+            height: 10,
+            sub: sub_for(10),
+            compute_us: 100,
+        });
         assert_eq!(folder.fold_ready(&mut acc), 600);
         assert_eq!(folder.folded_through(), 12);
         assert_eq!(folder.pending_len(), 0);
@@ -105,12 +117,24 @@ mod tests {
         assert_eq!(acc.clone().finalize(), serial.finalize());
 
         // A stale height (already folded) is ignored, a gap holds the fold.
-        folder.push(MuHashSub { height: 11, sub: sub_for(11), compute_us: 1 });
-        folder.push(MuHashSub { height: 14, sub: sub_for(14), compute_us: 1 });
+        folder.push(MuHashSub {
+            height: 11,
+            sub: sub_for(11),
+            compute_us: 1,
+        });
+        folder.push(MuHashSub {
+            height: 14,
+            sub: sub_for(14),
+            compute_us: 1,
+        });
         assert_eq!(folder.fold_ready(&mut acc), 0);
         assert_eq!(folder.folded_through(), 12);
         assert_eq!(folder.pending_len(), 1);
-        folder.push(MuHashSub { height: 13, sub: sub_for(13), compute_us: 1 });
+        folder.push(MuHashSub {
+            height: 13,
+            sub: sub_for(13),
+            compute_us: 1,
+        });
         assert_eq!(folder.fold_ready(&mut acc), 2);
         assert_eq!(folder.folded_through(), 14);
     }

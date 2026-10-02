@@ -532,7 +532,10 @@ impl ChainState {
     /// Prior accepted checkpoint UTXO count (the persist before the current export_utxo_count).
     /// Repair 50% gate uses this so dest-ak 8.2M@516k is poison vs ~10M+ rather than vs itself.
     pub fn get_engine_prev_accepted_utxo_count(&self) -> Result<Option<u64>> {
-        if let Some(data) = self.chain_info.get(b"ibd_engine_prev_accepted_utxo_count")? {
+        if let Some(data) = self
+            .chain_info
+            .get(b"ibd_engine_prev_accepted_utxo_count")?
+        {
             if data.len() < 8 {
                 return Ok(None);
             }
@@ -546,10 +549,8 @@ impl ChainState {
 
     /// Test/repair helper: set prior accepted count without a full checkpoint persist.
     pub fn force_set_engine_prev_accepted_utxo_count(&self, count: u64) -> Result<()> {
-        self.chain_info.insert(
-            b"ibd_engine_prev_accepted_utxo_count",
-            &count.to_be_bytes(),
-        )?;
+        self.chain_info
+            .insert(b"ibd_engine_prev_accepted_utxo_count", &count.to_be_bytes())?;
         Ok(())
     }
 

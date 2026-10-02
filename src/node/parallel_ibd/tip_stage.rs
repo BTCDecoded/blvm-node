@@ -252,10 +252,7 @@ pub(crate) fn tournament_note_assign(peer: &str) {
     }
     if g.started.is_none() {
         g.started = Some(Instant::now());
-        warn!(
-            "[IBD_TOURNAMENT_START] peer={} — ignition 1-32 cap=4",
-            peer
-        );
+        warn!("[IBD_TOURNAMENT_START] peer={} — ignition 1-32 cap=4", peer);
     }
     g.racers.entry(peer.to_string()).or_insert(TourRacer {
         n: 0,
@@ -302,7 +299,7 @@ pub(crate) fn tournament_poll() -> TournamentPoll {
     // R-66b closed at 36ms on ia_ms=0 n=16. Burst ≠ flood. List-head
     // holds H until 2s. R-67 then exclusive'd ia_ms=2 → 461 mesh.
     // WIN only if IA≤1. Else keep the 4 until H=64.
-    if !g.started.is_some_and(|t| t.elapsed() >= TOURNAMENT_TIMEOUT) {
+    if g.started.is_none_or(|t| t.elapsed() < TOURNAMENT_TIMEOUT) {
         return TournamentPoll::None;
     }
     let qualified: Vec<(String, u64, u64)> = g

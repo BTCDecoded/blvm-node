@@ -51,7 +51,7 @@ pub fn ibd_pin_peers() -> Vec<SocketAddr> {
 }
 
 pub fn ibd_pin_contains(addr: SocketAddr) -> bool {
-    ibd_pin_peers().iter().any(|a| *a == addr)
+    ibd_pin_peers().contains(&addr)
 }
 
 #[cfg(test)]

@@ -10,8 +10,8 @@ use super::insert_reorder_gap_aware;
 use super::latch_env;
 use super::types::{SharedBlock, SharedWitnesses};
 use super::wire_hash_gate;
-use blvm_protocol::{Block, Hash};
 use blvm_protocol::segwit::Witness;
+use blvm_protocol::{Block, Hash};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -77,9 +77,7 @@ fn log_admit(h: u64, peer: SocketAddr, next_needed: u64) {
     {
         return;
     }
-    info!(
-        "[IBD_LATE_BODY_ADMIT] h={h} peer={peer} next_needed={next_needed} (late arrival used)"
-    );
+    info!("[IBD_LATE_BODY_ADMIT] h={h} peer={peer} next_needed={next_needed} (late arrival used)");
 }
 
 /// Admit a late body. `true` means it is queued for the same

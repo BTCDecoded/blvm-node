@@ -996,9 +996,15 @@ mod ibd_autorepair_tests {
         assert!(!checkpoint_utxo_count_monotonic(
             200_000, 4_000_000, 16_800_000
         ));
-        assert!(checkpoint_first_persist_acceptable(16_800_000, 16_800_000, true));
+        assert!(checkpoint_first_persist_acceptable(
+            16_800_000, 16_800_000, true
+        ));
         assert!(!checkpoint_first_persist_acceptable(3_600_000, 0, true));
-        assert!(!checkpoint_first_persist_acceptable(3_600_000, 200_000_000, true));
+        assert!(!checkpoint_first_persist_acceptable(
+            3_600_000,
+            200_000_000,
+            true
+        ));
         // dest-bc overlay persists vs last good 16.8M — 50% gate, not height/7.
         assert!(!checkpoint_persist_acceptable(
             452_846, 0, 16_800_000, 0, true, false
@@ -1065,16 +1071,17 @@ mod ibd_autorepair_tests {
         apply_ibd_utxo_autorepair_if_needed(&storage, data_dir).unwrap();
 
         assert!(!ibd_utxo_repair_flag_present(data_dir));
-        let export_h = storage.chain().get_engine_export_height().unwrap().unwrap_or(0);
+        let export_h = storage
+            .chain()
+            .get_engine_export_height()
+            .unwrap()
+            .unwrap_or(0);
         let wm = storage.chain().get_utxo_watermark().unwrap().unwrap_or(0);
         assert_eq!(
             export_h, 0,
             "8.2M@516k must not re-seed; genesis reset, got export_h={export_h}"
         );
-        assert_eq!(
-            wm, 0,
-            "must not align watermark to poison 516773, got {wm}"
-        );
+        assert_eq!(wm, 0, "must not align watermark to poison 516773, got {wm}");
         unsafe {
             std::env::remove_var("BLVM_IBD_ENGINE");
         }

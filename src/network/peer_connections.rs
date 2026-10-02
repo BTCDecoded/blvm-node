@@ -307,14 +307,13 @@ impl NetworkManager {
         // R-347: during a live IBD session race more candidates per call. R-346 top-up ticks
         // connected 3–10 of the 30–44 needed from `needed × 2` sockets (stale seed
         // addresses); the attempts run concurrently so a wider fan-out costs little.
-        let fanout: usize =
-            if crate::node::parallel_ibd::PARALLEL_IBD_SESSION_ACTIVE
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
-                4
-            } else {
-                2
-            };
+        let fanout: usize = if crate::node::parallel_ibd::PARALLEL_IBD_SESSION_ACTIVE
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            4
+        } else {
+            2
+        };
         let addresses: Vec<_> = {
             let db = self.address_database().read().await;
             // IBD-biased ordering: full-history peers first, unknown second, pruned last.

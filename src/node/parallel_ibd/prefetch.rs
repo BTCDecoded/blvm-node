@@ -20,8 +20,6 @@ use std::sync::{Arc, Mutex};
 use std::sync::LazyLock;
 
 #[cfg(feature = "production")]
-use super::types::{SharedBlock, SharedWitnesses};
-#[cfg(feature = "production")]
 use blvm_protocol::types::UTXO;
 #[cfg(feature = "production")]
 use blvm_protocol::{Block, Hash, UtxoSet};
@@ -730,9 +728,7 @@ impl OrderedReadyBridge {
             .pending
             .keys()
             .filter(|&&h| {
-                h > ceiling
-                    && g.next_expected != Some(h)
-                    && !super::lookahead_height_reserved(h)
+                h > ceiling && g.next_expected != Some(h) && !super::lookahead_height_reserved(h)
             })
             .copied()
             .collect();

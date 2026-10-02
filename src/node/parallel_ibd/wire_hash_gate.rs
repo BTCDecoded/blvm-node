@@ -81,9 +81,7 @@ pub(crate) fn enabled() -> bool {
 pub(crate) fn bind_validation_height(h: Arc<AtomicU64>) {
     let _ = NEXT.set(h);
     if enabled() {
-        info!(
-            "[IBD_WIRE_HASH_GATE] on — skip deserialize when IBD GetData height < next_needed"
-        );
+        info!("[IBD_WIRE_HASH_GATE] on — skip deserialize when IBD GetData height < next_needed");
     }
 }
 
@@ -293,10 +291,7 @@ mod tests {
         tip().store(50, Ordering::Relaxed);
         let got = try_skip_obsolete_block_frame(&block_frame(hdr));
         unsafe { std::env::remove_var("BLVM_IBD_WIRE_HASH_GATE") };
-        assert!(
-            got.is_none(),
-            "still-needed pending GetData must parse"
-        );
+        assert!(got.is_none(), "still-needed pending GetData must parse");
         forget_want(hash);
     }
 

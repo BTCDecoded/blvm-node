@@ -60,8 +60,16 @@ fn emit_secs() -> u64 {
 /// Per-event wait-duration buckets for `[IBD_TIP_HOLE_HIST]` / `[IBD_GD_SLOW_HIST]`.
 /// Read-only: these never feed scheduling. Seconds live in the summed-ms column.
 const HIST_LABELS: [&str; 10] = [
-    "<10", "10-25", "25-50", "50-100", "100-200", "200-300", "300-500", "500-1000",
-    "1000-2000", ">2000",
+    "<10",
+    "10-25",
+    "25-50",
+    "50-100",
+    "100-200",
+    "200-300",
+    "300-500",
+    "500-1000",
+    "1000-2000",
+    ">2000",
 ];
 
 fn hist_idx(ms: u64) -> usize {
@@ -341,15 +349,9 @@ impl Buckets {
             tip_hole_ge500_ms: self
                 .tip_hole_ge500_ms
                 .saturating_sub(prev.tip_hole_ge500_ms),
-            gd_slow_ge150_ms: self
-                .gd_slow_ge150_ms
-                .saturating_sub(prev.gd_slow_ge150_ms),
-            gd_slow_ge300_ms: self
-                .gd_slow_ge300_ms
-                .saturating_sub(prev.gd_slow_ge300_ms),
-            gd_slow_ge500_ms: self
-                .gd_slow_ge500_ms
-                .saturating_sub(prev.gd_slow_ge500_ms),
+            gd_slow_ge150_ms: self.gd_slow_ge150_ms.saturating_sub(prev.gd_slow_ge150_ms),
+            gd_slow_ge300_ms: self.gd_slow_ge300_ms.saturating_sub(prev.gd_slow_ge300_ms),
+            gd_slow_ge500_ms: self.gd_slow_ge500_ms.saturating_sub(prev.gd_slow_ge500_ms),
             tip_n: self.tip_n.saturating_sub(prev.tip_n),
             tip_need_body_ms: self.tip_need_body_ms.saturating_sub(prev.tip_need_body_ms),
             tip_gd_body_ms: self.tip_gd_body_ms.saturating_sub(prev.tip_gd_body_ms),
@@ -382,9 +384,7 @@ impl Buckets {
                 .pending_block_sum
                 .saturating_sub(prev.pending_block_sum),
             pending_block_n: self.pending_block_n.saturating_sub(prev.pending_block_n),
-            pending0_block_n: self
-                .pending0_block_n
-                .saturating_sub(prev.pending0_block_n),
+            pending0_block_n: self.pending0_block_n.saturating_sub(prev.pending0_block_n),
             inflight_h0: self.inflight_h0.saturating_sub(prev.inflight_h0),
             inflight_h1: self.inflight_h1.saturating_sub(prev.inflight_h1),
             inflight_h2: self.inflight_h2.saturating_sub(prev.inflight_h2),
@@ -467,6 +467,14 @@ fn wall_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Drop covering ranges so a unit test does not see another test's GetData.
+#[cfg(test)]
+pub(crate) fn test_reset_assigned() {
+    if let Ok(mut g) = assigned_ranges().lock() {
+        g.clear();
+    }
 }
 
 /// Record that `start..=end` was assigned (GetData path). Last-wins for covering lookup.
@@ -789,12 +797,7 @@ pub(crate) fn note_drain_split_us(skipchk_us: u64, flush_us: u64) {
 
 /// Collect phase: head already buffered vs needed a blocking recv.
 /// `in_flight` / `pending` / `at_depth` are occupancy (worker-scheduling subsystem).
-pub(crate) fn note_collect_outcome(
-    ready: bool,
-    in_flight: usize,
-    pending: usize,
-    at_depth: bool,
-) {
+pub(crate) fn note_collect_outcome(ready: bool, in_flight: usize, pending: usize, at_depth: bool) {
     if !enabled() {
         return;
     }
@@ -1092,7 +1095,11 @@ mod tests {
         for i in 0..40 {
             std::thread::sleep(std::time::Duration::from_micros(300));
             flush_wall_locked(&mut local, &mut cum);
-            local.state = if i % 2 == 0 { WallState::Drain } else { WallState::Dispatch };
+            local.state = if i % 2 == 0 {
+                WallState::Drain
+            } else {
+                WallState::Dispatch
+            };
         }
         let measured_us = local.since.duration_since(t0).as_micros() as u64;
         let accounted_us = cum.wall_total() * 1000 + local.carry_us.iter().sum::<u64>();
@@ -1102,7 +1109,11 @@ mod tests {
             measured_us - accounted_us <= 40,
             "buckets + carry must equal the wall to ≤ 1 µs per slice: {accounted_us} vs {measured_us}"
         );
-        assert!(cum.wall_total() >= 12, "≥ 12 ms must land in buckets (got {})", cum.wall_total());
+        assert!(
+            cum.wall_total() >= 12,
+            "≥ 12 ms must land in buckets (got {})",
+            cum.wall_total()
+        );
         assert!(local.carry_us.iter().all(|&c| c < 1000));
     }
 
@@ -1113,6 +1124,7 @@ mod tests {
 
     #[test]
     fn assigned_covering_last_wins() {
+        test_reset_assigned();
         note_assigned(100, 115);
         let ago = assigned_ms_ago(108);
         assert!(ago >= 0, "covering range must resolve");
@@ -1144,8 +1156,7 @@ mod tests {
         assert_eq!(a.tip_hole_hist_n[7], 1, "500-1000 holds 500");
         assert_eq!(a.tip_hole_hist_n[9], 1, ">2000 holds 2001");
         assert_eq!(
-            a.tip_hole_hist_ms[9],
-            2001,
+            a.tip_hole_hist_ms[9], 2001,
             "R-301: the 2001ms event must dominate its bucket's summed-ms (not share it with count)"
         );
         assert_eq!(
@@ -1165,9 +1176,18 @@ mod tests {
         let mut b = a.clone();
         b.add_binder_wait("SUPPLY_TIP_HOLE", 12);
         let d = b.sub_snapshot(&a);
-        assert_eq!(d.tip_hole_hist_n[1], 1, "window delta counts only the new 12ms");
+        assert_eq!(
+            d.tip_hole_hist_n[1], 1,
+            "window delta counts only the new 12ms"
+        );
         assert_eq!(d.tip_hole_hist_ms[1], 12);
-        assert_eq!(d.tip_hole_hist_n[9], 0, "window must not carry the 2001ms event");
-        assert_eq!(d.tip_hole_ge150_ms, 0, "12ms is below 150; window ge150 stays 0");
+        assert_eq!(
+            d.tip_hole_hist_n[9], 0,
+            "window must not carry the 2001ms event"
+        );
+        assert_eq!(
+            d.tip_hole_ge150_ms, 0,
+            "12ms is below 150; window ge150 stays 0"
+        );
     }
 }

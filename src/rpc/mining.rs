@@ -12,6 +12,7 @@ use crate::rpc::params::{param_str_required, param_u64_default, param_u64_requir
 use crate::rpc::rawtx::address_string_to_script_pubkey;
 use crate::storage::Storage;
 use crate::utils::{CACHE_REFRESH_TIP, current_timestamp};
+use async_trait::async_trait;
 use blvm_protocol::mining::BlockTemplate;
 use blvm_protocol::mining::MiningResult;
 use blvm_protocol::opcodes::{
@@ -32,7 +33,6 @@ use blvm_protocol::{
     ConsensusProof, ValidationResult,
     types::{BlockHeader, ByteString, Natural, Transaction, UtxoSet},
 };
-use async_trait::async_trait;
 use hex;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -52,10 +52,7 @@ impl CommonsGbtSlot {
     }
 
     pub(crate) fn get(&self) -> Option<Arc<dyn CommonsGbtCaller>> {
-        self.inner
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
@@ -140,18 +137,13 @@ impl MiningRpc {
             return Ok(None);
         };
         match caller.fetch_commons_gbt_outputs().await? {
-            Some(outs) if !outs.is_empty() => {
-                Ok(Some(outs.into_iter().map(|(v, s)| (v, s.into())).collect()))
-            }
+            Some(outs) if !outs.is_empty() => Ok(Some(outs.into_iter().collect())),
             _ => Ok(None),
         }
     }
 
     /// Commons outputs when bound; otherwise one 0-value output at `fallback` (fit tops up).
-    async fn resolve_gbt_outputs(
-        &self,
-        fallback: ByteString,
-    ) -> RpcResult<Vec<(i64, ByteString)>> {
+    async fn resolve_gbt_outputs(&self, fallback: ByteString) -> RpcResult<Vec<(i64, ByteString)>> {
         Ok(self
             .try_commons_gbt_outputs()
             .await?
@@ -325,7 +317,8 @@ impl MiningRpc {
         let coinbase_address = self.extract_coinbase_address(params).unwrap_or_default();
 
         let network = self.consensus_network_from_storage();
-        let mempool_witnesses = self.build_mempool_witnesses_for_template(&utxo_set, &mempool_txs)?;
+        let mempool_witnesses =
+            self.build_mempool_witnesses_for_template(&utxo_set, &mempool_txs)?;
         // Commons outputs when the module is loaded; else value 0 tops up the caller address.
         // Hold is an error so GBT does not issue a node-default coinbase.
         let outputs = self.resolve_gbt_outputs(coinbase_address).await?;
@@ -1316,7 +1309,9 @@ fn spends_witness_utxo(tx: &Transaction, utxo_set: &UtxoSet) -> bool {
                 .and_then(|version| {
                     extract_witness_program(&script, version).map(|program| (version, program))
                 })
-                .is_some_and(|(version, program)| validate_witness_program_length(&program, version))
+                .is_some_and(|(version, program)| {
+                    validate_witness_program_length(&program, version)
+                })
         })
     })
 }

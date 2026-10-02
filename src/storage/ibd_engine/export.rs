@@ -512,27 +512,29 @@ impl<'a> CheckpointChunkWriter<'a> {
                 if let Some(heed) = self.tree.as_heed3_tree() {
                     let mut pending: Option<(Vec<u8>, Vec<u8>)> = None;
                     let dups_ref = &mut dups;
-                    let res = heed.write_append_from_fn(commit_every, || loop {
-                        let Some(AppendHeapItem { key, value, run }) = heap.pop() else {
-                            return Ok(pending.take());
-                        };
-                        if let Some((k, v)) = readers[run].next_pair()? {
-                            heap.push(AppendHeapItem {
-                                key: k,
-                                value: v,
-                                run,
-                            });
-                        }
-                        match pending.take() {
-                            Some((pk, pv)) if pk != key => {
-                                pending = Some((key, value));
-                                return Ok(Some((pk, pv)));
+                    let res = heed.write_append_from_fn(commit_every, || {
+                        loop {
+                            let Some(AppendHeapItem { key, value, run }) = heap.pop() else {
+                                return Ok(pending.take());
+                            };
+                            if let Some((k, v)) = readers[run].next_pair()? {
+                                heap.push(AppendHeapItem {
+                                    key: k,
+                                    value: v,
+                                    run,
+                                });
                             }
-                            Some(_) => {
-                                *dups_ref += 1;
-                                pending = Some((key, value));
+                            match pending.take() {
+                                Some((pk, pv)) if pk != key => {
+                                    pending = Some((key, value));
+                                    return Ok(Some((pk, pv)));
+                                }
+                                Some(_) => {
+                                    *dups_ref += 1;
+                                    pending = Some((key, value));
+                                }
+                                None => pending = Some((key, value)),
                             }
-                            None => pending = Some((key, value)),
                         }
                     });
                     match res {
@@ -1482,7 +1484,11 @@ mod tests {
                 hash: *txid,
                 index: 0,
             });
-            assert!(tree.get(&key).unwrap().is_some(), "utxo {:?} exported", &txid[..2]);
+            assert!(
+                tree.get(&key).unwrap().is_some(),
+                "utxo {:?} exported",
+                &txid[..2]
+            );
         }
         assert_ne!(
             muhash.serialize_running_state(),
@@ -1527,13 +1533,24 @@ mod tests {
             (key(3), b"c1".to_vec()),
         ];
         w.spill_append_run().unwrap();
-        w.kv_pairs = vec![(key(2), b"b1".to_vec()), (key(4), b"d".to_vec()), (key(5), b"e0".to_vec())];
+        w.kv_pairs = vec![
+            (key(2), b"b1".to_vec()),
+            (key(4), b"d".to_vec()),
+            (key(5), b"e0".to_vec()),
+        ];
         w.spill_append_run().unwrap();
-        w.kv_pairs = vec![(key(5), b"e1".to_vec()), (key(5), b"e2".to_vec()), (key(6), b"f".to_vec())];
+        w.kv_pairs = vec![
+            (key(5), b"e1".to_vec()),
+            (key(5), b"e2".to_vec()),
+            (key(6), b"f".to_vec()),
+        ];
         w.spill_append_run().unwrap();
         w.live_count = 10;
         let scratch = w.append_dir.clone().expect("append dir");
-        assert!(scratch.starts_with(dir.path()), "spill lives in the engine dir: {scratch:?}");
+        assert!(
+            scratch.starts_with(dir.path()),
+            "spill lives in the engine dir: {scratch:?}"
+        );
         w.merge_append_load().unwrap();
         assert_eq!(tree.len().unwrap(), 6, "one row per distinct key");
         for i in 1u8..=6 {

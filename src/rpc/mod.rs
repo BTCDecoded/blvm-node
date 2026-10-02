@@ -6,13 +6,13 @@
 pub mod auth;
 pub mod blockchain;
 pub mod cache;
+pub mod commons_gbt;
 pub mod control;
 pub mod errors;
 pub mod mempool;
 pub mod merkle_block;
 pub mod methods;
 pub mod mining;
-pub mod commons_gbt;
 
 pub mod network;
 pub mod params;

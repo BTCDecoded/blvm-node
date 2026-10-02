@@ -16,10 +16,10 @@
 // * window = `[next_needed, next_needed + max_ahead]`
 // * heights are handed out lowest-first in runs of `WINDOW_TILE` (16) that are
 //   neither in flight (any peer) nor already delivered (`window_done`)
-// * each peer holds at most `WINDOW_PER_PEER` (2) tiles at once; a fast peer
+// * each peer holds at most `WINDOW_PER_PEER` (1) tiles at once; a fast peer
 //   naturally cycles more tiles because it finishes sooner
 // * if the front of the window (`next_needed`) has been in flight on one peer
-//   for more than `WINDOW_STALL_SECS` (10) and nobody else covers it, the next
+//   for more than `WINDOW_STALL_SECS` (3) and nobody else covers it, the next
 //   free peer gets a duplicate request for that tile (wire gate dedups)
 // * a peer that failed a range does not get the same heights back for
 //   `WINDOW_FAIL_SKIP_SECS` (30); the heights go to the next poller
@@ -401,7 +401,7 @@ impl ChunkAssigner {
         }
         // R-340: 2.5× drifted stall_s to 6 s at 340k (dup age median 7 s vs 3 s in R-338);
         // 1.5× keeps the floor in charge until tiles genuinely slow down.
-        let calibrated = (ema_ms * 3 / 2 + 999) / 1000;
+        let calibrated = (ema_ms * 3 / 2).div_ceil(1000);
         calibrated.clamp(floor, 30)
     }
 
@@ -712,7 +712,7 @@ impl ChunkAssigner {
                             age,
                             released,
                             if bench {
-                                format!("benched {}s", bench_secs)
+                                format!("benched {bench_secs}s")
                             } else {
                                 format!("front cooldown {}s", Self::window_front_cool_secs())
                             },
@@ -796,7 +796,7 @@ impl ChunkAssigner {
             }
             let start = h;
             let mut end = h;
-            while end + 1 <= window_hi
+            while end < window_hi
                 && end + 1 - start < tile
                 && !covered[idx(end + 1)]
                 && !failed_by_me(end + 1)

@@ -99,8 +99,16 @@ pub(crate) fn start(
         let bbytes = batch_bytes();
         match std::thread::Builder::new()
             .name("ibd-persist-lane".into())
-            .spawn(move || run(rx, blockstore, validation_height, protocol_version, bb, bbytes))
-        {
+            .spawn(move || {
+                run(
+                    rx,
+                    blockstore,
+                    validation_height,
+                    protocol_version,
+                    bb,
+                    bbytes,
+                )
+            }) {
             Ok(_) => {
                 info!(
                     "[IBD_PERSIST_LANE] on batch={} batch_mb={} queue={}",
@@ -177,7 +185,12 @@ fn run(
         }
         QUEUED.fetch_sub(jobs.len(), Ordering::Relaxed);
         let t0 = Instant::now();
-        persist_batch(&jobs, &blockstore, validation_height.as_ref(), protocol_version);
+        persist_batch(
+            &jobs,
+            &blockstore,
+            validation_height.as_ref(),
+            protocol_version,
+        );
         let ms = t0.elapsed().as_millis() as u64;
         STAT_BATCHES.fetch_add(1, Ordering::Relaxed);
         STAT_BLOCKS.fetch_add(jobs.len() as u64, Ordering::Relaxed);
@@ -229,11 +242,14 @@ fn persist_batch(
         }
         return;
     }
-    let items: Vec<(&blvm_protocol::Block, &[Vec<blvm_protocol::segwit::Witness>], u64)> =
-        to_write
-            .iter()
-            .map(|j| (j.block.as_ref(), j.witnesses.as_ref().as_slice(), j.height))
-            .collect();
+    let items: Vec<(
+        &blvm_protocol::Block,
+        &[Vec<blvm_protocol::segwit::Witness>],
+        u64,
+    )> = to_write
+        .iter()
+        .map(|j| (j.block.as_ref(), j.witnesses.as_ref().as_slice(), j.height))
+        .collect();
     if let Err(e) = blockstore.store_blocks_with_witness_batch(&items) {
         warn!(
             "[IBD_GAP_PERSIST] batch of {} ({}..{}) failed: {e} — retrying one by one",

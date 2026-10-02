@@ -236,9 +236,9 @@ fn sigop_cost_above_standard_cap_is_rejected() {
 
 #[test]
 fn ancestor_limit_uses_sigop_adjusted_vsize() {
-    use std::sync::Arc;
     use blvm_protocol::block::calculate_tx_id;
     use blvm_protocol::serialization::transaction::serialize_transaction;
+    use std::sync::Arc;
 
     let parent_prevout = blvm_protocol::OutPoint {
         hash: [9u8; 32],
@@ -268,8 +268,8 @@ fn ancestor_limit_uses_sigop_adjusted_vsize() {
         vec![],
         30_000,
     );
-    let stripped = serialize_transaction(&parent).len() as u64
-        + serialize_transaction(&child).len() as u64;
+    let stripped =
+        serialize_transaction(&parent).len() as u64 + serialize_transaction(&child).len() as u64;
     let mut tight = MempoolPolicyConfig::default();
     tight.max_ancestor_size = stripped;
     tight.min_relay_fee_rate = 1;

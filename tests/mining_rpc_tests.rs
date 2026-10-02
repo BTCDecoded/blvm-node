@@ -233,7 +233,10 @@ async fn test_getblocktemplate_coinbasetxn_has_bip141_commitment() {
         "rules": ["segwit"]
     }]);
     let template = expect_block_template(&mining, &params).await;
-    assert_eq!(template.get("coinbasevalue").unwrap().as_u64().unwrap(), 5_000_000_000);
+    assert_eq!(
+        template.get("coinbasevalue").unwrap().as_u64().unwrap(),
+        5_000_000_000
+    );
     let data = template
         .get("coinbasetxn")
         .and_then(|c| c.get("data"))
@@ -241,7 +244,8 @@ async fn test_getblocktemplate_coinbasetxn_has_bip141_commitment() {
         .expect("coinbasetxn.data");
     let raw = hex::decode(data).expect("coinbase hex");
     assert!(
-        raw.windows(6).any(|w| w == [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed]),
+        raw.windows(6)
+            .any(|w| w == [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed]),
         "fitted coinbase must include BIP141 commitment"
     );
 }

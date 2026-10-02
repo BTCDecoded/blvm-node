@@ -444,8 +444,14 @@ mod tests {
                 allowed += 1;
             }
         }
-        assert_eq!(allowed, 10, "outbound dials are still throttled to the window");
-        assert!(!dos.should_auto_ban(ip).await, "our own dial rate must not ban the peer");
+        assert_eq!(
+            allowed, 10,
+            "outbound dials are still throttled to the window"
+        );
+        assert!(
+            !dos.should_auto_ban(ip).await,
+            "our own dial rate must not ban the peer"
+        );
         assert_eq!(dos.get_dos_metrics().await.connection_rate_violations, 0);
         // The inbound path is unchanged: the same IP flooding us still accrues violations.
         for _ in 0..3 {

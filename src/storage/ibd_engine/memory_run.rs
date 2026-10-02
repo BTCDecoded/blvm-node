@@ -1104,7 +1104,10 @@ mod tests {
         let kv = OutputKV::SIZE;
         // dest-ba 660k ~15 KiB buckets stay under the old 16-bit clamp.
         let small = directory_prefix_bits(10_000);
-        assert!(small <= 16, "10k-entry segs must not take the dest-bc mega clamp");
+        assert!(
+            small <= 16,
+            "10k-entry segs must not take the dest-bc mega clamp"
+        );
 
         // dest-bc 251 KiB avg ≈ 300M uniform entries at 16 bits.
         let n = 300_000_000usize;

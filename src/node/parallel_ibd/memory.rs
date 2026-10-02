@@ -243,9 +243,7 @@ fn forced_ibd_pressure_from_env() -> Option<PressureLevel> {
         .map(str::trim)
     {
         Some("critical") | Some("Critical") | Some("CRITICAL") => Some(PressureLevel::Critical),
-        Some("emergency") | Some("Emergency") | Some("EMERGENCY") => {
-            Some(PressureLevel::Emergency)
-        }
+        Some("emergency") | Some("Emergency") | Some("EMERGENCY") => Some(PressureLevel::Emergency),
         _ => None,
     }
 }
@@ -286,7 +284,7 @@ pub(crate) fn cgroup_memory_limit_mb() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
         static CACHED: OnceLock<Option<u64>> = OnceLock::new();
-        return *CACHED.get_or_init(read_cgroup_memory_max_mb);
+        *CACHED.get_or_init(read_cgroup_memory_max_mb)
     }
     #[cfg(not(target_os = "linux"))]
     None
@@ -308,7 +306,11 @@ fn read_cgroup_memory_max_mb() -> Option<u64> {
         if raw == "max" {
             continue;
         }
-        if let Some(mb) = raw.parse::<u64>().ok().map(|b| b / 1024 / 1024).filter(|&m| m > 0)
+        if let Some(mb) = raw
+            .parse::<u64>()
+            .ok()
+            .map(|b| b / 1024 / 1024)
+            .filter(|&m| m > 0)
         {
             return Some(mb);
         }

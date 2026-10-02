@@ -1323,8 +1323,7 @@ impl MempoolManager {
             .unwrap_or_default();
 
         let witness_ref = witnesses.as_deref();
-        let (candidate_vsize, sigop_cost) =
-            self.admit_vsize(&tx, witness_ref, &utxo_snapshot);
+        let (candidate_vsize, sigop_cost) = self.admit_vsize(&tx, witness_ref, &utxo_snapshot);
         if sigop_cost > blvm_protocol::mempool::MAX_STANDARD_TX_SIGOPS_COST {
             warn!(
                 "Transaction {} rejected: sigop cost {} exceeds standard limit {}",
@@ -1836,10 +1835,10 @@ impl MempoolManager {
         witnesses: Option<&[Witness]>,
         utxo_set: &UtxoSet,
     ) -> (u64, u64) {
+        use blvm_protocol::UTXO;
         use blvm_protocol::mempool::{DEFAULT_BYTES_PER_SIGOP, sigop_adjusted_vsize};
         use blvm_protocol::script::flags::SEGWIT_STANDARD_FLAGS;
         use blvm_protocol::sigop::get_transaction_sigop_cost_with_utxos;
-        use blvm_protocol::UTXO;
 
         let bytes_per_sigop = self
             .policy_config
@@ -1874,16 +1873,15 @@ impl MempoolManager {
                 .collect()
         };
         let refs: Vec<Option<&UTXO>> = owned_utxos.iter().map(|utxo| utxo.as_ref()).collect();
-        let sigop_cost = get_transaction_sigop_cost_with_utxos(
-            tx,
-            &refs,
-            witnesses,
-            SEGWIT_STANDARD_FLAGS,
-        )
-        .unwrap_or_else(|_| blvm_protocol::sigop::get_legacy_sigop_count(tx) as u64 * 4);
+        let sigop_cost =
+            get_transaction_sigop_cost_with_utxos(tx, &refs, witnesses, SEGWIT_STANDARD_FLAGS)
+                .unwrap_or_else(|_| blvm_protocol::sigop::get_legacy_sigop_count(tx) as u64 * 4);
 
         let weight = self.transaction_weight(tx, witnesses);
-        (sigop_adjusted_vsize(weight, sigop_cost, bytes_per_sigop), sigop_cost)
+        (
+            sigop_adjusted_vsize(weight, sigop_cost, bytes_per_sigop),
+            sigop_cost,
+        )
     }
 
     /// Stored adjusted vsize for a pooled transaction, recomputed if the map has no entry.

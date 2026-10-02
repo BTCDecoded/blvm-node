@@ -311,12 +311,7 @@ pub fn seed_from_ibd_utxos(
         anyhow::bail!("ibd-seed-writer thread exited early; disk segment may be incomplete");
     }
 
-    seed_count_must_be_healthy(
-        checkpoint_height,
-        total,
-        expected_count,
-        last_accepted,
-    )?;
+    seed_count_must_be_healthy(checkpoint_height, total, expected_count, last_accepted)?;
 
     // Register segment + commit watermark (contiguous_length + GC fence).
     db.finalize_seed(seg, checkpoint_height);
@@ -469,13 +464,9 @@ mod tests {
             seed_count_must_be_healthy(516_773, 8_236_260, Some(8_236_260), 0).is_err(),
             "dest-ak 8.2M@516k fails height*18 even with no last_accepted"
         );
-        assert!(seed_count_must_be_healthy(
-            340_000,
-            16_800_000,
-            Some(16_800_000),
-            16_800_000
-        )
-        .is_ok());
+        assert!(
+            seed_count_must_be_healthy(340_000, 16_800_000, Some(16_800_000), 16_800_000).is_ok()
+        );
         assert!(seed_count_must_be_healthy(340_000, 16_800_000, Some(16_800_000), 0).is_ok());
         assert!(seed_count_must_be_healthy(0, 0, None, 0).is_ok());
     }

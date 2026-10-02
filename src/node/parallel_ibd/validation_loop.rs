@@ -17,7 +17,6 @@ use crate::storage::disk_utxo::{
 };
 use crate::storage::ibd_engine::{
     PartialSpendSession, SpendSession, UtxoDatabase, hotpath_timer_sample, session_fill_utxo_set,
-    session_to_utxo_set,
 };
 use crate::storage::ibd_utxo_store::{IbdUtxoStore, PendingFlushPackage};
 use crate::utils::time::current_timestamp;
@@ -35,7 +34,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 /// Reuse `Arc<Vec<Vec<Witness>>>` of empty stacks for pre-segwit blocks (same `n` as tx count).

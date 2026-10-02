@@ -605,9 +605,7 @@ impl MiningCoordinator {
         let mut all_transactions = vec![coinbase_tx];
         all_transactions.extend(transactions);
 
-        use blvm_protocol::mining::{
-            append_witness_commitment_from_nested, calculate_merkle_root,
-        };
+        use blvm_protocol::mining::{append_witness_commitment_from_nested, calculate_merkle_root};
         let mut coinbase = all_transactions[0].clone();
         let probe = Block {
             header: BlockHeader {
@@ -620,15 +618,11 @@ impl MiningCoordinator {
             },
             transactions: all_transactions.clone().into_boxed_slice(),
         };
-        let nested = self.build_witnesses_for_block(&probe, &utxo_set).map_err(|e| {
-            anyhow::anyhow!("mempool witnesses unavailable: {e}")
-        })?;
-        append_witness_commitment_from_nested(
-            &mut coinbase,
-            &mut all_transactions,
-            Some(&nested),
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to append witness commitment: {e}"))?;
+        let nested = self
+            .build_witnesses_for_block(&probe, &utxo_set)
+            .map_err(|e| anyhow::anyhow!("mempool witnesses unavailable: {e}"))?;
+        append_witness_commitment_from_nested(&mut coinbase, &mut all_transactions, Some(&nested))
+            .map_err(|e| anyhow::anyhow!("Failed to append witness commitment: {e}"))?;
         let merkle_root = calculate_merkle_root(&all_transactions)
             .map_err(|e| anyhow::anyhow!("Failed to calculate merkle root: {}", e))?;
 
@@ -1882,8 +1876,7 @@ mod tests {
             mempool_manager.add_transaction(spend).unwrap(),
             "tx must enter mempool"
         );
-        let mut coordinator =
-            MiningCoordinator::new(Arc::new(mempool_manager), Some(storage));
+        let mut coordinator = MiningCoordinator::new(Arc::new(mempool_manager), Some(storage));
 
         let err = coordinator
             .generate_block_template()
@@ -1925,7 +1918,9 @@ mod tests {
         assert_eq!(template.transactions.len(), 1, "coinbase only");
         let cb = &template.transactions[0];
         assert!(
-            cb.outputs.last().is_some_and(|o| o.value == 0 && o.script_pubkey.first() == Some(&0x6a)),
+            cb.outputs
+                .last()
+                .is_some_and(|o| o.value == 0 && o.script_pubkey.first() == Some(&0x6a)),
             "mined template coinbase must carry BIP141 commitment"
         );
         // BIP90: post-genesis blocks need version ≥ 4 (same as `generatetoaddress` RPC path).

@@ -142,7 +142,9 @@ async fn offload_block(
                 .await?;
         }
         Ok((Ok(_other), _)) => {
-            debug!("parse-offload: frame looked like block but parsed as other cmd from {peer_addr}");
+            debug!(
+                "parse-offload: frame looked like block but parsed as other cmd from {peer_addr}"
+            );
         }
         Ok((Err(e), _)) => {
             debug!("parse-offload deserialize from {peer_addr}: {e}");
@@ -170,7 +172,10 @@ mod tests {
     fn r302_is_block_frame_only_matches_nul_padded_block_command() {
         let mut block = vec![0u8; 24];
         block[4..9].copy_from_slice(b"block");
-        assert!(is_block_frame(&block), "12-byte NUL-padded 'block' is cmd::BLOCK");
+        assert!(
+            is_block_frame(&block),
+            "12-byte NUL-padded 'block' is cmd::BLOCK"
+        );
         let mut inv = vec![0u8; 24];
         inv[4..7].copy_from_slice(b"inv");
         assert!(!is_block_frame(&inv), "inv must stay on the message loop");

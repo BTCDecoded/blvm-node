@@ -139,10 +139,7 @@ fn main() -> Result<()> {
         let row = block_height_row_key(h, &hash);
         hi_b.put(&hb, &hash_vec);
         h2h_b.put(&hash, &hb);
-        if let Some(v) = s_hdr
-            .get(row.as_slice())?
-            .or(s_hdr.get(hash.as_slice())?)
-        {
+        if let Some(v) = s_hdr.get(row.as_slice())?.or(s_hdr.get(hash.as_slice())?) {
             hdr_b.put(row.as_slice(), &v);
             hdr_b.put(hash.as_slice(), &v);
         }
@@ -158,16 +155,10 @@ fn main() -> Result<()> {
                 }
             }
         }
-        if let Some(v) = s_wit
-            .get(row.as_slice())?
-            .or(s_wit.get(hash.as_slice())?)
-        {
+        if let Some(v) = s_wit.get(row.as_slice())?.or(s_wit.get(hash.as_slice())?) {
             wit_b.put(row.as_slice(), &v);
         }
-        if let Some(v) = s_meta
-            .get(hash.as_slice())?
-            .or(s_meta.get(row.as_slice())?)
-        {
+        if let Some(v) = s_meta.get(hash.as_slice())?.or(s_meta.get(row.as_slice())?) {
             meta_b.put(hash.as_slice(), &v);
         }
 

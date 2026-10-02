@@ -95,8 +95,8 @@ fn hard_trim_never_drops_tip_adjacent_need() {
 #[serial_test::serial(ibd)]
 #[test]
 fn r99_hard_trim_skips_reserved_far() {
-    use blvm_protocol::{Block, BlockHeader, Transaction, TransactionOutput};
     use crate::node::parallel_ibd::{publish_lookahead_reserved, test_clear_lookahead_reserved};
+    use blvm_protocol::{Block, BlockHeader, Transaction, TransactionOutput};
 
     test_clear_lookahead_reserved();
     let dummy = || -> (SharedBlock, SharedWitnesses) {
@@ -382,6 +382,7 @@ fn w139_empty_deep_cap_eight_hh_five() {
     let _g = tip_soft_atomic_lock();
     super::super::memory::BRIDGE_PENDING_COUNT.store(0, Ordering::Relaxed);
     super::super::IBD_TIP_GAP_MISSING.store(true, Ordering::Relaxed);
+    super::super::IBD_REORDER_AHEAD.store(0, Ordering::Relaxed);
     crate::node::parallel_ibd::IBD_TIP_BRIDGE_HOLES.store(0, Ordering::Relaxed);
     assert_eq!(
         tip_gap_timeout_secs_for_chunk(false, 316_114, 316_241),

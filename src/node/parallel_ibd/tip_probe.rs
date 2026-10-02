@@ -61,25 +61,23 @@ static LAST_PROGRESS_MS: AtomicU64 = AtomicU64::new(0);
 const MESH_ABORT_STALL_MS: u64 = 30_000;
 
 pub(crate) fn enabled() -> bool {
-    match std::env::var("BLVM_IBD_TIP_PROBE")
-        .ok()
-        .as_deref()
-        .map(str::trim)
-    {
-        Some("1") | Some("true") | Some("on") | Some("yes") => true,
-        _ => false,
-    }
+    matches!(
+        std::env::var("BLVM_IBD_TIP_PROBE")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1") | Some("true") | Some("on") | Some("yes")
+    )
 }
 
 fn mesh_abort_enabled() -> bool {
-    match std::env::var("BLVM_IBD_PROBE_MESH_ABORT")
-        .ok()
-        .as_deref()
-        .map(str::trim)
-    {
-        Some("0") | Some("false") | Some("off") | Some("no") => false,
-        _ => true,
-    }
+    !matches!(
+        std::env::var("BLVM_IBD_PROBE_MESH_ABORT")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    )
 }
 
 /// Drop a rank entry whose last OK is older than this (default 300s).
@@ -214,7 +212,9 @@ pub(crate) fn probe_ewma_ms(peer: &str) -> Option<u64> {
     let Ok(g) = table().lock() else {
         return None;
     };
-    g.get(peer).filter(|e| e.n > 0 && e.ewma_ms > 0).map(|e| e.ewma_ms)
+    g.get(peer)
+        .filter(|e| e.n > 0 && e.ewma_ms > 0)
+        .map(|e| e.ewma_ms)
 }
 
 /// Wave-implied BPS for one peer (`n≥1`). Unranked → `None`.
@@ -274,12 +274,9 @@ fn pick_probe_height(header_tip: u64, next_needed: u64) -> Option<u64> {
             return Some(h);
         }
     }
-    for h in PROBE_HEIGHT_FALLBACK {
-        if header_tip > h.saturating_add(288) {
-            return Some(h);
-        }
-    }
-    None
+    PROBE_HEIGHT_FALLBACK
+        .into_iter()
+        .find(|&h| header_tip > h.saturating_add(288))
 }
 
 fn now_ms() -> u64 {
@@ -302,10 +299,10 @@ pub(crate) fn verify_probe_body(
     }
     #[cfg(feature = "production")]
     {
-        match blvm_consensus::mining::calculate_merkle_root(&block.transactions) {
-            Ok(root) if root == stored_merkle => true,
-            _ => false,
-        }
+        matches!(
+            blvm_consensus::mining::calculate_merkle_root(&block.transactions),
+            Ok(root) if root == stored_merkle
+        )
     }
     #[cfg(not(feature = "production"))]
     {
@@ -445,12 +442,7 @@ fn maybe_mesh_fail(validation_height: u64, assigner: &ChunkAssigner) {
     if !mesh_fail_ready(validation_height, now_ms().saturating_sub(first)) {
         return;
     }
-    let hash_fetch = crate::node::parallel_ibd::hash_fetch::enabled();
-    let supply_ok = if hash_fetch {
-        crate::node::parallel_ibd::hash_fetch::aggregate_can_fill_ahead()
-    } else {
-        any_probe_ge80()
-    };
+    let supply_ok = any_probe_ge80();
     if supply_ok {
         MESH_FAIL.store(false, Ordering::Relaxed);
         return;
@@ -458,19 +450,11 @@ fn maybe_mesh_fail(validation_height: u64, assigner: &ChunkAssigner) {
     if MESH_FAIL.swap(true, Ordering::Relaxed) {
         return;
     }
-    if hash_fetch {
-        tracing::warn!(
-            "[IBD_PROBE_MESH_FAIL] validation={} first_probe_age_s={} — aggregate byte-rate cannot fill fetch_ahead",
-            validation_height,
-            now_ms().saturating_sub(first) / 1000
-        );
-    } else {
-        tracing::warn!(
-            "[IBD_PROBE_MESH_FAIL] validation={} first_probe_age_s={} ge80=0 — no NODE_NETWORK size-matched ≥80",
-            validation_height,
-            now_ms().saturating_sub(first) / 1000
-        );
-    }
+    tracing::warn!(
+        "[IBD_PROBE_MESH_FAIL] validation={} first_probe_age_s={} ge80=0 — no NODE_NETWORK size-matched ≥80",
+        validation_height,
+        now_ms().saturating_sub(first) / 1000
+    );
     if mesh_abort_enabled() {
         // dest-be: 200k size-matched probes rarely print ≥80 on public WAN
         // (400ms sojourn) while crawl still holds 20–150 BPS. Killing workers
