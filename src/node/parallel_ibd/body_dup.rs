@@ -100,13 +100,21 @@ fn ctr() -> &'static Counters {
     C.get_or_init(Counters::new)
 }
 
+/// Serializes test snapshots of the process-global counters. Production
+/// `note_body_rx` takes the same lock only in `cfg(test)`.
+#[cfg(test)]
+fn body_dup_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    L.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Every deserialized inbound `block` frame (the R-302 `offload_n` analogue).
 pub(crate) fn note_wire_block(bytes: u64) {
     ctr().wire.add(bytes);
 }
 
 /// IBD GetData body that reached the download worker (`!from_local`).
-pub(crate) fn note_body_rx(height: u64, bytes: u64) {
+fn note_body_rx_inner(height: u64, bytes: u64) {
     let c = ctr();
     c.rx.add(bytes);
     c.last_bytes.insert(height, bytes);
@@ -115,12 +123,14 @@ pub(crate) fn note_body_rx(height: u64, bytes: u64) {
     }
 }
 
+pub(crate) fn note_body_rx(height: u64, bytes: u64) {
+    #[cfg(test)]
+    let _g = body_dup_test_lock();
+    note_body_rx_inner(height, bytes);
+}
+
 pub(crate) fn last_bytes(height: u64) -> u64 {
-    ctr()
-        .last_bytes
-        .get(&height)
-        .map(|v| *v)
-        .unwrap_or(0)
+    ctr().last_bytes.get(&height).map(|v| *v).unwrap_or(0)
 }
 
 pub(crate) fn note_discard(reason: DiscardReason, height: Option<u64>, bytes: u64) {
@@ -311,10 +321,13 @@ mod tests {
     fn r303_second_body_same_height_is_not_a_new_distinct() {
         // Isolated: use a high sentinel height so this does not collide with other tests
         // if they share process-global counters (OnceLock lives for the test bin).
+        // Hold the same lock `note_body_rx` takes so a parallel test cannot
+        // bump `rx_n` between the two snapshots.
+        let _guard = body_dup_test_lock();
         let h = u64::MAX - 303;
         let before = snap_now();
-        note_body_rx(h, 1000);
-        note_body_rx(h, 1000);
+        note_body_rx_inner(h, 1000);
+        note_body_rx_inner(h, 1000);
         let after = snap_now();
         assert_eq!(after.rx_n.saturating_sub(before.rx_n), 2, "two receives");
         assert_eq!(
