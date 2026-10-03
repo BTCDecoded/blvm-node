@@ -654,71 +654,7 @@ impl RawTxRpc {
         tx: &blvm_protocol::Transaction,
         witnesses: &[blvm_protocol::segwit::Witness],
     ) -> String {
-        use blvm_protocol::block::calculate_tx_id;
-        let txid = calculate_tx_id(tx);
-
-        // Check if any witness has data
-        let has_witness = witnesses.iter().any(|w| !w.is_empty());
-
-        // If no witness data, wtxid == txid
-        if !has_witness {
-            return hex::encode(txid);
-        }
-
-        // For SegWit transactions, wtxid is hash of transaction WITH witness
-        // Serialize: version + marker(0x00) + flag(0x01) + inputs + outputs + locktime + witness_data
-        use blvm_protocol::serialization::varint::encode_varint;
-        use sha2::{Digest, Sha256};
-
-        let mut serialized = Vec::new();
-
-        // Version (4 bytes)
-        serialized.extend_from_slice(&(tx.version as u32).to_le_bytes());
-
-        // SegWit marker and flag
-        serialized.push(0x00);
-        serialized.push(0x01);
-
-        // Input count
-        serialized.extend_from_slice(&encode_varint(tx.inputs.len() as u64));
-
-        // Inputs (non-witness serialization)
-        for input in &tx.inputs {
-            serialized.extend_from_slice(&input.prevout.hash);
-            serialized.extend_from_slice(&input.prevout.index.to_le_bytes());
-            serialized.extend_from_slice(&encode_varint(input.script_sig.len() as u64));
-            serialized.extend_from_slice(&input.script_sig);
-            serialized.extend_from_slice(&(input.sequence as u32).to_le_bytes());
-        }
-
-        // Output count
-        serialized.extend_from_slice(&encode_varint(tx.outputs.len() as u64));
-
-        // Outputs
-        for output in &tx.outputs {
-            serialized.extend_from_slice(&(output.value as u64).to_le_bytes());
-            serialized.extend_from_slice(&encode_varint(output.script_pubkey.len() as u64));
-            serialized.extend_from_slice(&output.script_pubkey);
-        }
-
-        // Lock time
-        serialized.extend_from_slice(&(tx.lock_time as u32).to_le_bytes());
-
-        // Witness data: one witness stack per input
-        for witness_stack in witnesses {
-            // Witness stack count (number of elements)
-            serialized.extend_from_slice(&encode_varint(witness_stack.len() as u64));
-            // Each witness element
-            for element in witness_stack {
-                serialized.extend_from_slice(&encode_varint(element.len() as u64));
-                serialized.extend_from_slice(element);
-            }
-        }
-
-        // Double SHA256
-        let first_hash = Sha256::digest(&serialized);
-        let second_hash = Sha256::digest(first_hash);
-        hex::encode(second_hash)
+        crate::rpc::txwire::tx_wire(tx, Some(witnesses)).hash_hex
     }
 
     /// Validate package (multiple transactions)
@@ -865,67 +801,7 @@ impl RawTxRpc {
         tx: &blvm_protocol::Transaction,
         witnesses: Option<&[blvm_protocol::segwit::Witness]>,
     ) -> String {
-        use blvm_protocol::serialization::transaction::serialize_transaction;
-        use blvm_protocol::serialization::varint::encode_varint;
-
-        // Check if we have witness data
-        let has_witness = witnesses
-            .map(|w| w.iter().any(|witness_stack| !witness_stack.is_empty()))
-            .unwrap_or(false);
-
-        if !has_witness {
-            // Non-SegWit: return standard serialization
-            return hex::encode(serialize_transaction(tx));
-        }
-
-        // SegWit: serialize with witness marker and data
-        let witnesses = witnesses.unwrap();
-        let mut serialized = Vec::new();
-
-        // Version (4 bytes, little-endian)
-        serialized.extend_from_slice(&(tx.version as i32).to_le_bytes());
-
-        // SegWit marker and flag
-        serialized.push(0x00);
-        serialized.push(0x01);
-
-        // Input count
-        serialized.extend_from_slice(&encode_varint(tx.inputs.len() as u64));
-
-        // Inputs (non-witness serialization)
-        for input in &tx.inputs {
-            serialized.extend_from_slice(&input.prevout.hash);
-            serialized.extend_from_slice(&input.prevout.index.to_le_bytes());
-            serialized.extend_from_slice(&encode_varint(input.script_sig.len() as u64));
-            serialized.extend_from_slice(&input.script_sig);
-            serialized.extend_from_slice(&(input.sequence as u32).to_le_bytes());
-        }
-
-        // Output count
-        serialized.extend_from_slice(&encode_varint(tx.outputs.len() as u64));
-
-        // Outputs
-        for output in &tx.outputs {
-            serialized.extend_from_slice(&(output.value as u64).to_le_bytes());
-            serialized.extend_from_slice(&encode_varint(output.script_pubkey.len() as u64));
-            serialized.extend_from_slice(&output.script_pubkey);
-        }
-
-        // Lock time
-        serialized.extend_from_slice(&(tx.lock_time as u32).to_le_bytes());
-
-        // Witness data: one witness stack per input
-        for witness_stack in witnesses {
-            // Witness stack count (number of elements)
-            serialized.extend_from_slice(&encode_varint(witness_stack.len() as u64));
-            // Each witness element
-            for element in witness_stack {
-                serialized.extend_from_slice(&encode_varint(element.len() as u64));
-                serialized.extend_from_slice(element);
-            }
-        }
-
-        hex::encode(serialized)
+        hex::encode(crate::rpc::txwire::tx_wire(tx, witnesses).bytes)
     }
 
     /// Calculate transaction size and weight for SegWit transactions
@@ -953,10 +829,7 @@ impl RawTxRpc {
             return (base_size, total_size, weight, vsize);
         }
 
-        // SegWit: calculate total size with witness
-        // Serialize with witness to get total size
-        let tx_hex_with_witness = Self::serialize_transaction_with_witness(tx, witnesses);
-        let total_size = tx_hex_with_witness.len() / 2; // Hex string length / 2 = bytes
+        let total_size = crate::rpc::txwire::tx_wire(tx, witnesses).bytes.len();
 
         // Calculate weight: 4 * base_size + total_size
         let weight = calculate_transaction_weight_segwit(base_size as u64, total_size as u64);
@@ -1535,8 +1408,10 @@ impl RawTxRpc {
         // Check mempool first
         if let Some(ref mempool) = self.mempool {
             if let Some(tx) = mempool.get_transaction(&hash) {
-                use blvm_protocol::serialization::transaction::serialize_transaction;
-                let size = serialize_transaction(&tx).len();
+                let witnesses = mempool.get_transaction_witnesses(&hash);
+                let wire = crate::rpc::txwire::tx_wire(&tx, witnesses.as_deref());
+                let (size, _, weight, vsize) =
+                    Self::calculate_segwit_sizes(&tx, witnesses.as_deref());
                 let fee = if let Some(ref storage) = self.storage {
                     let utxo_set = storage.utxos().get_all_utxos().unwrap_or_default();
                     mempool.calculate_transaction_fee(&tx, &utxo_set) as f64 / 100_000_000.0
@@ -1546,11 +1421,11 @@ impl RawTxRpc {
 
                 return Ok(json!({
                     "txid": txid,
-                    "hash": txid,
+                    "hash": wire.hash_hex,
                     "version": tx.version,
                     "size": size,
-                    "vsize": size,
-                    "weight": size * 4,
+                    "vsize": vsize,
+                    "weight": weight,
                     "locktime": tx.lock_time,
                     "vin": tx.inputs.iter().map(|input| json!({
                         "txid": hex::encode(input.prevout.hash),
@@ -1567,7 +1442,7 @@ impl RawTxRpc {
                             "type": "nonstandard" // Would need script analysis
                         }
                     })).collect::<Vec<_>>(),
-                    "hex": if include_hex { hex::encode(serialize_transaction(&tx)) } else { "".to_string() },
+                    "hex": if include_hex { hex::encode(&wire.bytes) } else { "".to_string() },
                     "blockhash": Value::Null,
                     "confirmations": 0,
                     "time": 0,
@@ -1581,8 +1456,7 @@ impl RawTxRpc {
         // Check blockchain
         if let Some(ref storage) = self.storage {
             if let Ok(Some(tx)) = storage.transactions().get_transaction(&hash) {
-                use blvm_protocol::serialization::transaction::serialize_transaction;
-                let size = serialize_transaction(&tx).len();
+                use blvm_protocol::block::calculate_tx_id;
 
                 // Get block info if available from transaction metadata
                 let metadata = storage.transactions().get_metadata(&hash).ok().flatten();
@@ -1605,14 +1479,30 @@ impl RawTxRpc {
                     .and_then(|bh| storage.blocks().get_header(&bh).ok().flatten())
                     .map(|h| h.timestamp)
                     .unwrap_or(0);
+                let witnesses = block_hash.and_then(|block_id| {
+                    let block = storage.blocks().get_block(&block_id).ok().flatten()?;
+                    let index = block
+                        .transactions
+                        .iter()
+                        .position(|stored| calculate_tx_id(stored) == hash)?;
+                    storage
+                        .blocks()
+                        .get_witness(&block_id)
+                        .ok()
+                        .flatten()
+                        .and_then(|all| all.get(index).cloned())
+                });
+                let wire = crate::rpc::txwire::tx_wire(&tx, witnesses.as_deref());
+                let (size, _, weight, vsize) =
+                    Self::calculate_segwit_sizes(&tx, witnesses.as_deref());
 
                 return Ok(json!({
                     "txid": txid,
-                    "hash": txid,
+                    "hash": wire.hash_hex,
                     "version": tx.version,
                     "size": size,
-                    "vsize": size,
-                    "weight": size * 4,
+                    "vsize": vsize,
+                    "weight": weight,
                     "locktime": tx.lock_time,
                     "vin": tx.inputs.iter().map(|input| json!({
                         "txid": hex::encode(input.prevout.hash),
@@ -1629,7 +1519,7 @@ impl RawTxRpc {
                             "type": "nonstandard"
                         }
                     })).collect::<Vec<_>>(),
-                    "hex": if include_hex { hex::encode(serialize_transaction(&tx)) } else { "".to_string() },
+                    "hex": if include_hex { hex::encode(&wire.bytes) } else { "".to_string() },
                     "blockhash": block_hash.map(|h| Value::String(hex::encode(h))).unwrap_or(Value::Null),
                     "confirmations": confirmations,
                     "time": block_time,

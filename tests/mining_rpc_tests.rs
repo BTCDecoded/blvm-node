@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use blvm_node::node::mempool::MempoolManager;
 use blvm_node::rpc::errors::RpcResult;
 use blvm_node::rpc::mining::{CommonsGbtCaller, CommonsGbtSlot, MiningRpc};
+use blvm_node::rpc::rawtx::RawTxRpc;
 use blvm_node::storage::Storage;
 use blvm_protocol::serialization::serialize_transaction;
 use blvm_protocol::{OutPoint, UTXO};
@@ -416,6 +417,39 @@ async fn test_getblocktemplate_includes_segwit_mempool_tx_on_regtest() {
         entries[0].get("txid").unwrap().as_str().unwrap(),
         hex::encode(txid)
     );
+    let data_hex = entries[0].get("data").unwrap().as_str().unwrap();
+    let data_bytes = hex::decode(data_hex).unwrap();
+    assert_eq!(
+        &data_bytes[4..6],
+        &[0x00, 0x01],
+        "segwit marker after version"
+    );
+    assert_eq!(
+        &data_bytes[data_bytes.len() - 4..],
+        &[0, 0, 0, 0],
+        "locktime follows the witness stack"
+    );
+    assert!(
+        data_bytes[..data_bytes.len() - 4].contains(&OP_1),
+        "witness element precedes locktime"
+    );
+    let hash = entries[0].get("hash").unwrap().as_str().unwrap();
+    assert_ne!(hash, hex::encode(txid));
+    let digest = Sha256::digest(Sha256::digest(&data_bytes));
+    assert_eq!(hash, hex::encode(digest));
+
+    let raw = RawTxRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool), None, None);
+    let txid_hex = hex::encode(txid);
+    let verbose = raw
+        .getrawtransaction(&serde_json::json!([txid_hex, true]))
+        .await
+        .expect("getrawtransaction");
+    assert_eq!(verbose.get("hash").unwrap().as_str().unwrap(), hash);
+    let details = raw
+        .get_transaction_details(&serde_json::json!([txid_hex, true]))
+        .await
+        .expect("gettransactiondetails");
+    assert_eq!(details.get("hash").unwrap().as_str().unwrap(), hash);
     let rules = template.get("rules").unwrap().as_array().unwrap();
     assert!(
         rules.iter().any(|r| r.as_str() == Some("segwit")),

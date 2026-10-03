@@ -113,7 +113,8 @@ impl MempoolRpc {
                 for tx in transactions {
                     let txid = calculate_tx_id(&tx);
                     let txid_hex = hex::encode(txid);
-                    let txid_hex_clone = txid_hex.clone();
+                    let witnesses = mempool.get_transaction_witnesses(&txid);
+                    let wtxid = crate::rpc::txwire::tx_wire(&tx, witnesses.as_deref()).hash_hex;
                     let size = serialize_transaction(&tx).len();
 
                     result.insert(txid_hex, json!({
@@ -133,7 +134,7 @@ impl MempoolRpc {
                         "ancestorcount": 1,
                         "ancestorsize": size,
                         "ancestorfees": 0.00001000,
-                        "wtxid": txid_hex_clone,
+                        "wtxid": wtxid,
                         "fees": {
                             "base": 0.00001000,
                             "modified": 0.00001000,
@@ -426,12 +427,8 @@ impl MempoolRpc {
         let descendant_fees_btc =
             self.sum_mempool_modified_fees_btc(mempool, &descendants) + modified_fee_btc;
 
-        let wtxid = match mempool.get_transaction_witnesses(hash) {
-            Some(wits) if wits.iter().any(|w| !w.is_empty()) => hex::encode(
-                crate::network::txhash::calculate_wtxid(tx, Some(wits.as_slice())),
-            ),
-            _ => hex::encode(hash),
-        };
+        let witnesses = mempool.get_transaction_witnesses(hash);
+        let wtxid = crate::rpc::txwire::tx_wire(tx, witnesses.as_deref()).hash_hex;
 
         json!({
             "size": size,

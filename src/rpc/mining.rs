@@ -35,7 +35,6 @@ use blvm_protocol::{
 };
 use hex;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -656,30 +655,25 @@ impl MiningRpc {
     }
 
     fn transaction_to_json(&self, tx: &Transaction) -> Value {
-        // Convert transaction to JSON-RPC format
-        let tx_bytes = serialize_transaction(tx);
-        let tx_hash = self.calculate_tx_hash(&tx_bytes);
+        use blvm_protocol::block::calculate_tx_id;
+
+        let witnesses = self.mempool.as_ref().and_then(|mempool| {
+            let txid = calculate_tx_id(tx);
+            mempool.get_transaction_witnesses(&txid)
+        });
+        let wire = crate::rpc::txwire::tx_wire(tx, witnesses.as_deref());
         let fee = self.calculate_transaction_fee(tx);
         let sigops = self.count_sigops(tx);
         let weight = self.calculate_weight(tx);
 
         json!({
-            "data": hex::encode(&tx_bytes),
-            "txid": hex::encode(tx_hash),
+            "data": hex::encode(&wire.bytes),
+            "txid": wire.txid_hex,
+            "hash": wire.hash_hex,
             "fee": fee,
             "sigops": sigops,
             "weight": weight,
         })
-    }
-
-    fn calculate_tx_hash(&self, tx_bytes: &[u8]) -> [u8; 32] {
-        // Transaction hash is double SHA256 of transaction bytes
-        let hash1 = Sha256::digest(tx_bytes);
-        let hash2 = Sha256::digest(hash1);
-
-        let mut result = [0u8; 32];
-        result.copy_from_slice(&hash2);
-        result
     }
 
     fn calculate_transaction_fee(&self, tx: &Transaction) -> u64 {

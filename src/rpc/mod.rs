@@ -22,6 +22,7 @@ pub mod rawtx;
 #[cfg(feature = "rest-api")]
 pub mod rest;
 pub mod server;
+pub mod txwire;
 pub mod types;
 pub mod validation;
 
