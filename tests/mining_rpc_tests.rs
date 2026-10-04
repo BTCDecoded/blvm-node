@@ -13,8 +13,8 @@ use tempfile::TempDir;
 
 mod common;
 use common::{
-    MINING_RPC_CHAIN_BLOCKS, patch_storage_chain_network_regtest, setup_mining_chain,
-    valid_transaction,
+    patch_storage_chain_network_regtest, setup_mining_chain, valid_transaction,
+    MINING_RPC_CHAIN_BLOCKS,
 };
 
 async fn expect_block_template(
@@ -415,7 +415,7 @@ async fn test_getblocktemplate_includes_segwit_mempool_tx_on_regtest() {
     );
     assert_eq!(
         entries[0].get("txid").unwrap().as_str().unwrap(),
-        hex::encode(txid)
+        blvm_node::storage::hashing::hash_to_rpc_hex(&txid)
     );
     let data_hex = entries[0].get("data").unwrap().as_str().unwrap();
     let data_bytes = hex::decode(data_hex).unwrap();
@@ -436,7 +436,13 @@ async fn test_getblocktemplate_includes_segwit_mempool_tx_on_regtest() {
     let hash = entries[0].get("hash").unwrap().as_str().unwrap();
     assert_ne!(hash, hex::encode(txid));
     let digest = Sha256::digest(Sha256::digest(&data_bytes));
-    assert_eq!(hash, hex::encode(digest));
+    let mut digest_bytes = [0u8; 32];
+    digest_bytes.copy_from_slice(&digest);
+    assert_ne!(hash, hex::encode(digest_bytes));
+    assert_eq!(
+        hash,
+        blvm_node::storage::hashing::hash_to_rpc_hex(&digest_bytes)
+    );
 
     let raw = RawTxRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool), None, None);
     let txid_hex = hex::encode(txid);
@@ -538,7 +544,7 @@ async fn test_getblocktemplate_mempool_witness_available_for_template() {
     );
     assert_eq!(
         entries[0].get("txid").unwrap().as_str().unwrap(),
-        hex::encode(txid)
+        blvm_node::storage::hashing::hash_to_rpc_hex(&txid)
     );
 }
 

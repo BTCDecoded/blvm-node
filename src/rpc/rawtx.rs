@@ -20,7 +20,7 @@ use crate::rpc::params::{
 use crate::storage::Storage;
 use crate::utils::{storage_timeout_from_config, with_custom_timeout};
 use hex;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::result::Result;
 use std::sync::Arc;
@@ -225,18 +225,18 @@ impl RawTxRpc {
         if let (Some(storage), Some(mempool)) = (self.storage.as_ref(), self.mempool.as_ref()) {
             let (tx, tx_witnesses) = Self::deserialize_transaction_with_witness(&tx_bytes)
                 .map_err(|e| {
-                RpcError::invalid_params_with_fields(
-                    format!("Failed to parse transaction: {e}"),
-                    vec![(
-                        "hexstring",
-                        &format!("Transaction deserialization failed: {e}"),
-                    )],
-                    Some(json!([
+                    RpcError::invalid_params_with_fields(
+                        format!("Failed to parse transaction: {e}"),
+                        vec![(
+                            "hexstring",
+                            &format!("Transaction deserialization failed: {e}"),
+                        )],
+                        Some(json!([
                         "Ensure the transaction hex is valid and complete",
                         "Check that the transaction format matches Bitcoin transaction structure"
                     ])),
-                )
-            })?;
+                    )
+                })?;
 
             use blvm_protocol::block::calculate_tx_id;
             let txid = calculate_tx_id(&tx);
@@ -494,20 +494,22 @@ impl RawTxRpc {
         for (tx, tx_witnesses) in transactions.iter().zip(all_witnesses.iter()) {
             // If package validation failed, mark all transactions as failed
             if let Some(ref pkg_err) = package_error {
+                let wire = crate::rpc::txwire::tx_wire(tx, Some(tx_witnesses));
                 results.push(json!({
-                    "txid": hex::encode(blvm_protocol::block::calculate_tx_id(tx)),
-                    "wtxid": Self::calculate_wtxid(tx, tx_witnesses),
+                    "txid": wire.txid_hex,
+                    "wtxid": wire.hash_hex,
                     "package-error": pkg_err,
                     "allowed": false
                 }));
                 continue;
             }
 
-            // Calculate txid and wtxid
+            // Calculate txid and wtxid in BIP145 display order.
             use blvm_protocol::block::calculate_tx_id;
             let txid = calculate_tx_id(tx);
-            let txid_hex = hex::encode(txid);
-            let wtxid_hex = Self::calculate_wtxid(tx, tx_witnesses);
+            let wire = crate::rpc::txwire::tx_wire(tx, Some(tx_witnesses));
+            let txid_hex = wire.txid_hex;
+            let wtxid_hex = wire.hash_hex;
 
             // Validate transaction using consensus layer
             use blvm_protocol::ConsensusProof;
@@ -646,17 +648,6 @@ impl RawTxRpc {
         Ok((tx, witnesses))
     }
 
-    /// Calculate wtxid (witness transaction hash)
-    /// For non-SegWit: wtxid == txid
-    /// For SegWit: wtxid = SHA256(SHA256(tx_with_witness))
-    /// witnesses: Vec<Witness> - one witness stack per input
-    fn calculate_wtxid(
-        tx: &blvm_protocol::Transaction,
-        witnesses: &[blvm_protocol::segwit::Witness],
-    ) -> String {
-        crate::rpc::txwire::tx_wire(tx, Some(witnesses)).hash_hex
-    }
-
     /// Validate package (multiple transactions)
     /// Returns error string if package is invalid
     fn validate_package(transactions: &[blvm_protocol::Transaction]) -> Option<String> {
@@ -738,17 +729,11 @@ impl RawTxRpc {
 
         let (tx, witnesses) = Self::deserialize_transaction_with_witness(&tx_bytes)?;
 
-        use blvm_protocol::block::calculate_tx_id;
-        let txid = calculate_tx_id(&tx);
-        let txid_hex = hex::encode(txid);
-        let wtxid_hex = Self::calculate_wtxid(&tx, &witnesses);
+        let wire = crate::rpc::txwire::tx_wire(&tx, Some(&witnesses));
+        let txid_hex = wire.txid_hex;
+        let hash_hex = wire.hash_hex;
         let (_, total_size, weight, vsize) =
             Self::calculate_segwit_sizes(&tx, Some(witnesses.as_slice()));
-        let hash_hex = if witnesses.iter().any(|w| !w.is_empty()) {
-            wtxid_hex.clone()
-        } else {
-            txid_hex.clone()
-        };
         let tx_hex_out = Self::serialize_transaction_with_witness(&tx, Some(&witnesses));
 
         // Pre-allocate and build vin
@@ -846,23 +831,17 @@ impl RawTxRpc {
         verbose: bool,
     ) -> RpcResult<Value> {
         use blvm_protocol::block::calculate_tx_id;
-
+        let wire = crate::rpc::txwire::tx_wire(tx, witnesses);
         let txid_hex = hex::encode(calculate_tx_id(tx));
-        let witness_slices = witnesses.unwrap_or(&[]);
-        let wtxid_hex = if witnesses.is_some() {
-            Self::calculate_wtxid(tx, witness_slices)
+        let has_witness = witnesses
+            .map(|stacks| stacks.iter().any(|stack| !stack.is_empty()))
+            .unwrap_or(false);
+        let hash_hex = if has_witness {
+            wire.hash_hex
         } else {
             txid_hex.clone()
         };
         let (_, total_size, weight, vsize) = Self::calculate_segwit_sizes(tx, witnesses);
-        let hash_hex = if witnesses
-            .map(|w| w.iter().any(|stack| !stack.is_empty()))
-            .unwrap_or(false)
-        {
-            wtxid_hex
-        } else {
-            txid_hex.clone()
-        };
         let tx_hex = Self::serialize_transaction_with_witness(tx, witnesses);
 
         if verbose {
@@ -1321,7 +1300,7 @@ impl RawTxRpc {
                 return Err(RpcError::invalid_params("Empty proof"));
             }
 
-            use crate::rpc::merkle_block::{MerkleBlock, block_hash_from_header};
+            use crate::rpc::merkle_block::{block_hash_from_header, MerkleBlock};
 
             let merkle_block = MerkleBlock::deserialize(&proof_bytes).map_err(|e| {
                 RpcError::invalid_params(format!("Invalid merkle block proof: {e}"))
