@@ -557,6 +557,7 @@ mod tests {
         test_reset_probes();
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn probe_keep_hero_is_wave_ge80() {
         test_reset_probes();
@@ -569,6 +570,7 @@ mod tests {
         test_reset_probes();
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn exclude_and_empty() {
         test_reset_probes();
@@ -608,6 +610,7 @@ mod tests {
         test_reset_probes();
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn unranked_fail_is_not_keep() {
         test_reset_probes();
@@ -646,6 +649,7 @@ mod tests {
         assert!(!mesh_fail_ready(4_999, 180_000));
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn dest_be_mesh_abort_must_not_shutdown_while_validation_advances() {
         // dest-be 05:23:18: ge80=0 after 180s, vh=360583 still climbing,
