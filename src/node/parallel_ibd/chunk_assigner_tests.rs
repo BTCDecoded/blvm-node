@@ -15421,24 +15421,25 @@ fn r354_window_stall_dup_goes_to_an_empty_pipe_first() {
     }
     let dup = assigner
         .get_work("p1", 1024)
-        .expect("idle p1 takes the tip");
-    assert_eq!(dup, (210_001, 210_001), "wide cover peels to one block");
-    let flying = assigner.in_flight_per_peer.lock().unwrap();
+        .expect("idle p1 takes the stall dup");
+    assert_eq!(dup, (210_001, 210_016), "dup covers the stalled front tile");
     assert!(
-        flying.get("p0").map_or(true, |v| v.is_empty()
-            || v.iter().all(|(s, e)| !(*s <= 210_001 && 210_001 <= *e))),
-        "wide holder no longer covers the tip"
+        assigner
+            .in_flight_per_peer
+            .lock()
+            .unwrap()
+            .get("p0")
+            .is_some_and(|v| !v.is_empty()),
+        "one strike does not release the holder"
     );
     ChunkAssigner::window_test_force(false);
 }
 
-/// Resume7: a higher tile had already finished and the tile EMA was the stalled
-/// front (40 s → stall cap 30 s). Stealing that front at the 3 s floor reassigned
-/// the tip every few seconds, so the GetData never stayed with one peer. A 4 s
-/// age stays under the EMA cap; the idle peer takes the next free tile.
+/// An empty pipe duplicates the front at the 1 s floor. A 40 s tile EMA does not
+/// hold that pipe off a 4 s cover; the holder keeps the original tile.
 #[serial_test::serial(ibd)]
 #[test]
-fn r376_proven_pipeline_does_not_steal_front_before_ema_cap() {
+fn r376_idle_pipe_dups_a_young_front_despite_tile_ema() {
     ChunkAssigner::window_test_force(true);
     let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["p0", "p1", "p2", "p3"]);
     let front = assigner.get_work("p0", 1024).expect("p0 takes the front");
@@ -15456,10 +15457,11 @@ fn r376_proven_pipeline_does_not_steal_front_before_ema_cap() {
     }
     let next = assigner
         .get_work("p2", 1024)
-        .expect("idle peer takes the next tile, not the 4s front");
-    assert!(
-        next.0 > ahead.1,
-        "4s front stays with p0 under a 30s EMA cap, got {next:?}"
+        .expect("idle p2 duplicates the front");
+    assert_eq!(
+        next,
+        (210_001, 210_016),
+        "empty pipe duplicates the 4s front, got {next:?}"
     );
     assert!(
         assigner
@@ -15471,7 +15473,6 @@ fn r376_proven_pipeline_does_not_steal_front_before_ema_cap() {
         "holder keeps the front"
     );
 
-    // Cold pipeline: EMA cap still applies, so 4 s does not steal.
     let cold = wan_tip_assigner(210_000, 209_900, 300_000, &["c0", "c1"]);
     let cold_front = cold.get_work("c0", 1024).expect("c0 takes the front");
     assert_eq!(cold_front, (210_001, 210_016));
@@ -15483,8 +15484,8 @@ fn r376_proven_pipeline_does_not_steal_front_before_ema_cap() {
     }
     let next = cold
         .get_work("c1", 1024)
-        .expect("no proof yet, so the next tile");
-    assert_eq!(next.0, 210_017);
+        .expect("idle peer duplicates the front");
+    assert_eq!(next, (210_001, 210_016));
     ChunkAssigner::window_test_force(false);
 }
 
@@ -16188,16 +16189,17 @@ fn r356_window_stall_dup_fires_before_the_strike_threshold() {
     }
     let dup = assigner
         .get_work("p1", 1024)
-        .expect("idle p1 takes the tip");
-    assert_eq!(dup, (210_001, 210_001), "wide cover peels to one block");
-    let flying = assigner.in_flight_per_peer.lock().unwrap();
+        .expect("idle p1 takes the early dup");
+    assert_eq!(dup, (210_001, 210_016), "dup covers the stalled front tile");
     assert!(
-        flying.get("p0").map_or(true, |v| {
-            v.iter().all(|(s, e)| !(*s <= 210_001 && 210_001 <= *e))
-        }),
-        "holder no longer covers the tip"
+        assigner
+            .in_flight_per_peer
+            .lock()
+            .unwrap()
+            .get("p0")
+            .is_some_and(|v| !v.is_empty()),
+        "holder keeps its tile"
     );
-    drop(flying);
     assert!(
         assigner
             .window_strikes
