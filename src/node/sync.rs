@@ -645,8 +645,7 @@ impl SyncCoordinator {
         connect_height: u64,
         utxo_set: &mut UtxoSet,
     ) -> Result<bool> {
-        let wire =
-            blvm_protocol::serialization::serialize_block_with_witnesses(block, witnesses, true);
+        let wire = serialize_mined_block_wire(block, witnesses);
         self.connect_block_wire(
             blockstore,
             protocol,
@@ -656,6 +655,34 @@ impl SyncCoordinator {
             utxo_set,
         )
     }
+}
+
+/// Emit Bitcoin/SegWit block wire bytes that `deserialize_block_with_witnesses` can parse.
+///
+/// crates.io `blvm-primitives` 0.1.22 `serialize_block_with_witnesses` writes a non-Bitcoin
+/// layout (block-level `0x00 0x01`, then all txs, then all witnesses). The deserializer
+/// expects per-tx SegWit encoding via `serialize_transaction_with_witness` /
+/// `deserialize_transaction_with_witness`. Empty witnesses happened to avoid the marker and
+/// round-trip; a BIP141 reserved coinbase nonce does not. Keep this helper until a fixed
+/// primitives release is published and CI can use it.
+fn serialize_mined_block_wire(
+    block: &Block,
+    witnesses: &[Vec<blvm_protocol::segwit::Witness>],
+) -> Vec<u8> {
+    use blvm_protocol::serialization::serialize_block_header;
+    use blvm_protocol::serialization::serialize_transaction_with_witness;
+    use blvm_protocol::serialization::varint::encode_varint;
+
+    let mut wire = serialize_block_header(&block.header);
+    wire.extend_from_slice(&encode_varint(block.transactions.len() as u64));
+    for (i, tx) in block.transactions.iter().enumerate() {
+        let stacks = witnesses.get(i).map(|w| w.as_slice()).unwrap_or(&[]);
+        let padded: Vec<blvm_protocol::segwit::Witness> = (0..tx.inputs.len())
+            .map(|j| stacks.get(j).cloned().unwrap_or_default())
+            .collect();
+        wire.extend_from_slice(&serialize_transaction_with_witness(tx, &padded));
+    }
+    wire
 }
 
 impl Default for InMemoryBlockProvider {

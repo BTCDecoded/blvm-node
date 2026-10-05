@@ -856,7 +856,7 @@ impl MiningCoordinator {
         Ok(())
     }
 
-    /// Build per-transaction witness stacks for block connect (coinbase uses empty stacks).
+    /// Build per-transaction witness stacks for block connect (BIP141 reserved nonce on coinbase when committed).
     fn build_witnesses_for_block(
         &self,
         block: &Block,
@@ -873,7 +873,14 @@ impl MiningCoordinator {
             .iter()
             .map(|tx| {
                 if is_coinbase(tx) {
-                    return Ok(tx.inputs.iter().map(|_| Witness::default()).collect());
+                    // BIP141: a coinbase with a witness commitment needs one 32-byte reserved
+                    // value on its single input. The template commits with the all-zero value.
+                    let reserved: Witness = if coinbase_has_witness_commitment(tx) {
+                        vec![vec![0u8; 32]]
+                    } else {
+                        Witness::default()
+                    };
+                    return Ok(vec![reserved]);
                 }
                 let txid = calculate_tx_id(tx);
                 if let Some(wits) = self.mempool.get_transaction_witnesses(&txid) {
@@ -1070,6 +1077,15 @@ impl MempoolProvider for MockMempoolProvider {
     fn get_transaction_witnesses(&self, _hash: &[u8; 32]) -> Option<Vec<Witness>> {
         None
     }
+}
+
+/// True when a coinbase output is a BIP141 witness commitment
+/// (`OP_RETURN 0x24 0xaa21a9ed` followed by 32 bytes).
+fn coinbase_has_witness_commitment(coinbase: &Transaction) -> bool {
+    coinbase.outputs.iter().any(|o| {
+        let s = &o.script_pubkey;
+        s.len() >= 38 && s[..6] == [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed]
+    })
 }
 
 #[cfg(test)]
