@@ -980,7 +980,22 @@ impl MiningRpc {
             let witnesses: Vec<Vec<Witness>> = mined
                 .transactions
                 .iter()
-                .map(|tx| tx.inputs.iter().map(|_| Witness::default()).collect())
+                .enumerate()
+                .map(|(i, tx)| {
+                    // The template commitment is hashed with 32 zero bytes.
+                    let commitment = i == 0
+                        && tx.outputs.iter().any(|output| {
+                            let script: &[u8] = output.script_pubkey.as_ref();
+                            script.len() >= 6
+                                && script[0] == 0x6a
+                                && script[2..6] == [0xaa, 0x21, 0xa9, 0xed]
+                        });
+                    if commitment {
+                        tx.inputs.iter().map(|_| vec![vec![0u8; 32]]).collect()
+                    } else {
+                        tx.inputs.iter().map(|_| Witness::default()).collect()
+                    }
+                })
                 .collect();
 
             let accepted = coord
