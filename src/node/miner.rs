@@ -1722,7 +1722,7 @@ mod tests {
             .build_witnesses_for_block(&block, &utxo_set)
             .expect("witness spend with stored mempool witnesses");
         assert_eq!(witnesses.len(), 2);
-        assert!(witnesses[0].iter().all(|w| w.is_empty()));
+        assert_eq!(witnesses[0], vec![vec![vec![0u8; 32]]]);
         assert_eq!(witnesses[1], vec![witness_stack.clone()]);
         assert_eq!(
             coordinator.mempool.get_transaction_witnesses(&txid),
