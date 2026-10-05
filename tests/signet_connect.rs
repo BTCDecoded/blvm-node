@@ -25,8 +25,6 @@ fn signet_genesis_connects_at_height_zero() {
         .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
         .collect();
 
-    store_block_with_context(&storage.blocks(), &genesis, &witnesses, 0).unwrap();
-
     let mut utxo_set = UtxoSet::default();
     let result = validate_block_with_context(
         &storage.blocks(),
@@ -37,6 +35,10 @@ fn signet_genesis_connects_at_height_zero() {
         0,
     )
     .unwrap();
+
+    // Store after validation. Storing first puts this header into the median,
+    // and the genesis time is not strictly later than itself.
+    store_block_with_context(&storage.blocks(), &genesis, &witnesses, 0).unwrap();
 
     assert!(
         matches!(result, ValidationResult::Valid),
