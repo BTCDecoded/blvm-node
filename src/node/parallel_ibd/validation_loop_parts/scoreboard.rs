@@ -434,6 +434,12 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
     // BIP30 O(1) index: for non-disk path, maintain locally. For disk path, DiskBackedUtxoSet owns it.
     let mut bip30_index = Bip30Index::default();
+    let consensus_network = protocol.get_protocol_version().consensus_network();
+    // Set once the known height-in-coinbase block has been connected. Until then the
+    // index is required. After that block the lookup may be skipped until
+    // `BIP34_IMPLIES_BIP30_LIMIT`, which is when this flag is no longer enough.
+    let mut bip34_hash_matches = false;
+    let mut bip30_index_dropped = false;
     // Arc<UtxoDelta> so under-lock snapshots in the dispatcher fold are pointer-bumps only,
     // not deep clones of the delta vectors. Retire takes the Arc out (refcount drops to 1 after
     // the dispatcher's transient fold clones go out of scope) and operates on the inner value.
@@ -2214,8 +2220,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         }
 
         // === DISPATCH PHASE: fill pipeline up to pipeline_depth_live ===
-        // BIP30 adjacency guard: the two exceptional heights on mainnet (91722, 91842)
-        // require sequential BIP30 state propagation — force depth=1 to serialize through them.
+        // The two historical duplicate-coinbase blocks sit in this range. Force depth=1
+        // so their BIP30 index updates are applied before the next height is dispatched.
         // Otherwise pipeline_depth controls how far ahead the dispatcher can run, while
         // n_validate_workers controls how many of those in-flight blocks execute concurrently.
         let pipeline_depth_live: usize = if (91710..=91855).contains(&next_validation_height) {
@@ -2766,13 +2772,20 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 std::mem::take(&mut keys_v2_buf)
             };
 
-            // Past the BIP30 exceptional range (91710..=91855) no duplicate coinbase
-            // txids can occur in a valid Bitcoin chain. Sending an empty index to each
-            // worker is correct: the check always passes, and we avoid cloning a
-            // potentially large FxHashMap<Hash, usize> × pipeline_depth times per block.
-            // Within the range we must clone the live state because workers update it
-            // in-place (sequential at depth=1, but each job needs a snapshot).
-            let bip30_for_job: Bip30Index = if h > 91855 {
+            // After the known height-in-coinbase block, a new coinbase cannot repeat an
+            // earlier one until `BIP34_IMPLIES_BIP30_LIMIT`. An empty index is the skip.
+            // Before that block, and again from the limit, the live index is required.
+            let skip_bip30 = blvm_protocol::bip_validation::bip30_lookup_skippable(
+                consensus_network,
+                h,
+                bip34_hash_matches,
+            );
+            if !skip_bip30 && bip30_index_dropped {
+                return Err(anyhow::anyhow!(
+                    "duplicate-coinbase index was dropped before height {h}"
+                ));
+            }
+            let bip30_for_job: Bip30Index = if skip_bip30 {
                 Bip30Index::default()
             } else {
                 bip30_index.clone()
@@ -3100,22 +3113,49 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         keys_v2_buf.clear();
         let witnesses_to_use: &[Vec<Witness>] = witnesses_storage.as_slice();
 
-        // Only propagate the returned BIP30 state while within the exceptional range.
-        // Workers past h=91855 received Bip30Index::default() and updated it with just
-        // one block's worth of entries — accepting that back would evict our accumulated
-        // state. Once the range is cleared we also free the index memory since it is
-        // no longer referenced for anything.
-        if vres.height <= 91855 {
-            bip30_index = vres.bip30_post;
-            if vres.height == 91855 {
-                bip30_index.clear();
-                bip30_index.shrink_to_fit();
-                info!(
-                    "[IBD] BIP30 exceptional range complete at h=91855 — cleared BIP30 index \
-                       (eliminates per-dispatch clone cost for remaining ~{}k blocks)",
-                    (700_000u64.saturating_sub(91855)) / 1000
-                );
+        // Workers in the skip window received an empty index. Taking that back would
+        // replace the accumulated map with one block. Keep the map until the known
+        // height-in-coinbase block is connected, then drop it. From
+        // `BIP34_IMPLIES_BIP30_LIMIT` the lookup is mandatory again and a dropped
+        // index is a hard failure at dispatch.
+        if !bip34_hash_matches
+            && blvm_protocol::bip_validation::is_known_bip34_header(
+                consensus_network,
+                vres.height,
+                &block_arc.header,
+            )
+        {
+            bip34_hash_matches = true;
+        }
+        let skip_bip30 = blvm_protocol::bip_validation::bip30_lookup_skippable(
+            consensus_network,
+            vres.height,
+            bip34_hash_matches,
+        );
+        if !skip_bip30 {
+            if bip30_index_dropped {
+                return Err(anyhow::anyhow!(
+                    "duplicate-coinbase index was dropped before height {}",
+                    vres.height
+                ));
             }
+            bip30_index = vres.bip30_post;
+        }
+        if bip34_hash_matches
+            && !bip30_index_dropped
+            && blvm_protocol::bip_validation::bip30_lookup_skippable(
+                consensus_network,
+                vres.height.saturating_add(1),
+                true,
+            )
+        {
+            bip30_index.clear();
+            bip30_index.shrink_to_fit();
+            bip30_index_dropped = true;
+            info!(
+                "[IBD] height-in-coinbase block matched at h={} — cleared duplicate-coinbase index",
+                vres.height
+            );
         }
         // R-359: fold whatever MuHash subs have arrived, in height order (non-blocking).
         if muhash_fold_active {

@@ -1914,7 +1914,8 @@ struct ValidateResult {
 //     They equal D(h).additions for any valid block, so correctness holds.
 //   - Results arrive in any order; the orchestrator retires in strict ascending
 //     order so IbdUtxoStore invariants are preserved.
-//   - BIP30-sensitive range [91710..91855]: force pipeline_depth_live=1 (also serializes workers).
+//   - Heights 91710..=91855: force pipeline_depth_live=1 so the two historical
+//     duplicate-coinbase blocks update the index before the next height is dispatched.
 //   - pipeline_depth (max in-flight) is decoupled from n_validate_workers (concurrent execution).
 //     A deeper pipeline lets the dispatcher front-run so a single slow block at the head of the
 //     in-order queue doesn't starve other workers.
