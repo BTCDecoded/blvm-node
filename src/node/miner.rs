@@ -856,7 +856,10 @@ impl MiningCoordinator {
         Ok(())
     }
 
-    /// Build per-transaction witness stacks for block connect (coinbase uses empty stacks).
+    /// Build per-transaction witness stacks for block connect.
+    ///
+    /// The mined commitment is `sha256d(witness root || 32 zero bytes)`. The coinbase
+    /// input must carry that reserved value; an empty stack is not those 32 bytes.
     fn build_witnesses_for_block(
         &self,
         block: &Block,
@@ -873,7 +876,7 @@ impl MiningCoordinator {
             .iter()
             .map(|tx| {
                 if is_coinbase(tx) {
-                    return Ok(tx.inputs.iter().map(|_| Witness::default()).collect());
+                    return Ok(tx.inputs.iter().map(|_| vec![vec![0u8; 32]]).collect());
                 }
                 let txid = calculate_tx_id(tx);
                 if let Some(wits) = self.mempool.get_transaction_witnesses(&txid) {

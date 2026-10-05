@@ -473,7 +473,10 @@ impl SyncCoordinator {
             );
             Ok(true)
         } else {
-            error!("Block validation failed at height {}", current_height);
+            error!(
+                "Block validation failed at height {}: {validation_result:?}",
+                current_height
+            );
             Ok(false)
         }
     }
@@ -526,7 +529,10 @@ impl SyncCoordinator {
             processing_time = start_time.elapsed();
             if !matches!(validation_result, ValidationResult::Valid) {
                 *utxo_set = utxo_for_connect;
-                error!("Block validation failed at height {}", connect_height);
+                error!(
+                    "Block validation failed at height {}: {validation_result:?}",
+                    connect_height
+                );
                 return Ok(false);
             }
 
