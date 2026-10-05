@@ -758,8 +758,9 @@ impl PruningManager {
                         self.network,
                     )?;
 
-                    let ctx =
+                    let mut ctx =
                         blvm_protocol::block::BlockValidationContext::for_network(self.network);
+                    ctx.sequence_prev_mtp = Some(self.blockstore.sequence_prev_mtp_lookup());
                     let (validation_result, new_utxo_set, _undo_log) =
                         connect_block(&block, &witnesses, utxo_set, height, &ctx)?;
 

@@ -792,6 +792,30 @@ impl BlockStore {
         self.get_header(&hash)
     }
 
+    /// Median time of the block at `height` (up to 11 headers ending at that block).
+    ///
+    /// Missing any header in the window returns `None` so a time-based relative
+    /// lock is rejected instead of measured from the wrong block.
+    pub fn median_time_at_height(&self, height: u64) -> Result<Option<u64>> {
+        let start = height.saturating_sub(10);
+        let mut headers = Vec::with_capacity(11);
+        for h in start..=height {
+            match self.get_header_at_height(h)? {
+                Some(header) => headers.push(header),
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(blvm_protocol::bip113::get_median_time_past(&headers)))
+    }
+
+    /// Lookup used by block connection for time-based relative locks.
+    pub fn sequence_prev_mtp_lookup(
+        &self,
+    ) -> std::sync::Arc<dyn Fn(u64) -> Option<u64> + Send + Sync> {
+        let store = self.clone();
+        std::sync::Arc::new(move |height| store.median_time_at_height(height).ok().flatten())
+    }
+
     /// Headers for BIP113 MTP immediately before `before_height` (oldest→newest, ≤11).
     ///
     /// Prefer this over [`get_recent_headers`] when validating at a height far below tip.

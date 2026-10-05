@@ -741,6 +741,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             local_replay_no_lmdb_max,
                             replay_transition_done,
                             replay_hydration_done,
+                            utxo_nominal_max_entries,
                         );
                     })
                     .expect("spawn IBD retire shard")

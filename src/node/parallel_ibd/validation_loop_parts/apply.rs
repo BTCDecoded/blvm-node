@@ -435,16 +435,17 @@ fn run_ibd_retire_loop_no_commitment(
     max_pending_ops_last_adapt_ms: Arc<AtomicU64>,
     engine_mode: bool,
     durability_tx: Option<std::sync::mpsc::SyncSender<DurabilityRequest>>,
-    /// When non-zero: skip all LMDB durability writes while `h <= local_replay_no_lmdb_max`
-    /// (safe after a genesis restart where the LMDB UTXO store is empty).  A one-shot bulk
-    /// cache→LMDB write fires at `h = local_replay_no_lmdb_max + 1` to hydrate LMDB before
-    /// normal incremental durability resumes.  Zero means normal durability from the start.
+    // When non-zero: skip all LMDB durability writes while `h <= local_replay_no_lmdb_max`
+    // (safe after a genesis restart where the LMDB UTXO store is empty).  A one-shot bulk
+    // cache→LMDB write fires at `h = local_replay_no_lmdb_max + 1` to hydrate LMDB before
+    // normal incremental durability resumes.  Zero means normal durability from the start.
     local_replay_no_lmdb_max: u64,
     // Shared across all retire shards. CAS from false→true wins the bulk write.
     local_replay_transition_done: Arc<std::sync::atomic::AtomicBool>,
     // Set to `true` by the winning shard only AFTER flush_full_cache_to_lmdb() completes.
     // Losing shards spin on this before processing blocks h > local_replay_no_lmdb_max.
     local_replay_hydration_done: Arc<std::sync::atomic::AtomicBool>,
+    utxo_nominal_max_entries: usize,
 ) {
     let mut keys_buf: Vec<OutPointKey> = Vec::new();
     let mut keys_seen = rustc_hash::FxHashSet::default();

@@ -199,17 +199,20 @@ pub fn try_activate_heavier_fork(
         })
     };
 
+    let mtp_store = blockstore.clone();
     let mut connect_context =
         move |_height: u64,
               recent_headers: Option<&[blvm_consensus::types::BlockHeader]>,
               network_time: u64,
               net: Network|
               -> blvm_consensus::block::BlockValidationContext {
-            blvm_consensus::block::block_validation_context_for_connect_ibd(
+            let mut ctx = blvm_consensus::block::block_validation_context_for_connect_ibd(
                 recent_headers,
                 network_time,
                 net,
-            )
+            );
+            ctx.sequence_prev_mtp = Some(mtp_store.sequence_prev_mtp_lookup());
+            ctx
         };
 
     let result = reorganize_chain_with_witnesses(

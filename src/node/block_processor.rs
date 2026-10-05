@@ -316,8 +316,9 @@ pub fn validate_block_with_context_and_undo(
         ));
     }
 
-    let consensus_ctx =
+    let mut consensus_ctx =
         protocol.connect_block_validation_context(recent_headers.as_deref(), network_time);
+    consensus_ctx.sequence_prev_mtp = Some(blockstore.sequence_prev_mtp_lookup());
     let owned_utxo = std::mem::take(utxo_set);
     let (result, new_utxo_set, undo_log) =
         blvm_consensus::block::connect_block(block, witnesses, owned_utxo, height, &consensus_ctx)?;
