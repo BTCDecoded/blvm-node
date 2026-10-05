@@ -961,6 +961,11 @@ impl MiningRpc {
                         RpcError::internal_error(format!("generatetoaddress: template failed: {e}"))
                     })?
             };
+            // A block mined in the same second as its parent is not later than the median.
+            let median_time_past = blvm_protocol::bip113::get_median_time_past(&prev_headers);
+            if block.header.timestamp <= median_time_past {
+                block.header.timestamp = median_time_past.saturating_add(1);
+            }
             block.header.version = 4;
 
             let (mined, result) = self.consensus.mine_block(block, max_tries).map_err(|e| {
