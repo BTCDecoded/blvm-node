@@ -20,7 +20,7 @@ use crate::rpc::params::{
 use crate::storage::Storage;
 use crate::utils::{storage_timeout_from_config, with_custom_timeout};
 use hex;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::result::Result;
 use std::sync::Arc;
@@ -1300,7 +1300,7 @@ impl RawTxRpc {
                 return Err(RpcError::invalid_params("Empty proof"));
             }
 
-            use crate::rpc::merkle_block::{block_hash_from_header, MerkleBlock};
+            use crate::rpc::merkle_block::{MerkleBlock, block_hash_from_header};
 
             let merkle_block = MerkleBlock::deserialize(&proof_bytes).map_err(|e| {
                 RpcError::invalid_params(format!("Invalid merkle block proof: {e}"))

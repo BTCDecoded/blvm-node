@@ -150,10 +150,7 @@ impl MempoolRpc {
             } else {
                 let txids: Vec<String> = transactions
                     .iter()
-                    .map(|tx| {
-                        let txid = calculate_tx_id(tx);
-                        hex::encode(txid)
-                    })
+                    .map(|tx| hex::encode(calculate_tx_id(tx)))
                     .collect();
                 Ok(json!(txids))
             }

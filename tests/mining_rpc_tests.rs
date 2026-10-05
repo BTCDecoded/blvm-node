@@ -13,8 +13,8 @@ use tempfile::TempDir;
 
 mod common;
 use common::{
-    patch_storage_chain_network_regtest, setup_mining_chain, valid_transaction,
-    MINING_RPC_CHAIN_BLOCKS,
+    MINING_RPC_CHAIN_BLOCKS, patch_storage_chain_network_regtest, setup_mining_chain,
+    valid_transaction,
 };
 
 async fn expect_block_template(

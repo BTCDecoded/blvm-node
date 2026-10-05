@@ -15705,14 +15705,24 @@ fn r376_uncovered_tip_is_taken_ahead_of_the_done_wall() {
 #[serial_test::serial(ibd)]
 #[test]
 fn r376_uncovered_tip_gets_a_third_peer_after_one_second() {
-    assert!(ChunkAssigner::uncovered_tip_third_cover(true, true, 2, 1, 1));
+    assert!(ChunkAssigner::uncovered_tip_third_cover(
+        true, true, 2, 1, 1
+    ));
     assert!(!ChunkAssigner::uncovered_tip_third_cover(
         false, true, 2, 5, 1
     ));
-    assert!(!ChunkAssigner::uncovered_tip_third_cover(true, true, 1, 5, 1));
-    assert!(!ChunkAssigner::uncovered_tip_third_cover(true, true, 3, 5, 1));
-    assert!(!ChunkAssigner::uncovered_tip_third_cover(true, false, 2, 5, 1));
-    assert!(!ChunkAssigner::uncovered_tip_third_cover(true, true, 2, 0, 1));
+    assert!(!ChunkAssigner::uncovered_tip_third_cover(
+        true, true, 1, 5, 1
+    ));
+    assert!(!ChunkAssigner::uncovered_tip_third_cover(
+        true, true, 3, 5, 1
+    ));
+    assert!(!ChunkAssigner::uncovered_tip_third_cover(
+        true, false, 2, 5, 1
+    ));
+    assert!(!ChunkAssigner::uncovered_tip_third_cover(
+        true, true, 2, 0, 1
+    ));
 
     ChunkAssigner::window_test_force(true);
     let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["h0", "h1", "idle", "extra"]);
@@ -15737,11 +15747,15 @@ fn r376_uncovered_tip_gets_a_third_peer_after_one_second() {
     assert_eq!(third, (tip, tip), "the third request is that one height");
     let flying = assigner.in_flight_per_peer.lock().unwrap();
     assert!(
-        flying.get("h0").is_some_and(|v| v.iter().any(|&(s, e)| s <= tip && tip <= e)),
+        flying
+            .get("h0")
+            .is_some_and(|v| v.iter().any(|&(s, e)| s <= tip && tip <= e)),
         "the first holder keeps the height"
     );
     assert!(
-        flying.get("h1").is_some_and(|v| v.iter().any(|&(s, e)| s <= tip && tip <= e)),
+        flying
+            .get("h1")
+            .is_some_and(|v| v.iter().any(|&(s, e)| s <= tip && tip <= e)),
         "the second holder keeps the height"
     );
     drop(flying);
@@ -15808,7 +15822,11 @@ fn r376_stale_wide_tiles_get_one_fresh_tip_request() {
     let first = assigner
         .get_work("idle", 4096)
         .expect("idle peer takes the stale tip");
-    assert_eq!(first, (tip, tip), "the request is that one height: {first:?}");
+    assert_eq!(
+        first,
+        (tip, tip),
+        "the request is that one height: {first:?}"
+    );
     let second_now = assigner.get_work("peek", 4096);
     assert!(
         second_now.is_some_and(|(s, _)| s > tip),
@@ -15821,7 +15839,11 @@ fn r376_stale_wide_tiles_get_one_fresh_tip_request() {
     let second = assigner
         .get_work("idle2", 4096)
         .expect("once the one-block request is stale, another idle peer asks");
-    assert_eq!(second, (tip, tip), "the second request is that one height: {second:?}");
+    assert_eq!(
+        second,
+        (tip, tip),
+        "the second request is that one height: {second:?}"
+    );
     assigner.window_started.lock().unwrap().insert(
         ("idle2".to_string(), tip, tip),
         Instant::now() - Duration::from_secs(2),
@@ -15842,7 +15864,9 @@ fn r376_stale_wide_tiles_get_one_fresh_tip_request() {
     let flying = assigner.in_flight_per_peer.lock().unwrap();
     for peer in ["h0", "h1", "h2"] {
         assert!(
-            flying.get(peer).is_some_and(|v| v.iter().any(|&(s, e)| s == tip && e == tip + 3)),
+            flying
+                .get(peer)
+                .is_some_and(|v| v.iter().any(|&(s, e)| s == tip && e == tip + 3)),
             "wide holder {peer} keeps the tile"
         );
     }
@@ -15918,7 +15942,11 @@ fn r376_peer_at_cap_takes_the_second_tip_cover() {
     let second = assigner
         .get_work("capped", 4096)
         .expect("a peer at the tile cap still takes the uncovered tip");
-    assert_eq!(second, (tip, tip), "the request is that one height: {second:?}");
+    assert_eq!(
+        second,
+        (tip, tip),
+        "the request is that one height: {second:?}"
+    );
     let flying = assigner.in_flight_per_peer.lock().unwrap();
     assert!(
         flying
@@ -15950,7 +15978,10 @@ fn r376_empty_reorder_keeps_the_runway() {
     let mut furthest = tip;
     for name in &names {
         if let Some((start, end)) = assigner.get_work(name, 4096) {
-            assert!(start >= tip, "work stays at the tip or ahead: {start}-{end}");
+            assert!(
+                start >= tip,
+                "work stays at the tip or ahead: {start}-{end}"
+            );
             furthest = furthest.max(end);
         }
     }

@@ -719,8 +719,6 @@ fn merge_append_bulk_fallback(
     Ok(n)
 }
 
-/// One record from an E4 append run file.
-
 fn e3c_offset(kv: &OutputKV) -> u64 {
     IdCodec::decode(kv.id).0
 }
@@ -733,14 +731,9 @@ fn output_kv_bytes(kv: &OutputKV) -> &[u8] {
     unsafe { std::slice::from_raw_parts(kv as *const OutputKV as *const u8, OutputKV::SIZE) }
 }
 
+#[derive(Default)]
 struct E3cRunCleanup {
     paths: Vec<PathBuf>,
-}
-
-impl Default for E3cRunCleanup {
-    fn default() -> Self {
-        Self { paths: Vec::new() }
-    }
 }
 
 impl Drop for E3cRunCleanup {

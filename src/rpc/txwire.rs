@@ -5,11 +5,11 @@
 //! `data` stays the wire bytes. A transaction with no witness uses the
 //! non-witness serialization, so `hash` equals `txid`.
 
+use blvm_protocol::Transaction;
 use blvm_protocol::block::calculate_tx_id;
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::serialization::serialize_transaction;
 use blvm_protocol::serialization::serialize_transaction_with_witness;
-use blvm_protocol::Transaction;
 use sha2::{Digest, Sha256};
 
 use crate::storage::hashing::hash_to_rpc_hex;
@@ -60,14 +60,18 @@ mod tests {
     /// The genesis id is also Bitcoin Core's published coinbase txid.
     #[test]
     fn rpc_identifiers_match_rust_bitcoin_display_order() {
-        let (txid, hash) = identifiers("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000");
+        let (txid, hash) = identifiers(
+            "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000",
+        );
         assert_eq!(
             txid,
             "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
         );
         assert_eq!(hash, txid);
 
-        let (txid, hash) = identifiers("0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff010000000000000000015101015100000000");
+        let (txid, hash) = identifiers(
+            "0200000000010100000000000000000000000000000000000000000000000000000000000000000000000000ffffffff010000000000000000015101015100000000",
+        );
         assert_eq!(
             txid,
             "fbc337e9a8f09fb0468dbd5661f5f158bbbd128a804cf04cc9f291f58b4ec8f3"

@@ -55,26 +55,16 @@ pub(super) fn sort_external_keys(keys: &mut [OutputKey]) {
 
 /// GC fence for cross-checkpoint Add+Delete pair cancellation.
 ///
-/// The compacter's GC in `MemoryRun::merge` must not cancel an Add+Delete pair when the
-/// Delete height exceeds the last committed checkpoint. Otherwise, `scan_live_at_height(H)`
-/// run during a concurrent checkpoint export would miss UTXOs created before H but spent
-/// after H — producing an incomplete checkpoint that causes "UTXO not found" on resume.
+/// Starts at `i32::MAX`. No finite fence has been stored yet.
+/// `advance_gc_fence_to` and `advance_gc_fence_between_exports` use `fetch_max`
+/// and cannot leave `MAX`. `set_gc_fence` is the store. An export that never
+/// starts leaves the fence at `MAX`.
 ///
-/// Set this to the checkpoint height (inclusive) immediately **before** starting a
-/// checkpoint export. The GC will only cancel pairs where `Delete.height <= fence`.
-/// After the export is committed, advance the fence to the new checkpoint height.
+/// `MAX` means no finite fence yet. It does not mean the oldest fan-in window
+/// will shrink: that window does not contain Deletes that live in younger segments.
 ///
-/// Initialized to `i32::MAX` so GC runs freely before the first checkpoint is committed.
-/// GC fence: compaction may only cancel an Add+Delete pair when Delete.height <= this value.
-///
-/// Starts at 0 (no GC until the first checkpoint export sets a real height). After each
-/// checkpoint export the fence is left at the exported height — NOT reset to i32::MAX.
-/// This prevents compaction from cancelling Add+Delete pairs for UTXOs that were live at
-/// the last checkpoint but spent after it (the Add would be missing from the next scan).
-///
-/// Advancing the fence to the next checkpoint height happens just before `scan_live_at_height`
-/// is called, so at that point GC is allowed to cancel all pairs spent at or before that height.
-/// Checkpoint export height, or `i32::MAX` when no export is in progress (unrestricted GC).
+/// Once `set_gc_fence` has stored a checkpoint height, compaction may cancel an
+/// Add+Delete pair only when `Delete.height <= fence`.
 static CHECKPOINT_GC_FENCE: AtomicI32 = AtomicI32::new(i32::MAX);
 
 /// Update the GC fence to `checkpoint_height`.

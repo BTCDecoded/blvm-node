@@ -1711,6 +1711,7 @@ pub(crate) fn wan_tip_dispatch_band() -> u64 {
 ///   `bmin>>tip` 86%, `gap_flush_on_abort`≈10k).
 /// - **Bulk catch-up (tip present):** far below header tip — use the admit `window`
 ///   (multi-peer pipe), not W18 tip-band serialization (live: 8–40 BPS at ~50–60k).
+///
 /// Resume9: the fill loop is blocked on the bridge cursor. That body is in
 /// reorder, and the atomic tip is already taken into the validation pipeline,
 /// so W58's `gap_missing` defer is looking at a tip that is no longer in
@@ -7682,26 +7683,23 @@ impl ParallelIBD {
                         let first_ahead =
                             reorder_first_ahead(&reorder_buffer, next_needed_dispatch);
                         assigner_for_coord.set_window_hole_until(first_ahead.unwrap_or(0));
-                        let in_reorder =
-                            reorder_buffer.contains_key(&next_needed_dispatch);
+                        let in_reorder = reorder_buffer.contains_key(&next_needed_dispatch);
                         let in_feeder = {
                             let g = feeder_state_for_coord.0.lock();
                             g.0.get(next_needed_dispatch).is_some()
                         };
-                        let in_bridge = ready_bridge_for_coord.as_ref().is_some_and(|b| {
-                            b.pending_contains(next_needed_dispatch)
-                        });
+                        let in_bridge = ready_bridge_for_coord
+                            .as_ref()
+                            .is_some_and(|b| b.pending_contains(next_needed_dispatch));
                         // Resume21: the hole was re-marked delivered and every peer
                         // was on a tile ~400 above it. covers==0, so the old yield
                         // (which requires a holder) never released them.
-                        assigner_for_coord.set_window_tip_uncovered(
-                            !in_reorder && !in_feeder && !in_bridge,
-                        );
+                        assigner_for_coord
+                            .set_window_tip_uncovered(!in_reorder && !in_feeder && !in_bridge);
                         if !in_reorder {
                             let until =
                                 first_ahead.unwrap_or(next_needed_dispatch.saturating_add(1));
-                            assigner_for_coord
-                                .window_reissue_absent(next_needed_dispatch, until);
+                            assigner_for_coord.window_reissue_absent(next_needed_dispatch, until);
                         }
                     }
                     // Repair bridge hole before dispatch so tip in pending can flush.
