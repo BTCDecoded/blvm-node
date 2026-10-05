@@ -643,7 +643,14 @@ fn c1n_gd_fast_elevates_cap_only_when_ewma_fast() {
             d = tip_hole_grow_on_delivery(d);
         }
         assert_eq!(d, fast, "gd-fast grow must reach FAST_CAP");
+        // Fast EWMA: a hot peer may take the warm/pipe cap.
+        assert!(tip_hole_grow_cap_for_peer(true) >= fast);
     }
+    // Resume15 dead zone: 655ms is above the 150ms fast gate and below the 800ms
+    // slow clamp. A hot peer must stay at the cold cap, not the 128 pipe.
+    super::super::tip_stage::test_seed_getdata_body_ewma(655, tip_hole_gd_fast_n());
+    assert_eq!(tip_hole_grow_cap_effective(), cold);
+    assert_eq!(tip_hole_grow_cap_for_peer(true), cold);
     super::super::tip_stage::test_reset_getdata_body_ewma();
     unsafe {
         std::env::remove_var("BLVM_IBD_TIP_HOLE_PIPE");
@@ -1049,6 +1056,34 @@ fn gap_timeout_for_chunk_tip_and_far() {
     );
 }
 
+#[test]
+fn r376_short_tile_deadline_is_ten_seconds() {
+    assert_eq!(
+        super::chunk_gap_deadline_secs(2819365, 2819368, 143, 45, true),
+        10
+    );
+    assert!(
+        super::chunk_gap_deadline_secs(2819365, 2819368, 143, 45, false) >= 90,
+        "an ahead tile keeps the long deadline so a partial download is not discarded"
+    );
+    assert_eq!(
+        super::chunk_gap_deadline_secs(2819365, 2819365, 143, 45, true),
+        45
+    );
+    assert!(super::chunk_gap_deadline_secs(700_001, 700_080, 700_000, 45, true) >= 90);
+}
+
+#[test]
+fn r376_abort_flush_sends_the_buffered_tip_only() {
+    assert_eq!(super::abort_flush_heights(&[10, 11, 12], 11), vec![11, 12]);
+    assert_eq!(super::abort_flush_heights(&[11], 11), vec![11]);
+    assert!(
+        super::abort_flush_heights(&[20, 21], 11).is_empty(),
+        "far-ahead buffer does not contain the tip"
+    );
+    assert_eq!(super::abort_flush_heights(&[5, 6], 11), vec![5, 6]);
+}
+
 #[serial_test::serial(ibd)]
 #[test]
 fn wan_deep_pipe_chunk_deadline_capped_on_wan_gap() {
@@ -1305,6 +1340,46 @@ fn hang_93063_tip_enter_reason_is_c1j_ahead() {
         tip_enter_abort_reason(false, true, 93063, 93063, 93063),
         "walk_in_other"
     );
+}
+
+/// R-378: a store hit has no wire frame. Noting the field-count approximation
+/// held the tile EMA at ~75 KB (tile 13) while BODY_DUP wire was ~135 KB (tile 7).
+#[serial_test::serial(ibd)]
+#[test]
+fn store_hit_does_not_move_tile_estimate() {
+    test_reset_download_bytes();
+    test_set_download_est(1_000_000);
+    let bytes = download_bytes_total();
+    let est = download_est_block_bytes();
+    note_wire_frame_bytes("local", None);
+    note_wire_frame_bytes("local", Some(&[]));
+    assert_eq!(
+        download_est_block_bytes(),
+        est,
+        "missing frame must not move the EMA"
+    );
+    assert_eq!(
+        download_bytes_total(),
+        bytes,
+        "missing frame must not credit WAN bytes"
+    );
+
+    note_wire_frame_bytes("wan", Some(&vec![0u8; 140_000]));
+    let next = (1_000_000u64 * 7 + 140_000) / 8;
+    assert_eq!(download_est_block_bytes(), next);
+    assert_eq!(download_bytes_total(), bytes + 140_000);
+
+    assert_eq!(
+        super::super::chunk_assigner::ChunkAssigner::window_tile_for(140_000, 1_000_000, 64),
+        7
+    );
+    assert_eq!(
+        super::super::chunk_assigner::ChunkAssigner::window_tile_for(75_000, 1_000_000, 64),
+        13
+    );
+
+    test_set_download_est(1_000_000);
+    test_reset_download_bytes();
 }
 
 /// R-153/R-155 leftover: node `win_mbps` is global. This names who owns the bytes.

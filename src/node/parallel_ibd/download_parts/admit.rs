@@ -472,6 +472,29 @@ pub(crate) fn worker_chunk_outer_deadline_secs(
     }
 }
 
+/// Far tile whose handshake has not finished. Resume22 waited out 15s here,
+/// before the download loop's past-hole release could run.
+fn release_if_past_hole(
+    tip_enter: &Option<Arc<super::chunk_assigner::ChunkAssigner>>,
+    peer_id: &str,
+    start_height: u64,
+    end_height: u64,
+    phase: &str,
+) -> Result<()> {
+    if tip_enter
+        .as_ref()
+        .is_some_and(|a| a.past_hole_should_release(start_height))
+    {
+        warn!(
+            "[IBD_PAST_HOLE_RELEASE] peer={peer_id} chunk={start_height}-{end_height} phase={phase} — tip uncovered, leaving the far tile"
+        );
+        return Err(anyhow::anyhow!(
+            "tip-dup yield: past-hole release chunk {start_height}-{end_height} phase={phase}"
+        ));
+    }
+    Ok(())
+}
+
 /// Wait for outbound peer connection, spawning reconnect if needed.
 async fn wait_for_peer_connected(
     network: &Arc<NetworkManager>,
@@ -480,6 +503,7 @@ async fn wait_for_peer_connected(
     max_wait: Duration,
     tip_enter: &Option<Arc<super::chunk_assigner::ChunkAssigner>>,
     start_height: u64,
+    end_height: u64,
 ) -> Result<()> {
     // Check eviction FIRST — an IP that has been permanently evicted this session
     // must be rejected even if it briefly reconnects.
@@ -515,6 +539,7 @@ async fn wait_for_peer_connected(
             ));
         }
     }
+    release_if_past_hole(tip_enter, peer_id, start_height, end_height, "connect")?;
     if network.is_peer_connected(peer_addr).await {
         return Ok(());
     }
@@ -556,6 +581,7 @@ async fn wait_for_peer_connected(
                 ));
             }
         }
+        release_if_past_hole(tip_enter, peer_id, start_height, end_height, "connect")?;
         if network.is_peer_connected(peer_addr).await {
             return Ok(());
         }
@@ -575,7 +601,9 @@ async fn wait_for_peer_ibd_ready(
     max_wait: Duration,
     tip_enter: &Option<Arc<super::chunk_assigner::ChunkAssigner>>,
     start_height: u64,
+    end_height: u64,
 ) -> Result<()> {
+    release_if_past_hole(tip_enter, peer_id, start_height, end_height, "handshake")?;
     let deadline = tokio::time::Instant::now() + max_wait;
     let mut poll = tokio::time::interval(Duration::from_millis(200));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -609,6 +637,7 @@ async fn wait_for_peer_ibd_ready(
                 ));
             }
         }
+        release_if_past_hole(tip_enter, peer_id, start_height, end_height, "handshake")?;
         if network.peer_ibd_ready(peer_addr).await {
             return Ok(());
         }
@@ -750,6 +779,22 @@ async fn enqueue_network_block_batch(
     }
     for &(height, _) in &heights_and_hashes {
         super::tip_stage::mark_getdata_from_peer(height, peer_id);
+    }
+    // The tip stall is a missing body. This is the send, distinct from assignment age.
+    let need = validation_tip.saturating_add(1);
+    if heights_and_hashes.iter().any(|(h, _)| *h <= need.saturating_add(2)) {
+        let lo = heights_and_hashes.iter().map(|(h, _)| *h).min().unwrap_or(0);
+        let hi = heights_and_hashes.iter().map(|(h, _)| *h).max().unwrap_or(0);
+        tracing::warn!(
+            "[IBD_TIP_GETDATA] peer={} need={} batch={}..={} n={} chunk={}-{}",
+            peer_id,
+            need,
+            lo,
+            hi,
+            heights_and_hashes.len(),
+            start_height,
+            end_height
+        );
     }
 
     if !*first_block_logged {

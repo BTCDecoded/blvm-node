@@ -308,6 +308,32 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         );
     }
 
+    // Incremental prune: keep a sliding body window. Archive dests (pruning
+    // disabled, or the flag off) stay at window 0 and pass horizon 0 below.
+    let (incremental_prune_window, incremental_prune_min_height) = storage_clone
+        .pruning()
+        .map(|pm| {
+            let window = super::local_block::incremental_ibd_prune_window(
+                pm.config.incremental_prune_during_ibd,
+                pm.is_enabled(),
+                pm.config.prune_window_size,
+                pm.config.min_blocks_to_keep,
+            );
+            (window, pm.config.min_blocks_for_incremental_prune)
+        })
+        .unwrap_or((0, 0));
+    let startup_horizon = super::local_block::ibd_prune_horizon(
+        super::live_header_tip(),
+        effective_end_height(),
+        incremental_prune_window,
+    );
+    super::local_block::publish_ibd_prune_horizon(startup_horizon);
+    if incremental_prune_window > 0 {
+        info!(
+            "[IBD_PRUNE] incremental window={incremental_prune_window} min_height={incremental_prune_min_height} horizon={startup_horizon} — skip body flush and GAP_PERSIST below horizon"
+        );
+    }
+
     super::ms_breakdown::arm();
     info!(
         "Validation loop starting (deferred storage: flush every ~{} blocks [pressure-scaled], extra flush under Critical/Emergency when pending bytes exceed budget cap, initial buffer limit: {}, utxo_prefetch_lookahead_nominal: {})...",
@@ -729,8 +755,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
     // ── N-parallel validation worker pool ───────────────────────────────────
     // `BLVM_IBD_MAX_PARALLEL` overrides. Otherwise default scales with **RAM**:
-    // low-memory hosts stay at half-cores (capped) to limit RSS; 32+ GiB hosts
-    // use most logical CPUs so heavy post-300k blocks keep CPU saturated.
+    // low-memory hosts stay at half-cores (capped) to limit RSS. 32+ GiB hosts
+    // cap at 8: cpus-1 up to 24 built ~3–4 GB of per-thread allocator cache.
     let n_validate_workers: usize = std::env::var("BLVM_IBD_MAX_PARALLEL")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -740,7 +766,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 .unwrap_or(4);
             let total_gb = MemoryGuard::total_gb_rounded(system_total_ram_mb);
             if total_gb >= 32 {
-                cpus.saturating_sub(1).clamp(4, 24)
+                cpus.saturating_sub(1).clamp(4, 8)
             } else if total_gb >= 24 {
                 (cpus * 3 / 4).clamp(2, 16)
             } else if total_gb >= 16 {
@@ -3332,12 +3358,31 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 // R-360: timed (`drain_skipchk_sum`) — header hash + LMDB body probe per block.
                 let t_drain_skipchk = std::time::Instant::now();
                 let block_hash = blockstore.get_block_hash(block_arc.as_ref());
+                let prune_horizon = if incremental_prune_window == 0 {
+                    0
+                } else {
+                    super::local_block::ibd_prune_horizon(
+                        super::live_header_tip(),
+                        effective_end_height(),
+                        incremental_prune_window,
+                    )
+                };
+                super::local_block::publish_ibd_prune_horizon(prune_horizon);
+                if incremental_prune_window > 0
+                    && prune_horizon > 0
+                    && next_height < prune_horizon
+                    && next_height % 10_000 == 0
+                {
+                    info!(
+                        "[IBD_PRUNE_PERSIST_SKIP] h={next_height} horizon={prune_horizon} window={incremental_prune_window}"
+                    );
+                }
                 let already_persisted = super::local_block::should_skip_block_store_write(
                     blockstore.as_ref(),
                     next_height,
                     &block_hash,
                     local_replay_max_height,
-                    0,
+                    prune_horizon,
                 )
                 .unwrap_or(false);
                 let drain_skipchk_us = t_drain_skipchk.elapsed().as_micros() as u64;
@@ -3481,6 +3526,33 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
                 // Update shared validation height (allows download workers to track progress)
                 validation_height.store(next_height, Ordering::Relaxed);
+                let gc_height = super::local_block::ibd_prune_gc_height(
+                    next_height,
+                    incremental_prune_window,
+                    incremental_prune_min_height,
+                );
+                // Far below the keep window there is no body to retain. The lookup
+                // and delete take the LMDB writer on this thread; resume12 spent
+                // the validation clock there while GAP_PERSIST held that writer.
+                let gc_far_below_horizon = super::local_block::published_prune_horizon()
+                    > gc_height.saturating_add(incremental_prune_window);
+                if gc_height > 0 && !gc_far_below_horizon {
+                    match super::local_block::gc_pruned_window_gap_persist(
+                        blockstore.as_ref(),
+                        gc_height,
+                    ) {
+                        Ok(true) if gc_height % 10_000 == 0 => {
+                            info!(
+                                "[IBD_PRUNE_GAP_GC] removed body+witness h={gc_height} validated={next_height} window={incremental_prune_window}"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) if gc_height % 10_000 == 0 => {
+                            warn!("[IBD_PRUNE_GAP_GC] h={gc_height} failed: {e:#}");
+                        }
+                        Err(_) => {}
+                    }
+                }
                 if next_height == 190_000 || next_height == 199_000 {
                     super::feeder_miss::dump_dist(true);
                 }

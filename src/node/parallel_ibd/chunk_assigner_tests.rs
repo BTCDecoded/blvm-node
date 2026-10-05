@@ -15369,6 +15369,34 @@ fn r345_window_bench_escalates_15_60_300() {
 }
 
 #[test]
+fn r376_idle_peer_dups_the_front_without_waiting_for_the_inflated_ema() {
+    // Resume13: dup_s sat at 30 because tile EMA was ~50–150s, and the peers
+    // polling get_work were the slow ones. An empty pipe must duplicate at the
+    // 1s floor, including when that peer is marked slow.
+    assert!(ChunkAssigner::window_front_dup_ok(
+        true, true, 1, 1, 30, 0, 30
+    ));
+    assert!(!ChunkAssigner::window_front_dup_ok(
+        true, true, 0, 1, 30, 0, 30
+    ));
+    // Resume26: a busy slow peer is the only taker left. It takes the second
+    // cover at the 1s floor instead of leaving the holder alone for minutes.
+    assert!(ChunkAssigner::window_front_dup_ok(
+        false, true, 1, 1, 30, 1, 30
+    ));
+    assert!(!ChunkAssigner::window_front_dup_ok(
+        false, true, 1, 1, 30, 3, 30
+    ));
+    // A busy non-slow peer with one tile also duplicates at the 1s floor.
+    assert!(ChunkAssigner::window_front_dup_ok(
+        false, false, 1, 1, 30, 1, 30
+    ));
+    assert!(!ChunkAssigner::window_front_dup_ok(
+        false, false, 0, 1, 30, 1, 30
+    ));
+}
+
+#[test]
 fn r354_window_stall_dup_goes_to_an_empty_pipe_first() {
     // Pure predicate: empty / one-deep pipe takes the dup at `stall`; a loaded pipe only
     // past 2 × stall.
@@ -15393,17 +15421,631 @@ fn r354_window_stall_dup_goes_to_an_empty_pipe_first() {
     }
     let dup = assigner
         .get_work("p1", 1024)
-        .expect("idle p1 takes the stall dup");
-    assert_eq!(dup, (210_001, 210_016), "dup covers the stalled front tile");
+        .expect("idle p1 takes the tip");
+    assert_eq!(dup, (210_001, 210_001), "wide cover peels to one block");
+    let flying = assigner.in_flight_per_peer.lock().unwrap();
+    assert!(
+        flying.get("p0").map_or(true, |v| v.is_empty()
+            || v.iter().all(|(s, e)| !(*s <= 210_001 && 210_001 <= *e))),
+        "wide holder no longer covers the tip"
+    );
+    ChunkAssigner::window_test_force(false);
+}
+
+/// Resume7: a higher tile had already finished and the tile EMA was the stalled
+/// front (40 s → stall cap 30 s). Stealing that front at the 3 s floor reassigned
+/// the tip every few seconds, so the GetData never stayed with one peer. A 4 s
+/// age stays under the EMA cap; the idle peer takes the next free tile.
+#[serial_test::serial(ibd)]
+#[test]
+fn r376_proven_pipeline_does_not_steal_front_before_ema_cap() {
+    ChunkAssigner::window_test_force(true);
+    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["p0", "p1", "p2", "p3"]);
+    let front = assigner.get_work("p0", 1024).expect("p0 takes the front");
+    assert_eq!(front, (210_001, 210_016));
+    let ahead = assigner
+        .get_work("p1", 1024)
+        .expect("p1 takes the next tile");
+    assert_eq!(ahead, (210_017, 210_032));
+    assigner.window_tile_ms_ema.store(40_000, Ordering::Relaxed);
+    assigner.window_note_complete("p1", ahead.0, ahead.1, 16);
+    {
+        let mut started = assigner.window_started.lock().unwrap();
+        let key = ("p0".to_string(), front.0, front.1);
+        *started.get_mut(&key).expect("front stamp") = Instant::now() - Duration::from_secs(4);
+    }
+    let next = assigner
+        .get_work("p2", 1024)
+        .expect("idle peer takes the next tile, not the 4s front");
+    assert!(
+        next.0 > ahead.1,
+        "4s front stays with p0 under a 30s EMA cap, got {next:?}"
+    );
     assert!(
         assigner
             .in_flight_per_peer
             .lock()
             .unwrap()
             .get("p0")
-            .is_some_and(|v| !v.is_empty()),
-        "one strike does not release the holder"
+            .is_some_and(|v| v.iter().any(|&(s, _)| s == front.0)),
+        "holder keeps the front"
     );
+
+    // Cold pipeline: EMA cap still applies, so 4 s does not steal.
+    let cold = wan_tip_assigner(210_000, 209_900, 300_000, &["c0", "c1"]);
+    let cold_front = cold.get_work("c0", 1024).expect("c0 takes the front");
+    assert_eq!(cold_front, (210_001, 210_016));
+    cold.window_tile_ms_ema.store(40_000, Ordering::Relaxed);
+    {
+        let mut started = cold.window_started.lock().unwrap();
+        let key = ("c0".to_string(), cold_front.0, cold_front.1);
+        *started.get_mut(&key).expect("cold front stamp") = Instant::now() - Duration::from_secs(4);
+    }
+    let next = cold
+        .get_work("c1", 1024)
+        .expect("no proof yet, so the next tile");
+    assert_eq!(next.0, 210_017);
+    ChunkAssigner::window_test_force(false);
+}
+
+/// R-376: the hole in front of a done-ahead pipeline must be re-issued as a span.
+/// Unmarking only the cursor left ~60 heights `window_done` and validation
+/// crawled one block per stall.
+#[serial_test::serial(ibd)]
+#[test]
+fn r376_window_unmarks_hole_span_not_just_the_cursor() {
+    ChunkAssigner::window_test_force(true);
+    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["p0", "p1"]);
+    assigner.set_ibd_ready_peers(HashSet::from(["p0".to_string(), "p1".to_string()]));
+    let front = assigner
+        .get_work("p0", 1024)
+        .expect("p0 holds the front tile");
+    assert_eq!(front, (210_001, 210_016));
+    let old = Instant::now() - Duration::from_secs(6);
+    {
+        let mut done = assigner.window_done.lock().unwrap();
+        for h in 210_001..=210_020 {
+            done.insert(h, old);
+        }
+        // Still inside the span, but younger than the unmark threshold.
+        done.insert(210_018, Instant::now());
+    }
+    assigner.window_note_missing_span(210_001, 210_021);
+    let done = assigner.window_done.lock().unwrap();
+    for h in 210_001..=210_016 {
+        assert!(done.contains_key(&h), "in-flight {h} stays delivered");
+    }
+    assert!(
+        !done.contains_key(&210_017),
+        "aged hole height is re-issued"
+    );
+    assert!(
+        done.contains_key(&210_018),
+        "a fresh mark inside the span is still in transit"
+    );
+    assert!(
+        !done.contains_key(&210_019),
+        "aged hole height is re-issued"
+    );
+    assert!(
+        !done.contains_key(&210_020),
+        "aged hole height is re-issued"
+    );
+    drop(done);
+    ChunkAssigner::window_test_force(false);
+}
+
+/// Resume8: `window_note_missing` was a one-height span while `first_ahead`
+/// sat ~65 above the tip and the rest of `window_done` blocked idle peers.
+#[serial_test::serial(ibd)]
+#[test]
+fn r376_window_note_missing_unmarks_up_to_first_ahead() {
+    ChunkAssigner::window_test_force(true);
+    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["p0"]);
+    let tip = 210_001u64;
+    let first_ahead = tip + 65;
+    let old = Instant::now() - Duration::from_secs(6);
+    {
+        let mut done = assigner.window_done.lock().unwrap();
+        for h in tip..=first_ahead + 10 {
+            done.insert(h, old);
+        }
+        done.insert(tip + 10, Instant::now());
+    }
+    assigner.set_window_hole_until(first_ahead);
+    assigner.window_note_missing(tip);
+    {
+        let done = assigner.window_done.lock().unwrap();
+        assert!(
+            !done.contains_key(&tip),
+            "tip mark older than the unmark threshold is re-issued"
+        );
+        assert!(
+            !done.contains_key(&(first_ahead - 1)),
+            "last hole height below first_ahead is re-issued"
+        );
+        assert!(
+            done.contains_key(&(tip + 10)),
+            "a fresh mark inside the hole is still in transit"
+        );
+        assert!(
+            done.contains_key(&first_ahead),
+            "first_ahead stays marked; that body is in reorder"
+        );
+        assert!(
+            done.contains_key(&(first_ahead + 10)),
+            "heights past first_ahead stay marked"
+        );
+    }
+    let one = wan_tip_assigner(210_000, 209_900, 300_000, &["p0"]);
+    {
+        let mut done = one.window_done.lock().unwrap();
+        for h in tip..=tip + 5 {
+            done.insert(h, old);
+        }
+    }
+    one.set_window_hole_until(0);
+    one.window_note_missing(tip);
+    {
+        let done = one.window_done.lock().unwrap();
+        assert!(
+            !done.contains_key(&tip),
+            "absent first_ahead still unmarks the tip"
+        );
+        assert!(
+            done.contains_key(&(tip + 1)),
+            "absent first_ahead does not open the frontier"
+        );
+    }
+    ChunkAssigner::window_test_force(false);
+}
+
+/// Resume17: a fresh `window_done` mark on an absent tip must be re-issued
+/// without the 5s grace. `window_note_missing` leaves that fresh mark.
+#[serial_test::serial(ibd)]
+#[test]
+fn r376_reissue_absent_tip_ignores_mark_age() {
+    ChunkAssigner::window_test_force(true);
+    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["p0"]);
+    let tip = 210_001u64;
+    {
+        let mut done = assigner.window_done.lock().unwrap();
+        done.insert(tip, Instant::now());
+        done.insert(tip + 1, Instant::now());
+    }
+    assigner.window_reissue_absent(tip, tip + 1);
+    let done = assigner.window_done.lock().unwrap();
+    assert!(
+        !done.contains_key(&tip),
+        "absent tip is re-issued immediately"
+    );
+    assert!(
+        done.contains_key(&(tip + 1)),
+        "the body already in reorder stays marked"
+    );
+    drop(done);
+    ChunkAssigner::window_test_force(false);
+}
+
+/// Resume20: the delivered hole was ~50 high and stall unmark cleared one
+/// height, so the next free tile started on the far side of the hole.
+#[serial_test::serial(ibd)]
+#[test]
+fn r376_reissue_clears_the_absent_span_up_to_the_buffered_body() {
+    ChunkAssigner::window_test_force(true);
+    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["p0"]);
+    let tip = 210_001u64;
+    let first_ahead = tip + 52;
+    {
+        let mut done = assigner.window_done.lock().unwrap();
+        for h in tip..first_ahead + 4 {
+            done.insert(h, Instant::now());
+        }
+    }
+    assigner.set_window_hole_until(first_ahead);
+    assigner.window_reissue_absent(tip, first_ahead);
+    let done = assigner.window_done.lock().unwrap();
+    assert!(
+        !done.contains_key(&tip) && !done.contains_key(&(first_ahead - 1)),
+        "every absent height below the buffered body is re-issued"
+    );
+    assert!(
+        done.contains_key(&first_ahead),
+        "the body still in reorder stays marked"
+    );
+    drop(done);
+    ChunkAssigner::window_test_force(false);
+}
+
+/// Resume21: the hole was marked delivered again, covers was 0, and peers
+/// stayed on tiles 400 above the tip for half a minute.
+#[serial_test::serial(ibd)]
+#[test]
+fn r376_uncovered_tip_is_taken_ahead_of_the_done_wall() {
+    ChunkAssigner::window_test_force(true);
+    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["p0"]);
+    mark_peers_ibd_ready(&assigner, &["p0"]);
+    let tip = 210_001u64;
+    let first_ahead = tip + 52;
+    {
+        let mut done = assigner.window_done.lock().unwrap();
+        for h in tip..first_ahead + 8 {
+            done.insert(h, Instant::now());
+        }
+    }
+    assigner.set_window_hole_until(first_ahead);
+    assigner.set_window_tip_uncovered(true);
+    assert!(
+        !assigner.past_hole_should_release(tip),
+        "the tile that contains the tip stays"
+    );
+    assert!(
+        !assigner.past_hole_should_release(tip + 4),
+        "a tile inside the hole is the refill"
+    );
+    assert!(
+        !assigner.past_hole_should_release(first_ahead),
+        "a tile at the buffered body stays; aborting it drops the runway"
+    );
+    let work = assigner.get_work("p0", 4096);
+    assert!(
+        work.is_some_and(|(s, _)| s == tip),
+        "get_work starts at the uncovered tip, not the far side of window_done: {work:?}"
+    );
+    assigner.set_window_tip_uncovered(false);
+    assert!(
+        !assigner.past_hole_should_release(first_ahead + 10),
+        "a covered tip does not pull peers off the runway"
+    );
+    ChunkAssigner::window_test_force(false);
+}
+
+/// Resume23: height 2861258 had two covers and no block for 109s, because a
+/// third peer is only issued when `front_covers < 2`.
+#[serial_test::serial(ibd)]
+#[test]
+fn r376_uncovered_tip_gets_a_third_peer_after_one_second() {
+    assert!(ChunkAssigner::uncovered_tip_third_cover(true, true, 2, 1, 1));
+    assert!(!ChunkAssigner::uncovered_tip_third_cover(
+        false, true, 2, 5, 1
+    ));
+    assert!(!ChunkAssigner::uncovered_tip_third_cover(true, true, 1, 5, 1));
+    assert!(!ChunkAssigner::uncovered_tip_third_cover(true, true, 3, 5, 1));
+    assert!(!ChunkAssigner::uncovered_tip_third_cover(true, false, 2, 5, 1));
+    assert!(!ChunkAssigner::uncovered_tip_third_cover(true, true, 2, 0, 1));
+
+    ChunkAssigner::window_test_force(true);
+    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["h0", "h1", "idle", "extra"]);
+    mark_peers_ibd_ready(&assigner, &["h0", "h1", "idle", "extra"]);
+    let tip = 210_001u64;
+    {
+        let mut g = assigner.in_flight_per_peer.lock().unwrap();
+        ChunkAssigner::insert_in_flight(&mut g, "h0", tip, tip + 3);
+        ChunkAssigner::insert_in_flight(&mut g, "h1", tip, tip + 3);
+    }
+    let old = Instant::now() - Duration::from_secs(2);
+    {
+        let mut started = assigner.window_started.lock().unwrap();
+        started.insert(("h0".to_string(), tip, tip + 3), old);
+        started.insert(("h1".to_string(), tip, tip + 3), old);
+    }
+    assigner.set_window_hole_until(tip + 64);
+    assigner.set_window_tip_uncovered(true);
+    let third = assigner
+        .get_work("idle", 4096)
+        .expect("idle peer takes the stuck tip");
+    assert_eq!(third, (tip, tip), "the third request is that one height");
+    let flying = assigner.in_flight_per_peer.lock().unwrap();
+    assert!(
+        flying.get("h0").is_some_and(|v| v.iter().any(|&(s, e)| s <= tip && tip <= e)),
+        "the first holder keeps the height"
+    );
+    assert!(
+        flying.get("h1").is_some_and(|v| v.iter().any(|&(s, e)| s <= tip && tip <= e)),
+        "the second holder keeps the height"
+    );
+    drop(flying);
+    let fourth = assigner.get_work("extra", 4096);
+    assert!(
+        fourth.is_some_and(|(s, _)| s > tip),
+        "a fourth peer does not join the tip: {fourth:?}"
+    );
+    assigner.set_window_tip_uncovered(false);
+    ChunkAssigner::window_test_force(false);
+}
+
+/// Resume27: three 4-block tiles covered the tip for 45–90s. `covers == 2`
+/// never matched, so nobody was asked for that one height. A young cover,
+/// a fourth one-block request, and a tip that is already present do not ask.
+#[serial_test::serial(ibd)]
+#[test]
+fn r376_stale_wide_tiles_get_one_fresh_tip_request() {
+    assert!(ChunkAssigner::tip_needs_fresh_cover(
+        true, false, false, true, false, 0
+    ));
+    assert!(ChunkAssigner::tip_needs_fresh_cover(
+        true, false, false, true, false, 2
+    ));
+    assert!(!ChunkAssigner::tip_needs_fresh_cover(
+        true, false, false, true, false, 3
+    ));
+    assert!(!ChunkAssigner::tip_needs_fresh_cover(
+        true, false, false, true, true, 0
+    ));
+    assert!(!ChunkAssigner::tip_needs_fresh_cover(
+        false, false, false, true, false, 0
+    ));
+    assert!(!ChunkAssigner::tip_needs_fresh_cover(
+        true, true, false, true, false, 0
+    ));
+    assert!(!ChunkAssigner::tip_needs_fresh_cover(
+        true, false, true, true, false, 0
+    ));
+    assert!(!ChunkAssigner::tip_needs_fresh_cover(
+        true, false, false, false, false, 0
+    ));
+
+    ChunkAssigner::window_test_force(true);
+    let peers = ["h0", "h1", "h2", "idle", "peek", "idle2", "idle3", "idle4"];
+    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &peers);
+    mark_peers_ibd_ready(&assigner, &peers);
+    let tip = 210_001u64;
+    let old = Instant::now() - Duration::from_secs(2);
+    {
+        let mut g = assigner.in_flight_per_peer.lock().unwrap();
+        for peer in ["h0", "h1", "h2"] {
+            ChunkAssigner::insert_in_flight(&mut g, peer, tip, tip + 3);
+        }
+    }
+    {
+        let mut started = assigner.window_started.lock().unwrap();
+        for peer in ["h0", "h1", "h2"] {
+            started.insert((peer.to_string(), tip, tip + 3), old);
+        }
+    }
+    assigner.set_window_hole_until(tip + 64);
+    assigner.set_window_tip_uncovered(true);
+    let first = assigner
+        .get_work("idle", 4096)
+        .expect("idle peer takes the stale tip");
+    assert_eq!(first, (tip, tip), "the request is that one height: {first:?}");
+    let second_now = assigner.get_work("peek", 4096);
+    assert!(
+        second_now.is_some_and(|(s, _)| s > tip),
+        "a request just issued still counts, so the next idle peer stays off the tip: {second_now:?}"
+    );
+    assigner.window_started.lock().unwrap().insert(
+        ("idle".to_string(), tip, tip),
+        Instant::now() - Duration::from_secs(2),
+    );
+    let second = assigner
+        .get_work("idle2", 4096)
+        .expect("once the one-block request is stale, another idle peer asks");
+    assert_eq!(second, (tip, tip), "the second request is that one height: {second:?}");
+    assigner.window_started.lock().unwrap().insert(
+        ("idle2".to_string(), tip, tip),
+        Instant::now() - Duration::from_secs(2),
+    );
+    let third = assigner
+        .get_work("idle3", 4096)
+        .expect("a third one-block request is still under the cap");
+    assert_eq!(third, (tip, tip));
+    assigner.window_started.lock().unwrap().insert(
+        ("idle3".to_string(), tip, tip),
+        Instant::now() - Duration::from_secs(2),
+    );
+    let fourth = assigner.get_work("idle4", 4096);
+    assert!(
+        fourth.is_some_and(|(s, _)| s > tip),
+        "three one-block requests is the ceiling: {fourth:?}"
+    );
+    let flying = assigner.in_flight_per_peer.lock().unwrap();
+    for peer in ["h0", "h1", "h2"] {
+        assert!(
+            flying.get(peer).is_some_and(|v| v.iter().any(|&(s, e)| s == tip && e == tip + 3)),
+            "wide holder {peer} keeps the tile"
+        );
+    }
+    drop(flying);
+
+    let young = wan_tip_assigner(210_000, 209_900, 300_000, &["y0", "y1", "y2", "idle"]);
+    mark_peers_ibd_ready(&young, &["y0", "y1", "y2", "idle"]);
+    {
+        let mut g = young.in_flight_per_peer.lock().unwrap();
+        for peer in ["y0", "y1", "y2"] {
+            ChunkAssigner::insert_in_flight(&mut g, peer, tip, tip + 3);
+        }
+    }
+    {
+        let mut started = young.window_started.lock().unwrap();
+        started.insert(("y0".to_string(), tip, tip + 3), old);
+        started.insert(("y1".to_string(), tip, tip + 3), old);
+        started.insert(("y2".to_string(), tip, tip + 3), Instant::now());
+    }
+    young.set_window_hole_until(tip + 64);
+    young.set_window_tip_uncovered(true);
+    let young_work = young.get_work("idle", 4096);
+    assert!(
+        young_work.is_some_and(|(s, _)| s > tip),
+        "one cover issued just now blocks a one-block request: {young_work:?}"
+    );
+
+    let covered = wan_tip_assigner(210_000, 209_900, 300_000, &["c0", "c1", "c2", "idle"]);
+    mark_peers_ibd_ready(&covered, &["c0", "c1", "c2", "idle"]);
+    {
+        let mut g = covered.in_flight_per_peer.lock().unwrap();
+        for peer in ["c0", "c1", "c2"] {
+            ChunkAssigner::insert_in_flight(&mut g, peer, tip, tip + 3);
+        }
+    }
+    {
+        let mut started = covered.window_started.lock().unwrap();
+        for peer in ["c0", "c1", "c2"] {
+            started.insert((peer.to_string(), tip, tip + 3), old);
+        }
+    }
+    covered.set_window_hole_until(tip + 64);
+    covered.set_window_tip_uncovered(false);
+    let covered_work = covered.get_work("idle", 4096);
+    assert!(
+        covered_work.is_some_and(|(s, _)| s > tip),
+        "a tip already present is not asked for again: {covered_work:?}"
+    );
+    ChunkAssigner::window_test_force(false);
+}
+
+/// Resume26: the peer that could deliver the tip was already at its tile cap,
+/// so get_work returned before the duplicate. The sole holder stayed for 287s.
+#[serial_test::serial(ibd)]
+#[test]
+fn r376_peer_at_cap_takes_the_second_tip_cover() {
+    ChunkAssigner::window_test_force(true);
+    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["holder", "capped"]);
+    mark_peers_ibd_ready(&assigner, &["holder", "capped"]);
+    let tip = 210_001u64;
+    {
+        let mut g = assigner.in_flight_per_peer.lock().unwrap();
+        ChunkAssigner::insert_in_flight(&mut g, "holder", tip, tip);
+        ChunkAssigner::insert_in_flight(&mut g, "capped", tip + 20, tip + 20);
+    }
+    let old = Instant::now() - Duration::from_secs(2);
+    assigner
+        .window_started
+        .lock()
+        .unwrap()
+        .insert(("holder".to_string(), tip, tip), old);
+    assigner.set_window_tip_uncovered(true);
+    let second = assigner
+        .get_work("capped", 4096)
+        .expect("a peer at the tile cap still takes the uncovered tip");
+    assert_eq!(second, (tip, tip), "the request is that one height: {second:?}");
+    let flying = assigner.in_flight_per_peer.lock().unwrap();
+    assert!(
+        flying
+            .get("holder")
+            .is_some_and(|v| v.iter().any(|&(s, e)| s <= tip && tip <= e)),
+        "the holder keeps the height"
+    );
+    assigner.set_window_tip_uncovered(false);
+    ChunkAssigner::window_test_force(false);
+}
+
+/// Resume25: the +32 cap and past-hole release emptied the RAM runway.
+/// With no buffered body, idle peers keep filling past +32 and those tiles stay.
+#[serial_test::serial(ibd)]
+#[test]
+fn r376_empty_reorder_keeps_the_runway() {
+    ChunkAssigner::window_test_force(true);
+    let names: Vec<String> = (0..16).map(|i| format!("p{i}")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &refs);
+    mark_peers_ibd_ready(&assigner, &refs);
+    let tip = 210_001u64;
+    assigner.set_window_hole_until(0);
+    assigner.set_window_tip_uncovered(true);
+    assert!(
+        !assigner.past_hole_should_release(tip + 400),
+        "an empty reorder does not drop the runway"
+    );
+    let mut furthest = tip;
+    for name in &names {
+        if let Some((start, end)) = assigner.get_work(name, 4096) {
+            assert!(start >= tip, "work stays at the tip or ahead: {start}-{end}");
+            furthest = furthest.max(end);
+        }
+    }
+    assert!(
+        furthest > tip + 31,
+        "the roster fills past the old 32 cap, furthest={furthest} tip={tip}"
+    );
+    ChunkAssigner::window_test_force(false);
+}
+
+/// R-379: delivered heights in the hole stay hidden while the tip is uncovered.
+/// The cursor is still the first assignment. Reloading the marked hole from
+/// disk completed 1.46M local blocks in 200–250k against 50k wire blocks.
+#[serial_test::serial(ibd)]
+#[test]
+fn r379_delivered_hole_is_not_reloaded() {
+    ChunkAssigner::window_test_force(true);
+    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["p0", "idle"]);
+    mark_peers_ibd_ready(&assigner, &["p0", "idle"]);
+    let tip = 210_001u64;
+    let first_ahead = tip + 52;
+    {
+        let mut done = assigner.window_done.lock().unwrap();
+        for h in tip..=tip + 10 {
+            done.insert(h, Instant::now());
+        }
+    }
+    assigner.set_window_hole_until(first_ahead);
+    assigner.set_window_tip_uncovered(true);
+    let work = assigner.get_work("p0", 4096);
+    assert!(
+        work.is_some_and(|(s, _)| s == tip),
+        "the uncovered tip is still first: {work:?}"
+    );
+    let far = assigner.get_work("idle", 4096);
+    assert!(
+        far.is_some_and(|(s, _)| s > tip + 10),
+        "a delivered hole height is not reloaded: {far:?}"
+    );
+    ChunkAssigner::window_test_force(false);
+}
+
+/// R-377: with the hole already in flight, an idle ready peer fills past the
+/// buffered body. Stopping there left the frontier at the hole and the next
+/// tip wait had no runway. A peer that has not handshaked still gets nothing.
+#[serial_test::serial(ibd)]
+#[test]
+fn r377_idle_peer_fills_past_the_buffered_body() {
+    ChunkAssigner::window_test_force(true);
+    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["holder", "idle", "unready"]);
+    mark_peers_ibd_ready(&assigner, &["holder", "idle"]);
+    let tip = 210_001u64;
+    let first_ahead = tip + 52;
+    {
+        let mut g = assigner.in_flight_per_peer.lock().unwrap();
+        ChunkAssigner::insert_in_flight(&mut g, "holder", tip, first_ahead - 1);
+    }
+    assigner.set_window_hole_until(first_ahead);
+    assigner.set_window_tip_uncovered(true);
+    assert!(
+        assigner.get_work("unready", 4096).is_none(),
+        "a peer that has not handshaked still gets nothing"
+    );
+    let far = assigner.get_work("idle", 4096);
+    assert!(
+        far.is_some_and(|(s, e)| s >= first_ahead && e >= s),
+        "an idle ready peer fills past the buffered body: {far:?}"
+    );
+    let flying = assigner.in_flight_per_peer.lock().unwrap();
+    assert!(
+        flying
+            .get("holder")
+            .is_some_and(|v| v.iter().any(|&(s, e)| s <= tip && tip <= e)),
+        "the hole holder keeps the tip"
+    );
+    ChunkAssigner::window_test_force(false);
+}
+
+/// R-376: a peer that has not finished handshake must not hold the tip tile
+/// once any peer has VerAck'd. Otherwise the chunk sits in the 15s handshake
+/// wait while handshook peers download past it.
+#[serial_test::serial(ibd)]
+#[test]
+fn r376_window_skips_peers_that_have_not_handshaked() {
+    ChunkAssigner::window_test_force(true);
+    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["unready", "ready"]);
+    assigner.set_ibd_ready_peers(HashSet::from(["ready".to_string()]));
+    assert!(
+        assigner.get_work("unready", 1024).is_none(),
+        "unready peer gets no tile"
+    );
+    let front = assigner
+        .get_work("ready", 1024)
+        .expect("handshook peer takes the front");
+    assert_eq!(front, (210_001, 210_016));
     ChunkAssigner::window_test_force(false);
 }
 
@@ -15515,17 +16157,16 @@ fn r356_window_stall_dup_fires_before_the_strike_threshold() {
     }
     let dup = assigner
         .get_work("p1", 1024)
-        .expect("idle p1 takes the early dup");
-    assert_eq!(dup, (210_001, 210_016), "dup covers the stalled front tile");
+        .expect("idle p1 takes the tip");
+    assert_eq!(dup, (210_001, 210_001), "wide cover peels to one block");
+    let flying = assigner.in_flight_per_peer.lock().unwrap();
     assert!(
-        assigner
-            .in_flight_per_peer
-            .lock()
-            .unwrap()
-            .get("p0")
-            .is_some_and(|v| !v.is_empty()),
-        "holder keeps its tile"
+        flying.get("p0").map_or(true, |v| {
+            v.iter().all(|(s, e)| !(*s <= 210_001 && 210_001 <= *e))
+        }),
+        "holder no longer covers the tip"
     );
+    drop(flying);
     assert!(
         assigner
             .window_strikes

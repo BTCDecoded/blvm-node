@@ -61,6 +61,12 @@ use tracing::{info, warn};
 
 const EXPORT_CHUNK_SIZE: usize = 500_000;
 
+/// Max `OutputKV`s held while sorting an E3c spill by flat-table offset.
+///
+/// 8_000_000 × 56 B = 448 MiB. R-376 loaded 291_220_850 entries (~16 GiB) into
+/// one `Vec` during shutdown export and anon hit 26 GiB.
+const E3C_SORT_RAM_ENTRIES: usize = 8_000_000;
+
 /// E3c: spill live Adds during compact, globally sort by flat-table offset, then fetch.
 ///
 /// Without this, each key-order chunk of 500k is offset-sorted locally but still spans the
@@ -431,7 +437,11 @@ impl<'a> CheckpointChunkWriter<'a> {
         ))
     }
 
-    /// E3c: load spilled Adds, sort by flat-table offset, fetch+encode in chunk order.
+    /// E3c: sort spilled Adds by flat-table offset, then fetch+encode in chunk order.
+    ///
+    /// Spills at or under [`E3C_SORT_RAM_ENTRIES`] sort in one `Vec`. Larger spills
+    /// (R-376: 291_220_850) sort in disk runs of that size and k-way merge, so the
+    /// export does not allocate the whole journal as anonymous memory.
     fn finish_global_offset_sort(&mut self) -> Result<()> {
         if let Some(mut w) = self.spill.take() {
             w.flush().context("E3c spill flush")?;
@@ -445,27 +455,120 @@ impl<'a> CheckpointChunkWriter<'a> {
             let _ = std::fs::remove_file(&path);
             return Ok(());
         }
+        let result = if count <= E3C_SORT_RAM_ENTRIES {
+            self.finish_global_offset_sort_in_memory(&path, count)
+        } else {
+            info!(
+                "[IBD_EXPORT_E3C] external sort count={count} ram_entries={E3C_SORT_RAM_ENTRIES}"
+            );
+            self.finish_global_offset_sort_external(&path, count)
+        };
+        let _ = std::fs::remove_file(&path);
+        result
+    }
+
+    fn finish_global_offset_sort_in_memory(
+        &mut self,
+        path: &std::path::Path,
+        count: usize,
+    ) -> Result<()> {
         let t_load = std::time::Instant::now();
-        let mut file = BufReader::with_capacity(8 << 20, File::open(&path)?);
+        let mut file = BufReader::with_capacity(8 << 20, File::open(path)?);
         let mut all = Vec::with_capacity(count);
         let mut buf = [0u8; OutputKV::SIZE];
         for _ in 0..count {
             file.read_exact(&mut buf).context("E3c spill read")?;
-            let kv = unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const OutputKV) };
-            all.push(kv);
+            all.push(read_output_kv_bytes(&buf));
         }
         let load_ms = t_load.elapsed().as_millis() as u64;
         let t_sort = std::time::Instant::now();
-        all.sort_unstable_by_key(|kv| IdCodec::decode(kv.id).0);
+        all.sort_unstable_by_key(e3c_offset);
         self.sort_ms = t_sort.elapsed().as_millis() as u64;
         info!(
             "[IBD_EXPORT_E3C] buffered={} load_ms={} sort_ms={} (global offset fetch)",
             count, load_ms, self.sort_ms
         );
-        let _ = std::fs::remove_file(&path);
         for chunk in all.chunks(EXPORT_CHUNK_SIZE) {
             self.chunk_kvs.clear();
             self.chunk_kvs.extend_from_slice(chunk);
+            self.flush_chunk()?;
+        }
+        Ok(())
+    }
+
+    fn finish_global_offset_sort_external(
+        &mut self,
+        path: &std::path::Path,
+        count: usize,
+    ) -> Result<()> {
+        let t_load = std::time::Instant::now();
+        let dir = path.parent().context("E3c spill has no parent")?;
+        let mut file = BufReader::with_capacity(8 << 20, File::open(path)?);
+        let mut runs: Vec<(PathBuf, usize)> = Vec::new();
+        let mut cleanup = E3cRunCleanup::default();
+        let mut left = count;
+        let mut run_idx = 0usize;
+        while left > 0 {
+            let n = left.min(E3C_SORT_RAM_ENTRIES);
+            let mut batch = Vec::with_capacity(n);
+            let mut buf = [0u8; OutputKV::SIZE];
+            for _ in 0..n {
+                file.read_exact(&mut buf).context("E3c spill read")?;
+                batch.push(read_output_kv_bytes(&buf));
+            }
+            left -= n;
+            batch.sort_unstable_by_key(e3c_offset);
+            let run_path = dir.join(format!(
+                "blvm-export-e3c-off-{}-{run_idx:05}.bin",
+                self.checkpoint_height
+            ));
+            let mut w = BufWriter::with_capacity(8 << 20, File::create(&run_path)?);
+            for kv in &batch {
+                w.write_all(output_kv_bytes(kv))?;
+            }
+            w.flush().context("E3c run flush")?;
+            cleanup.paths.push(run_path.clone());
+            runs.push((run_path, n));
+            run_idx += 1;
+        }
+        self.sort_ms = t_load.elapsed().as_millis() as u64;
+        info!(
+            "[IBD_EXPORT_E3C] external runs={} count={} sort_ms={} ram_entries={}",
+            runs.len(),
+            count,
+            self.sort_ms,
+            E3C_SORT_RAM_ENTRIES
+        );
+
+        let mut readers: Vec<E3cOffReader> = runs
+            .iter()
+            .map(|(p, n)| E3cOffReader::open(p, *n))
+            .collect::<Result<_>>()?;
+        let mut heap: BinaryHeap<E3cOffItem> = BinaryHeap::new();
+        for (idx, reader) in readers.iter_mut().enumerate() {
+            if let Some(kv) = reader.next_kv()? {
+                heap.push(E3cOffItem {
+                    offset: e3c_offset(&kv),
+                    kv,
+                    run: idx,
+                });
+            }
+        }
+        self.chunk_kvs.clear();
+        while let Some(E3cOffItem { kv, run, .. }) = heap.pop() {
+            self.chunk_kvs.push(kv);
+            if let Some(next) = readers[run].next_kv()? {
+                heap.push(E3cOffItem {
+                    offset: e3c_offset(&next),
+                    kv: next,
+                    run,
+                });
+            }
+            if self.chunk_kvs.len() >= EXPORT_CHUNK_SIZE {
+                self.flush_chunk()?;
+            }
+        }
+        if !self.chunk_kvs.is_empty() {
             self.flush_chunk()?;
         }
         Ok(())
@@ -617,6 +720,88 @@ fn merge_append_bulk_fallback(
 }
 
 /// One record from an E4 append run file.
+
+fn e3c_offset(kv: &OutputKV) -> u64 {
+    IdCodec::decode(kv.id).0
+}
+
+fn read_output_kv_bytes(buf: &[u8; OutputKV::SIZE]) -> OutputKV {
+    unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const OutputKV) }
+}
+
+fn output_kv_bytes(kv: &OutputKV) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(kv as *const OutputKV as *const u8, OutputKV::SIZE) }
+}
+
+struct E3cRunCleanup {
+    paths: Vec<PathBuf>,
+}
+
+impl Default for E3cRunCleanup {
+    fn default() -> Self {
+        Self { paths: Vec::new() }
+    }
+}
+
+impl Drop for E3cRunCleanup {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+struct E3cOffReader {
+    reader: BufReader<File>,
+    left: usize,
+}
+
+impl E3cOffReader {
+    fn open(path: &PathBuf, count: usize) -> Result<Self> {
+        Ok(Self {
+            reader: BufReader::with_capacity(4 << 20, File::open(path)?),
+            left: count,
+        })
+    }
+
+    fn next_kv(&mut self) -> Result<Option<OutputKV>> {
+        if self.left == 0 {
+            return Ok(None);
+        }
+        let mut buf = [0u8; OutputKV::SIZE];
+        self.reader.read_exact(&mut buf).context("E3c run read")?;
+        self.left -= 1;
+        Ok(Some(read_output_kv_bytes(&buf)))
+    }
+}
+
+/// Min-heap item for E3c offset merge (BinaryHeap is max-heap → reverse Ord).
+struct E3cOffItem {
+    offset: u64,
+    kv: OutputKV,
+    run: usize,
+}
+
+impl PartialEq for E3cOffItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.offset == other.offset && self.run == other.run
+    }
+}
+impl Eq for E3cOffItem {}
+impl PartialOrd for E3cOffItem {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for E3cOffItem {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match other.offset.cmp(&self.offset) {
+            Ordering::Equal => other.run.cmp(&self.run),
+            o => o,
+        }
+    }
+}
+
 struct AppendRunReader {
     reader: BufReader<File>,
 }
@@ -1574,5 +1759,23 @@ mod tests {
         assert_eq!(adds.len(), 1);
         assert_eq!(adds[0].key, key_a);
         assert_eq!(deletes, vec![key_b]);
+    }
+
+    #[test]
+    fn e3c_sort_ram_cap_rejects_the_r376_full_buffer() {
+        // Shutdown export buffered 291_220_850 OutputKVs (56 B, ~16 GiB) and
+        // anon reached 26 GiB. That count must take the disk-run path.
+        assert!(291_220_850 > E3C_SORT_RAM_ENTRIES);
+        assert!(E3C_SORT_RAM_ENTRIES * OutputKV::SIZE <= 512 * 1024 * 1024);
+        let mut kvs = vec![
+            OutputKV::new_add([1; 36], 1, IdCodec::encode(30, 1)),
+            OutputKV::new_add([2; 36], 1, IdCodec::encode(10, 1)),
+            OutputKV::new_add([3; 36], 1, IdCodec::encode(20, 1)),
+        ];
+        kvs.sort_unstable_by_key(e3c_offset);
+        assert_eq!(
+            kvs.iter().map(e3c_offset).collect::<Vec<_>>(),
+            vec![10, 20, 30]
+        );
     }
 }

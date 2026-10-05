@@ -762,6 +762,26 @@ impl NetworkManager {
                 }
                 return Ok(());
             }
+            ProtocolMessage::NotFound(msg) => {
+                // A peer that does not have the block used to be ignored here, so the
+                // download oneshot stayed open until the 90–135s chunk deadline.
+                use crate::network::inventory::{MSG_BLOCK, MSG_WITNESS_BLOCK};
+                let mut dropped = 0u32;
+                for inv in &msg.inventory {
+                    if inv.inv_type != MSG_BLOCK && inv.inv_type != MSG_WITNESS_BLOCK {
+                        continue;
+                    }
+                    self.cancel_block_request_force(peer_addr, inv.hash);
+                    dropped = dropped.saturating_add(1);
+                }
+                if dropped > 0 {
+                    warn!(
+                        "[IBD_NOTFOUND] peer={} dropped {} block request(s)",
+                        peer_addr, dropped
+                    );
+                }
+                return Ok(());
+            }
             _ => {}
         }
 

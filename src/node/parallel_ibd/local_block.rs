@@ -11,7 +11,7 @@ use blvm_protocol::types::ARC_BLOCK_CREATED;
 use blvm_protocol::{Block, Hash, ProtocolVersion, segwit::Witness};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use tracing::{debug, info, warn};
 
@@ -19,6 +19,11 @@ use tracing::{debug, info, warn};
 /// Coordinator copies this into `live_body_tip`. Discovery walks are not
 /// tip authorities (closed `body_tip` cascade).
 static FLUSH_PATH_BODY_TIP: AtomicU64 = AtomicU64::new(0);
+
+/// Incremental-prune keep boundary. `0` = archive (GAP_PERSIST unchanged).
+/// Heights below this are not written and are not deleted on the validation thread.
+static IBD_PRUNE_HORIZON: AtomicU64 = AtomicU64::new(0);
+static GAP_PERSIST_PRUNE_SKIP_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// Process-latched [`FeatureRegistry`] — `for_protocol` rebuilds `Vec`+`String` feature
 /// names on every call. Tip crawl hits persist/load/serve per body; cache by protocol.
@@ -339,13 +344,47 @@ pub fn probe_highest_stored_body_height(blockstore: &BlockStore) -> Result<u64> 
 ///
 /// `0` = archive / no window: never skip for prune. Otherwise skip flush when
 /// `height < horizon` (i.e. `height + window < header_tip`). Persist
-/// `[header_tip − window, header_tip]`; GAP_PERSIST still writes ahead of
-/// validation independently.
+/// `[header_tip − window, header_tip]`. GAP_PERSIST uses the same horizon:
+/// a body the keep window will not retain is not written.
 pub fn pruned_midchain_skip_horizon(header_tip: u64, prune_window: u64) -> u64 {
     if prune_window == 0 || header_tip <= prune_window {
         return 0;
     }
     header_tip.saturating_sub(prune_window)
+}
+
+/// Sliding keep window for incremental prune on the parallel IBD path.
+///
+/// `0` leaves archive persist unchanged: pruning disabled, or
+/// `incremental_prune_during_ibd` off. Otherwise the window is
+/// `max(prune_window_size, min_blocks_to_keep)`.
+pub fn incremental_ibd_prune_window(
+    incremental_during_ibd: bool,
+    pruning_enabled: bool,
+    prune_window_size: u64,
+    min_blocks_to_keep: u64,
+) -> u64 {
+    if !incremental_during_ibd || !pruning_enabled {
+        return 0;
+    }
+    let window = prune_window_size.max(min_blocks_to_keep);
+    if window == 0 { 0 } else { window }
+}
+
+/// Header-tip horizon for the validation flush. `0` means do not skip for prune.
+pub fn ibd_prune_horizon(header_tip: u64, end_height: u64, window: u64) -> u64 {
+    if window == 0 {
+        return 0;
+    }
+    pruned_midchain_skip_horizon(header_tip.max(end_height), window)
+}
+
+/// Height whose GAP_PERSIST body just left the keep window. `0` means do not delete.
+pub fn ibd_prune_gc_height(validated: u64, window: u64, min_height: u64) -> u64 {
+    if window == 0 || validated < min_height {
+        return 0;
+    }
+    validated.saturating_sub(window)
 }
 
 /// Skip heed3 block-store flush when the body is already on disk (cheap `contains_key` — no
@@ -369,12 +408,23 @@ pub fn should_skip_block_store_write(
     blockstore.has_block_body(block_hash)
 }
 
-/// Drop one GAP_PERSIST leftover that just left the prune window.
-///
-/// Validation skip does not flush mid-chain bodies, but GAP_PERSIST still writes
-/// `val+1..val+lookahead`. Incremental prune never runs on Normal mode (needs
-/// Aggressive + commitments), so genesis dest stored the whole chain (22G heed3
-/// @ 296k). Headers stay. LMDB will not shrink the file; this stops further growth.
+/// Publish the keep boundary used by validation flush and GAP_PERSIST.
+/// `0` leaves archive persist unchanged.
+pub fn publish_ibd_prune_horizon(horizon: u64) {
+    IBD_PRUNE_HORIZON.store(horizon, Ordering::Relaxed);
+}
+
+/// Horizon last published by the validation loop. `0` before publish, and on archive dests.
+pub fn published_prune_horizon() -> u64 {
+    IBD_PRUNE_HORIZON.load(Ordering::Relaxed)
+}
+
+/// Same bound as the validation flush: `horizon == 0` keeps archive persist,
+/// and `height == horizon` is still inside the keep window.
+pub(crate) fn height_below_prune_horizon(height: u64, horizon: u64) -> bool {
+    horizon > 0 && height < horizon
+}
+
 pub fn gc_pruned_window_gap_persist(blockstore: &BlockStore, gc_height: u64) -> Result<bool> {
     if gc_height == 0 {
         return Ok(false);
@@ -615,6 +665,16 @@ pub(crate) fn gap_persist_gate(
         return Ok(GapPersistGate::Skip);
     };
     let val_h = vh.load(std::sync::atomic::Ordering::Relaxed);
+    // Below the keep window the validation flush will not store this body, and
+    // deleting it later takes the LMDB writer on the validation thread. Skip
+    // before any blockstore call.
+    let horizon = published_prune_horizon();
+    if height_below_prune_horizon(height, horizon) {
+        if !GAP_PERSIST_PRUNE_SKIP_LOGGED.swap(true, Ordering::Relaxed) || height % 10_000 == 0 {
+            info!("[IBD_GAP_PERSIST_PRUNE_SKIP] h={height} horizon={horizon} val={val_h}");
+        }
+        return Ok(GapPersistGate::Skip);
+    }
     let lookahead = gap_persist_lookahead();
     // Persist-ahead (Phase 1): do not refuse on the apply window.
     // Step 0/1 already widened the clamp and still glued FLUSH_PATH_TIP to apply
@@ -1156,6 +1216,29 @@ mod tests {
     }
 
     #[test]
+    fn incremental_ibd_prune_window_is_zero_unless_enabled() {
+        assert_eq!(incremental_ibd_prune_window(false, true, 144, 144), 0);
+        assert_eq!(incremental_ibd_prune_window(true, false, 144, 144), 0);
+        assert_eq!(incremental_ibd_prune_window(true, true, 0, 0), 0);
+        assert_eq!(
+            incremental_ibd_prune_window(true, true, 144, 50_000),
+            50_000
+        );
+        assert_eq!(incremental_ibd_prune_window(true, true, 144, 144), 144);
+    }
+
+    #[test]
+    fn ibd_prune_horizon_and_gc_follow_the_keep_window() {
+        assert_eq!(ibd_prune_horizon(961_637, 250_000, 144), 961_493);
+        assert_eq!(ibd_prune_horizon(100, 250_000, 144), 249_856);
+        assert_eq!(ibd_prune_horizon(961_637, 250_000, 0), 0);
+        assert_eq!(ibd_prune_gc_height(287, 144, 288), 0);
+        assert_eq!(ibd_prune_gc_height(288, 144, 288), 144);
+        assert_eq!(ibd_prune_gc_height(50_000, 50_000, 288), 0);
+        assert_eq!(ibd_prune_gc_height(50_144, 144, 288), 50_000);
+    }
+
+    #[test]
     fn pruned_midchain_horizon_skips_below_window() {
         assert_eq!(pruned_midchain_skip_horizon(961_637, 144), 961_493);
         assert_eq!(pruned_midchain_skip_horizon(223_000, 144), 222_856);
@@ -1165,6 +1248,13 @@ mod tests {
     }
 
     #[test]
+    fn gap_persist_prune_skip_matches_flush_horizon() {
+        assert!(height_below_prune_horizon(223_000, 961_493));
+        assert!(!height_below_prune_horizon(961_493, 961_493));
+        assert!(!height_below_prune_horizon(961_494, 961_493));
+        assert!(!height_below_prune_horizon(223_000, 0));
+    }
+
     fn should_skip_pruned_midchain_without_body_on_disk() {
         let blockstore = temp_blockstore();
         let missing = [0xCCu8; 32];

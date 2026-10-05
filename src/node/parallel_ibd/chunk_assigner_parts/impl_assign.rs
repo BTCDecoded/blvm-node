@@ -125,6 +125,8 @@ impl ChunkAssigner {
             tip_gap_missing: AtomicBool::new(false),
             leftover_force_getdata: AtomicBool::new(false),
             tip_bridge_holes: AtomicU64::new(0),
+            window_hole_until: AtomicU64::new(0),
+            window_tip_uncovered: AtomicBool::new(false),
             preferred_tip_owner: Mutex::new(None),
             tip_owner_fail_until: Mutex::new(HashMap::new()),
             tip_cover_claims: Mutex::new(Vec::new()),
@@ -892,6 +894,17 @@ impl ChunkAssigner {
     pub(crate) fn set_tip_bridge_holes(&self, holes: u64) {
         self.tip_bridge_holes.store(holes, Ordering::Relaxed);
         super::IBD_TIP_BRIDGE_HOLES.store(holes, Ordering::Relaxed);
+    }
+
+    /// Exclusive end of the missing span in front of reorder `first_ahead`.
+    /// `0` when that height is absent.
+    pub(crate) fn set_window_hole_until(&self, until: u64) {
+        self.window_hole_until.store(until, Ordering::Relaxed);
+    }
+
+    /// True when the validation tip is not in reorder, the feeder, or the bridge.
+    pub(crate) fn set_window_tip_uncovered(&self, uncovered: bool) {
+        self.window_tip_uncovered.store(uncovered, Ordering::Relaxed);
     }
 
     /// Default **on**. Opt out `BLVM_IBD_HOLE_ANY=0`.

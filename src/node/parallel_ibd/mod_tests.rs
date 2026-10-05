@@ -519,6 +519,27 @@ fn r259_leftover_w22_floor_is_248k_not_180k() {
     ));
 }
 
+#[test]
+fn r376_far_ahead_cursor_is_lost_when_tip_is_not_in_feeder() {
+    // Resume6: bridge_next 2813397, validation 2813334, pending empty, feeder
+    // did not hold the tip. One-ahead stays the W26 pipeline, not a loss.
+    assert!(cursor_far_ahead_tip_lost(
+        2813334, 2813397, false, false, false
+    ));
+    assert!(!cursor_far_ahead_tip_lost(
+        2813334, 2813335, false, false, false
+    ));
+    assert!(!cursor_far_ahead_tip_lost(
+        2813334, 2813397, true, false, false
+    ));
+    assert!(!cursor_far_ahead_tip_lost(
+        2813334, 2813397, false, true, false
+    ));
+    assert!(!cursor_far_ahead_tip_lost(
+        2813334, 2813397, false, false, true
+    ));
+}
+
 #[serial_test::serial(ibd)]
 #[test]
 fn c1f_tip_runway_mode_classifies_tip_hole_ahead() {
@@ -1020,6 +1041,37 @@ fn slice_a_448m_journal_must_shrink_50k_interval_below_allcold_budget() {
     assert_eq!(
         journal_scaled_checkpoint_interval(iv_sit, 1_000_000, floor),
         iv_sit
+    );
+}
+
+#[test]
+fn checkpoint_interval_respecting_fence_does_not_schedule_below_high_water() {
+    // R-376: last export 2_600_000, fence already at 2_760_000, journal 300_206_233
+    // scaled the 200_000 cadence to 106_593. That slot (2_706_593) is under the
+    // fence, so the exporter waited 31 min for a second step. The soonest legal
+    // snapshot is the fence itself.
+    let last = 2_600_000;
+    let fence = 2_760_000;
+    let shrunk = 106_593;
+    let iv = checkpoint_interval_respecting_fence(last, shrunk, fence);
+    assert_eq!(iv, fence - last);
+    let cl = 2_767_249;
+    let ckpt = aligned_checkpoint_height(cl, last, iv);
+    assert_eq!(ckpt, fence);
+    assert!(ckpt >= fence);
+    // A cadence that already clears the fence stays put.
+    assert_eq!(
+        checkpoint_interval_respecting_fence(last, 200_000, fence),
+        200_000
+    );
+    // No finite fence, or the fence is still at the last export: do not widen.
+    assert_eq!(
+        checkpoint_interval_respecting_fence(last, shrunk, 0),
+        shrunk
+    );
+    assert_eq!(
+        checkpoint_interval_respecting_fence(last, shrunk, last),
+        shrunk
     );
 }
 
@@ -2592,6 +2644,39 @@ fn defer_bridge_ahead_dispatch_blocks_far_ahead_when_gap_missing() {
         false,
         false
     ));
+}
+
+#[serial_test::serial(ibd)]
+#[test]
+fn r376_bridge_cursor_dispatches_when_atomic_tip_already_taken() {
+    let _lock = tip_stage::test_tip_atomics_lock();
+    tip_stage::test_reset_tip_stage();
+    // Resume9 12:30Z: atomic tip 2861698 already in the pipeline, bridge cursor
+    // 2861731 sitting in reorder, W58 deferring it, validators idle.
+    let next = 2_861_698u64;
+    let cursor = 2_861_731u64;
+    assert!(
+        defer_bridge_ahead_dispatch(cursor, next, true, true, 192, true, false, false),
+        "W58 still defers the cursor; the allow is a separate gate"
+    );
+    assert!(!bridge_cursor_dispatch_allowed(cursor, next, Some(cursor)));
+    tip_stage::mark_taken_from_feeder(next);
+    assert!(bridge_cursor_dispatch_allowed(cursor, next, Some(cursor)));
+    assert!(
+        !bridge_cursor_dispatch_allowed(cursor + 1, next, Some(cursor)),
+        "only the cursor height, not the frontier past it"
+    );
+    let mut dispatched = rustc_hash::FxHashSet::default();
+    dispatched.insert(cursor);
+    release_cursor_stuck_in_reorder(&mut dispatched, true, Some(cursor), false, false);
+    assert!(!dispatched.contains(&cursor));
+    dispatched.insert(cursor);
+    release_cursor_stuck_in_reorder(&mut dispatched, true, Some(cursor), true, false);
+    assert!(
+        dispatched.contains(&cursor),
+        "feeder already has the cursor; leave the mark"
+    );
+    tip_stage::test_reset_tip_stage();
 }
 
 #[serial_test::serial(ibd)]

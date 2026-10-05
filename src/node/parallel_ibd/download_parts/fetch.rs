@@ -70,6 +70,43 @@ fn log_tip_hole_grow_info(
     );
 }
 
+/// Drop an ahead chunk so this peer's next `get_work` is an empty-pipe duplicate of the tip.
+async fn release_ahead_chunk_for_tip(
+    received: &mut BTreeMap<u64, (SharedBlock, SharedWitnesses)>,
+    block_tx: Option<&tokio::sync::mpsc::Sender<(u64, SharedBlock, SharedWitnesses)>>,
+    start_height: u64,
+    end_height: u64,
+    next_to_send: u64,
+    validation_height: Option<&AtomicU64>,
+    in_flight_heights: &HashSet<u64>,
+    block_hash_by_height: &BTreeMap<u64, [u8; 32]>,
+    network: &Arc<NetworkManager>,
+    peer_addr: SocketAddr,
+    peer_id: &str,
+) -> Result<DownloadChunkResult> {
+    warn!(
+        "[IBD_TIP_DUP_YIELD] peer={} releasing ahead chunk {}-{} (next_to_send={})",
+        peer_id, start_height, end_height, next_to_send
+    );
+    for &h in in_flight_heights {
+        if let Some(&h_hash) = block_hash_by_height.get(&h) {
+            network.cancel_block_request(peer_addr, h_hash);
+        }
+    }
+    flush_received_on_abort(
+        received,
+        block_tx,
+        start_height,
+        end_height,
+        next_to_send,
+        validation_height,
+    )
+    .await;
+    Err(anyhow::anyhow!(
+        "tip-dup yield: releasing ahead chunk {start_height}-{end_height}"
+    ))
+}
+
 /// Download a chunk of blocks from a peer.
 ///
 /// When block_tx is Some, streams each block immediately so validation doesn't wait for full chunk.
@@ -191,7 +228,18 @@ pub(crate) async fn download_chunk(
                 "[IBD_LEFTOVER_TRACE] step=connect_begin start={start_height} peer={peer_id}"
             );
         }
-        let connect_wait = Duration::from_secs(config.download_timeout_secs.max(15));
+        let covers_tip = tip_enter.as_ref().is_some_and(|a| {
+            let next = a.next_needed_height();
+            start_height <= next && next <= end_height
+        });
+        // A peer that is not connected must not hold the validation tip for the
+        // 45s download timeout. Resume16 handed that tip to peers that then
+        // failed "handshake not complete after 15s", repeatedly.
+        let connect_wait = if covers_tip {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_secs(config.download_timeout_secs.max(15))
+        };
         wait_for_peer_connected(
             &network,
             peer_addr,
@@ -199,6 +247,7 @@ pub(crate) async fn download_chunk(
             connect_wait,
             &tip_enter,
             start_height,
+            end_height,
         )
         .await?;
         if leftover_trace {
@@ -211,7 +260,11 @@ pub(crate) async fn download_chunk(
                 "[IBD_LEFTOVER_TRACE] step=handshake_begin start={start_height} peer={peer_id}"
             );
         }
-        let handshake_wait = Duration::from_secs(15);
+        let handshake_wait = if covers_tip {
+            Duration::from_millis(200)
+        } else {
+            Duration::from_secs(15)
+        };
         wait_for_peer_ibd_ready(
             &network,
             peer_addr,
@@ -219,6 +272,7 @@ pub(crate) async fn download_chunk(
             handshake_wait,
             &tip_enter,
             start_height,
+            end_height,
         )
         .await?;
         if leftover_trace {
@@ -890,21 +944,16 @@ pub(crate) async fn download_chunk(
     // W8: multi-block chunks used the same 45s as micros (W6), aborting after receiving
     // 13/14 blocks (live h=646643). Give multi-block ≥90s (or 3× per-block) so a slow gap
     // peer can finish while ahead blocks stay buffered.
-    let chunk_deadline_secs: u64 = wan_deep_tip_pipe_chunk_deadline_secs(
+    let covers_tip = tip_enter.as_ref().is_some_and(|a| {
+        let next = a.next_needed_height();
+        start_height <= next && next <= end_height
+    });
+    let chunk_deadline_secs: u64 = chunk_gap_deadline_secs(
         start_height,
         end_height,
         confirmed_body_height,
-        if start_height == end_height {
-            timeout_duration.as_secs()
-        } else {
-            let blocks = end_height.saturating_sub(start_height).saturating_add(1);
-            timeout_duration
-                .as_secs()
-                .saturating_mul(3)
-                .max(90)
-                .min(timeout_duration.as_secs().saturating_mul(blocks.max(1)))
-                .clamp(90, 600)
-        },
+        timeout_duration.as_secs(),
+        covers_tip,
     );
     let mut last_gap_at = chunk_start_time;
     let mut deadline_poll = tokio::time::interval(Duration::from_secs(1));
@@ -1271,6 +1320,31 @@ pub(crate) async fn download_chunk(
                 tokio::select! {
                     biased;
                     r = in_flight.next() => r,
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                        if tip_enter
+                            .as_ref()
+                            .is_some_and(|a| a.past_hole_should_release(start_height))
+                        {
+                            warn!(
+                                "[IBD_PAST_HOLE_RELEASE] peer={peer_id} chunk={start_height}-{end_height} — tip uncovered, leaving the far tile"
+                            );
+                            return release_ahead_chunk_for_tip(
+                                &mut received,
+                                block_tx.as_ref(),
+                                start_height,
+                                end_height,
+                                next_to_send,
+                                validation_height.as_deref(),
+                                &in_flight_heights,
+                                &block_hash_by_height,
+                                &network,
+                                peer_addr,
+                                peer_id,
+                            )
+                            .await;
+                        }
+                        continue;
+                    }
                     stall_res = rx.recv() => {
                         if let Ok(stall_h) = stall_res {
                             let leftover_cheese = tip_enter.as_ref().is_some_and(|a| {
@@ -1460,6 +1534,31 @@ pub(crate) async fn download_chunk(
             // We have started receiving blocks. Race in_flight, stall signal, and hard deadline.
             tokio::select! {
                 r = in_flight.next() => r,
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    if tip_enter
+                        .as_ref()
+                        .is_some_and(|a| a.past_hole_should_release(start_height))
+                    {
+                        warn!(
+                            "[IBD_PAST_HOLE_RELEASE] peer={peer_id} chunk={start_height}-{end_height} — tip uncovered, leaving the far tile"
+                        );
+                        return release_ahead_chunk_for_tip(
+                            &mut received,
+                            block_tx.as_ref(),
+                            start_height,
+                            end_height,
+                            next_to_send,
+                            validation_height.as_deref(),
+                            &in_flight_heights,
+                            &block_hash_by_height,
+                            &network,
+                            peer_addr,
+                            peer_id,
+                        )
+                        .await;
+                    }
+                    continue;
+                }
                 stall_res = rx.recv() => {
                     // Coordinator detected validation waiting on our gap height — fail fast so
                     // assigner can requeue a gap micro-chunk to another peer instead of burning
@@ -1841,6 +1940,45 @@ pub(crate) async fn download_chunk(
                                 );
                             }
                         } else {
+                            let wire_ms = request_start.elapsed().as_millis() as u64;
+                            let slow_peer = tip_hole_gd_slow_for_peer(peer_id);
+                            let gd_ms = gd.map(|(ms, _)| ms).unwrap_or(0);
+                            if slow_peer || gd_ms >= tip_hole_gd_slow_ms() {
+                                static LAST_S: AtomicU64 = AtomicU64::new(0);
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+                                let prev = LAST_S.load(Ordering::Relaxed);
+                                if now.saturating_sub(prev) >= 5 {
+                                    LAST_S.store(now, Ordering::Relaxed);
+                                    let peer_ewma = super::tip_stage::getdata_body_ewma_ms_for_peer(
+                                        peer_id,
+                                        tip_hole_gd_slow_n(),
+                                    );
+                                    let val_h = validation_height
+                                        .as_ref()
+                                        .map(|v| v.load(Ordering::Relaxed))
+                                        .unwrap_or(0);
+                                    warn!(
+                                        "[IBD_TIP_HOLE_WHY] peer={} h={} next_to_send={} val={} sole_ready={} slow_peer={} c1u={} hot={} wire_ms={} gd_ewma_ms={} gd_n={} peer_ewma={:?} inflight={} depth={}",
+                                        peer_id,
+                                        height,
+                                        next_to_send,
+                                        val_h,
+                                        sole_ready,
+                                        slow_peer,
+                                        c1u_applies_slow_clamp(&tip_enter, peer_id),
+                                        tip_hole_hot,
+                                        wire_ms,
+                                        gd_ms,
+                                        gd.map(|(_, n)| n).unwrap_or(0),
+                                        peer_ewma,
+                                        in_flight_heights.len(),
+                                        tip_hole_grown
+                                    );
+                                }
+                            }
                             tip_hole_grown =
                                 tip_hole_grow_on_delivery_capped(tip_hole_grown, tip_hole_cap);
                             if tip_hole_grown > prev {
@@ -1910,6 +2048,25 @@ pub(crate) async fn download_chunk(
                 progress.record_progress(received_hash);
                 progress.reset_timeout();
                 let latency_ms = request_start.elapsed().as_secs_f64() * 1000.0;
+                if !from_local {
+                    let val_h = validation_height
+                        .as_ref()
+                        .map(|v| v.load(Ordering::Relaxed))
+                        .unwrap_or(0);
+                    if height <= val_h.saturating_add(2) {
+                        warn!(
+                            "[IBD_TIP_BODY] peer={} h={} val={} wire_ms={} inflight={} chunk={}-{} next_to_send={}",
+                            peer_id,
+                            height,
+                            val_h,
+                            latency_ms as u64,
+                            in_flight_heights.len(),
+                            start_height,
+                            end_height,
+                            next_to_send
+                        );
+                    }
+                }
                 // Wire size for W2 EMA + peer scorer + window tile sizing (not
                 // consensus-critical). R-346: use the actual P2P payload length when the
                 // frame is here; the field-count approximation below ignores scriptSig /
@@ -1944,7 +2101,9 @@ pub(crate) async fn download_chunk(
                         );
                     }
                 }
-                note_download_block_bytes(peer_id, block_size);
+                // Store hits carry no frame. Noting the approximation here widened
+                // the 1 MB tile (R-378: blk_kb 75, tile 13, wire still ~135 KB).
+                note_wire_frame_bytes(peer_id, wire_payload.as_deref());
                 peer_scorer.record_block(peer_addr, block_size, latency_ms);
                 // W7: empty-witness MSG_BLOCK of a *commitment* block must not enter
                 // `received` (stripped payload). Blocks without BIP141 commitment may
@@ -2763,6 +2922,18 @@ pub(crate) async fn download_chunk(
     // left permanent gaps in the coordinator reorder buffer.
     if next_to_send != end_height + 1 {
         let still = received.len();
+        // The tip body may already be in `received` while next_to_send is stuck
+        // on an earlier height. Dropping the map here deletes the only copy:
+        // incremental prune does not keep a body this far below the header tip.
+        flush_received_on_abort(
+            &mut received,
+            block_tx.as_ref(),
+            start_height,
+            end_height,
+            next_to_send,
+            validation_height.as_deref(),
+        )
+        .await;
         received_drain_all(&mut received);
         return Err(anyhow::anyhow!(
             "Incomplete chunk {}-{}: stuck before height {} ({} heights still buffered) — chunk needs retry",

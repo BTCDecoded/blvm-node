@@ -311,6 +311,31 @@ async fn drain_consecutive_received_after(
 /// **W60:** only flush `[next_needed, next_needed+1, …]` while contiguous. Dumping sparse
 /// ahead (old behavior) hole-fills OrderedReadyBridge — live W59 genesis: `FLUSH_ON_ABORT`
 /// 37× by h≈6k with `bmin>nn+1` 71% while tip crawl stalled. Matches W50 GAP_STREAM policy.
+/// Heights to hand the coordinator before an abort drops `received`.
+///
+/// The validation tip and the contiguous run above it go through. A buffer that
+/// does not contain the tip and starts above it is left alone (W60: sparse
+/// ahead hole-fills the bridge). Heights at or behind the tip are sent when
+/// the tip itself is not buffered.
+pub(crate) fn abort_flush_heights(keys: &[u64], tip_needed: u64) -> Vec<u64> {
+    if keys.is_empty() {
+        return Vec::new();
+    }
+    if keys.binary_search(&tip_needed).is_ok() {
+        let mut h = tip_needed;
+        let mut out = Vec::new();
+        while keys.binary_search(&h).is_ok() {
+            out.push(h);
+            h = h.saturating_add(1);
+        }
+        return out;
+    }
+    if keys[0] > tip_needed {
+        return Vec::new();
+    }
+    keys.iter().copied().take_while(|&h| h <= tip_needed).collect()
+}
+
 /// Returns the number of blocks successfully flushed.
 async fn flush_received_on_abort(
     received: &mut BTreeMap<u64, (SharedBlock, SharedWitnesses)>,
@@ -336,23 +361,26 @@ async fn flush_received_on_abort(
         // - tip in buffer → flush contiguous from tip (never sparse ahead past a hole)
         // - all buffered < tip → flush all (obsolete behind-tip; persist/reuse, no hole-fill)
         // - all buffered > tip → flush nothing (ahead-only would hole-fill the bridge)
-        let ahead_only = min_h.is_some_and(|m| m > tip_needed);
-        if ahead_only {
+        let _ = (min_h, max_h);
+        let keys: Vec<u64> = received.keys().copied().collect();
+        let send = abort_flush_heights(&keys, tip_needed);
+        if send.is_empty() {
             let skipped = received.len();
-            // Keep ahead bodies — clear() was the 409 leak (fetched at +113, discarded,
-            // then empty 128 reassign ×35). Caller may still drop the map on abort.
+            // Far-ahead only. The caller drops this map; those bodies are not
+            // the validation tip. clear() here was the 409 leak.
             info!(
                 "[IBD_FLUSH_ON_ABORT] chunk {}-{}: flushed 0 tip-contiguous block(s) (kept_ahead={}, buffered={}, next_to_send={}, tip_needed={})",
                 start_height, end_height, skipped, buffered, next_to_send, tip_needed
             );
-        } else if min_h.is_some_and(|m| m == tip_needed) || received.contains_key(&tip_needed) {
-            let mut h = tip_needed;
-            while let Some((block, witnesses)) = received_take(received, h) {
+        } else {
+            for h in send {
+                let Some((block, witnesses)) = received_take(received, h) else {
+                    break;
+                };
                 if tx.send((h, block, witnesses)).await.is_err() {
                     break;
                 }
                 flushed += 1;
-                h = h.saturating_add(1);
             }
             let skipped = received.len();
             received.clear();
@@ -362,34 +390,6 @@ async fn flush_received_on_abort(
                 "[IBD_FLUSH_ON_ABORT] chunk {}-{}: flushed {} tip-contiguous block(s) (skipped_ahead={}, buffered={}, next_to_send={}, tip_needed={})",
                 start_height, end_height, flushed, skipped, buffered, next_to_send, tip_needed
             );
-        } else {
-            // Behind tip (max < tip) or tip hole with some behind — drain ascending behind/at tip only.
-            let _ = max_h;
-            while let Some((&h, _)) = received.iter().next() {
-                if h > tip_needed {
-                    break;
-                }
-                let Some((block, witnesses)) = received_take(received, h) else {
-                    break;
-                };
-                if h < tip_needed {
-                    // Behind tip: still deliver for store/inject; coordinator drops if obsolete.
-                }
-                if tx.send((h, block, witnesses)).await.is_err() {
-                    break;
-                }
-                flushed += 1;
-            }
-            let skipped = received.len();
-            received.clear();
-            if flushed > 0 || skipped > 0 {
-                crate::node::parallel_ibd::memory::GAP_FLUSH_ON_ABORT_BLOCKS
-                    .fetch_add(flushed as u64, Ordering::Relaxed);
-                info!(
-                    "[IBD_FLUSH_ON_ABORT] chunk {}-{}: flushed {} block(s) (skipped_ahead={}, buffered={}, next_to_send={}, tip_needed={})",
-                    start_height, end_height, flushed, skipped, buffered, next_to_send, tip_needed
-                );
-            }
         }
     } else {
         // No validation cursor — legacy ascending drain.
@@ -1026,6 +1026,16 @@ pub(crate) fn download_peer_recv_window(
     (mbps(sticky_d), top_p, mbps(top_d))
 }
 
+/// Tile EMA and WAN byte counters. A store hit has no frame (`None` / empty)
+/// and must not move either: R-378 noted the field-count approximation on those
+/// hits and the 1 MB tile became 13 blocks while the wire was still ~135 KB.
+pub(crate) fn note_wire_frame_bytes(peer_id: &str, wire_payload: Option<&[u8]>) {
+    let Some(n) = wire_payload.map(|p| p.len() as u64).filter(|&n| n > 0) else {
+        return;
+    };
+    note_download_block_bytes(peer_id, n);
+}
+
 fn note_download_block_bytes(peer_id: &str, nbytes: u64) {
     if nbytes == 0 {
         return;
@@ -1039,6 +1049,11 @@ fn note_download_block_bytes(peer_id: &str, nbytes: u64) {
     // EMA: 7/8 old + 1/8 new
     let next = old.saturating_mul(7).saturating_add(nbytes) / 8;
     est.store(next.max(50_000), std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn test_set_download_est(n: u64) {
+    download_est_store().store(n, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -1572,8 +1587,7 @@ pub(crate) fn c1u_applies_slow_clamp(
 }
 
 /// C1d: warm peers (hot tip streamer) may deepen to pipe cap.
-/// Ship: hot streamer gets 128 immediately (WARM env no longer required).
-/// `BLVM_IBD_TIP_HOLE_WARM=0` still forces cold cap.
+/// A hot streamer gets the pipe cap. There is no env opt-out.
 pub(crate) fn tip_hole_warm_enabled() -> bool {
     super::policy::tip_hole_warm()
 }
@@ -1591,15 +1605,14 @@ pub(crate) fn tip_hole_grow_cap_for_peer(hot_tip_streamer: bool) -> usize {
     if !tip_hole_grow_enabled() || !hot_tip_streamer {
         return cold;
     }
-    // Explicit WARM=0 keeps cold. Unset / on: C1d 128 immediately.
-    if std::env::var("BLVM_IBD_TIP_HOLE_WARM")
-        .ok()
-        .as_deref()
-        .map(str::trim)
-        == Some("0")
-    {
-        return cold;
+    // Warm/pipe cap only while getdata→body EWMA is under the fast gate.
+    // Resume15: hot peers grew to depth 104 at ewma 655ms (fast gate 150, slow
+    // clamp 800). Tip wire p50 went 468ms → 29s and the crawl fell ~20 BPS → ~1.
+    match super::tip_stage::getdata_body_ewma_ms_min_n(tip_hole_gd_fast_n()) {
+        Some((ms, _)) if ms < tip_hole_gd_fast_ms() => {}
+        _ => return cold,
     }
+    // Hot streamer: pipe cap. Unset and any old WARM env take the same path.
     tip_hole_warm_cap_raw()
         .clamp(cold, 128)
         .min(tip_hole_pipe_cap())
@@ -2022,6 +2035,46 @@ async fn wait_blacklist_abort(
             return;
         }
     }
+}
+
+/// Hard deadline for a chunk whose first height has not moved.
+///
+/// A deep pipe (64+ blocks) keeps the 90–180s tip-SLA budget. A window tile is
+/// 4 blocks. Resume16 clamped every multi-block chunk to at least 90s, so a
+/// 4-block tip tile sat the full 90s. In the fast stretch of that same run the
+/// tip body p90 was 1.2s and the max was under 8s.
+///
+/// Resume17 applied that 10s cap to every short tile. 163 deadlines fired, one
+/// of them on the validation tip; the rest aborted ahead tiles that already
+/// held 1–3 bodies and `flush_received_on_abort` dropped those bodies. Only a
+/// chunk that covers `next_needed` uses the short cap.
+pub(crate) fn chunk_gap_deadline_secs(
+    start_height: u64,
+    end_height: u64,
+    confirmed_body_height: u64,
+    per_block_secs: u64,
+    covers_tip: bool,
+) -> u64 {
+    let blocks = end_height.saturating_sub(start_height).saturating_add(1);
+    if confirmed_body_height > 0
+        && start_height > confirmed_body_height
+        && end_height.saturating_sub(start_height) >= 63
+    {
+        return super::tip_stage::tip_sla_secs()
+            .saturating_mul(2)
+            .clamp(90, 180);
+    }
+    if blocks <= 1 {
+        return per_block_secs.max(5);
+    }
+    if covers_tip && blocks <= 8 {
+        return 10;
+    }
+    per_block_secs
+        .saturating_mul(3)
+        .max(90)
+        .min(per_block_secs.saturating_mul(blocks.max(1)))
+        .clamp(90, 600)
 }
 
 /// W33/A6g: WAN deep tip-owner pipe uses a bounded gap deadline — ahead blocks must not

@@ -440,6 +440,99 @@ impl ChunkAssigner {
         taker_inflight <= 1 || oldest_age >= stall.saturating_mul(2)
     }
 
+    /// Whether this poller should duplicate the front tile.
+    ///
+    /// A peer with an empty pipe duplicates at `dup_floor` (default 1s), including a peer
+    /// the EMA has marked slow. Resume13: `dup_s=30` but the duplicate age was 54s median
+    /// and 173s p90, because every non-slow peer was inside a download and the only
+    /// pollers were the slow ones, who were barred by `!slow`. The empty-pipe request is
+    /// the one that is not queued behind that peer's current tile.
+    pub(crate) fn window_front_dup_ok(
+        idle: bool,
+        slow: bool,
+        oldest_age: u64,
+        dup_floor: u64,
+        dup_after: u64,
+        taker_inflight: usize,
+        stall: u64,
+    ) -> bool {
+        if oldest_age < dup_floor {
+            return false;
+        }
+        // Resume26: 2867707 sat on one peer for 287s (getdata EWMA ~22s). Every
+        // other peer was marked slow and already held a tile, so this predicate
+        // refused them. A different peer then delivered that block in 772ms.
+        // The second cover is the one-block tip; the slow flag does not bar it.
+        let _ = (dup_after, slow);
+        if idle {
+            return true;
+        }
+        Self::window_dup_taker_ok(taker_inflight, oldest_age, stall)
+    }
+
+    /// Resume23: two peers already covered 2861258 and neither had the block.
+    /// `front_covers < 2` kept every idle peer off that height for 109s.
+    /// One more idle peer may take the single height once the oldest cover
+    /// is past the dup floor. A fourth peer does not.
+    pub(crate) fn uncovered_tip_third_cover(
+        uncovered: bool,
+        idle: bool,
+        covers: usize,
+        oldest_age: u64,
+        dup_floor: u64,
+    ) -> bool {
+        uncovered && idle && covers == 2 && oldest_age >= dup_floor
+    }
+
+    /// Resume27: three 4-block tiles already covered the tip, so `covers == 2`
+    /// never matched and no peer was asked for that one height. The tiles stayed
+    /// 45–90s because a later block in the tile kept the chunk alive.
+    ///
+    /// An idle peer may take `(next, next)` once every cover is at least
+    /// `dup_floor` old. A missing stamp counts as fresh. At most three of those
+    /// one-block requests exist; a wide tile does not consume that cap and is
+    /// not cancelled. A cover younger than the floor — the fast stretch, where
+    /// the body is back in well under a second — adds nothing.
+    pub(crate) fn tip_needs_fresh_cover(
+        uncovered: bool,
+        holds: bool,
+        cooled: bool,
+        idle: bool,
+        any_young: bool,
+        dedicated: usize,
+    ) -> bool {
+        uncovered && !holds && !cooled && idle && !any_young && dedicated < 3
+    }
+
+    /// A `window_done` mark hides that height from `get_work`.
+    ///
+    /// While the tip body is missing, the cursor itself stays assignable even
+    /// if a late completion re-marked it. Resume21 otherwise handed the next
+    /// tile 400 above the hole. Every other delivered height stays hidden.
+    /// Treating the whole hole as free reloaded those blocks from disk:
+    /// R-379 completed 1.46M local blocks in 200–250k against 50k wire blocks.
+    /// Hiding them is not an assignment cap. A height with no mark, including
+    /// past the buffered body, is still free, and `past_hole_should_release`
+    /// stays false.
+    fn window_done_covers_height(&self, h: u64, next: u64) -> bool {
+        if self.window_tip_uncovered.load(Ordering::Relaxed) && h == next {
+            return false;
+        }
+        true
+    }
+
+    /// Ahead of the buffered body, keep the tile.
+    ///
+    /// R-377 aborted these and also refused to assign past `first_ahead`.
+    /// Busy peers fell (67 → 42 at 200–250k, 50 → 35 at 370–400k) and the
+    /// frontier stopped at the hole, so the cursor met the next missing
+    /// height with no runway. `tip_need_body` was 36s → 121s on that band.
+    /// The next idle peer still takes the hole first. Aborting this tile
+    /// drops the bodies already in it.
+    pub(crate) fn past_hole_should_release(&self, _chunk_start: u64) -> bool {
+        false
+    }
+
     /// R-341: heights at the front of the window reserved for peers that are not slow
     /// (`BLVM_IBD_WINDOW_FRONT_RESERVE`, default 256; 0 disables placement).
     fn window_front_reserve() -> u64 {
@@ -534,6 +627,26 @@ impl ChunkAssigner {
             }
         }
 
+        // R-376: do not hand a tile to a peer that has not VerAck'd.
+        // The download path waits up to 15s inside the chunk (`handshake not complete`)
+        // and that chunk is often the validation tip. An empty ready snapshot used to
+        // mean "allow everyone", so the first tiles went out before the coordinator's
+        // first refresh — including to mainnet :8333. Empty means nobody is ready,
+        // except window unit tests that never populate the set.
+        let tests_without_ready_snapshot = self.ibd_ready_peer_count() == 0 && {
+            #[cfg(test)]
+            {
+                WINDOW_TEST_FORCE.with(|f| f.get())
+            }
+            #[cfg(not(test))]
+            {
+                false
+            }
+        };
+        if !tests_without_ready_snapshot && !self.peer_is_ibd_ready(peer_id) {
+            return None;
+        }
+
         // R-341: slow peers keep off the front of the window and never take the stall dup.
         // R-344: so do holders released from the front by a strike-out, for FRONT_COOL_SECS.
         let cooled = {
@@ -553,6 +666,49 @@ impl ChunkAssigner {
         // Per-peer tile cap (R-342: byte budget unless WINDOW_PER_PEER is set).
         let mine = guard.get(peer_id).map(|v| v.len()).unwrap_or(0);
         if mine >= self.window_peer_cap(tile, slow) {
+            // A slow peer at the byte cap used to return here, so the sole tip
+            // holder stayed alone. Resume26: that holder was 287s old and the
+            // next peer delivered the block in 772ms.
+            if !cooled {
+                let floor = Self::window_dup_secs().max(1);
+                let mut covers = 0usize;
+                let mut oldest = 0u64;
+                let mut holds = false;
+                {
+                    let started = self.window_started.lock().unwrap();
+                    for (p, ranges) in guard.iter() {
+                        for &(s, e) in ranges {
+                            if s <= next_needed && next_needed <= e {
+                                covers += 1;
+                                if p == peer_id {
+                                    holds = true;
+                                }
+                                if let Some(t0) = started.get(&(p.clone(), s, e)) {
+                                    oldest = oldest.max(now.saturating_duration_since(*t0).as_secs());
+                                }
+                            }
+                        }
+                    }
+                }
+                if !holds && covers == 1 && oldest >= floor {
+                    Self::insert_in_flight(&mut guard, peer_id, next_needed, next_needed);
+                    self.window_started.lock().unwrap().insert(
+                        (peer_id.to_string(), next_needed, next_needed),
+                        now,
+                    );
+                    self.note_tip_cover_claim(peer_id, next_needed, next_needed);
+                    crate::node::parallel_ibd::ms_breakdown::note_peers_inflight(
+                        guard.values().filter(|v| !v.is_empty()).count(),
+                    );
+                    tracing::warn!(
+                        "[IBD_TIP_SECOND] tip={} age_s={} dup_to={} — one block, holder kept, taker was at cap",
+                        next_needed,
+                        oldest,
+                        peer_id
+                    );
+                    return Some((next_needed, next_needed));
+                }
+            }
             return None;
         }
 
@@ -563,6 +719,9 @@ impl ChunkAssigner {
         // (peer, range end, issue time) for every range covering next_needed.
         let mut front_holders: Vec<(String, u64, Option<Instant>)> = Vec::new();
         let mut front_covers = 0usize;
+        let mut dedicated = 0usize;
+        let mut any_young = false;
+        let dup_floor = Self::window_dup_secs();
         for (p, ranges) in guard.iter() {
             for &(s, e) in ranges {
                 if e < next_needed || s > window_hi {
@@ -575,12 +734,22 @@ impl ChunkAssigner {
                 }
                 if s <= next_needed && next_needed <= e {
                     front_covers += 1;
+                    if s == next_needed && e == next_needed {
+                        dedicated += 1;
+                    }
                     let t0 = self
                         .window_started
                         .lock()
                         .unwrap()
                         .get(&(p.clone(), s, e))
                         .copied();
+                    match t0 {
+                        None => any_young = true,
+                        Some(t) if now.saturating_duration_since(t).as_secs() < dup_floor => {
+                            any_young = true;
+                        }
+                        Some(_) => {}
+                    }
                     front_holders.push((p.clone(), e, t0));
                 }
             }
@@ -596,9 +765,11 @@ impl ChunkAssigner {
                 }
             }
             for (&h, _) in done.range(next_needed..=window_hi) {
-                covered[idx(h)] = true;
+                if self.window_done_covers_height(h, next_needed) {
+                    covered[idx(h)] = true;
+                }
             }
-        }
+        };
         // Drop issue stamps for ranges no longer in flight (chunk_fail with no peer).
         self.window_started.lock().unwrap().retain(|(p, s, e), _| {
             guard.get(p).is_some_and(|v| v.contains(&(*s, *e)))
@@ -609,13 +780,27 @@ impl ChunkAssigner {
         // tiles are released and it is queued for eviction (Core disconnects a
         // peer that stalls the window). While fewer than two peers cover the
         // front and the oldest is past the threshold, this peer gets a duplicate.
-        if front_covers > 0 && !front_holders.iter().any(|(p, _, _)| p == peer_id) {
+        //
+        // Resume7: done-ahead (28–68) made the old 3 s steal fire while the gauge
+        // still said dup_s=30 (tile EMA 72 s). The tip tile moved every 3–4 s and
+        // the GetData that finally soft-retried had waited 86 s against a 5 s
+        // limit. A finished higher tile is not a reason to ignore the EMA cap.
+        let mut oldest_age = 0u64;
+        let mut oldest_holder: Option<(String, u64)> = None;
+        for (holder, hold_end, t0) in front_holders.iter() {
+            let Some(t0) = t0 else { continue };
+            let age = now.saturating_duration_since(*t0).as_secs();
+            if age > oldest_age || oldest_holder.is_none() {
+                oldest_age = age;
+                oldest_holder = Some((holder.clone(), *hold_end));
+            }
+        }
+        let holds_front = front_holders.iter().any(|(p, _, _)| p == peer_id);
+        if front_covers > 0 && !holds_front {
             let stall = self.window_stall_dyn();
             // R-356: dup fires at `dup_after` (≤ stall); strikes/bench stay on `stall`.
             let dup_after = self.window_dup_dyn(stall);
             let mut evicted_any = false;
-            let mut oldest_age = 0u64;
-            let mut oldest_holder: Option<(String, u64)> = None;
             for (holder, hold_end, t0) in front_holders.iter() {
                 let Some(t0) = t0 else { continue };
                 let age = now.saturating_duration_since(*t0).as_secs();
@@ -743,12 +928,44 @@ impl ChunkAssigner {
                 }
                 let done = self.window_done.lock().unwrap();
                 for (&h, _) in done.range(next_needed..=window_hi) {
-                    covered[idx(h)] = true;
+                    if self.window_done_covers_height(h, next_needed) {
+                        covered[idx(h)] = true;
+                    }
                 }
+            } else if Self::uncovered_tip_third_cover(
+                self.window_tip_uncovered.load(Ordering::Relaxed),
+                mine == 0,
+                front_covers,
+                oldest_age,
+                Self::window_dup_secs(),
+            ) {
+                Self::insert_in_flight(&mut guard, peer_id, next_needed, next_needed);
+                self.window_started.lock().unwrap().insert(
+                    (peer_id.to_string(), next_needed, next_needed),
+                    now,
+                );
+                self.note_tip_cover_claim(peer_id, next_needed, next_needed);
+                crate::node::parallel_ibd::ms_breakdown::note_peers_inflight(
+                    guard.values().filter(|v| !v.is_empty()).count(),
+                );
+                tracing::warn!(
+                    "[IBD_TIP_THIRD] tip={} covers={} age_s={} dup_to={} — one block, holders kept",
+                    next_needed,
+                    front_covers,
+                    oldest_age,
+                    peer_id
+                );
+                return Some((next_needed, next_needed));
             } else if front_covers < 2
-                && oldest_age >= dup_after
-                && !slow
-                && Self::window_dup_taker_ok(mine, oldest_age, stall)
+                && Self::window_front_dup_ok(
+                    mine == 0,
+                    slow,
+                    oldest_age,
+                    Self::window_dup_secs(),
+                    dup_after,
+                    mine,
+                    stall,
+                )
             {
                 if let Some((holder, hold_end)) = oldest_holder {
                     let end = hold_end.min(next_needed + tile - 1);
@@ -772,6 +989,32 @@ impl ChunkAssigner {
                     );
                     return Some((next_needed, end));
                 }
+            } else if Self::tip_needs_fresh_cover(
+                self.window_tip_uncovered.load(Ordering::Relaxed),
+                holds_front,
+                cooled,
+                mine == 0,
+                any_young,
+                dedicated,
+            ) {
+                Self::insert_in_flight(&mut guard, peer_id, next_needed, next_needed);
+                self.window_started.lock().unwrap().insert(
+                    (peer_id.to_string(), next_needed, next_needed),
+                    now,
+                );
+                self.note_tip_cover_claim(peer_id, next_needed, next_needed);
+                crate::node::parallel_ibd::ms_breakdown::note_peers_inflight(
+                    guard.values().filter(|v| !v.is_empty()).count(),
+                );
+                tracing::warn!(
+                    "[IBD_TIP_FRESH] tip={} wide={} dedicated={} age_s={} dup_to={} — one block, wide holders kept",
+                    next_needed,
+                    front_covers.saturating_sub(dedicated),
+                    dedicated,
+                    oldest_age,
+                    peer_id
+                );
+                return Some((next_needed, next_needed));
             }
         }
 
@@ -788,15 +1031,20 @@ impl ChunkAssigner {
         let failed_by_me = |h: u64| my_fails.iter().any(|&(s, e)| s <= h && h <= e);
 
         // Lowest-first free run of up to `tile` heights (slow peers start past the reserve).
+        // The hole is the first free height. Do not stop at the buffered body:
+        // R-377 left idle peers with nothing once that span was in flight, and
+        // the runway behind it never refilled. `window_done` still hides a
+        // body that is already in reorder.
+        let assign_hi = window_hi;
         let mut h = walk_from;
-        while h <= window_hi {
+        while h <= assign_hi {
             if covered[idx(h)] || failed_by_me(h) {
                 h += 1;
                 continue;
             }
             let start = h;
             let mut end = h;
-            while end < window_hi
+            while end < assign_hi
                 && end + 1 - start < tile
                 && !covered[idx(end + 1)]
                 && !failed_by_me(end + 1)
@@ -873,32 +1121,144 @@ impl ChunkAssigner {
         }
     }
 
-    /// Coordinator says `height` is missing at the tip. If we marked it delivered more
-    /// than `WINDOW_UNMARK_SECS` (5) ago, it was lost downstream (bridge evict, reorder
-    /// pressure, reject) — un-mark so the next poller re-issues it. Younger marks are
-    /// blocks still in transit reorder → bridge; leave them.
-    pub(crate) fn window_note_missing(&self, height: u64) {
-        if !Self::window_assign_enabled() {
-            return;
-        }
-        let unmark_secs: u64 = latch_env!(u64, {
+    fn window_unmark_secs() -> u64 {
+        latch_env!(u64, {
             std::env::var("BLVM_IBD_WINDOW_UNMARK_SECS")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(5)
                 .clamp(1, 120)
-        });
-        let mut done = self.window_done.lock().unwrap();
-        if let Some(&t) = done.get(&height) {
-            if Instant::now().saturating_duration_since(t).as_secs() >= unmark_secs {
-                done.remove(&height);
-                tracing::warn!(
-                    "[IBD_WINDOW_UNMARK] h={} delivered {}s ago but missing at tip — re-issue",
-                    height,
-                    Instant::now().saturating_duration_since(t).as_secs()
-                );
+        })
+    }
+
+    /// Coordinator says `height` is missing at the tip. If we marked it delivered more
+    /// than `WINDOW_UNMARK_SECS` (5) ago, it was lost downstream (bridge evict, reorder
+    /// pressure, reject) — un-mark so the next poller re-issues it. Younger marks are
+    /// blocks still in transit reorder → bridge; leave them.
+    pub(crate) fn window_note_missing(&self, height: u64) {
+        let until = self.window_hole_until.load(Ordering::Relaxed);
+        // `first_ahead` is exclusive: those bodies are already in reorder.
+        // Absent (`0`) or already at the cursor stays a one-height unmark so
+        // the frontier past the buffer is not re-opened.
+        let end = if until > height.saturating_add(1) {
+            until
+        } else {
+            height.saturating_add(1)
+        };
+        self.window_note_missing_span(height, end);
+    }
+
+    /// Un-mark every delivered height in `[from, until)` that is older than the unmark
+    /// threshold and not currently in flight.
+    ///
+    /// R-376 resume: stall recovery only unmarked `next_needed`. The next ~60 heights
+    /// stayed in `window_done` after the bodies left reorder, so idle peers kept taking
+    /// frontier+2000 while validation re-fetched one hole height per stall (~0.2 BPS).
+    pub(crate) fn window_note_missing_span(&self, from: u64, until: u64) {
+        if !Self::window_assign_enabled() || until <= from {
+            return;
+        }
+        let unmark_secs = Self::window_unmark_secs();
+        let now = Instant::now();
+        // Same lock order as `window_get_work`: in-flight, then done.
+        let mut flying = Vec::new();
+        {
+            let guard = self.in_flight_per_peer.lock().unwrap();
+            for ranges in guard.values() {
+                for &(s, e) in ranges {
+                    if e < from || s >= until {
+                        continue;
+                    }
+                    let lo = s.max(from);
+                    let hi = e.min(until.saturating_sub(1));
+                    for h in lo..=hi {
+                        flying.push(h);
+                    }
+                }
             }
         }
+        flying.sort_unstable();
+        flying.dedup();
+        let mut done = self.window_done.lock().unwrap();
+        let stale: Vec<u64> = done
+            .range(from..until)
+            .filter(|(h, t)| {
+                now.saturating_duration_since(**t).as_secs() >= unmark_secs
+                    && flying.binary_search(h).is_err()
+            })
+            .map(|(h, _)| *h)
+            .collect();
+        let n = stale.len();
+        if n == 0 {
+            return;
+        }
+        let first = stale[0];
+        let last = stale[n - 1];
+        for h in stale {
+            done.remove(&h);
+        }
+        tracing::warn!(
+            "[IBD_WINDOW_UNMARK] span {}..{} re-issue {} height(s) {}..={}",
+            from,
+            until,
+            n,
+            first,
+            last
+        );
+    }
+
+    /// Drop `window_done` marks in `[from, until)` that are not in flight, with no age grace.
+    ///
+    /// Resume17: the validation tip sat in `window_done` for minutes after the body
+    /// left reorder. `window_note_missing` waits 5s and only runs from stall requeue,
+    /// so each absent tip cost ~11s (`wait_ms` 10–14s, wire 83ms once re-issued).
+    /// The coordinator calls this on the gap poll, while the body is in neither
+    /// reorder, the feeder, nor the bridge.
+    pub(crate) fn window_reissue_absent(&self, from: u64, until: u64) {
+        if !Self::window_assign_enabled() || until <= from {
+            return;
+        }
+        let mut flying = Vec::new();
+        {
+            let guard = self.in_flight_per_peer.lock().unwrap();
+            for ranges in guard.values() {
+                for &(s, e) in ranges {
+                    if e < from || s >= until {
+                        continue;
+                    }
+                    let lo = s.max(from);
+                    let hi = e.min(until.saturating_sub(1));
+                    for h in lo..=hi {
+                        flying.push(h);
+                    }
+                }
+            }
+        }
+        flying.sort_unstable();
+        flying.dedup();
+        let mut done = self.window_done.lock().unwrap();
+        let stale: Vec<u64> = done
+            .range(from..until)
+            .filter(|(h, _)| flying.binary_search(h).is_err())
+            .map(|(h, _)| *h)
+            .collect();
+        let n = stale.len();
+        if n == 0 {
+            return;
+        }
+        let first = stale[0];
+        let last = stale[n - 1];
+        for h in stale {
+            done.remove(&h);
+        }
+        tracing::warn!(
+            "[IBD_WINDOW_REISSUE] span {}..{} re-issue {} absent height(s) {}..={}",
+            from,
+            until,
+            n,
+            first,
+            last
+        );
     }
 
     /// Failure / guard drop: release bookkeeping and keep this peer off these heights briefly.

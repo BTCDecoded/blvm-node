@@ -182,6 +182,8 @@ impl OrderedReadyBridge {
                     next_needed
                 );
                 g.next_expected = Some(h);
+            } else if Self::park_still_needed(&mut g, h, item, next_needed) {
+                return;
             } else {
                 sync_bridge_pending_count(&g);
                 return;
@@ -338,6 +340,31 @@ impl OrderedReadyBridge {
         true
     }
 
+    /// Height is still ahead of validation and behind the bridge cursor.
+    /// Keep it in `pending` so the tip re-emit can flush it into the feeder.
+    /// `next_needed == 0` is the test/legacy path and must keep dropping duplicates.
+    fn park_still_needed(
+        g: &mut OrderedReadyInner,
+        h: u64,
+        item: ReadyItem,
+        next_needed: u64,
+    ) -> bool {
+        if next_needed == 0 || h <= next_needed {
+            return false;
+        }
+        if h == next_needed.saturating_add(1) {
+            tracing::warn!(
+                "[IBD_BRIDGE_PARK] h={} next_expected={:?} next_needed={} — keeping below-cursor body",
+                h,
+                g.next_expected,
+                next_needed
+            );
+        }
+        g.pending.insert(h, item);
+        sync_bridge_pending_count(g);
+        true
+    }
+
     /// W23/W26/W39: emit in-order height directly into the feeder buffer, bypassing the bounded
     /// ready channel. Live WAN: tip was `GAP_STREAM`ed 164× in 42s while `bridge_next`
     /// ran ahead of `next_needed` with `feeder=0` — ReadyItems sat/lost on the channel hop.
@@ -385,6 +412,8 @@ impl OrderedReadyBridge {
                     g.next_expected
                 );
                 g.next_expected = Some(h);
+            } else if Self::park_still_needed(&mut g, h, item, next_needed) {
+                return None;
             } else {
                 sync_bridge_pending_count(&g);
                 return None;
@@ -1143,6 +1172,51 @@ mod tests {
         assert!(rx.try_recv().is_err());
         assert_eq!(bridge.next_expected(), Some(11));
         assert!(!bridge.pending_contains(10));
+    }
+
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn r376_below_cursor_bodies_flush_when_tip_arrives() {
+        let _lock = super::super::tip_stage::test_tip_atomics_lock();
+        super::super::tip_stage::test_reset_tip_stage();
+        let (tx, _rx) = unbounded();
+        let bridge = OrderedReadyBridge::new(tx);
+        let feeder = super::super::feeder::new_feeder_state();
+        bridge.attach_feeder(Arc::clone(&feeder));
+        // Resume10 14:19Z: cursor ~700 ahead, feeder full of those heights,
+        // validation tip not among them. Bodies between the tip and the cursor
+        // must survive until the tip rewinds the cursor.
+        bridge.coordinator_will_send_height(110);
+        for h in 101..106 {
+            assert!(
+                bridge
+                    .try_emit_in_order_to_feeder(h, dummy_ready(h), &feeder, 99)
+                    .is_none()
+            );
+            assert!(bridge.pending_contains(h), "parked {h}");
+        }
+        assert_eq!(bridge.next_expected(), Some(110));
+        assert!(feeder.0.lock().0.get(101).is_none());
+        // Already validated: still dropped.
+        assert!(
+            bridge
+                .try_emit_in_order_to_feeder(99, dummy_ready(99), &feeder, 99)
+                .is_none()
+        );
+        assert!(!bridge.pending_contains(99));
+        assert!(
+            bridge
+                .try_emit_in_order_to_feeder(100, dummy_ready(100), &feeder, 99)
+                .is_none()
+        );
+        let guard = feeder.0.lock();
+        for h in 100..106 {
+            assert!(guard.0.get(h).is_some(), "feeder has {h}");
+        }
+        drop(guard);
+        assert_eq!(bridge.next_expected(), Some(106));
+        assert!(!bridge.pending_contains(101));
+        super::super::tip_stage::test_reset_tip_stage();
     }
 
     #[serial_test::serial(ibd)]

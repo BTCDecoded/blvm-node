@@ -437,6 +437,19 @@ pub(crate) fn leftover_w22_cursor_lie(
     false
 }
 
+/// Cursor jumped more than one height past validation and the tip is not in
+/// the feeder or the bridge. That is a lost emit. One-ahead stays the W26b
+/// pipeline case and is not lost.
+pub(crate) fn cursor_far_ahead_tip_lost(
+    next_needed: u64,
+    bridge_next: u64,
+    tip_in_feeder: bool,
+    tip_in_pending: bool,
+    tip_taken: bool,
+) -> bool {
+    bridge_next > next_needed.saturating_add(1) && !tip_in_feeder && !tip_in_pending && !tip_taken
+}
+
 /// W22: `bridge_next > H` is delivered unless leftover_w22_cursor_lie.
 pub(crate) fn leftover_w22_cursor_is_delivered(
     next_needed: u64,
@@ -507,6 +520,16 @@ pub(crate) fn register_live_assigner(assigner: &Arc<chunk_assigner::ChunkAssigne
 
 pub(crate) fn clear_live_assigner() {
     *live_assigner_slot().lock().unwrap() = None;
+}
+
+/// Header tip the coordinator last published. `0` before the assigner is registered.
+pub(crate) fn live_header_tip() -> u64 {
+    live_assigner_slot()
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|w| w.upgrade()))
+        .map(|assigner| assigner.header_tip())
+        .unwrap_or(0)
 }
 
 /// TCP down: drop assigner inflight and sticky state for this peer.
@@ -1688,6 +1711,40 @@ pub(crate) fn wan_tip_dispatch_band() -> u64 {
 ///   `bmin>>tip` 86%, `gap_flush_on_abort`≈10k).
 /// - **Bulk catch-up (tip present):** far below header tip — use the admit `window`
 ///   (multi-peer pipe), not W18 tip-band serialization (live: 8–40 BPS at ~50–60k).
+/// Resume9: the fill loop is blocked on the bridge cursor. That body is in
+/// reorder, and the atomic tip is already taken into the validation pipeline,
+/// so W58's `gap_missing` defer is looking at a tip that is no longer in
+/// reorder or the feeder. Emitting the cursor is the next in-order block,
+/// not a hole-fill of the frontier.
+#[inline]
+pub(crate) fn bridge_cursor_dispatch_allowed(
+    h: u64,
+    next_needed: u64,
+    bridge_next: Option<u64>,
+) -> bool {
+    bridge_next == Some(h) && h > next_needed && tip_stage::tip_taken_by_validation(next_needed)
+}
+
+/// Cursor body is in reorder and not in the feeder or bridge pending.
+/// `dispatched` still hides it from the fill loop (engine dispatch never
+/// puts a dropped body back, and a later insert can return it to reorder).
+#[inline]
+pub(crate) fn release_cursor_stuck_in_reorder(
+    dispatched: &mut rustc_hash::FxHashSet<u64>,
+    reorder_has_cursor: bool,
+    cursor: Option<u64>,
+    cursor_in_feeder: bool,
+    cursor_in_pending: bool,
+) {
+    let Some(h) = cursor else {
+        return;
+    };
+    if cursor_in_feeder || cursor_in_pending || !reorder_has_cursor {
+        return;
+    }
+    dispatched.remove(&h);
+}
+
 #[inline]
 fn defer_bridge_ahead_dispatch(
     h: u64,
@@ -2251,6 +2308,27 @@ pub(crate) fn journal_scaled_checkpoint_interval(
     let scaled = (schedule_iv as u128).saturating_mul(CHECKPOINT_COMPACT_INPUT_TARGET as u128)
         / journal_entries.max(1) as u128;
     (scaled as i32).clamp(floor, schedule_iv)
+}
+
+/// Keep the next checkpoint at or above [`gc_fence_high_water`].
+///
+/// Journal scaling shrinks the interval so a huge cold journal exports sooner.
+/// The scoreboard has already advanced the GC fence up to the previous target,
+/// and that high water only moves forward. A shrunk slot under the fence is
+/// not a legal snapshot (Deletes at or below the fence may already be gone),
+/// and waiting for the following alignment leaves the journal in place
+/// (R-376: fence 2_760_000, interval 200_000 → 106_593, 31 minutes at 2–8 BPS).
+/// The soonest complete checkpoint is the fence itself, so the interval must
+/// not shrink below `fence - last_exported`.
+pub(crate) fn checkpoint_interval_respecting_fence(
+    last_exported: i32,
+    schedule_iv: i32,
+    fence_hw: i32,
+) -> i32 {
+    if schedule_iv <= 0 || fence_hw <= last_exported {
+        return schedule_iv;
+    }
+    schedule_iv.max(fence_hw.saturating_sub(last_exported))
 }
 
 /// Whether periodic export may label a snapshot at `ckpt` given current validation height.
@@ -3294,6 +3372,32 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
                         assigner_clone.on_chunk_complete_range(&peer_id, *s, *e);
                     }
                     tokio::task::yield_now().await;
+                    continue;
+                }
+
+                if err_str.contains("tip-dup yield") {
+                    assigner_clone.requeue_reason(
+                        start,
+                        stripe0_end,
+                        Some(peer_id.clone()),
+                        "tip-dup yield",
+                    );
+                    for (s, e) in &extra_ranges {
+                        assigner_clone.requeue_reason(
+                            *s,
+                            *e,
+                            Some(peer_id.clone()),
+                            "tip-dup yield",
+                        );
+                    }
+                    _guard.as_mut().expect("assigner ChunkGuard").disarm();
+                    for g in extra_guards.iter_mut() {
+                        g.disarm();
+                    }
+                    assigner_clone.on_chunk_complete_range(&peer_id, start, stripe0_end);
+                    for (s, e) in &extra_ranges {
+                        assigner_clone.on_chunk_complete_range(&peer_id, *s, *e);
+                    }
                     continue;
                 }
 
@@ -6537,10 +6641,26 @@ impl ParallelIBD {
                                     if tip_in_feeder {
                                         reorder_buffer.remove(&next_needed);
                                         dispatched.insert(next_needed);
+                                    } else if cursor_far_ahead_tip_lost(
+                                        next_needed,
+                                        n,
+                                        false,
+                                        in_bridge_pending,
+                                        tip_stage::tip_taken_by_validation(next_needed),
+                                    ) && bridge.rewind_cursor_to(next_needed)
+                                    {
+                                        // R-376: cursor ~60 ahead, pending empty, tip sitting
+                                        // in reorder. W49 left the cursor for Case B, and
+                                        // try_emit never logged a re-emit — the body stayed
+                                        // out of the feeder. Pull the cursor back so Case B
+                                        // emits at next_expected.
+                                        warn!(
+                                            "[IBD_TIP_REWIND] next_expected {} → {} (cursor far ahead, tip in reorder not feeder)",
+                                            n, next_needed
+                                        );
+                                        dispatched.remove(&next_needed);
                                     }
-                                    // else W49: leave cursor; Case B handoff emits tip.
-                                    // Synth grace-rewind tip-crawled ~6 from start — do not
-                                    // fight healthy ahead pipelining here.
+                                    // else W49: one-ahead, leave cursor; Case B handoff emits tip.
                                 } else {
                                     // W50/W56: tip already left reorder (Case B handoff /
                                     // try_emit). Cursor one-ahead is success when tip is in
@@ -6554,15 +6674,26 @@ impl ParallelIBD {
                                         let g = feeder_state_for_coord.0.lock();
                                         g.0.get(next_needed).is_some()
                                     };
-                                    // Grace-bounded: sticky `dispatched` alone must not
-                                    // block true-loss recovery forever after inflight timeout.
-                                    let tip_inflight = dispatched.contains(&next_needed)
+                                    let tip_taken_now =
+                                        tip_stage::tip_taken_by_validation(next_needed);
+                                    // Far-ahead + tip absent is a lost emit. The 10s
+                                    // inflight grace is only for a one-ahead handoff
+                                    // whose cursor has not moved yet.
+                                    let far_lost = cursor_far_ahead_tip_lost(
+                                        next_needed,
+                                        n,
+                                        tip_in_feeder,
+                                        in_bridge_pending,
+                                        tip_taken_now,
+                                    );
+                                    let tip_inflight = !far_lost
+                                        && dispatched.contains(&next_needed)
                                         && tip_inflight_since.is_some_and(|(h, t)| {
                                             h == next_needed && t.elapsed() < tip_inflight_grace
                                         });
                                     if !tip_in_feeder
                                         && !in_bridge_pending
-                                        && !tip_stage::tip_taken_by_validation(next_needed)
+                                        && !tip_taken_now
                                         && !tip_inflight
                                         && bridge.rewind_cursor_to(next_needed)
                                     {
@@ -7102,13 +7233,27 @@ impl ParallelIBD {
                                         allow_requeue = false;
                                     }
                                 } else if !one_ahead {
-                                    // W26b: do NOT rewind far-ahead (healthy try_emit
-                                    // pipelining; rewind 642820→642756 → ~0.7 BPS).
-                                    // Synth: inject without rewind when tip is not in the
-                                    // feeder — including when `tip_taken` (engine direct-feed
-                                    // clears feeder while validation holds tip).
+                                    // W26b: do NOT rewind far-ahead when the tip is in the
+                                    // feeder (healthy try_emit pipelining; rewind
+                                    // 642820→642756 → ~0.7 BPS).
+                                    // R-376: cursor ~60 ahead, pending empty, tip NOT in
+                                    // the feeder. That pipeline is not healthy — rewind
+                                    // and let inject/Case B place the body.
                                     if tip_in_feeder {
                                         allow_requeue = false;
+                                    } else if cursor_far_ahead_tip_lost(
+                                        next_needed,
+                                        bnext.unwrap_or(next_needed),
+                                        false,
+                                        false,
+                                        tip_taken_now,
+                                    ) {
+                                        if let Some(ref bridge) = ready_bridge_for_coord {
+                                            let _ = bridge.rewind_cursor_to(next_needed);
+                                        }
+                                        dispatched.remove(&next_needed);
+                                        bridge_ahead_since = None;
+                                        allow_requeue = true;
                                     } else if synthetic_wan::bulk_local_disk_stream() {
                                         allow_requeue = true; // inject only; no rewind
                                     } else {
@@ -7305,6 +7450,7 @@ impl ParallelIBD {
                             let ahead_buffered =
                                 reorder_ahead_buffered(&reorder_buffer, next_needed);
                             let first_ahead = reorder_first_ahead(&reorder_buffer, next_needed);
+                            assigner_for_coord.set_window_hole_until(first_ahead.unwrap_or(0));
                             let (bridge_next, bridge_len, bridge_min, bridge_max, holes) =
                                 ready_bridge_for_coord
                                     .as_ref()
@@ -7526,6 +7672,38 @@ impl ParallelIBD {
                     let mut reorder_emitted = 0usize;
                     let val_h_dispatch = validation_height_for_coord.load(Ordering::Relaxed);
                     let next_needed_dispatch = val_h_dispatch.saturating_add(1);
+                    // Resume20: 2820664–2820780 completed at 23:01:49 and were marked
+                    // delivered. By 23:05 the bodies were gone and first_ahead was ~50
+                    // above the tip, but stall unmark cleared one height because
+                    // window_hole_until was the previous sample. The next get_work
+                    // started at 2820772. Clear that absent span before a bridge-cap
+                    // continue skips the gap-poll reissue.
+                    {
+                        let first_ahead =
+                            reorder_first_ahead(&reorder_buffer, next_needed_dispatch);
+                        assigner_for_coord.set_window_hole_until(first_ahead.unwrap_or(0));
+                        let in_reorder =
+                            reorder_buffer.contains_key(&next_needed_dispatch);
+                        let in_feeder = {
+                            let g = feeder_state_for_coord.0.lock();
+                            g.0.get(next_needed_dispatch).is_some()
+                        };
+                        let in_bridge = ready_bridge_for_coord.as_ref().is_some_and(|b| {
+                            b.pending_contains(next_needed_dispatch)
+                        });
+                        // Resume21: the hole was re-marked delivered and every peer
+                        // was on a tile ~400 above it. covers==0, so the old yield
+                        // (which requires a holder) never released them.
+                        assigner_for_coord.set_window_tip_uncovered(
+                            !in_reorder && !in_feeder && !in_bridge,
+                        );
+                        if !in_reorder {
+                            let until =
+                                first_ahead.unwrap_or(next_needed_dispatch.saturating_add(1));
+                            assigner_for_coord
+                                .window_reissue_absent(next_needed_dispatch, until);
+                        }
+                    }
                     // Repair bridge hole before dispatch so tip in pending can flush.
                     if let Some(ref bridge) = ready_bridge_for_coord {
                         if bridge.repair_missing_cursor_hole(next_needed_dispatch) {
@@ -7536,6 +7714,25 @@ impl ParallelIBD {
                         {
                             let _ = bridge.fast_forward_cursor_to(next_needed_dispatch);
                         }
+                    }
+                    let cursor_now = ready_bridge_for_coord
+                        .as_ref()
+                        .and_then(|b| b.next_expected());
+                    if let Some(h) = cursor_now {
+                        let cursor_in_feeder = {
+                            let g = feeder_state_for_coord.0.lock();
+                            g.0.get(h).is_some()
+                        };
+                        let cursor_in_pending = ready_bridge_for_coord
+                            .as_ref()
+                            .is_some_and(|b| b.pending_contains(h));
+                        release_cursor_stuck_in_reorder(
+                            &mut dispatched,
+                            reorder_buffer.contains_key(&h),
+                            cursor_now,
+                            cursor_in_feeder,
+                            cursor_in_pending,
+                        );
                     }
                     dispatch_heights_buf.clear();
                     dispatch_heights_buf.extend(
@@ -7596,16 +7793,18 @@ impl ParallelIBD {
                                 continue;
                             }
                         }
-                        if defer_bridge_ahead_dispatch(
-                            h,
-                            next_needed_dispatch,
-                            gap_missing_dispatch,
-                            next_expected_missing_dispatch,
-                            admit_window,
-                            wan_tip_crawl_dispatch,
-                            feeder_starved_dispatch,
-                            bulk_catchup_dispatch,
-                        ) {
+                        if !bridge_cursor_dispatch_allowed(h, next_needed_dispatch, cursor_now)
+                            && defer_bridge_ahead_dispatch(
+                                h,
+                                next_needed_dispatch,
+                                gap_missing_dispatch,
+                                next_expected_missing_dispatch,
+                                admit_window,
+                                wan_tip_crawl_dispatch,
+                                feeder_starved_dispatch,
+                                bulk_catchup_dispatch,
+                            )
+                        {
                             continue;
                         }
                         if let Some(ref bridge) = ready_bridge_for_coord {
@@ -7862,6 +8061,21 @@ impl ParallelIBD {
                     let g = feeder_state_for_coord.0.lock();
                     g.0.get(next_needed_poll).is_some()
                 };
+                // Resume17: a delivered mark with no body blocks get_work until the
+                // 5s unmark, and that unmark only ran when an ahead chunk's 10s
+                // deadline called stall requeue. Re-issue as soon as the gap poll
+                // sees the tip absent from reorder, feeder, and bridge.
+                if gap_poll
+                    && !tip_in_feeder_poll
+                    && !ready_bridge_for_coord
+                        .as_ref()
+                        .is_some_and(|b| b.pending_contains(next_needed_poll))
+                    && !tip_stage::tip_taken_by_validation(next_needed_poll)
+                {
+                    let until = reorder_first_ahead(&reorder_buffer, next_needed_poll)
+                        .unwrap_or(next_needed_poll.saturating_add(1));
+                    assigner_for_coord.window_reissue_absent(next_needed_poll, until);
+                }
                 let gap_in_pipeline = gap_poll
                     && tip_gap_body_in_pipeline(
                         ready_bridge_for_coord.as_ref().is_some_and(|b| {
@@ -8193,6 +8407,15 @@ impl ParallelIBD {
                             );
                         }
                         let _ = stall_tx_for_coord.send(stall_height);
+                        // Same span as the dispatch reissue. A stall that only
+                        // punches `next_needed` leaves the rest of the delivered
+                        // hole marked, and idle peers take the far side of it.
+                        {
+                            let first_ahead = reorder_first_ahead(&reorder_buffer, next_needed);
+                            assigner_for_coord.set_window_hole_until(first_ahead.unwrap_or(0));
+                            let until = first_ahead.unwrap_or(next_needed.saturating_add(1));
+                            assigner_for_coord.window_reissue_absent(next_needed, until);
+                        }
                         if assigner_for_coord.wan_stall_micro_allowed(stall_height) {
                             assigner_for_coord.requeue_stall_gaps(stall_height, None);
                         }
@@ -8428,6 +8651,25 @@ impl ParallelIBD {
                     }
                     // Dispatch all undispatched blocks from the buffer (any order).
                     // Reuse scratch buffer to avoid per-loop Vec allocation.
+                    let cursor_now = ready_bridge_for_coord
+                        .as_ref()
+                        .and_then(|b| b.next_expected());
+                    if let Some(h) = cursor_now {
+                        let cursor_in_feeder = {
+                            let g = feeder_state_for_coord.0.lock();
+                            g.0.get(h).is_some()
+                        };
+                        let cursor_in_pending = ready_bridge_for_coord
+                            .as_ref()
+                            .is_some_and(|b| b.pending_contains(h));
+                        release_cursor_stuck_in_reorder(
+                            &mut dispatched,
+                            reorder_buffer.contains_key(&h),
+                            cursor_now,
+                            cursor_in_feeder,
+                            cursor_in_pending,
+                        );
+                    }
                     dispatch_heights_buf.clear();
                     dispatch_heights_buf.extend(
                         reorder_buffer
@@ -8474,16 +8716,18 @@ impl ParallelIBD {
                         if reorder_buffer.len() >= dynamic_buffer_limit {
                             break; // respect backpressure cap
                         }
-                        if defer_bridge_ahead_dispatch(
-                            h,
-                            next_needed_dispatch,
-                            gap_missing_dispatch,
-                            next_expected_missing_dispatch,
-                            admit_window,
-                            wan_tip_crawl_dispatch,
-                            feeder_starved_dispatch,
-                            bulk_catchup_dispatch,
-                        ) {
+                        if !bridge_cursor_dispatch_allowed(h, next_needed_dispatch, cursor_now)
+                            && defer_bridge_ahead_dispatch(
+                                h,
+                                next_needed_dispatch,
+                                gap_missing_dispatch,
+                                next_expected_missing_dispatch,
+                                admit_window,
+                                wan_tip_crawl_dispatch,
+                                feeder_starved_dispatch,
+                                bulk_catchup_dispatch,
+                            )
+                        {
                             continue;
                         }
                         if let Some(ref bridge) = ready_bridge_for_coord {
@@ -8793,6 +9037,7 @@ impl ParallelIBD {
                         let mut bps_sample_at = std::time::Instant::now();
                         let mut validation_bps: f64 = 0.0;
                         let mut ckpt_hold_logged_at: Option<std::time::Instant> = None;
+                        let mut fence_floor_logged: i32 = -1;
                         loop {
                             std::thread::sleep(std::time::Duration::from_secs(5));
                             let cl = engine_clone.contiguous_length();
@@ -8840,13 +9085,28 @@ impl ParallelIBD {
                                 .checkpoint_min_interval
                                 .max(DEST_BE_INTERVAL_FLOOR);
                             let pre_journal_iv = schedule_iv;
-                            let schedule_iv = journal_scaled_checkpoint_interval(
+                            let journal_iv = journal_scaled_checkpoint_interval(
                                 schedule_iv,
                                 journal_entries,
                                 journal_floor,
                             );
+                            let fence_hw = crate::storage::ibd_engine::gc_fence_high_water();
+                            let schedule_iv = checkpoint_interval_respecting_fence(
+                                last_exported,
+                                journal_iv,
+                                fence_hw,
+                            );
+                            if schedule_iv != journal_iv && fence_floor_logged != schedule_iv {
+                                info!(
+                                    "[IBD_CKPT_FENCE_FLOOR] interval {journal_iv} → {schedule_iv} \
+                                     so next ckpt {} >= fence {fence_hw}",
+                                    last_exported.saturating_add(schedule_iv)
+                                );
+                                fence_floor_logged = schedule_iv;
+                            }
                             // R-352: publish the next scheduled checkpoint so the scoreboard's
-                            // between-export GC fence advance never passes it.
+                            // between-export GC fence advance never passes it. The fence floor
+                            // above keeps that target from sliding back under the high water.
                             crate::storage::ibd_engine::set_next_checkpoint_target(
                                 last_exported.saturating_add(schedule_iv.max(0)),
                             );
@@ -8990,14 +9250,14 @@ impl ParallelIBD {
                             // `scan_live_at_height(ckpt)` is running, producing an
                             // incomplete checkpoint that fails on resume.
                             crate::storage::ibd_engine::set_gc_fence(ckpt);
-                            if schedule_iv != pre_journal_iv {
+                            if journal_iv != pre_journal_iv {
                                 info!(
                                     "[IBD_CKPT_JOURNAL_SCALE] journal_entries={} segs={} \
                                      interval {} → {} (target={} floor={})",
                                     journal_entries,
                                     engine_clone.disk_segment_count(),
                                     pre_journal_iv,
-                                    schedule_iv,
+                                    journal_iv,
                                     CHECKPOINT_COMPACT_INPUT_TARGET,
                                     journal_floor
                                 );

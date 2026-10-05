@@ -3,16 +3,15 @@
 //! Three layers — do not add a fourth:
 //!
 //! 1. **This file** — tip-hole / sole-peer / gap-persist DNA. Not TOML.
-//!    KEEP constant is the default; rematch `BLVM_IBD_*` still overrides
-//!    (peel contract). Values are the r29od / peel-go KEEP table (S11 240/205.6).
+//!    Production returns the KEEP constant. Values are the r29od / peel-go KEEP
+//!    table (S11 240/205.6).
 //! 2. **`[ibd]` TOML** — operator surface: peers, mode, chunk_size, engine opt-out,
 //!    `max_blocks_in_transit_per_peer`, timeouts, dump_dir.
 //! 3. **Emergency / debug env** — `BLVM_IBD_ENGINE=0`, `BLVM_IBD_DUMP_DIR`,
 //!    `BLVM_IBD_JEMALLOC_DUMP`, `BLVM_SERVE_ONLY`, `BLVM_IBD_PEERS` pin.
 //!
-//! Production: KEEP constant is the default; rematch `BLVM_IBD_*` still overrides
-//! (peel contract). `#[cfg(test)]` uses historical unset defaults so the assigner
-//! suite does not flip.
+//! Production does not read the KEEP-table env vars. `#[cfg(test)]` still does,
+//! and uses historical unset defaults so the assigner suite does not flip.
 
 #[cfg(test)]
 use super::latch_env;
@@ -68,6 +67,7 @@ pub const GAP_PERSIST_DEFER_FAR: bool = false;
 /// covering=0 idle requeue. KEEP unset → 0 (off).
 pub const COVERING0_IDLE_REQUEUE_MS: u64 = 0;
 
+#[cfg(test)]
 fn test_bool(env: &str, default: bool, explicit_on: bool) -> bool {
     let Ok(raw) = std::env::var(env) else {
         return default;
@@ -88,6 +88,7 @@ fn test_bool(env: &str, default: bool, explicit_on: bool) -> bool {
     if off { false } else { default }
 }
 
+#[cfg(test)]
 fn test_usize(env: &str, default: usize, lo: usize, hi: usize) -> usize {
     std::env::var(env)
         .ok()
@@ -96,6 +97,7 @@ fn test_usize(env: &str, default: usize, lo: usize, hi: usize) -> usize {
         .clamp(lo, hi)
 }
 
+#[cfg(test)]
 fn test_u64(env: &str, default: u64, lo: u64, hi: u64) -> u64 {
     std::env::var(env)
         .ok()
@@ -104,6 +106,7 @@ fn test_u64(env: &str, default: u64, lo: u64, hi: u64) -> u64 {
         .clamp(lo, hi)
 }
 
+#[cfg(test)]
 fn test_u32(env: &str, default: u32, lo: u32, hi: u32) -> u32 {
     std::env::var(env)
         .ok()
@@ -116,8 +119,8 @@ macro_rules! keep_bool {
     ($keep:expr, $test_default:expr, $env:expr, $explicit_on:expr) => {{
         #[cfg(not(test))]
         {
-            let _ = $test_default;
-            test_bool($env, $keep, $explicit_on)
+            let _ = ($test_default, $env, $explicit_on);
+            $keep
         }
         #[cfg(test)]
         {
@@ -130,8 +133,8 @@ macro_rules! keep_usize {
     ($keep:expr, $test_default:expr, $env:expr, $lo:expr, $hi:expr) => {{
         #[cfg(not(test))]
         {
-            let _ = $test_default;
-            test_usize($env, $keep, $lo, $hi)
+            let _ = ($test_default, $env, $lo, $hi);
+            $keep
         }
         #[cfg(test)]
         {
@@ -144,8 +147,8 @@ macro_rules! keep_u64 {
     ($keep:expr, $test_default:expr, $env:expr, $lo:expr, $hi:expr) => {{
         #[cfg(not(test))]
         {
-            let _ = $test_default;
-            test_u64($env, $keep, $lo, $hi)
+            let _ = ($test_default, $env, $lo, $hi);
+            $keep
         }
         #[cfg(test)]
         {

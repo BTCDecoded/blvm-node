@@ -331,6 +331,14 @@ pub(crate) struct ChunkAssigner {
     /// waiting for the next body). Live 2026-07-15: `allow_ahead=!gap_missing` → covering=1
     /// forever with ready≈52 → tip ~5 blk/s vs ≥80 target.
     tip_bridge_holes: AtomicU64,
+    /// Exclusive end of the reorder hole in front of `first_ahead`.
+    /// `0` means no ahead body, so a tip unmark stays one height and does not
+    /// open the frontier. Heights `>= first_ahead` stay in `window_done`.
+    window_hole_until: AtomicU64,
+    /// Tip body is in neither reorder, the feeder, nor the bridge.
+    /// `tip_taken` is not enough: resume21 had contig=1 from that latch while
+    /// the body was gone, so ahead peers never released.
+    window_tip_uncovered: AtomicBool,
     /// W28c: sticky tip-owner peer — prefer until they fail / become unavailable.
     preferred_tip_owner: Mutex<Option<String>>,
     /// W92: peer_id → Instant until which they must not win tip-owner / TIP_PIN.
@@ -429,11 +437,28 @@ pub(crate) struct ChunkAssigner {
     lookahead_streams: Mutex<HashMap<String, TipStreamWindow>>,
 }
 
+/// Production returns `$prod`. Tests still read the env so a suite can arm a knob.
+macro_rules! prod_or_test {
+    ($prod:expr, $test:expr) => {{
+        #[cfg(not(test))]
+        {
+            $prod
+        }
+        #[cfg(test)]
+        {
+            $test
+        }
+    }};
+}
+
 fn a6m_min_bps() -> f64 {
-    std::env::var("BLVM_IBD_A6M_MIN_BPS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(6.0)
+    prod_or_test!(
+        6.0,
+        std::env::var("BLVM_IBD_A6M_MIN_BPS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(6.0)
+    )
 }
 
 /// Floor-sticky recent-window floor (score≈0.1). Live: floor≥75% of assigns → tip p50 **10.8**
@@ -443,64 +468,85 @@ fn a6m_min_bps() -> f64 {
 /// `tenure_bps=12.57` OPEN_SLOT churned a historical-healthy sticky (band 12–18) into score=0.100
 /// pins with no tip-proven alt above bar. See [`a6m_floor_open_slot_min_bps`].
 fn a6m_floor_min_bps() -> f64 {
-    std::env::var("BLVM_IBD_A6M_FLOOR_MIN_BPS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(22.0)
+    prod_or_test!(
+        22.0,
+        std::env::var("BLVM_IBD_A6M_FLOOR_MIN_BPS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(22.0)
+    )
 }
 
 /// Only blacklist + open-slot when floor sticky recent BPS is below this **and** no tip-proven
 /// alternate clears the A6n bar. Default **12** = prior healthy WAN floor (plan: floor≥75% →
 /// tip p50 10.8; good stickies sat ~15–18). Env: `BLVM_IBD_A6M_FLOOR_OPEN_SLOT_MIN_BPS`.
 fn a6m_floor_open_slot_min_bps() -> f64 {
-    std::env::var("BLVM_IBD_A6M_FLOOR_OPEN_SLOT_MIN_BPS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(12.0)
+    prod_or_test!(
+        12.0,
+        std::env::var("BLVM_IBD_A6M_FLOOR_OPEN_SLOT_MIN_BPS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(12.0)
+    )
 }
 
 fn a6m_tenure_secs() -> u64 {
-    std::env::var("BLVM_IBD_A6M_TENURE_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(300)
+    prod_or_test!(
+        300,
+        std::env::var("BLVM_IBD_A6M_TENURE_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300)
+    )
 }
 
 /// Recent tip BPS window for A6m (not lifetime tenure). Default **60**.
 /// Live: 90s windows at ~18 blk/s never tripped floor_min=12; shorter window + higher
 /// floor_min (22) opens slot while still below the 45–80 target.
 fn a6m_recent_window_secs() -> u64 {
-    std::env::var("BLVM_IBD_A6M_RECENT_WINDOW_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(60)
-        .clamp(30, 300)
+    prod_or_test!(
+        60,
+        std::env::var("BLVM_IBD_A6M_RECENT_WINDOW_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60)
+            .clamp(30, 300)
+    )
 }
 
 fn a6m_rotate_cooldown_secs() -> u64 {
-    std::env::var("BLVM_IBD_A6M_ROTATE_COOLDOWN")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(600)
+    prod_or_test!(
+        600,
+        std::env::var("BLVM_IBD_A6M_ROTATE_COOLDOWN")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(600)
+    )
 }
 
 /// Cooldown after floor-sticky / open-slot rotate. Default **120** (F-P1).
 fn a6m_floor_rotate_cooldown_secs() -> u64 {
-    std::env::var("BLVM_IBD_A6M_FLOOR_ROTATE_COOLDOWN")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(120)
+    prod_or_test!(
+        120,
+        std::env::var("BLVM_IBD_A6M_FLOOR_ROTATE_COOLDOWN")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(120)
+    )
 }
 
 /// A6m also arms when warm getdata→body EWMA exceeds this (ms), even if tip-advance
 /// BPS looks healthy. Default **800**. E11: tip BPS~64 (LOCAL_GAP) masked sticky GetData
 /// p50~1284 → `A6M_MIN_BPS=40` never fired. Env: `BLVM_IBD_A6M_MAX_GETDATA_MS`.
 fn a6m_max_getdata_ms() -> u64 {
-    std::env::var("BLVM_IBD_A6M_MAX_GETDATA_MS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(800)
-        .clamp(200, 10_000)
+    prod_or_test!(
+        800,
+        std::env::var("BLVM_IBD_A6M_MAX_GETDATA_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(800)
+            .clamp(200, 10_000)
+    )
 }
 
 /// E16: skip GD_SLOW rotate/OPEN when feeder runway ≥ this (default **4**).
@@ -509,11 +555,14 @@ fn a6m_max_getdata_ms() -> u64 {
 /// E11 LOCAL_GAP false-health has feeder=0; keep when buffer proves crawl health.
 /// E16b: default 8→4 — live C1u-e16 rotated at feeder=5 / tip_bps=162 after KEEP@29.
 fn a6m_gd_slow_feeder_keep() -> usize {
-    std::env::var("BLVM_IBD_A6M_GD_SLOW_FEEDER_KEEP")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(4usize)
-        .clamp(0, 64)
+    prod_or_test!(
+        4,
+        std::env::var("BLVM_IBD_A6M_GD_SLOW_FEEDER_KEEP")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4usize)
+            .clamp(0, 64)
+    )
 }
 
 /// E16b: skip GD_SLOW rotate when recent *or stream* tip BPS ≥ this (default **0** = off).
@@ -521,22 +570,28 @@ fn a6m_gd_slow_feeder_keep() -> usize {
 /// feeder=5 ewma=554 (≥500) OPEN'd the hero → same cascade. dest-ax 226k: cheese sit
 /// dropped height recent_bps below min while stream was 92; KEEP uses `wan_tip_stream_bps`.
 fn a6m_gd_slow_tip_bps_keep() -> f64 {
-    std::env::var("BLVM_IBD_A6M_GD_SLOW_TIP_BPS_KEEP")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.0)
-        .clamp(0.0, 400.0)
+    prod_or_test!(
+        0.0,
+        std::env::var("BLVM_IBD_A6M_GD_SLOW_TIP_BPS_KEEP")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            .clamp(0.0, 400.0)
+    )
 }
 
 /// E16: seconds after A6m OPEN before tip trial may displace the new pin (default **8**).
 /// Post-OPEN boost (`TIP_TRIAL_POST_OPEN_MS=500`) otherwise arms trials at await≈500ms
 /// during handoff and cools the OPEN pin before first tip body.
 fn tip_trial_post_open_settle_secs() -> u64 {
-    std::env::var("BLVM_IBD_TIP_TRIAL_POST_OPEN_SETTLE_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8)
-        .clamp(0, 30)
+    prod_or_test!(
+        8,
+        std::env::var("BLVM_IBD_TIP_TRIAL_POST_OPEN_SETTLE_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(8)
+            .clamp(0, 30)
+    )
 }
 
 /// W92 tip-owner cooldown after GD_SLOW rotate/open (default **180s**).
@@ -545,32 +600,41 @@ fn tip_trial_post_open_settle_secs() -> u64 {
 /// blacklist expires / when no score-map pin is available.
 /// E13: 90s still allowed A↔B ping-pong (FORCE then ROTATE back within ~2m).
 fn a6m_gd_slow_owner_cooldown_secs() -> u64 {
-    std::env::var("BLVM_IBD_A6M_GD_SLOW_OWNER_COOLDOWN_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(180)
-        .clamp(30, 600)
+    prod_or_test!(
+        180,
+        std::env::var("BLVM_IBD_A6M_GD_SLOW_OWNER_COOLDOWN_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(180)
+            .clamp(30, 600)
+    )
 }
 
 /// Min tip-stream BPS for a GD_SLOW force-rotate target (default **20**).
 /// E13: FORCE pinned `24.253…` at candidate_tip_bps=3.86 — better than sticky GetData
 /// mask but not a real tip hero. Below this → OPEN_SLOT pin path instead.
 fn a6m_gd_slow_force_min_tip_bps() -> f64 {
-    std::env::var("BLVM_IBD_A6M_GD_SLOW_FORCE_MIN_TIP_BPS")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(20.0)
-        .clamp(1.0_f64, 200.0_f64)
+    prod_or_test!(
+        20.0,
+        std::env::var("BLVM_IBD_A6M_GD_SLOW_FORCE_MIN_TIP_BPS")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(20.0)
+            .clamp(1.0_f64, 200.0_f64)
+    )
 }
 
 /// dest-az: protect a just-pinned GD_SLOW `new=` from P1e 120s on first-H mute.
 /// Default **30s** (live gap was 3s). Not dest-aq 180s keep-hot.
 fn gd_slow_pin_protect_secs() -> u64 {
-    std::env::var("BLVM_IBD_GD_SLOW_PIN_PROTECT_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(30)
-        .clamp(8, 90)
+    prod_or_test!(
+        30,
+        std::env::var("BLVM_IBD_GD_SLOW_PIN_PROTECT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30)
+            .clamp(8, 90)
+    )
 }
 
 /// R-218 dump freeze: `feeder==0 && rtt>1500 && bps<150` is true for the
@@ -584,8 +648,8 @@ const DUMP_WAREHOUSE_REORDER: u64 = 2048;
 /// four times (`[IBD_H_SLOW]` 10, 180–200k **60**). Mute already uses **120s**.
 const H_SLOW_COOLDOWN_SECS: u64 = 120;
 
-/// R-334: fat-RTT H rotation is **off** by default (opt-in
-/// `BLVM_IBD_H_SLOW_ROTATE=1`). The predicate (`feeder==0 && gd>1500ms &&
+/// R-334: fat-RTT H rotation is **off** in production. Tests may arm
+/// `BLVM_IBD_H_SLOW_ROTATE=1`. The predicate (`feeder==0 && gd>1500ms &&
 /// bps<60`, ≥180k) was derived when tip GetData→body was ~700ms (R-213); in
 /// the R-328–R-333 crawl p50 GetData→body is 4–8s and BPS 32–94, so it is
 /// simply true: `[IBD_H_SLOW]` 18× in R-273 (1580s) vs 226/249/**333**× in
@@ -597,9 +661,12 @@ const H_SLOW_COOLDOWN_SECS: u64 = 120;
 /// negative-sign family as the closed aborts / 10s far-ahead re-request /
 /// tip trials. Dump-warehouse rotate (<180k) is unchanged.
 pub(crate) fn h_slow_rotate_enabled() -> bool {
-    matches!(
-        std::env::var("BLVM_IBD_H_SLOW_ROTATE").ok().as_deref(),
-        Some("1") | Some("true") | Some("on") | Some("yes")
+    prod_or_test!(
+        false,
+        matches!(
+            std::env::var("BLVM_IBD_H_SLOW_ROTATE").ok().as_deref(),
+            Some("1") | Some("true") | Some("on") | Some("yes")
+        )
     )
 }
 
