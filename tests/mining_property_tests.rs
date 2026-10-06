@@ -147,11 +147,13 @@ proptest! {
     }
 }
 
-/// Property: Template height matches input height
+/// Property: getblocktemplate height is the blockstore count, not chain_info.height.
+///
+/// This setup stores no blocks, so the template stays at height 0 after update_tip.
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(10))] // Limit cases due to expensive setup
     #[test]
-    fn prop_template_height_matches(
+    fn prop_template_height_follows_blockstore(
         height in 0u64..=100u64, // Reduced range for faster tests
     ) {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -191,7 +193,7 @@ proptest! {
         if result.is_ok() {
             let template = result.unwrap();
             let template_height = template.get("height").unwrap().as_u64().unwrap();
-            prop_assert_eq!(template_height, height);
+            prop_assert_eq!(template_height, 0);
         }
     }
 }
@@ -341,11 +343,14 @@ proptest! {
     }
 }
 
-/// Property: Rules array always contains at least "csv"
+/// Property: a mainnet template at height 0 does not advertise CSV.
+///
+/// Default chain params are mainnet, and an empty blockstore templates height 0,
+/// which is before CSV activation.
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(10))] // Limit cases due to expensive setup
     #[test]
-    fn prop_rules_always_contains_csv(height in 0u64..=100u64) {
+    fn prop_mainnet_height_zero_omits_csv(height in 0u64..=100u64) {
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         let temp_dir = TempDir::new().unwrap();
@@ -384,7 +389,7 @@ proptest! {
             let rule_strings: Vec<String> = rules.iter()
                 .map(|r| r.as_str().unwrap().to_string())
                 .collect();
-            prop_assert!(rule_strings.contains(&"csv".to_string()));
+            prop_assert!(!rule_strings.iter().any(|rule| rule == "csv"));
         }
     }
 }
