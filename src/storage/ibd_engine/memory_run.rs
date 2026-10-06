@@ -533,6 +533,10 @@ pub struct QueryResult {
 #[derive(Debug)]
 pub struct MemoryRun {
     pub(super) entries: Vec<OutputKV>,
+    /// Sorted copy of the incoming append. Kept so the next block does not allocate it again.
+    batch_scratch: Vec<OutputKV>,
+    /// Destination of the tip merge. After `swap` with `entries` this holds the previous tip.
+    merge_scratch: Vec<OutputKV>,
     pub(super) height_range: (i32, i32),
     pub(super) directory: Directory,
     pub(super) filter: BloomFilter,
@@ -546,8 +550,12 @@ impl Clone for MemoryRun {
         // (observed −193k) while total kept climbing. Count clones as live instances.
         MEMORY_RUN_LIVE.fetch_add(1, Ordering::Relaxed);
         MEMORY_RUN_TOTAL.fetch_add(1, Ordering::Relaxed);
+        // Slow-path append clones the tip outside the lock. The scratches are spare
+        // capacity, not run state — copying them would allocate another tip buffer.
         Self {
             entries: self.entries.clone(),
+            batch_scratch: Vec::new(),
+            merge_scratch: Vec::new(),
             height_range: self.height_range,
             directory: self.directory.clone(),
             filter: self.filter.clone(),
@@ -573,6 +581,8 @@ impl MemoryRun {
         MEMORY_RUN_TOTAL.fetch_add(1, Ordering::Relaxed);
         Self {
             entries,
+            batch_scratch: Vec::new(),
+            merge_scratch: Vec::new(),
             height_range,
             directory,
             filter,
@@ -596,6 +606,8 @@ impl MemoryRun {
         MEMORY_RUN_TOTAL.fetch_add(1, Ordering::Relaxed);
         Self {
             entries,
+            batch_scratch: Vec::new(),
+            merge_scratch: Vec::new(),
             height_range,
             directory,
             filter,
@@ -609,6 +621,8 @@ impl MemoryRun {
         MEMORY_RUN_TOTAL.fetch_add(1, Ordering::Relaxed);
         Self {
             entries: Vec::new(),
+            batch_scratch: Vec::new(),
+            merge_scratch: Vec::new(),
             height_range: (i32::MAX, i32::MIN),
             directory: Directory::build(&[]),
             filter: BloomFilter::build(&[]),
@@ -628,9 +642,12 @@ impl MemoryRun {
         self.height_range
     }
 
-    /// Approximate resident memory in bytes: entries Vec + bloom filter + directory.
+    /// Approximate resident memory in bytes: entries Vec + merge scratches + bloom + directory.
     pub fn mem_bytes(&self) -> usize {
-        let entries_bytes = self.entries.capacity() * super::types::OutputKV::SIZE;
+        let entries_bytes = (self.entries.capacity()
+            + self.batch_scratch.capacity()
+            + self.merge_scratch.capacity())
+            * super::types::OutputKV::SIZE;
         entries_bytes + self.filter.mem_bytes() + self.directory.mem_bytes()
     }
 
@@ -646,7 +663,12 @@ impl MemoryRun {
             self.entries.extend_from_slice(new_entries);
             self.entries.sort_unstable();
         } else {
-            merge_sorted_output_kvs(&mut self.entries, new_entries);
+            merge_sorted_output_kvs(
+                &mut self.entries,
+                &mut self.batch_scratch,
+                &mut self.merge_scratch,
+                new_entries,
+            );
         }
         self.height_range = height_range_of(&self.entries);
         // Mutable tip: skip directory/bloom rebuild every block — lookup uses direct
@@ -658,6 +680,12 @@ impl MemoryRun {
         self.is_mutable = false;
         self.directory = Directory::build(&self.entries);
         self.filter = BloomFilter::build(&self.entries);
+        // Spare buffers are only for the mutable tip. Drop them so a frozen run
+        // does not keep a second copy of the tip.
+        self.batch_scratch.clear();
+        self.batch_scratch.shrink_to_fit();
+        self.merge_scratch.clear();
+        self.merge_scratch.shrink_to_fit();
     }
 
     /// Look up `key` in this run within `[since, before)` height window.
@@ -929,34 +957,44 @@ impl MemoryRun {
 }
 
 /// Merge `new_entries` into sorted `base` without a full re-sort of `base`.
-fn merge_sorted_output_kvs(base: &mut Vec<OutputKV>, new_entries: &[OutputKV]) {
+///
+/// `batch_scratch` and `merge_scratch` are reused across appends. Callers must not
+/// shrink them here — the next block needs the capacity. `freeze` drops them.
+fn merge_sorted_output_kvs(
+    base: &mut Vec<OutputKV>,
+    batch_scratch: &mut Vec<OutputKV>,
+    merge_scratch: &mut Vec<OutputKV>,
+    new_entries: &[OutputKV],
+) {
     if new_entries.is_empty() {
         return;
     }
-    let mut batch: Vec<OutputKV> = new_entries.to_vec();
-    batch.sort_unstable();
+    batch_scratch.clear();
+    batch_scratch.extend_from_slice(new_entries);
+    batch_scratch.sort_unstable();
     if base.is_empty() {
-        *base = batch;
+        std::mem::swap(base, batch_scratch);
         return;
     }
-    let mut merged = Vec::with_capacity(base.len() + batch.len());
+    merge_scratch.clear();
+    merge_scratch.reserve(base.len() + batch_scratch.len());
     let (mut i, mut j) = (0usize, 0usize);
-    while i < base.len() && j < batch.len() {
-        if base[i] <= batch[j] {
-            merged.push(base[i]);
+    while i < base.len() && j < batch_scratch.len() {
+        if base[i] <= batch_scratch[j] {
+            merge_scratch.push(base[i]);
             i += 1;
         } else {
-            merged.push(batch[j]);
+            merge_scratch.push(batch_scratch[j]);
             j += 1;
         }
     }
     if i < base.len() {
-        merged.extend_from_slice(&base[i..]);
+        merge_scratch.extend_from_slice(&base[i..]);
     }
-    if j < batch.len() {
-        merged.extend_from_slice(&batch[j..]);
+    if j < batch_scratch.len() {
+        merge_scratch.extend_from_slice(&batch_scratch[j..]);
     }
-    *base = merged;
+    std::mem::swap(base, merge_scratch);
 }
 
 fn height_range_of(entries: &[OutputKV]) -> (i32, i32) {
@@ -1258,5 +1296,55 @@ mod tests {
         run.erase_since(75);
         assert_eq!(run.entries.len(), 1);
         assert_eq!(run.entries[0].key, k1);
+    }
+
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn test_mutable_append_reuses_merge_scratch() {
+        fn add(n: u8, height: i32) -> OutputKV {
+            OutputKV::new_add(make_key(n), height, n as u64)
+        }
+
+        let mut run = MemoryRun::new_mutable();
+        // Empty tip sorts in place and does not merge.
+        run.append_and_rebuild(&[add(30, 1), add(10, 1), add(20, 1)]);
+        assert!(run.entries.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(run.merge_scratch.capacity(), 0);
+
+        // `reserve` doubles. Once `merge_scratch` already fits the next tip, that
+        // buffer is swapped into `entries` and its capacity must stay put.
+        let mut saw_stable = false;
+        for n in 4u8..40 {
+            let batch = [add(n.wrapping_mul(7).wrapping_add(1), i32::from(n))];
+            let spare = run.merge_scratch.capacity();
+            let need = run.entries.len() + batch.len();
+            run.append_and_rebuild(&batch);
+            assert!(
+                run.entries.windows(2).all(|w| w[0] <= w[1]),
+                "append {n} broke sort"
+            );
+            if spare >= need {
+                assert_eq!(
+                    run.entries.capacity(),
+                    spare,
+                    "spare fit ({spare} >= {need}) but the merge buffer grew"
+                );
+                saw_stable = true;
+                break;
+            }
+        }
+        assert!(saw_stable, "no merge reused merge_scratch");
+
+        let cloned = run.clone();
+        assert_eq!(cloned.entries, run.entries);
+        assert_eq!(cloned.batch_scratch.capacity(), 0);
+        assert_eq!(cloned.merge_scratch.capacity(), 0);
+
+        assert!(run.merge_scratch.capacity() > 0 || run.batch_scratch.capacity() > 0);
+        run.freeze();
+        assert!(!run.is_mutable);
+        assert_eq!(run.batch_scratch.capacity(), 0);
+        assert_eq!(run.merge_scratch.capacity(), 0);
+        assert_eq!(run.lookup_key(&make_key(10), 0, i32::MAX), Some(10));
     }
 }

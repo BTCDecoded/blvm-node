@@ -131,11 +131,11 @@ impl PartialOrd for OutputKV {
 }
 
 /// Decoded UTXO detail from the flat table. Consumed by `session_to_utxo_set`.
+///
+/// Script bytes live only on `utxo.script_pubkey`. Export and import read that field.
 #[derive(Debug, Clone)]
 pub struct OutputDetail {
     pub header: OutputHeader,
-    /// Script bytes retained for export/debug; consensus view uses `utxo`.
-    pub script: SharedByteString,
     /// Built once at fetch; `session_fill_utxo_set` clones this `Arc` into `UtxoSet`.
     pub utxo: std::sync::Arc<blvm_protocol::UTXO>,
 }
@@ -146,22 +146,18 @@ impl Drop for OutputDetail {
     }
 }
 
-/// Build `OutputDetail` with a single script copy into the consensus `UTXO`.
+/// Build `OutputDetail`, moving `script` into the consensus `UTXO`.
 pub fn output_detail_from_parts(header: OutputHeader, script: SharedByteString) -> OutputDetail {
     use blvm_protocol::UTXO;
     OUTPUT_DETAIL_CREATED.fetch_add(1, Ordering::Relaxed);
     OUTPUT_DETAIL_LIVE.fetch_add(1, Ordering::Relaxed);
     let utxo = std::sync::Arc::new(UTXO {
         value: header.amount,
-        script_pubkey: script.clone(),
+        script_pubkey: script,
         height: header.height as u64,
         is_coinbase: header.is_coinbase(),
     });
-    OutputDetail {
-        header,
-        script,
-        utxo,
-    }
+    OutputDetail { header, utxo }
 }
 
 /// Encodes/decodes `{offset, length}` pairs into a single `OutputId` (`u64`).

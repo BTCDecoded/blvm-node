@@ -247,32 +247,52 @@ where
     ))
 }
 
-/// Coalesce sorted candidate `[lo, hi)` spans into pread ranges.
+/// Coalesce sorted `[lo, hi)` spans. Shared by `coalesce_pread_spans` and cold `batch_lookup`.
 ///
 /// Merge while the next span overlaps or abuts and the combined entry count is
 /// `≤ max_entries`. A single span is never shrunk. `usize::MAX` is unlimited.
-/// Returns `(lo, hi, ci, cj)` covering `sorted_lo_hi[ci..cj]`.
-pub(crate) fn coalesce_pread_spans(
-    sorted_lo_hi: &[(usize, usize)],
-    max_entries: usize,
-) -> Vec<(usize, usize, usize, usize)> {
-    let mut out = Vec::new();
+/// `push(lo, hi, ci, cj)` covers input indices `[ci, cj)`.
+#[inline(always)]
+fn coalesce_sorted_spans<L, P>(len: usize, lo_hi: L, max_entries: usize, mut push: P)
+where
+    L: Fn(usize) -> (usize, usize),
+    P: FnMut(usize, usize, usize, usize),
+{
     let mut ci = 0;
-    while ci < sorted_lo_hi.len() {
-        let read_lo = sorted_lo_hi[ci].0;
-        let mut read_hi = sorted_lo_hi[ci].1;
+    while ci < len {
+        let (read_lo, mut read_hi) = lo_hi(ci);
         let mut cj = ci + 1;
-        while cj < sorted_lo_hi.len() && sorted_lo_hi[cj].0 <= read_hi {
-            let new_hi = read_hi.max(sorted_lo_hi[cj].1);
+        while cj < len {
+            let (next_lo, next_hi) = lo_hi(cj);
+            if next_lo > read_hi {
+                break;
+            }
+            let new_hi = read_hi.max(next_hi);
             if new_hi.saturating_sub(read_lo) > max_entries {
                 break;
             }
             read_hi = new_hi;
             cj += 1;
         }
-        out.push((read_lo, read_hi, ci, cj));
+        push(read_lo, read_hi, ci, cj);
         ci = cj;
     }
+}
+
+/// Coalesce sorted candidate `[lo, hi)` spans into pread ranges.
+///
+/// Returns `(lo, hi, ci, cj)` covering `sorted_lo_hi[ci..cj]`.
+pub(crate) fn coalesce_pread_spans(
+    sorted_lo_hi: &[(usize, usize)],
+    max_entries: usize,
+) -> Vec<(usize, usize, usize, usize)> {
+    let mut out = Vec::new();
+    coalesce_sorted_spans(
+        sorted_lo_hi.len(),
+        |i| sorted_lo_hi[i],
+        max_entries,
+        |lo, hi, ci, cj| out.push((lo, hi, ci, cj)),
+    );
     out
 }
 
@@ -1176,17 +1196,19 @@ impl DiskSegment {
                 candidates.sort_unstable_by_key(|c| c.lo);
 
                 let max_entries = disk_pread_max_entries();
-                let spans: Vec<(usize, usize)> = candidates.iter().map(|c| (c.lo, c.hi)).collect();
-                for (read_lo, read_hi, span_ci, span_cj) in
-                    coalesce_pread_spans(&spans, max_entries)
-                {
-                    ranges.push(Range {
-                        lo: read_lo,
-                        hi: read_hi.min(self.entry_count),
-                        ci: span_ci,
-                        cj: span_cj,
-                    });
-                }
+                coalesce_sorted_spans(
+                    candidates.len(),
+                    |i| (candidates[i].lo, candidates[i].hi),
+                    max_entries,
+                    |read_lo, read_hi, span_ci, span_cj| {
+                        ranges.push(Range {
+                            lo: read_lo,
+                            hi: read_hi.min(self.entry_count),
+                            ci: span_ci,
+                            cj: span_cj,
+                        });
+                    },
+                );
                 if bucket_willneed_from_env() {
                     for r in ranges.iter() {
                         let byte_offset = HEADER_SIZE + (r.lo * OutputKV::SIZE) as u64;

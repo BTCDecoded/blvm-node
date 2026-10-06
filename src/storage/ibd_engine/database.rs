@@ -25,8 +25,16 @@ use super::types::{
     to_output_key,
 };
 use blvm_protocol::{Block, transaction::is_coinbase};
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+thread_local! {
+    /// Txids of the block being appended. The dispatch thread reuses this set.
+    /// Drop the borrow before `index.append`.
+    static APPEND_TX_ID_SET: RefCell<rustc_hash::FxHashSet<[u8; 32]>> =
+        RefCell::new(rustc_hash::FxHashSet::default());
+}
 
 pub struct UtxoDatabase {
     pub(super) table: Arc<UtxoTable>,
@@ -207,26 +215,31 @@ impl UtxoDatabase {
 
         // Phase 2: build Delete entries + classify inputs in a single walk.
         // tx_ids[0] is the coinbase txid; tx_ids[1..] are the spendable non-coinbase txids.
-        let tx_id_set: rustc_hash::FxHashSet<[u8; 32]> = tx_ids[1..].iter().copied().collect();
-
         let mut external_keys: Vec<OutputKey> = Vec::new();
         let mut intra_block_keys: Vec<OutputKey> = Vec::new();
 
-        for tx in block.transactions.iter() {
-            if is_coinbase(tx) {
-                continue;
-            }
-            for input in tx.inputs.iter() {
-                let key = outpoint_to_output_key(&input.prevout);
-                if tx_id_set.contains(&input.prevout.hash) {
-                    // Intra-block spend: resolved from engine tail, no Delete needed.
-                    intra_block_keys.push(key);
-                } else {
-                    external_keys.push(key);
-                    entries.push(OutputKV::new_delete(key, height));
+        // Borrow ends before `index.append` so a re-entrant append cannot see this set.
+        APPEND_TX_ID_SET.with(|cell| {
+            let mut tx_id_set = cell.borrow_mut();
+            tx_id_set.clear();
+            tx_id_set.extend(tx_ids[1..].iter().copied());
+
+            for tx in block.transactions.iter() {
+                if is_coinbase(tx) {
+                    continue;
+                }
+                for input in tx.inputs.iter() {
+                    let key = outpoint_to_output_key(&input.prevout);
+                    if tx_id_set.contains(&input.prevout.hash) {
+                        // Intra-block spend: resolved from engine tail, no Delete needed.
+                        intra_block_keys.push(key);
+                    } else {
+                        external_keys.push(key);
+                        entries.push(OutputKV::new_delete(key, height));
+                    }
                 }
             }
-        }
+        });
 
         // Sort + dedup external keys for Phase-2 batch_query (binary search).
         super::memory_run::sort_external_keys(&mut external_keys);
@@ -528,6 +541,46 @@ mod tests {
             ids[0],
             OutputId::MAX,
             "tx1 Add should be in index (intra-block Delete for tx2 filtered)"
+        );
+
+        // Second append on this thread reuses the txid set. Same intra-block check.
+        let txid_cb_b = make_txid(20);
+        let txid1_b = make_txid(21);
+        let txid2_b = make_txid(22);
+        let block_b = make_block(vec![
+            dummy_coinbase_tx(5_000_000_000),
+            Transaction {
+                version: 1,
+                inputs: vec![spend_input(make_txid(98), 0)].into(),
+                outputs: vec![TransactionOutput {
+                    value: 4_900_000_000,
+                    script_pubkey: vec![0x51],
+                }]
+                .into(),
+                lock_time: 0,
+            },
+            dummy_spend_tx(txid1_b, 0, 4_800_000_000),
+        ]);
+        let _pin_b = db
+            .append(&block_b, &[txid_cb_b, txid1_b, txid2_b], 102)
+            .unwrap();
+
+        let mut key_b: OutputKey = [0u8; 36];
+        key_b[..32].copy_from_slice(&txid1_b);
+        key_b[32..36].copy_from_slice(&0u32.to_be_bytes());
+        let mut ids_b = [OutputId::MAX; 1];
+        db.query(&[key_b], &mut ids_b, i32::MAX);
+        assert_ne!(
+            ids_b[0],
+            OutputId::MAX,
+            "second block tx Add should be in index (intra-block Delete filtered)"
+        );
+
+        db.query(&[key], &mut ids, i32::MAX);
+        assert_ne!(
+            ids[0],
+            OutputId::MAX,
+            "first block Add should still be visible after the second append"
         );
     }
 
