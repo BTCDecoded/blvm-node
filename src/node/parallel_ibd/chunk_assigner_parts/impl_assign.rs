@@ -1,3 +1,15 @@
+/// Result of the leftover-hole arm while `in_flight_per_peer` is held.
+enum LeftoverHoleStep<'a> {
+    Assigned((u64, u64)),
+    Continue(std::sync::MutexGuard<'a, HashMap<String, Vec<(u64, u64)>>>),
+}
+
+/// Tip-fill arm (W28) while `in_flight_per_peer` is held.
+enum TipFillStep<'a> {
+    Return(Option<(u64, u64)>),
+    Continue(std::sync::MutexGuard<'a, HashMap<String, Vec<(u64, u64)>>>),
+}
+
 impl ChunkAssigner {
     /// Deduplicate peer ids while preserving first-seen order.
     fn dedupe_workers(peers: Vec<String>) -> Vec<String> {
@@ -497,8 +509,7 @@ impl ChunkAssigner {
             tip_missing
         };
         assign_wan_gap
-            && (missing_or_holes
-                || (min_contig_for_ahead > 0 && contig_now < min_contig_for_ahead))
+            && (missing_or_holes || (min_contig_for_ahead > 0 && contig_now < min_contig_for_ahead))
     }
 
     /// C1i min contig for opening past-H (same bar as tip-fill `c1g_freeze_past_tip`).
@@ -904,7 +915,8 @@ impl ChunkAssigner {
 
     /// True when the validation tip is not in reorder, the feeder, or the bridge.
     pub(crate) fn set_window_tip_uncovered(&self, uncovered: bool) {
-        self.window_tip_uncovered.store(uncovered, Ordering::Relaxed);
+        self.window_tip_uncovered
+            .store(uncovered, Ordering::Relaxed);
     }
 
     /// Default **on**. Opt out `BLVM_IBD_HOLE_ANY=0`.
@@ -936,11 +948,12 @@ impl ChunkAssigner {
         }
         // One racer per height: the incumbent still owns the retry budget.
         let already = TIP_RERACE_HEIGHT.load(Ordering::Relaxed) == next_needed;
-        let peer_covers_h = guard
-            .get(peer_id)
-            .is_some_and(|r| r.iter().any(|(s, e)| *s <= next_needed && next_needed <= *e));
-        let incumbent_is_self = super::tip_stage::getdata_peer_for(next_needed)
-            .is_some_and(|p| p == peer_id);
+        let peer_covers_h = guard.get(peer_id).is_some_and(|r| {
+            r.iter()
+                .any(|(s, e)| *s <= next_needed && next_needed <= *e)
+        });
+        let incumbent_is_self =
+            super::tip_stage::getdata_peer_for(next_needed).is_some_and(|p| p == peer_id);
         super::tip_stale_cover_should_rerace(
             true,
             super::tip_stage::tip_awaiting_ms_for_cap(),
@@ -1107,6 +1120,48 @@ impl ChunkAssigner {
         true
     }
 
+    /// Leftover-hole assign while `in_flight_per_peer` is held.
+    ///
+    /// The guard is taken by value so a successful insert can drop it. Fall-through,
+    /// including `try_insert_dynamic` returning false, hands the same guard back still held.
+    fn assign_leftover_hole<'a>(
+        &'a self,
+        mut guard: std::sync::MutexGuard<'a, HashMap<String, Vec<(u64, u64)>>>,
+        peer_id: &str,
+        next_needed: u64,
+        body_tip: u64,
+        leftover_hole: bool,
+    ) -> LeftoverHoleStep<'a> {
+        if leftover_hole {
+            let hh_inflight = guard.values().any(|ranges| {
+                ranges
+                    .iter()
+                    .any(|(s, e)| *s == next_needed && *e == next_needed)
+            });
+            if !hh_inflight {
+                if self.try_insert_dynamic(&mut guard, peer_id, next_needed, next_needed) {
+                    drop(guard);
+                    tracing::warn!(
+                        "[IBD_LEFTOVER_HOLE] assign GetData {}-{} (ignore leftover covering)",
+                        next_needed,
+                        next_needed
+                    );
+                    return LeftoverHoleStep::Assigned((next_needed, next_needed));
+                }
+                // R-284: same (peer,H,H) net=0 — fall through. Do not idle.
+            } else {
+                Self::leftover_hole_skip_log(format!(
+                    "leftover_hole next={next_needed} hh_inflight peer={peer_id}"
+                ));
+            }
+        } else if self.leftover_force_getdata.load(Ordering::Relaxed) {
+            Self::leftover_hole_skip_log(format!(
+                "leftover_force next={next_needed} body_tip={body_tip} leftover_hole=false peer={peer_id}"
+            ));
+        }
+        LeftoverHoleStep::Continue(guard)
+    }
+
     #[cfg(test)]
     pub(crate) fn noprog_len(&self) -> usize {
         self.noprog_ok.lock().unwrap().len()
@@ -1122,6 +1177,947 @@ impl ChunkAssigner {
     /// Round-robin: prioritizes critical chunk (containing next_needed) from retry, then earliest available.
     /// CRITICAL: Entire operation under one lock to prevent duplicate chunk assignment (race: two workers
     /// for same peer both getting chunk 116240-116255, both requesting same blocks, one starves).
+    /// W28 tip fill while `in_flight_per_peer` is held.
+    ///
+    /// A `return` from this arm returns from `get_work`. Fall-through hands the
+    /// same guard back still held.
+    fn assign_tip_fill<'a>(
+        &'a self,
+        peer_id: &str,
+        next_needed: u64,
+        max_start: u64,
+        body_tip: u64,
+        local_ahead: bool,
+        mut guard: std::sync::MutexGuard<'a, HashMap<String, Vec<(u64, u64)>>>,
+    ) -> TipFillStep<'a> {
+        let leftover_hole = super::leftover_hole_needs_getdata(
+            self.leftover_force_getdata.load(Ordering::Relaxed),
+            next_needed,
+            body_tip,
+            Self::covering_next_count(&guard, next_needed),
+        );
+        let containing = self
+            .chunks
+            .iter()
+            .find(|(s, e)| *s <= next_needed && next_needed <= *e)
+            .copied();
+        // Leftover cheese in the chunk map is not a feeder pipeline (live 70709:
+        // 70645–70735 covering blocked leftover_hole `or_else` and overlap).
+        // Force (H,H) GetData; leftover stripe overlap must not hide the miss.
+        let containing = if leftover_hole {
+            Some((next_needed, next_needed))
+        } else {
+            containing
+        };
+        // P0: on WAN tip gap, tip owner must assign even if next_needed walked past the
+        // static chunk map (headers advanced after IBD start). Synthetic containing range.
+        let containing = containing.or_else(|| {
+            if self.wan_tip_gap_crawl(next_needed)
+                || self.handoff_prime_active(next_needed)
+                || leftover_hole
+            {
+                let ht = self.header_tip();
+                let end = if ht >= next_needed {
+                    next_needed.saturating_add(255).min(ht)
+                } else {
+                    // No headers past tip yet — still advertise tip height so assign
+                    // can wait / clip rather than invent tip+255 past store.
+                    next_needed
+                };
+                Some((next_needed, end))
+            } else {
+                None
+            }
+        });
+        if let Some((cs, ce)) = containing {
+            if leftover_hole {
+                let hh_inflight = guard.values().any(|ranges| {
+                    ranges
+                        .iter()
+                        .any(|(s, e)| *s == next_needed && *e == next_needed)
+                });
+                if !hh_inflight
+                    && self.peer_has_flight_capacity(peer_id, &guard)
+                    && self.try_insert_dynamic(&mut guard, peer_id, next_needed, next_needed)
+                {
+                    drop(guard);
+                    tracing::warn!(
+                        "[IBD_LEFTOVER_HOLE] assign GetData {}-{} (ignore leftover covering)",
+                        next_needed,
+                        next_needed
+                    );
+                    return TipFillStep::Return(Some((next_needed, next_needed)));
+                }
+            }
+            let raw_covering = Self::covering_next_count(&guard, next_needed);
+            let at_chunk_start = next_needed == cs;
+            let wan_gap = self.wan_tip_gap_crawl(next_needed);
+            let handoff_prime = self.handoff_prime_active(next_needed);
+            // W30/W37: tip owner gating uses deep claims only — (H,H) failover micros
+            // must not block deep re-arm on WAN gap *or* LOCAL_AHEAD soft-resume
+            // (live 2026-07-16: covering=2/2 (H,H) treadmill, 0 deep owners, ~0.2 blk/s).
+            // W4/N12: one tip_cover_claims snapshot for deep+healthy counts (re-snap after promote).
+            // C1u: GetData-prime body_tip+1 while still local.
+            // (1) near_tip window (HANDOFF_PRIME of body) — only after local tip is
+            //     already covered. Live FAIL true-wan-…T004239Z: early near_tip prime
+            //     stole sticky max_in_flight=1 onto body_tip+1 while next_needed≪tip
+            //     and W28c ahead cheese'd the hole → freeze wait 437206 (tip60 never).
+            // (2) ahead frontier already at body tip (far local dens KEEP) — otherwise
+            //     tip-fill re-arms next_needed forever and never reaches ahead_frontier.
+            if !wan_gap {
+                let body_tip_c1u = self.wan_body_tip.load(Ordering::Relaxed);
+                let frontier_at_body = body_tip_c1u > 0
+                    && next_needed <= body_tip_c1u
+                    && Self::tip_pipeline_frontier(&guard, next_needed, 2048) >= body_tip_c1u;
+                if handoff_prime || frontier_at_body {
+                    let tip_covered = Self::covering_next_count(&guard, next_needed) > 0;
+                    // near_tip: only on the last local height (next>=body_tip) with cover.
+                    // frontier_at_body may still prime earlier (contig already at body tip).
+                    let near_tip_ready = tip_covered && next_needed >= body_tip_c1u;
+                    // Live leftover-getwork-phase: frontier_at_body at next=70634
+                    // called try_assign_handoff_prime while holding in_flight and
+                    // wedged on preferred/claims. Only prime at leftover tip.
+                    if next_needed >= body_tip_c1u
+                        && (frontier_at_body || (handoff_prime && near_tip_ready))
+                    {
+                        let reason = if handoff_prime && near_tip_ready {
+                            "near_tip"
+                        } else {
+                            "ahead_frontier"
+                        };
+                        leftover_get_work_phase(
+                            peer_id,
+                            next_needed,
+                            body_tip,
+                            self.leftover_force_getdata.load(Ordering::Relaxed),
+                            "before_prime",
+                        );
+                        if let Some(range) =
+                            self.try_assign_handoff_prime(peer_id, next_needed, &mut guard, reason)
+                        {
+                            drop(guard);
+                            return TipFillStep::Return(Some(range));
+                        }
+                    }
+                }
+            }
+            // Stale tip_cover prune: tried 2026-08-03 (exact + tip-cover variants).
+            // CLAIM_STALE never armed on tip-now; claimfix tip90≈61–63 REVERT vs
+            // forcedeb 108.9. Manual REVERT — keep force debounce + tip_nudge gate.
+            leftover_get_work_phase(
+                peer_id,
+                next_needed,
+                body_tip,
+                self.leftover_force_getdata.load(Ordering::Relaxed),
+                "before_claims",
+            );
+            let mut tip_claims = self.snapshot_tip_cover_claims();
+            let mut effective_healthy = Self::deep_tip_cover_count_from(&tip_claims, next_needed);
+            // W49b: ahead walk-in already covers tip in-flight — promote before assigning
+            // a competing tip owner (closes race: promote only on abort tick after W28d).
+            // W111: skip cooldown peers (mute residual in-flight must not re-sticky).
+            if wan_gap && effective_healthy == 0 {
+                if let Some((wp, ws, we)) = Self::find_inflight_deep_covering(&guard, next_needed) {
+                    if !self.tip_owner_in_fail_cooldown(&wp) {
+                        self.promote_tip_walk_in(&wp, ws, we);
+                        tip_claims = self.snapshot_tip_cover_claims();
+                        effective_healthy =
+                            Self::deep_tip_cover_count_from(&tip_claims, next_needed);
+                    }
+                }
+            }
+            // W28c/W32/W35‴: WAN tip owner deep pipe in one download session.
+            // Near tip: tip-owner batch must match GetData pipe depth (default 128).
+            // Live 2026-07-15: `wan_bulk_catchup` is true for most of IBD (header tip ≫
+            // next_needed) so this path used **64** while `IBD_TIP_PIPE` showed
+            // pipe_depth=128 span=64 — half the pipe idle; reassign cadence ~64/2.6s
+            // ≈24 blk/s ceiling (observed tip ~17–34). Always use 128 on WAN tip owner
+            // regardless of bulk; ahead partitions stay small (32) below.
+            // Env `BLVM_IBD_GAP_PREEMPT_BATCH` overrides.
+            let bulk = self.wan_bulk_catchup(next_needed);
+            // W40: LOCAL_AHEAD soft-resume tip holes need a deep pipe too (bodies sparse
+            // under body_tip). Live 2026-07-16: default 16 + chunk-start gate → 0 tip-owner
+            // assigns, behind-tip main-queue storm, ~0.06 blk/s.
+            // Synth bulk (GETDATA_DELAY_MS=0): bodies are already local — W40 tip-hole pipe
+            // re-preempts the same spans 8–17×/s, feeder stays 0, wall ~6–8 blk/s (2026-07-23).
+            // Keep W40 for real soft-resume and for synth tip-crawl with delay>0.
+            let tip_missing = self.tip_gap_missing.load(Ordering::Relaxed);
+            let local_tip_hole = (super::synthetic_wan::injected_ia()
+                || !super::synthetic_wan::enabled())
+                && tip_missing
+                && !wan_gap;
+            // Dense local W16 tip-fill (bootstrap / gap_preempt dens KEEP): body_tip=0
+            // makes wan_tip_gap_crawl true for genesis stall/nudge, but without a
+            // coordinator body/header tip and without tip_missing, tip-owner stays on
+            // the non-tip_pipe batch=16 path (not WAN 128 / C1e stripe).
+            let assign_wan_gap = wan_gap
+                && (tip_missing
+                    || self.header_tip() > 0
+                    || self.wan_body_tip.load(Ordering::Relaxed) > 0);
+            // C1u: handoff_prime uses tip-pipe GetData depth while still local.
+            let tip_pipe = assign_wan_gap || local_tip_hole || handoff_prime;
+            // C1e: while tip missing, tip-owner takes a *stripe* (default 32), not 128.
+            // Assigned tip..tip+127 with GetData depth 8 left frontier at tip+127 and
+            // other peers opened tip+128 — multi-peer Swiss cheese. Multiple peers fill
+            // contiguous stripes inside TIP_RUNWAY_CAP instead.
+            let runway_cap = Self::tip_runway_cap();
+            let runway_stripe = Self::tip_runway_stripe();
+            // C1g/C1i: freeze past-tip stripes until tip is present AND contig runway
+            // reaches min (default grow-start 8). R-16 dest cheese'd (apply stuck @10,
+            // holes=61, mode=CHEESE) — C1G-narrow reverted. C1h `(H,H)` race stays.
+            let contig_now = super::IBD_TIP_CONTIG_RUNWAY.load(Ordering::Relaxed);
+            // Coordinator contig can lag unit tests / refresh; deep in-flight tip cover
+            // already proves runway (w49 ahead after owner stripe).
+            // Mousetrap F2 REVERT (2026-08-01): pipe_contig C1i flattened mid-gap wall
+            // (365<390) and past-body tip_crawl 47<<B0 81 — restore claim credit.
+            let contig_from_claims = tip_claims
+                .iter()
+                .map(|(_, s, e)| Self::claim_remaining_tip_depth(next_needed, *s, *e))
+                .max()
+                .unwrap_or(0);
+            let contig_eff = contig_now.max(contig_from_claims);
+            let min_contig_for_ahead = Self::c1i_min_contig_for_ahead();
+            // Freeze past-tip only on real WAN assign (not dense-local body_tip=0 unit).
+            // R-50: first applied body clears tip_missing; in-flight 1-32 made
+            // contig_eff≥8 and unfroze ahead → MQ/tip-fill 33–288 in the same ms.
+            // Delivered contig (IBD_TIP_CONTIG_RUNWAY) is the C1i bar. Claim credit
+            // still used elsewhere; it must not lift this freeze.
+            let _ = contig_eff;
+            let holes_now = self.tip_bridge_holes.load(Ordering::Relaxed);
+            let c1g_freeze_past_tip = Self::c1g_freeze_past_tip_pred(
+                assign_wan_gap,
+                tip_missing,
+                holes_now,
+                min_contig_for_ahead,
+                contig_now,
+            );
+
+            // --- Tip owner: sticky/best peer (gated on healthy claims, not walk-ins) ---
+            // W40: never skip tip owner at chunk-map starts when covering=0 — that gate
+            // left LOCAL_AHEAD uncovered at every chunk boundary.
+            let fetchers_cap = self.max_gap_fetchers_per_height();
+            let healthy_claims = Self::healthy_tip_cover_count_from(&tip_claims, next_needed);
+            // W65: shallow tip-cover remnants (deep==0, healthy>0) need a full deep
+            // re-arm (≥64), not C1e stripe-32 (dens KEEP w65 expects end≥tip+63).
+            let shallow_rearm = tip_missing && effective_healthy == 0 && healthy_claims > 0;
+            let default_batch = if tip_pipe && assign_wan_gap && tip_missing && !shallow_rearm {
+                runway_stripe
+            } else if tip_pipe {
+                128
+            } else {
+                16
+            };
+            let mut preempt_batch: u64 = Self::gap_preempt_batch_raw()
+                .unwrap_or(default_batch)
+                .clamp(1, if tip_pipe { 256 } else { 128 });
+            if tip_pipe && assign_wan_gap && tip_missing && !shallow_rearm {
+                // Explicit GAP_PREEMPT_BATCH must not re-open phantom 128 assign while tip empty.
+                preempt_batch = preempt_batch.min(runway_stripe);
+            }
+            // W47: tip-pipe shrink on holes is opt-in only (was default holes≥1 → 32 forever).
+            if tip_pipe && Self::tip_pipe_shrink_holes_opt().is_some_and(|thr| holes_now >= thr) {
+                preempt_batch = preempt_batch.min(32);
+            }
+            let c1g_tip_race = wan_gap
+                && tip_missing
+                && super::tip_stage::tip_awaiting_secs_for_cap() >= Self::c1g_tip_race_await_secs();
+            let c1t_tip_race = wan_gap && tip_missing && self.c1t_tip_height_race();
+            let tip_distress = Self::tip_is_distressed() || c1g_tip_race || c1t_tip_race;
+            // W120: revert W117–W119 shallow_tip_cover / cover_for_gate. Live W117–W119
+            // all rate-failed @306–311k (W116 DNA reached 344k). Accept CAP-soft wait
+            // on end-of-pipe shallow cover (W116 @344580 ~9s) rather than early regress.
+            // Keep overlaps_ok failover-first below (harmless on W116 path; required if
+            // failover ever races a shallow remnant while deep cover exists).
+            // W88: one failover per tip-*stall episode* (not per tip height).
+            // W87 cleared on +1 advance → CAP at H then failover H,H+1,… every ~2s
+            // (live 2026-07-18: 10× cascade, tip60 45→9).
+            let failover_already = self.tip_failover_episode_active(next_needed);
+            // W112: empty triple race may assign a second (H,H) despite W88 episode
+            // latch — still hard-capped by fetchers_cap / raw_covering.
+            let empty_triple = self.empty_tip_triple_race();
+            // W122/W149: covering=1 mute + awaiting≥3s reopens one (H,H) under W88
+            // latch without empty_triple covering=3 (W121 soft-resume regress).
+            let mute_reopen = self.mute_single_cover_reopen(raw_covering);
+            if let Some(range) = self.maybe_drop_mute_tip_cover(raw_covering, peer_id, &mut guard) {
+                drop(guard);
+                return TipFillStep::Return(Some(range));
+            }
+            // W86: mute_reopen must not stack another (H,H) while a *deep* owner still
+            // covers tip (failover peer dropped in-flight → raw_covering=1). Only reopen
+            // under episode latch when deep cover is gone (true mute) or empty_triple.
+            // TPP L1 REVERT: understudy pierce undone with peer_may C1g.
+            let mute_reopen_open =
+                mute_reopen && effective_healthy == 0 && raw_covering < fetchers_cap;
+            // empty_triple may open a second (H,H) under episode latch (w112/w153) even
+            // with a deep owner — W86 stacking is blocked on the main-queue path instead.
+            let failover_slot_open = !failover_already
+                || (empty_triple && raw_covering < fetchers_cap)
+                || mute_reopen_open;
+            // W30: deep==0 must re-arm even with (H,H) micros present.
+            // W41c/W47: failover only under tip distress (not standing hole-keyed race).
+            // W86: also gate on raw_covering — healthy/deep counts ignore (H,H), so
+            // distress + `overlaps_ok=failover` previously stacked unbounded tip micros
+            // (live W85 fail: 2241× W28c tip failover on only 17 tip heights → tip60~30).
+            // W87/W88: episode latch (advance≥32 or ~30s) — not one-per-height.
+            // P1d/H6: GAP_STREAM DEDUP hold blocks tip-owner re-preempt (WAN + synth).
+            leftover_get_work_phase(
+                peer_id,
+                next_needed,
+                body_tip,
+                self.leftover_force_getdata.load(Ordering::Relaxed),
+                "before_tip_owner",
+            );
+            let tournament_h = self.ignition_tournament_h_ok(
+                wan_gap,
+                tip_missing,
+                next_needed,
+                raw_covering,
+                peer_id,
+            );
+            let ignition_second_h = tournament_h;
+            match super::tip_stage::tournament_poll() {
+                super::tip_stage::TournamentPoll::Win { ref peer, .. } => {
+                    self.note_tip_owner_assigned(peer);
+                }
+                super::tip_stage::TournamentPoll::Timeout => {}
+                super::tip_stage::TournamentPoll::None => {}
+            }
+            let disjoint_only = (64..50_000).contains(&next_needed)
+                && self.preferred_tip_owner().as_deref() != Some(peer_id)
+                && self
+                    .preferred_tip_owner()
+                    .as_ref()
+                    .is_some_and(|p| self.empty_band_should_sample(p));
+            if assign_wan_gap && disjoint_only {
+                if let Some(range) =
+                    self.try_assign_lookahead_stripe(peer_id, &mut guard, next_needed, raw_covering)
+                {
+                    return TipFillStep::Return(Some(range));
+                }
+            }
+            let tournament_open =
+                self.ignition_tournament_active(wan_gap, tip_missing, next_needed);
+            let hole = self.first_missing_height();
+            let is_hero = self.preferred_tip_owner().as_deref() == Some(peer_id);
+            let fill_from = if is_hero { hole } else { next_needed };
+            let skip_hero_h = is_hero && hole > next_needed;
+            if skip_hero_h {
+                tracing::warn!(
+                    "[IBD_HERO_SKIP] peer={} tip={} first_missing={} — already have, GetData hole",
+                    peer_id,
+                    next_needed,
+                    hole
+                );
+            }
+            // In-flight GetData on H is not have. Extras must not pack
+            // (try_assign_lookahead) or cheese (H,H) — R-84 holes=50.
+            // Farm warehouse covering H is not a tip pipe (R-112
+            // keep-full: covering_wait → flight_tip=0, 30–31k 8s).
+            // W65: a shallow walk-in (remain < deep min) is not a tip pipe.
+            // (H,H) micros are not either. Only a deep inflight cover waits.
+            let covering_wait = !Self::h_body_present()
+                && raw_covering >= 1
+                && !self.inflight_cover_is_only_farm(&guard, hole)
+                && Self::find_inflight_deep_covering(&guard, next_needed).is_some();
+            let want_tip_owner = !disjoint_only
+                && (skip_hero_h
+                    || ignition_second_h
+                    || (!covering_wait
+                        && !tournament_open
+                        && self.peer_may_take_tip_owner(peer_id, &guard, effective_healthy)
+                        && (effective_healthy == 0
+                            || ignition_second_h
+                            || (tip_distress
+                                && healthy_claims < fetchers_cap
+                                && raw_covering < fetchers_cap
+                                && failover_slot_open))
+                        && !self.tip_owner_blocked_by_dedup(next_needed)
+                        // Dense local (!tip_pipe): mid-chunk W16 only. At chunk-map starts the
+                        // main queue owns the full span (max_ahead=0 / A4 / sequential assign).
+                        && (tip_pipe || !at_chunk_start)));
+            let _ = at_chunk_start;
+            if want_tip_owner {
+                // W30/W37/W41c: (H,H) failover only while tip is in distress.
+                // W112: empty triple may open a second failover micro under fetchers_cap=3.
+                let assign_h = fill_from;
+                let failover = !ignition_second_h
+                    && !skip_hero_h
+                    && effective_healthy >= 1
+                    && tip_distress
+                    && failover_slot_open
+                    && raw_covering < fetchers_cap;
+                let mut preempt_end = if failover {
+                    // Failover races only the tip height — primary keeps the deep pipeline.
+                    assign_h
+                } else if tournament_h {
+                    // Same 1-32 for every racer. Not a second 1-64 range.
+                    32u64.max(assign_h)
+                } else {
+                    assign_h.saturating_add(preempt_batch.saturating_sub(1))
+                };
+                // W32a/W40: tip-pipe (WAN gap or LOCAL_AHEAD hole) skips chunk-map clip.
+                if !failover && !tip_pipe {
+                    // Dense local replay: clip to chunk-map boundaries.
+                    if ce > next_needed {
+                        preempt_end = preempt_end.min(ce);
+                    } else if let Some((_, nce)) =
+                        self.chunks.iter().find(|(s, _)| *s == ce + 1).copied()
+                    {
+                        preempt_end = preempt_end.min(nce);
+                    }
+                }
+                // C1u: while still local, tip-fill must not claim past on-disk body tip
+                // even when tip_pipe=handoff_prime (batch 128). Past-tip warm is only
+                // via try_assign_handoff_prime — else next..next+127 spans the hole and
+                // abandons local cover (true-wan freeze class @437205).
+                if !failover && !wan_gap {
+                    let body_tip = self.wan_body_tip.load(Ordering::Relaxed);
+                    if body_tip > 0 && next_needed <= body_tip {
+                        preempt_end = preempt_end.min(body_tip);
+                    }
+                }
+                // Hero owns [hole, farm_s). Do not let preempt_batch overlap
+                // the warehouse — overlap refuses the whole assign (R-108
+                // 47–48k: 129-high remnant, flight_tip=0, 9.7s).
+                // R-110 grew this to LEAD (512) in one GetData: 33–34k sat
+                // 46s on IBD_TIP_PROGRESSIVE_TIMEOUT 45s. Closed.
+                if let Some(farm_s) = self.first_reserved_start_after(assign_h) {
+                    if farm_s > assign_h {
+                        preempt_end = preempt_end.min(farm_s.saturating_sub(1));
+                    }
+                }
+                // W35‴-h: never assign past stored headers (live: 912× "hash not found"
+                // for height 957742" → mass blacklist → tip deadlock for hours).
+                let tip_headers_ok = match self.clip_end_to_headers(assign_h, preempt_end) {
+                    Some((_, clipped)) => {
+                        preempt_end = clipped;
+                        true
+                    }
+                    None => false,
+                };
+                if !tip_headers_ok {
+                    // next_needed past header tip — skip tip assign this poll.
+                } else {
+                    // W28d: when healthy==0, allow overlap with walk-in ahead ranges — those
+                    // peers will abort via should_abort_tip_walk_in. Only block on another
+                    // tip-cover claim overlapping the new range.
+                    let claim_overlap = {
+                        let min_depth = Self::tip_deep_cover_min_depth();
+                        let claims = self.tip_cover_claims.lock().unwrap();
+                        claims.iter().any(|(_, s, e)| {
+                            // W30/W37: (H,H) failover micro-claims must not block deep re-arm.
+                            if *s == *e {
+                                return false;
+                            }
+                            // W65: shallow walk-promote remnants must not block a real
+                            // deep tip pipe (live tip=218 claim 218-224 vs owner 218-345).
+                            if !failover
+                                && Self::claim_remaining_tip_depth(next_needed, *s, *e) < min_depth
+                            {
+                                return false;
+                            }
+                            *s <= preempt_end && assign_h <= *e
+                        })
+                    };
+                    // W117: check failover first — `effective_healthy==0` + shallow claim
+                    // made claim_overlap true under failover (shallow not skipped when
+                    // failover=true) and blocked the (H,H) assign (live W116 @344580).
+                    let overlaps_ok = if failover {
+                        // W86: allow overlap with deep/shallow tip owner, but never stack a
+                        // second (H,H) while raw covering already meets fetchers_cap.
+                        raw_covering < fetchers_cap
+                    } else if tournament_h {
+                        // Ignition tournament: same 1-32, cap 4. Not (H,H).
+                        raw_covering < 4
+                    } else if effective_healthy == 0 {
+                        // Refuse overlap with another *deep* tip pipe (synth same-span
+                        // storms). W28d/W65: shallow walk-in cover must NOT block deep
+                        // re-arm — raw_covering==0 froze owner behind promote remnants
+                        // (live tip=218 claim 218-224 → owner only got (H,H)).
+                        // Live farm covering H is warehouse, not a tip pipe (r115).
+                        !claim_overlap
+                            && Self::find_inflight_deep_covering(&guard, assign_h).is_none_or(
+                                |(p, s, e)| self.farm_stripe_covers_hole(&p, s, e, assign_h),
+                            )
+                    } else {
+                        !self.range_overlaps_inflight_except_farm_on_hole(
+                            &guard,
+                            assign_h,
+                            preempt_end,
+                        )
+                    };
+                    // P1c: never re-preempt tip onto a peer that already holds tip in-flight
+                    // (even failover (H,H) or top_peer max_in_flight=2). Ahead dual-pipe OK.
+                    // Hole-fill: block only if this peer already owns the hole span.
+                    let peer_already_tip = if skip_hero_h {
+                        guard.get(peer_id).is_some_and(|r| {
+                            r.iter().any(|&(s, e)| s <= preempt_end && assign_h <= e)
+                        })
+                    } else {
+                        Self::peer_holds_tip_inflight(&guard, peer_id, next_needed)
+                    };
+                    if preempt_end >= assign_h && overlaps_ok && !peer_already_tip {
+                        let walk_in = raw_covering > effective_healthy;
+                        if self.try_insert_dynamic(&mut guard, peer_id, assign_h, preempt_end) {
+                            self.note_tip_cover_claim(peer_id, assign_h, preempt_end);
+                            if tournament_h {
+                                super::tip_stage::tournament_note_assign(peer_id);
+                            }
+                            if effective_healthy == 0 || ignition_second_h {
+                                drop(guard);
+                                // Tournament racers share 1-32. Do not resticky
+                                // onto each racer. R-71: r62 live-H second may
+                                // become preferred (cheap switch, no trial).
+                                if !tournament_h || self.preferred_tip_owner().is_none() {
+                                    self.note_tip_owner_assigned(peer_id);
+                                }
+                                if wan_gap || local_tip_hole {
+                                    let score = self
+                                        .peer_scores
+                                        .lock()
+                                        .unwrap()
+                                        .get(peer_id)
+                                        .copied()
+                                        .unwrap_or(0.0);
+                                    tracing::debug!(
+                                        "[IBD_TIP_PEER] owner={} score={:.3} span={}-{} ({})",
+                                        peer_id,
+                                        score,
+                                        next_needed,
+                                        preempt_end,
+                                        if wan_gap {
+                                            "W33 top-peer pipe"
+                                        } else {
+                                            "W40 local tip-hole pipe"
+                                        }
+                                    );
+                                    if wan_gap {
+                                        self.log_wan_tip_owner_ready(
+                                            peer_id,
+                                            next_needed,
+                                            preempt_end,
+                                        );
+                                    }
+                                }
+                                if walk_in {
+                                    tracing::debug!(
+                                        "gap preempt: assigning {}-{} to {} (W28d tip owner after walk-in preempt, raw_covering={})",
+                                        next_needed,
+                                        preempt_end,
+                                        peer_id,
+                                        raw_covering
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        "gap preempt: assigning {}-{} to {} (W28c tip owner, covering={}/{})",
+                                        next_needed,
+                                        preempt_end,
+                                        peer_id,
+                                        1,
+                                        self.max_gap_fetchers_per_height()
+                                    );
+                                }
+                                return TipFillStep::Return(Some((assign_h, preempt_end)));
+                            }
+                            self.latch_tip_failover_episode(next_needed);
+                            tracing::debug!(
+                                "gap preempt: assigning {}-{} to {} (W28c tip failover{}, covering={}/{})",
+                                next_needed,
+                                preempt_end,
+                                peer_id,
+                                if c1t_tip_race { " C1t" } else { "" },
+                                raw_covering.saturating_add(1),
+                                self.max_gap_fetchers_per_height()
+                            );
+                            return TipFillStep::Return(Some((assign_h, preempt_end)));
+                        }
+                    }
+                } // tip_headers_ok
+            }
+
+            // --- Ahead partition: any free peer, non-overlapping after tip frontier ---
+            // Require a *healthy* tip cover (not walk-in) before handing out more ahead.
+            //
+            // C1g supersedes A6g "ahead while gap_missing": opening tip+32 while tip
+            // empty produced TIP_HOLE_AHEAD binder (C1f). Multi-peer ahead runs when
+            // tip is present in reorder (`!tip_missing`); between tip bodies the tip
+            // owner stripe + optional `(H,H)` race fill the hole.
+            //
+            // W47: gate on deep tip cover + tip distress, not bridge holes alone.
+            // Soft-retry freezes multi-peer ahead; late-body alone does not when tip
+            // already has healthy cover (2026-07-31 W102b/late-body narrow).
+            let gap_missing = self.tip_gap_missing.load(Ordering::Relaxed);
+            let feeder_len = super::IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed);
+            if c1g_freeze_past_tip {
+                static C1G_FREEZE_LOG: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let prev = C1G_FREEZE_LOG.load(Ordering::Relaxed);
+                if now.saturating_sub(prev) >= 5
+                    && C1G_FREEZE_LOG
+                        .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                {
+                    tracing::warn!(
+                        "[IBD_C1G_FREEZE] tip={} covering={} ready={} holes={} — past-tip stripes frozen; race tip H only",
+                        next_needed,
+                        raw_covering,
+                        self.ibd_ready_peer_count(),
+                        holes_now
+                    );
+                }
+            }
+            // R-17 dest cheese'd — contig owner_end+1 exception reverted.
+            // R-27 dest cheese'd — streaming-gated owner_end+1 (20 peers, one stripe).
+            // R-28 dest cheese'd @2366 — extras assigned, C1j aborted, same stripe reissued.
+            // R-29 dest cheese'd @33 — extras never armed; chunk-map 65/257 leaked.
+            // R-33/R-34 latch REVERTED — cheese @1978 / 10–50k 349 vs R-30 1415.
+            // R-54 latch REVERTED — 10–50k 1044 / 180–200k 87; LATCH_AHEAD=3 @398k only.
+            // R-245: one latched extra at ≥180k (try_assign_latched_ahead). Dump stays off.
+            // R-248: satd priority zone (H, H+256] disjoint tiles. Not 50k shuffle.
+            // R-249: start at H+1 (duplicate owner covering); do not jump to owner_end+1.
+            // R-250: except all inflight that cover H (ignition tournament 1-32 ×N).
+            // R-252: latch uses the same H+1 / except-H-coverers rule (R-251
+            // owner_end+1 left 190776-190967 empty when apply walked in).
+            // R-60: drop s<=H leftovers even while C1G freezes new arms
+            // (R-59 trial challengers sat in 259-514 through covering=0).
+            self.drop_stale_lookahead_stripes(&mut guard, next_needed);
+            if assign_wan_gap
+                && let Some(range) =
+                    self.try_assign_latched_ahead(peer_id, &mut guard, next_needed, raw_covering)
+            {
+                return TipFillStep::Return(Some(range));
+            }
+            if assign_wan_gap
+                && let Some(range) =
+                    self.try_assign_priority_zone(peer_id, &mut guard, next_needed, raw_covering)
+            {
+                return TipFillStep::Return(Some(range));
+            }
+            // Pack if have or hero inflight covers the hole (R-91).
+            // Covering-only without the hero on the hole packed R-84
+            // past an in-flight 64 (holes=50 @186k). Do not open C1g.
+            let runway_ok = self
+                .preferred_tip_owner()
+                .is_some_and(|p| self.may_pack_runway(&guard, &p));
+            if assign_wan_gap
+                && (!c1g_freeze_past_tip || runway_ok)
+                && let Some(range) =
+                    self.try_assign_lookahead_stripe(peer_id, &mut guard, next_needed, raw_covering)
+            {
+                return TipFillStep::Return(Some(range));
+            }
+            // Hero already took first_hole above. Do not idle.
+            // Mousetrap F3 REVERT (2026-08-01): secondary under tip_missing + pipe
+            // solid → past-body cheese=45 / tip_crawl regress. C1g freeze stays absolute.
+            // Layer C: TOP≥2 same-peer next stripe after tip lands. Do not
+            // require KEEP 80 (`wan_allow_multi_peer_ahead`) — that gate is
+            // other-peer leftover. C1g freeze / tip_missing still block.
+            let layer_c_sticky_dual = Self::top_peer_in_flight_cap() >= 2
+                && next_needed >= 50_000
+                && self.preferred_tip_owner().as_deref() == Some(peer_id)
+                && self.tip_sticky_usable(peer_id);
+            if assign_wan_gap
+                && !c1g_freeze_past_tip
+                && effective_healthy > 0
+                && (layer_c_sticky_dual
+                    || self.wan_allow_multi_peer_ahead(effective_healthy, feeder_len))
+                && super::tip_stage::tip_soft_retries() == 0
+                && !super::tip_stage::tip_ahead_frozen_for_soft_retry()
+                && self.preferred_tip_owner().as_deref() == Some(peer_id)
+                && self.tip_sticky_usable(peer_id)
+            {
+                // Sticky dual-pipe after tip lands (C1g: not while tip_missing).
+                let sticky_window: u64 = latch_env!(u64, {
+                    std::env::var("BLVM_IBD_STICKY_PIPE_WINDOW")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(512)
+                        .clamp(256, 2048)
+                });
+                // Mousetrap F1 REVERT: sticky frontier = claim pipeline (pre-F KEEP).
+                let frontier = Self::tip_pipeline_frontier(&guard, next_needed, sticky_window);
+                let assign_f = frontier;
+                let pipe_f = super::tip_stage::pipe_frontier(next_needed);
+                let body_f = if contig_now > 0 {
+                    next_needed.saturating_add(contig_now.saturating_sub(1))
+                } else {
+                    next_needed.saturating_sub(1)
+                };
+                let sticky_batch: u64 = Self::gap_preempt_batch_raw().unwrap_or(128).clamp(64, 256);
+                let band_end = next_needed.saturating_add(sticky_window);
+                // Sticky dual-pipe is the KEEP hero's near-H pipe. Do not
+                // apply wan_ahead_stripe_floor (H+grown) here — dest-au
+                // did, and cheese pin then saw start>H. Floor stays on
+                // C1g other-peer stripes below.
+                let part_start = frontier.saturating_add(1);
+                let part_end_raw = part_start
+                    .saturating_add(sticky_batch.saturating_sub(1))
+                    .min(band_end);
+                // Manual REVERT 2026-08-03: part_start>tip gate cratered tip90 (c1ggate
+                // 77.8 / c1gclaim 100 vs forcedeb 108.9). Tip reassigns were accidental
+                // re-arm when claims outlived in_flight; fix is stale-claim prune above,
+                // not blocking C1g when frontier falls to tip-1.
+                if part_start <= band_end {
+                    if let Some((_, part_end)) = self.clip_end_to_headers(part_start, part_end_raw)
+                    {
+                        if !(local_ahead && !assign_wan_gap && part_start > next_needed)
+                            && part_start <= max_start
+                            && part_end >= part_start
+                            && !Self::range_overlaps_inflight(&guard, part_start, part_end)
+                            && !self.chunk_range_in_flight(&guard, part_start, part_end)
+                            && self.try_insert_dynamic(&mut guard, peer_id, part_start, part_end)
+                        {
+                            Self::log_pipe_f(
+                                next_needed,
+                                assign_f,
+                                pipe_f,
+                                body_f,
+                                peer_id,
+                                "sticky",
+                            );
+                            tracing::warn!(
+                                "[IBD_STICKY_DUAL] peer={} {}-{} tip={} frontier={} — same-peer next stripe",
+                                peer_id,
+                                part_start,
+                                part_end,
+                                next_needed,
+                                frontier,
+                            );
+                            return TipFillStep::Return(Some((part_start, part_end)));
+                        }
+                    }
+                }
+            }
+            // Dense-local (wan crawl with body_tip=0 / no headers): use LOCAL ahead
+            // gating — WAN distress/contig freeze must not starve dens KEEP partitions.
+            // During HANDOFF_PRIME, freeze local ahead too: multi-peer W28c partitions
+            // through body tip while sticky primes past tip leave Swiss-cheese holes
+            // (true-wan freeze @437205 / wait 437206, reorder≈108, tip60 never armed).
+            let allow_ahead = if Self::no_farm_enabled() {
+                false
+            } else if assign_wan_gap {
+                !c1g_freeze_past_tip
+                    && self.wan_allow_multi_peer_ahead(effective_healthy, feeder_len)
+            } else {
+                !gap_missing && !handoff_prime
+            };
+            if effective_healthy > 0 && allow_ahead {
+                // Multi-peer ahead after tip lands (C1g). Contiguous assign frontier
+                // still used so stripes do not jump holes.
+                let runway_end = next_needed.saturating_add(runway_cap.saturating_sub(1));
+                let part_window: u64 = if assign_wan_gap {
+                    Self::tip_partition_window_raw()
+                        .unwrap_or(256)
+                        .clamp(64, 512)
+                } else {
+                    Self::tip_partition_window_raw()
+                        .unwrap_or(512)
+                        .clamp(64, 2048)
+                };
+                // Mousetrap F1 REVERT (2026-08-01): stripe frontier = claim contig
+                // (pre-F KEEP). Still log assign_F vs pipe_F for forensics.
+                let assign_f_wan = if assign_wan_gap {
+                    Self::tip_contiguous_assign_frontier(&guard, next_needed, runway_end)
+                } else {
+                    0
+                };
+                let pipe_f_wan = if assign_wan_gap {
+                    super::tip_stage::pipe_frontier(next_needed)
+                } else {
+                    0
+                };
+                let body_f_wan = if contig_now > 0 {
+                    next_needed.saturating_add(contig_now.saturating_sub(1))
+                } else {
+                    next_needed.saturating_sub(1)
+                };
+                let frontier = if assign_wan_gap {
+                    // Tip present: walk contiguous in-flight from tip inside runway,
+                    // then legacy window past runway.
+                    let contig =
+                        Self::tip_contiguous_assign_frontier(&guard, next_needed, runway_end);
+                    if contig >= runway_end {
+                        Self::tip_pipeline_frontier(&guard, next_needed, part_window)
+                    } else {
+                        contig
+                    }
+                } else {
+                    Self::tip_pipeline_frontier(&guard, next_needed, part_window)
+                };
+                let part_start = frontier
+                    .saturating_add(1)
+                    .max(self.wan_ahead_stripe_floor(next_needed));
+                // Leftover cheese past the inject window (live: 70657–70701
+                // while next=70001). Skip — tip-fill owns next..next+256.
+                // Any leftover ahead stripe ghosts the tip (live: 70671–70735
+                // while next=70734). Only GetData (H,H) at next — not cheese.
+                let leftover_far = local_ahead && !assign_wan_gap && part_start > next_needed;
+                if !leftover_far && part_start <= max_start && part_start >= next_needed {
+                    let ahead_peers = guard
+                        .iter()
+                        .filter(|(p, ranges)| {
+                            p.as_str() != peer_id && ranges.iter().any(|(s, _)| *s > next_needed)
+                        })
+                        .count();
+                    let holes_now = self.tip_bridge_holes.load(Ordering::Relaxed);
+                    let ahead_cap = if assign_wan_gap {
+                        let floor_stall = self.preferred_is_floor_sticky()
+                            && self
+                                .sticky_recent_bps(next_needed, a6m_recent_window_secs())
+                                .map(|(bps, _, elapsed)| {
+                                    elapsed >= (a6m_recent_window_secs() as f64) * 0.8
+                                        && bps < a6m_floor_open_slot_min_bps()
+                                })
+                                .unwrap_or(false);
+                        // W123: sticky hole-band freeze (not raw holes — W47).
+                        self.tip_ahead_hole_band_update(feeder_len);
+                        let tip_distress = Self::tip_is_distressed()
+                            || self.tip_ahead_hole_freeze.load(Ordering::Relaxed);
+                        // No ahead_cap bypass on under-target (W3c ahead flood FAIL; W3 REVERT).
+                        if floor_stall || tip_distress {
+                            0
+                        } else {
+                            Self::tip_ahead_peer_cap()
+                        }
+                    } else {
+                        usize::MAX
+                    };
+                    if assign_wan_gap && ahead_peers >= ahead_cap {
+                        // Tip owner / retry only — ahead cap reached.
+                    } else if assign_wan_gap && !self.wan_peer_may_take_ahead_stripe(peer_id) {
+                        // Mute sticky / unprobed: no C1g runway stripe (dual-pipe is separate).
+                    } else if assign_wan_gap {
+                        // C1g: tip already in reorder here; stripe from contiguous frontier.
+                        let ahead_batch = runway_stripe.min(32u64.min(preempt_batch));
+                        let part_end = part_start.saturating_add(ahead_batch.saturating_sub(1));
+                        if part_end >= part_start
+                            && !Self::range_overlaps_inflight(&guard, part_start, part_end)
+                            && !self.chunk_range_in_flight(&guard, part_start, part_end)
+                            && self.try_insert_dynamic(&mut guard, peer_id, part_start, part_end)
+                        {
+                            Self::log_pipe_f(
+                                next_needed,
+                                assign_f_wan,
+                                pipe_f_wan,
+                                body_f_wan,
+                                peer_id,
+                                "stripe",
+                            );
+                            if tip_missing && part_start > next_needed {
+                                static C1G_AHEAD_LOG: std::sync::atomic::AtomicU64 =
+                                    std::sync::atomic::AtomicU64::new(0);
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+                                let prev = C1G_AHEAD_LOG.load(Ordering::Relaxed);
+                                if now.saturating_sub(prev) >= 5
+                                    && C1G_AHEAD_LOG
+                                        .compare_exchange(
+                                            prev,
+                                            now,
+                                            Ordering::Relaxed,
+                                            Ordering::Relaxed,
+                                        )
+                                        .is_ok()
+                                {
+                                    tracing::warn!(
+                                        "[IBD_C1G_AHEAD] peer={} {}-{} tip={} covering={} — start>H while tip_missing",
+                                        peer_id,
+                                        part_start,
+                                        part_end,
+                                        next_needed,
+                                        raw_covering
+                                    );
+                                }
+                            }
+                            tracing::debug!(
+                                "gap preempt: assigning {}-{} to {} (C1g runway stripe, tip={}, frontier={}, ahead_peers={}, holes={}, runway={})",
+                                part_start,
+                                part_end,
+                                peer_id,
+                                next_needed,
+                                frontier,
+                                ahead_peers + 1,
+                                holes_now,
+                                runway_cap
+                            );
+                            return TipFillStep::Return(Some((part_start, part_end)));
+                        }
+                    } else {
+                        // Non-WAN: ahead partitions stay at 32 with chunk-map clip.
+                        // C1u: never multi-peer past body tip (live cheese: ahead
+                        // GetData'd 304672 while tip=304418 → TIP_HOLE_AHEAD cliff).
+                        // When frontier reaches body tip, tip-owner primes WAN GetData.
+                        let body_tip = self.wan_body_tip.load(Ordering::Relaxed);
+                        if body_tip > 0 && part_start > body_tip {
+                            if !super::synthetic_wan::bulk_local_disk_stream() {
+                                if let Some(range) = self.try_assign_handoff_prime(
+                                    peer_id,
+                                    next_needed,
+                                    &mut guard,
+                                    "ahead_frontier",
+                                ) {
+                                    drop(guard);
+                                    return TipFillStep::Return(Some(range));
+                                }
+                            }
+                        } else {
+                            // C1u: far-local fill to body tip — allow up to 256 so two
+                            // max_in_flight=1 peers can cover HANDOFF_PRIME without
+                            // completes (dens KEEP c1u_local_ahead…). Default stays 32.
+                            let ahead_batch = if body_tip > 0 && part_start <= body_tip {
+                                body_tip
+                                    .saturating_sub(part_start)
+                                    .saturating_add(1)
+                                    .min(256)
+                                    .max(preempt_batch.min(32))
+                            } else {
+                                preempt_batch.min(32)
+                            };
+                            let mut part_end =
+                                part_start.saturating_add(ahead_batch.saturating_sub(1));
+                            if body_tip > 0 {
+                                part_end = part_end.min(body_tip);
+                            }
+                            // Do not walk leftover cheese past the inject/handoff window.
+                            part_end = part_end.min(max_start);
+                            if let Some((_, pe)) = self
+                                .chunks
+                                .iter()
+                                .find(|(s, e)| *s <= part_start && part_start <= *e)
+                                .copied()
+                            {
+                                part_end = part_end.min(pe);
+                            }
+                            if part_end >= part_start
+                                && !Self::range_overlaps_inflight(&guard, part_start, part_end)
+                                && !self.chunk_range_in_flight(&guard, part_start, part_end)
+                                && self
+                                    .try_insert_dynamic(&mut guard, peer_id, part_start, part_end)
+                            {
+                                tracing::debug!(
+                                    "gap preempt: assigning {}-{} to {} (W28c ahead partition, tip={}, frontier={})",
+                                    part_start,
+                                    part_end,
+                                    peer_id,
+                                    next_needed,
+                                    frontier
+                                );
+                                return TipFillStep::Return(Some((part_start, part_end)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        TipFillStep::Continue(guard)
+    }
+
     pub(crate) fn get_work(&self, peer_id: &str, max_ahead: u64) -> Option<(u64, u64)> {
         let leftover_force_enter = self.leftover_force_getdata.load(Ordering::Relaxed);
         let next_enter = self.next_needed_height();
@@ -1139,7 +2135,9 @@ impl ChunkAssigner {
             if leftover_force_enter {
                 leftover_trace_rate(
                     "get_work_return",
-                    format!("peer={peer_id} next={next_enter} reason=shutdown_or_ibd_end leftover_force={leftover_force_enter}"),
+                    format!(
+                        "peer={peer_id} next={next_enter} reason=shutdown_or_ibd_end leftover_force={leftover_force_enter}"
+                    ),
                 );
             }
             return None;
@@ -1152,7 +2150,9 @@ impl ChunkAssigner {
             if leftover_force_enter {
                 leftover_trace_rate(
                     "get_work_return",
-                    format!("peer={peer_id} next={next_enter} reason=export_isolation leftover_force={leftover_force_enter}"),
+                    format!(
+                        "peer={peer_id} next={next_enter} reason=export_isolation leftover_force={leftover_force_enter}"
+                    ),
                 );
             }
             return None;
@@ -1173,7 +2173,9 @@ impl ChunkAssigner {
             if leftover_force_enter {
                 leftover_trace_rate(
                     "get_work_return",
-                    format!("peer={peer_id} next={next_enter} reason=blacklisted leftover_force={leftover_force_enter}"),
+                    format!(
+                        "peer={peer_id} next={next_enter} reason=blacklisted leftover_force={leftover_force_enter}"
+                    ),
                 );
             }
             return None;
@@ -1212,33 +2214,11 @@ impl ChunkAssigner {
         );
         // Leftover GetData must win even when leftover cheese already fills the
         // peer's flight slot (live: 16/16 in leftover, get_work returned None).
-        if leftover_hole {
-            let hh_inflight = guard.values().any(|ranges| {
-                ranges
-                    .iter()
-                    .any(|(s, e)| *s == next_needed && *e == next_needed)
-            });
-            if !hh_inflight {
-                if self.try_insert_dynamic(&mut guard, peer_id, next_needed, next_needed) {
-                    drop(guard);
-                    tracing::warn!(
-                        "[IBD_LEFTOVER_HOLE] assign GetData {}-{} (ignore leftover covering)",
-                        next_needed,
-                        next_needed
-                    );
-                    return Some((next_needed, next_needed));
-                }
-                // R-284: same (peer,H,H) net=0 — fall through. Do not idle.
-            } else {
-                Self::leftover_hole_skip_log(format!(
-                    "leftover_hole next={next_needed} hh_inflight peer={peer_id}"
-                ));
-            }
-        } else if self.leftover_force_getdata.load(Ordering::Relaxed) {
-            Self::leftover_hole_skip_log(format!(
-                "leftover_force next={next_needed} body_tip={body_tip} leftover_hole=false peer={peer_id}"
-            ));
-        }
+        let mut guard =
+            match self.assign_leftover_hole(guard, peer_id, next_needed, body_tip, leftover_hole) {
+                LeftoverHoleStep::Assigned(range) => return Some(range),
+                LeftoverHoleStep::Continue(guard) => guard,
+            };
         leftover_get_work_phase(
             peer_id,
             next_needed,
@@ -1251,23 +2231,23 @@ impl ChunkAssigner {
         // peers still LOOKAHEAD). Not STORE_APPLY. Dump: preferred None / not
         // inflight → this is silent (R-194b occupancy stays get_work).
         if self.hole_any_uncovered_ok(peer_id, &guard, next_needed)
-            && self.try_insert_dynamic(&mut guard, peer_id, next_needed, next_needed) {
-                drop(guard);
-                tracing::warn!(
-                    "[IBD_HOLE_ANY] peer={} {}-{}",
-                    peer_id,
-                    next_needed,
-                    next_needed
-                );
-                return Some((next_needed, next_needed));
-            }
+            && self.try_insert_dynamic(&mut guard, peer_id, next_needed, next_needed)
+        {
+            drop(guard);
+            tracing::warn!(
+                "[IBD_HOLE_ANY] peer={} {}-{}",
+                peer_id,
+                next_needed,
+                next_needed
+            );
+            return Some((next_needed, next_needed));
+        }
         if self.tip_stale_cover_rerace_ok(peer_id, &guard, next_needed) {
             let waited = super::tip_stage::tip_awaiting_ms_for_cap();
             TIP_RERACE_HEIGHT.store(next_needed, Ordering::Relaxed);
             Self::insert_in_flight(&mut guard, peer_id, next_needed, next_needed);
             drop(guard);
-            crate::node::parallel_ibd::memory::TIP_STALE_RERACES
-                .fetch_add(1, Ordering::Relaxed);
+            crate::node::parallel_ibd::memory::TIP_STALE_RERACES.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 "[IBD_TIP_RERACE] peer={} h={} awaiting_ms={} incumbent={:?}",
                 peer_id,
@@ -1393,961 +2373,17 @@ impl ChunkAssigner {
         // tip_band + tip-reserve spin). Overlap guard below blocks same-span reassign storms
         // (live ~30k W28c reassigns + GAP_STREAM ~3.4× overread → 350→400 wall 178).
         if allow_chunk(next_needed) {
-            let leftover_hole = super::leftover_hole_needs_getdata(
-                self.leftover_force_getdata.load(Ordering::Relaxed),
+            guard = match self.assign_tip_fill(
+                peer_id,
                 next_needed,
+                max_start,
                 body_tip,
-                Self::covering_next_count(&guard, next_needed),
-            );
-            let containing = self
-                .chunks
-                .iter()
-                .find(|(s, e)| *s <= next_needed && next_needed <= *e)
-                .copied();
-            // Leftover cheese in the chunk map is not a feeder pipeline (live 70709:
-            // 70645–70735 covering blocked leftover_hole `or_else` and overlap).
-            // Force (H,H) GetData; leftover stripe overlap must not hide the miss.
-            let containing = if leftover_hole {
-                Some((next_needed, next_needed))
-            } else {
-                containing
+                local_ahead,
+                guard,
+            ) {
+                TipFillStep::Return(done) => return done,
+                TipFillStep::Continue(guard) => guard,
             };
-            // P0: on WAN tip gap, tip owner must assign even if next_needed walked past the
-            // static chunk map (headers advanced after IBD start). Synthetic containing range.
-            let containing = containing.or_else(|| {
-                if self.wan_tip_gap_crawl(next_needed)
-                    || self.handoff_prime_active(next_needed)
-                    || leftover_hole
-                {
-                    let ht = self.header_tip();
-                    let end = if ht >= next_needed {
-                        next_needed.saturating_add(255).min(ht)
-                    } else {
-                        // No headers past tip yet — still advertise tip height so assign
-                        // can wait / clip rather than invent tip+255 past store.
-                        next_needed
-                    };
-                    Some((next_needed, end))
-                } else {
-                    None
-                }
-            });
-            if let Some((cs, ce)) = containing {
-                if leftover_hole {
-                    let hh_inflight = guard.values().any(|ranges| {
-                        ranges
-                            .iter()
-                            .any(|(s, e)| *s == next_needed && *e == next_needed)
-                    });
-                    if !hh_inflight && self.peer_has_flight_capacity(peer_id, &guard)
-                        && self.try_insert_dynamic(&mut guard, peer_id, next_needed, next_needed) {
-                            drop(guard);
-                            tracing::warn!(
-                                "[IBD_LEFTOVER_HOLE] assign GetData {}-{} (ignore leftover covering)",
-                                next_needed,
-                                next_needed
-                            );
-                            return Some((next_needed, next_needed));
-                        }
-                }
-                let raw_covering = Self::covering_next_count(&guard, next_needed);
-                let at_chunk_start = next_needed == cs;
-                let wan_gap = self.wan_tip_gap_crawl(next_needed);
-                let handoff_prime = self.handoff_prime_active(next_needed);
-                // W30/W37: tip owner gating uses deep claims only — (H,H) failover micros
-                // must not block deep re-arm on WAN gap *or* LOCAL_AHEAD soft-resume
-                // (live 2026-07-16: covering=2/2 (H,H) treadmill, 0 deep owners, ~0.2 blk/s).
-                // W4/N12: one tip_cover_claims snapshot for deep+healthy counts (re-snap after promote).
-                // C1u: GetData-prime body_tip+1 while still local.
-                // (1) near_tip window (HANDOFF_PRIME of body) — only after local tip is
-                //     already covered. Live FAIL true-wan-…T004239Z: early near_tip prime
-                //     stole sticky max_in_flight=1 onto body_tip+1 while next_needed≪tip
-                //     and W28c ahead cheese'd the hole → freeze wait 437206 (tip60 never).
-                // (2) ahead frontier already at body tip (far local dens KEEP) — otherwise
-                //     tip-fill re-arms next_needed forever and never reaches ahead_frontier.
-                if !wan_gap {
-                    let body_tip_c1u = self.wan_body_tip.load(Ordering::Relaxed);
-                    let frontier_at_body = body_tip_c1u > 0
-                        && next_needed <= body_tip_c1u
-                        && Self::tip_pipeline_frontier(&guard, next_needed, 2048) >= body_tip_c1u;
-                    if handoff_prime || frontier_at_body {
-                        let tip_covered = Self::covering_next_count(&guard, next_needed) > 0;
-                        // near_tip: only on the last local height (next>=body_tip) with cover.
-                        // frontier_at_body may still prime earlier (contig already at body tip).
-                        let near_tip_ready = tip_covered && next_needed >= body_tip_c1u;
-                        // Live leftover-getwork-phase: frontier_at_body at next=70634
-                        // called try_assign_handoff_prime while holding in_flight and
-                        // wedged on preferred/claims. Only prime at leftover tip.
-                        if next_needed >= body_tip_c1u
-                            && (frontier_at_body || (handoff_prime && near_tip_ready))
-                        {
-                            let reason = if handoff_prime && near_tip_ready {
-                                "near_tip"
-                            } else {
-                                "ahead_frontier"
-                            };
-                            leftover_get_work_phase(
-                                peer_id,
-                                next_needed,
-                                body_tip,
-                                self.leftover_force_getdata.load(Ordering::Relaxed),
-                                "before_prime",
-                            );
-                            if let Some(range) = self.try_assign_handoff_prime(
-                                peer_id,
-                                next_needed,
-                                &mut guard,
-                                reason,
-                            ) {
-                                drop(guard);
-                                return Some(range);
-                            }
-                        }
-                    }
-                }
-                // Stale tip_cover prune: tried 2026-08-03 (exact + tip-cover variants).
-                // CLAIM_STALE never armed on tip-now; claimfix tip90≈61–63 REVERT vs
-                // forcedeb 108.9. Manual REVERT — keep force debounce + tip_nudge gate.
-                leftover_get_work_phase(
-                    peer_id,
-                    next_needed,
-                    body_tip,
-                    self.leftover_force_getdata.load(Ordering::Relaxed),
-                    "before_claims",
-                );
-                let mut tip_claims = self.snapshot_tip_cover_claims();
-                let mut effective_healthy =
-                    Self::deep_tip_cover_count_from(&tip_claims, next_needed);
-                // W49b: ahead walk-in already covers tip in-flight — promote before assigning
-                // a competing tip owner (closes race: promote only on abort tick after W28d).
-                // W111: skip cooldown peers (mute residual in-flight must not re-sticky).
-                if wan_gap && effective_healthy == 0 {
-                    if let Some((wp, ws, we)) =
-                        Self::find_inflight_deep_covering(&guard, next_needed)
-                    {
-                        if !self.tip_owner_in_fail_cooldown(&wp) {
-                            self.promote_tip_walk_in(&wp, ws, we);
-                            tip_claims = self.snapshot_tip_cover_claims();
-                            effective_healthy =
-                                Self::deep_tip_cover_count_from(&tip_claims, next_needed);
-                        }
-                    }
-                }
-                // W28c/W32/W35‴: WAN tip owner deep pipe in one download session.
-                // Near tip: tip-owner batch must match GetData pipe depth (default 128).
-                // Live 2026-07-15: `wan_bulk_catchup` is true for most of IBD (header tip ≫
-                // next_needed) so this path used **64** while `IBD_TIP_PIPE` showed
-                // pipe_depth=128 span=64 — half the pipe idle; reassign cadence ~64/2.6s
-                // ≈24 blk/s ceiling (observed tip ~17–34). Always use 128 on WAN tip owner
-                // regardless of bulk; ahead partitions stay small (32) below.
-                // Env `BLVM_IBD_GAP_PREEMPT_BATCH` overrides.
-                let bulk = self.wan_bulk_catchup(next_needed);
-                // W40: LOCAL_AHEAD soft-resume tip holes need a deep pipe too (bodies sparse
-                // under body_tip). Live 2026-07-16: default 16 + chunk-start gate → 0 tip-owner
-                // assigns, behind-tip main-queue storm, ~0.06 blk/s.
-                // Synth bulk (GETDATA_DELAY_MS=0): bodies are already local — W40 tip-hole pipe
-                // re-preempts the same spans 8–17×/s, feeder stays 0, wall ~6–8 blk/s (2026-07-23).
-                // Keep W40 for real soft-resume and for synth tip-crawl with delay>0.
-                let tip_missing = self.tip_gap_missing.load(Ordering::Relaxed);
-                let local_tip_hole = (super::synthetic_wan::injected_ia()
-                    || !super::synthetic_wan::enabled())
-                    && tip_missing
-                    && !wan_gap;
-                // Dense local W16 tip-fill (bootstrap / gap_preempt dens KEEP): body_tip=0
-                // makes wan_tip_gap_crawl true for genesis stall/nudge, but without a
-                // coordinator body/header tip and without tip_missing, tip-owner stays on
-                // the non-tip_pipe batch=16 path (not WAN 128 / C1e stripe).
-                let assign_wan_gap = wan_gap
-                    && (tip_missing
-                        || self.header_tip() > 0
-                        || self.wan_body_tip.load(Ordering::Relaxed) > 0);
-                // C1u: handoff_prime uses tip-pipe GetData depth while still local.
-                let tip_pipe = assign_wan_gap || local_tip_hole || handoff_prime;
-                // C1e: while tip missing, tip-owner takes a *stripe* (default 32), not 128.
-                // Assigned tip..tip+127 with GetData depth 8 left frontier at tip+127 and
-                // other peers opened tip+128 — multi-peer Swiss cheese. Multiple peers fill
-                // contiguous stripes inside TIP_RUNWAY_CAP instead.
-                let runway_cap = Self::tip_runway_cap();
-                let runway_stripe = Self::tip_runway_stripe();
-                // C1g/C1i: freeze past-tip stripes until tip is present AND contig runway
-                // reaches min (default grow-start 8). R-16 dest cheese'd (apply stuck @10,
-                // holes=61, mode=CHEESE) — C1G-narrow reverted. C1h `(H,H)` race stays.
-                let contig_now = super::IBD_TIP_CONTIG_RUNWAY.load(Ordering::Relaxed);
-                // Coordinator contig can lag unit tests / refresh; deep in-flight tip cover
-                // already proves runway (w49 ahead after owner stripe).
-                // Mousetrap F2 REVERT (2026-08-01): pipe_contig C1i flattened mid-gap wall
-                // (365<390) and past-body tip_crawl 47<<B0 81 — restore claim credit.
-                let contig_from_claims = tip_claims
-                    .iter()
-                    .map(|(_, s, e)| Self::claim_remaining_tip_depth(next_needed, *s, *e))
-                    .max()
-                    .unwrap_or(0);
-                let contig_eff = contig_now.max(contig_from_claims);
-                let min_contig_for_ahead = Self::c1i_min_contig_for_ahead();
-                // Freeze past-tip only on real WAN assign (not dense-local body_tip=0 unit).
-                // R-50: first applied body clears tip_missing; in-flight 1-32 made
-                // contig_eff≥8 and unfroze ahead → MQ/tip-fill 33–288 in the same ms.
-                // Delivered contig (IBD_TIP_CONTIG_RUNWAY) is the C1i bar. Claim credit
-                // still used elsewhere; it must not lift this freeze.
-                let _ = contig_eff;
-                let holes_now = self.tip_bridge_holes.load(Ordering::Relaxed);
-                let c1g_freeze_past_tip = Self::c1g_freeze_past_tip_pred(
-                    assign_wan_gap,
-                    tip_missing,
-                    holes_now,
-                    min_contig_for_ahead,
-                    contig_now,
-                );
-
-                // --- Tip owner: sticky/best peer (gated on healthy claims, not walk-ins) ---
-                // W40: never skip tip owner at chunk-map starts when covering=0 — that gate
-                // left LOCAL_AHEAD uncovered at every chunk boundary.
-                let fetchers_cap = self.max_gap_fetchers_per_height();
-                let healthy_claims = Self::healthy_tip_cover_count_from(&tip_claims, next_needed);
-                // W65: shallow tip-cover remnants (deep==0, healthy>0) need a full deep
-                // re-arm (≥64), not C1e stripe-32 (dens KEEP w65 expects end≥tip+63).
-                let shallow_rearm = tip_missing && effective_healthy == 0 && healthy_claims > 0;
-                let default_batch = if tip_pipe && assign_wan_gap && tip_missing && !shallow_rearm {
-                    runway_stripe
-                } else if tip_pipe {
-                    128
-                } else {
-                    16
-                };
-                let mut preempt_batch: u64 = Self::gap_preempt_batch_raw()
-                    .unwrap_or(default_batch)
-                    .clamp(1, if tip_pipe { 256 } else { 128 });
-                if tip_pipe && assign_wan_gap && tip_missing && !shallow_rearm {
-                    // Explicit GAP_PREEMPT_BATCH must not re-open phantom 128 assign while tip empty.
-                    preempt_batch = preempt_batch.min(runway_stripe);
-                }
-                // W47: tip-pipe shrink on holes is opt-in only (was default holes≥1 → 32 forever).
-                if tip_pipe && Self::tip_pipe_shrink_holes_opt().is_some_and(|thr| holes_now >= thr)
-                {
-                    preempt_batch = preempt_batch.min(32);
-                }
-                let c1g_tip_race = wan_gap
-                    && tip_missing
-                    && super::tip_stage::tip_awaiting_secs_for_cap()
-                        >= Self::c1g_tip_race_await_secs();
-                let c1t_tip_race = wan_gap && tip_missing && self.c1t_tip_height_race();
-                let tip_distress = Self::tip_is_distressed() || c1g_tip_race || c1t_tip_race;
-                // W120: revert W117–W119 shallow_tip_cover / cover_for_gate. Live W117–W119
-                // all rate-failed @306–311k (W116 DNA reached 344k). Accept CAP-soft wait
-                // on end-of-pipe shallow cover (W116 @344580 ~9s) rather than early regress.
-                // Keep overlaps_ok failover-first below (harmless on W116 path; required if
-                // failover ever races a shallow remnant while deep cover exists).
-                // W88: one failover per tip-*stall episode* (not per tip height).
-                // W87 cleared on +1 advance → CAP at H then failover H,H+1,… every ~2s
-                // (live 2026-07-18: 10× cascade, tip60 45→9).
-                let failover_already = self.tip_failover_episode_active(next_needed);
-                // W112: empty triple race may assign a second (H,H) despite W88 episode
-                // latch — still hard-capped by fetchers_cap / raw_covering.
-                let empty_triple = self.empty_tip_triple_race();
-                // W122/W149: covering=1 mute + awaiting≥3s reopens one (H,H) under W88
-                // latch without empty_triple covering=3 (W121 soft-resume regress).
-                let mute_reopen = self.mute_single_cover_reopen(raw_covering);
-                if let Some(range) =
-                    self.maybe_drop_mute_tip_cover(raw_covering, peer_id, &mut guard)
-                {
-                    drop(guard);
-                    return Some(range);
-                }
-                // W86: mute_reopen must not stack another (H,H) while a *deep* owner still
-                // covers tip (failover peer dropped in-flight → raw_covering=1). Only reopen
-                // under episode latch when deep cover is gone (true mute) or empty_triple.
-                // TPP L1 REVERT: understudy pierce undone with peer_may C1g.
-                let mute_reopen_open =
-                    mute_reopen && effective_healthy == 0 && raw_covering < fetchers_cap;
-                // empty_triple may open a second (H,H) under episode latch (w112/w153) even
-                // with a deep owner — W86 stacking is blocked on the main-queue path instead.
-                let failover_slot_open = !failover_already
-                    || (empty_triple && raw_covering < fetchers_cap)
-                    || mute_reopen_open;
-                // W30: deep==0 must re-arm even with (H,H) micros present.
-                // W41c/W47: failover only under tip distress (not standing hole-keyed race).
-                // W86: also gate on raw_covering — healthy/deep counts ignore (H,H), so
-                // distress + `overlaps_ok=failover` previously stacked unbounded tip micros
-                // (live W85 fail: 2241× W28c tip failover on only 17 tip heights → tip60~30).
-                // W87/W88: episode latch (advance≥32 or ~30s) — not one-per-height.
-                // P1d/H6: GAP_STREAM DEDUP hold blocks tip-owner re-preempt (WAN + synth).
-                leftover_get_work_phase(
-                    peer_id,
-                    next_needed,
-                    body_tip,
-                    self.leftover_force_getdata.load(Ordering::Relaxed),
-                    "before_tip_owner",
-                );
-                let tournament_h = self.ignition_tournament_h_ok(
-                    wan_gap,
-                    tip_missing,
-                    next_needed,
-                    raw_covering,
-                    peer_id,
-                );
-                let ignition_second_h = tournament_h;
-                match super::tip_stage::tournament_poll() {
-                    super::tip_stage::TournamentPoll::Win { ref peer, .. } => {
-                        self.note_tip_owner_assigned(peer);
-                    }
-                    super::tip_stage::TournamentPoll::Timeout => {}
-                    super::tip_stage::TournamentPoll::None => {}
-                }
-                let disjoint_only = (64..50_000).contains(&next_needed)
-                    && self.preferred_tip_owner().as_deref() != Some(peer_id)
-                    && self
-                        .preferred_tip_owner()
-                        .as_ref()
-                        .is_some_and(|p| self.empty_band_should_sample(p));
-                if assign_wan_gap && disjoint_only {
-                    if let Some(range) = self.try_assign_lookahead_stripe(
-                        peer_id,
-                        &mut guard,
-                        next_needed,
-                        raw_covering,
-                    ) {
-                        return Some(range);
-                    }
-                }
-                let tournament_open =
-                    self.ignition_tournament_active(wan_gap, tip_missing, next_needed);
-                let hole = self.first_missing_height();
-                let is_hero = self.preferred_tip_owner().as_deref() == Some(peer_id);
-                let fill_from = if is_hero { hole } else { next_needed };
-                let skip_hero_h = is_hero && hole > next_needed;
-                if skip_hero_h {
-                    tracing::warn!(
-                        "[IBD_HERO_SKIP] peer={} tip={} first_missing={} — already have, GetData hole",
-                        peer_id,
-                        next_needed,
-                        hole
-                    );
-                }
-                // In-flight GetData on H is not have. Extras must not pack
-                // (try_assign_lookahead) or cheese (H,H) — R-84 holes=50.
-                // Farm warehouse covering H is not a tip pipe (R-112
-                // keep-full: covering_wait → flight_tip=0, 30–31k 8s).
-                // W65: a shallow walk-in (remain < deep min) is not a tip pipe.
-                // (H,H) micros are not either. Only a deep inflight cover waits.
-                let covering_wait = !Self::h_body_present()
-                    && raw_covering >= 1
-                    && !self.inflight_cover_is_only_farm(&guard, hole)
-                    && Self::find_inflight_deep_covering(&guard, next_needed).is_some();
-                let want_tip_owner = !disjoint_only
-                    && (skip_hero_h
-                    || ignition_second_h
-                    || (!covering_wait
-                        && !tournament_open
-                        && self.peer_may_take_tip_owner(peer_id, &guard, effective_healthy)
-                        && (effective_healthy == 0
-                            || ignition_second_h
-                            || (tip_distress
-                                && healthy_claims < fetchers_cap
-                                && raw_covering < fetchers_cap
-                                && failover_slot_open))
-                        && !self.tip_owner_blocked_by_dedup(next_needed)
-                        // Dense local (!tip_pipe): mid-chunk W16 only. At chunk-map starts the
-                        // main queue owns the full span (max_ahead=0 / A4 / sequential assign).
-                        && (tip_pipe || !at_chunk_start)));
-                let _ = at_chunk_start;
-                if want_tip_owner {
-                    // W30/W37/W41c: (H,H) failover only while tip is in distress.
-                    // W112: empty triple may open a second failover micro under fetchers_cap=3.
-                    let assign_h = fill_from;
-                    let failover = !ignition_second_h
-                        && !skip_hero_h
-                        && effective_healthy >= 1
-                        && tip_distress
-                        && failover_slot_open
-                        && raw_covering < fetchers_cap;
-                    let mut preempt_end = if failover {
-                        // Failover races only the tip height — primary keeps the deep pipeline.
-                        assign_h
-                    } else if tournament_h {
-                        // Same 1-32 for every racer. Not a second 1-64 range.
-                        32u64.max(assign_h)
-                    } else {
-                        assign_h.saturating_add(preempt_batch.saturating_sub(1))
-                    };
-                    // W32a/W40: tip-pipe (WAN gap or LOCAL_AHEAD hole) skips chunk-map clip.
-                    if !failover && !tip_pipe {
-                        // Dense local replay: clip to chunk-map boundaries.
-                        if ce > next_needed {
-                            preempt_end = preempt_end.min(ce);
-                        } else if let Some((_, nce)) =
-                            self.chunks.iter().find(|(s, _)| *s == ce + 1).copied()
-                        {
-                            preempt_end = preempt_end.min(nce);
-                        }
-                    }
-                    // C1u: while still local, tip-fill must not claim past on-disk body tip
-                    // even when tip_pipe=handoff_prime (batch 128). Past-tip warm is only
-                    // via try_assign_handoff_prime — else next..next+127 spans the hole and
-                    // abandons local cover (true-wan freeze class @437205).
-                    if !failover && !wan_gap {
-                        let body_tip = self.wan_body_tip.load(Ordering::Relaxed);
-                        if body_tip > 0 && next_needed <= body_tip {
-                            preempt_end = preempt_end.min(body_tip);
-                        }
-                    }
-                    // Hero owns [hole, farm_s). Do not let preempt_batch overlap
-                    // the warehouse — overlap refuses the whole assign (R-108
-                    // 47–48k: 129-high remnant, flight_tip=0, 9.7s).
-                    // R-110 grew this to LEAD (512) in one GetData: 33–34k sat
-                    // 46s on IBD_TIP_PROGRESSIVE_TIMEOUT 45s. Closed.
-                    if let Some(farm_s) = self.first_reserved_start_after(assign_h) {
-                        if farm_s > assign_h {
-                            preempt_end = preempt_end.min(farm_s.saturating_sub(1));
-                        }
-                    }
-                    // W35‴-h: never assign past stored headers (live: 912× "hash not found"
-                    // for height 957742" → mass blacklist → tip deadlock for hours).
-                    let tip_headers_ok = match self.clip_end_to_headers(assign_h, preempt_end) {
-                        Some((_, clipped)) => {
-                            preempt_end = clipped;
-                            true
-                        }
-                        None => false,
-                    };
-                    if !tip_headers_ok {
-                        // next_needed past header tip — skip tip assign this poll.
-                    } else {
-                        // W28d: when healthy==0, allow overlap with walk-in ahead ranges — those
-                        // peers will abort via should_abort_tip_walk_in. Only block on another
-                        // tip-cover claim overlapping the new range.
-                        let claim_overlap = {
-                            let min_depth = Self::tip_deep_cover_min_depth();
-                            let claims = self.tip_cover_claims.lock().unwrap();
-                            claims.iter().any(|(_, s, e)| {
-                                // W30/W37: (H,H) failover micro-claims must not block deep re-arm.
-                                if *s == *e {
-                                    return false;
-                                }
-                                // W65: shallow walk-promote remnants must not block a real
-                                // deep tip pipe (live tip=218 claim 218-224 vs owner 218-345).
-                                if !failover
-                                    && Self::claim_remaining_tip_depth(next_needed, *s, *e)
-                                        < min_depth
-                                {
-                                    return false;
-                                }
-                                *s <= preempt_end && assign_h <= *e
-                            })
-                        };
-                        // W117: check failover first — `effective_healthy==0` + shallow claim
-                        // made claim_overlap true under failover (shallow not skipped when
-                        // failover=true) and blocked the (H,H) assign (live W116 @344580).
-                        let overlaps_ok = if failover {
-                            // W86: allow overlap with deep/shallow tip owner, but never stack a
-                            // second (H,H) while raw covering already meets fetchers_cap.
-                            raw_covering < fetchers_cap
-                        } else if tournament_h {
-                            // Ignition tournament: same 1-32, cap 4. Not (H,H).
-                            raw_covering < 4
-                        } else if effective_healthy == 0 {
-                            // Refuse overlap with another *deep* tip pipe (synth same-span
-                            // storms). W28d/W65: shallow walk-in cover must NOT block deep
-                            // re-arm — raw_covering==0 froze owner behind promote remnants
-                            // (live tip=218 claim 218-224 → owner only got (H,H)).
-                            // Live farm covering H is warehouse, not a tip pipe (r115).
-                            !claim_overlap
-                                && Self::find_inflight_deep_covering(&guard, assign_h).is_none_or(
-                                    |(p, s, e)| self.farm_stripe_covers_hole(&p, s, e, assign_h),
-                                )
-                        } else {
-                            !self.range_overlaps_inflight_except_farm_on_hole(
-                                &guard,
-                                assign_h,
-                                preempt_end,
-                            )
-                        };
-                        // P1c: never re-preempt tip onto a peer that already holds tip in-flight
-                        // (even failover (H,H) or top_peer max_in_flight=2). Ahead dual-pipe OK.
-                        // Hole-fill: block only if this peer already owns the hole span.
-                        let peer_already_tip = if skip_hero_h {
-                            guard.get(peer_id).is_some_and(|r| {
-                                r.iter().any(|&(s, e)| s <= preempt_end && assign_h <= e)
-                            })
-                        } else {
-                            Self::peer_holds_tip_inflight(&guard, peer_id, next_needed)
-                        };
-                        if preempt_end >= assign_h && overlaps_ok && !peer_already_tip
-                        {
-                            let walk_in = raw_covering > effective_healthy;
-                            if self.try_insert_dynamic(&mut guard, peer_id, assign_h, preempt_end) {
-                            self.note_tip_cover_claim(peer_id, assign_h, preempt_end);
-                            if tournament_h {
-                                super::tip_stage::tournament_note_assign(peer_id);
-                            }
-                            if effective_healthy == 0 || ignition_second_h {
-                                drop(guard);
-                                // Tournament racers share 1-32. Do not resticky
-                                // onto each racer. R-71: r62 live-H second may
-                                // become preferred (cheap switch, no trial).
-                                if !tournament_h
-                                    || self.preferred_tip_owner().is_none()
-                                {
-                                    self.note_tip_owner_assigned(peer_id);
-                                }
-                                if wan_gap || local_tip_hole {
-                                    let score = self
-                                        .peer_scores
-                                        .lock()
-                                        .unwrap()
-                                        .get(peer_id)
-                                        .copied()
-                                        .unwrap_or(0.0);
-                                    tracing::debug!(
-                                        "[IBD_TIP_PEER] owner={} score={:.3} span={}-{} ({})",
-                                        peer_id,
-                                        score,
-                                        next_needed,
-                                        preempt_end,
-                                        if wan_gap {
-                                            "W33 top-peer pipe"
-                                        } else {
-                                            "W40 local tip-hole pipe"
-                                        }
-                                    );
-                                    if wan_gap {
-                                        self.log_wan_tip_owner_ready(
-                                            peer_id,
-                                            next_needed,
-                                            preempt_end,
-                                        );
-                                    }
-                                }
-                                if walk_in {
-                                    tracing::debug!(
-                                        "gap preempt: assigning {}-{} to {} (W28d tip owner after walk-in preempt, raw_covering={})",
-                                        next_needed,
-                                        preempt_end,
-                                        peer_id,
-                                        raw_covering
-                                    );
-                                } else {
-                                    tracing::debug!(
-                                        "gap preempt: assigning {}-{} to {} (W28c tip owner, covering={}/{})",
-                                        next_needed,
-                                        preempt_end,
-                                        peer_id,
-                                        1,
-                                        self.max_gap_fetchers_per_height()
-                                    );
-                                }
-                                return Some((assign_h, preempt_end));
-                            }
-                            self.latch_tip_failover_episode(next_needed);
-                            tracing::debug!(
-                                "gap preempt: assigning {}-{} to {} (W28c tip failover{}, covering={}/{})",
-                                next_needed,
-                                preempt_end,
-                                peer_id,
-                                if c1t_tip_race { " C1t" } else { "" },
-                                raw_covering.saturating_add(1),
-                                self.max_gap_fetchers_per_height()
-                            );
-                            return Some((assign_h, preempt_end));
-                            }
-                        }
-                    } // tip_headers_ok
-                }
-
-                // --- Ahead partition: any free peer, non-overlapping after tip frontier ---
-                // Require a *healthy* tip cover (not walk-in) before handing out more ahead.
-                //
-                // C1g supersedes A6g "ahead while gap_missing": opening tip+32 while tip
-                // empty produced TIP_HOLE_AHEAD binder (C1f). Multi-peer ahead runs when
-                // tip is present in reorder (`!tip_missing`); between tip bodies the tip
-                // owner stripe + optional `(H,H)` race fill the hole.
-                //
-                // W47: gate on deep tip cover + tip distress, not bridge holes alone.
-                // Soft-retry freezes multi-peer ahead; late-body alone does not when tip
-                // already has healthy cover (2026-07-31 W102b/late-body narrow).
-                let gap_missing = self.tip_gap_missing.load(Ordering::Relaxed);
-                let feeder_len = super::IBD_FEEDER_BUFFER_BLOCKS.load(Ordering::Relaxed);
-                if c1g_freeze_past_tip {
-                    static C1G_FREEZE_LOG: std::sync::atomic::AtomicU64 =
-                        std::sync::atomic::AtomicU64::new(0);
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    let prev = C1G_FREEZE_LOG.load(Ordering::Relaxed);
-                    if now.saturating_sub(prev) >= 5
-                        && C1G_FREEZE_LOG
-                            .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
-                            .is_ok()
-                    {
-                        tracing::warn!(
-                            "[IBD_C1G_FREEZE] tip={} covering={} ready={} holes={} — past-tip stripes frozen; race tip H only",
-                            next_needed,
-                            raw_covering,
-                            self.ibd_ready_peer_count(),
-                            holes_now
-                        );
-                    }
-                }
-                // R-17 dest cheese'd — contig owner_end+1 exception reverted.
-                // R-27 dest cheese'd — streaming-gated owner_end+1 (20 peers, one stripe).
-                // R-28 dest cheese'd @2366 — extras assigned, C1j aborted, same stripe reissued.
-                // R-29 dest cheese'd @33 — extras never armed; chunk-map 65/257 leaked.
-                // R-33/R-34 latch REVERTED — cheese @1978 / 10–50k 349 vs R-30 1415.
-                // R-54 latch REVERTED — 10–50k 1044 / 180–200k 87; LATCH_AHEAD=3 @398k only.
-                // R-245: one latched extra at ≥180k (try_assign_latched_ahead). Dump stays off.
-                // R-248: satd priority zone (H, H+256] disjoint tiles. Not 50k shuffle.
-                // R-249: start at H+1 (duplicate owner covering); do not jump to owner_end+1.
-                // R-250: except all inflight that cover H (ignition tournament 1-32 ×N).
-                // R-252: latch uses the same H+1 / except-H-coverers rule (R-251
-                // owner_end+1 left 190776-190967 empty when apply walked in).
-                // R-60: drop s<=H leftovers even while C1G freezes new arms
-                // (R-59 trial challengers sat in 259-514 through covering=0).
-                self.drop_stale_lookahead_stripes(&mut guard, next_needed);
-                if assign_wan_gap
-                    && let Some(range) = self.try_assign_latched_ahead(
-                        peer_id,
-                        &mut guard,
-                        next_needed,
-                        raw_covering,
-                    )
-                {
-                    return Some(range);
-                }
-                if assign_wan_gap
-                    && let Some(range) = self.try_assign_priority_zone(
-                        peer_id,
-                        &mut guard,
-                        next_needed,
-                        raw_covering,
-                    )
-                {
-                    return Some(range);
-                }
-                // Pack if have or hero inflight covers the hole (R-91).
-                // Covering-only without the hero on the hole packed R-84
-                // past an in-flight 64 (holes=50 @186k). Do not open C1g.
-                let runway_ok = self
-                    .preferred_tip_owner()
-                    .is_some_and(|p| self.may_pack_runway(&guard, &p));
-                if assign_wan_gap
-                    && (!c1g_freeze_past_tip || runway_ok)
-                    && let Some(range) = self.try_assign_lookahead_stripe(
-                        peer_id,
-                        &mut guard,
-                        next_needed,
-                        raw_covering,
-                    )
-                {
-                    return Some(range);
-                }
-                // Hero already took first_hole above. Do not idle.
-                // Mousetrap F3 REVERT (2026-08-01): secondary under tip_missing + pipe
-                // solid → past-body cheese=45 / tip_crawl regress. C1g freeze stays absolute.
-                // Layer C: TOP≥2 same-peer next stripe after tip lands. Do not
-                // require KEEP 80 (`wan_allow_multi_peer_ahead`) — that gate is
-                // other-peer leftover. C1g freeze / tip_missing still block.
-                let layer_c_sticky_dual = Self::top_peer_in_flight_cap() >= 2
-                    && next_needed >= 50_000
-                    && self.preferred_tip_owner().as_deref() == Some(peer_id)
-                    && self.tip_sticky_usable(peer_id);
-                if assign_wan_gap
-                    && !c1g_freeze_past_tip
-                    && effective_healthy > 0
-                    && (layer_c_sticky_dual
-                        || self.wan_allow_multi_peer_ahead(effective_healthy, feeder_len))
-                    && super::tip_stage::tip_soft_retries() == 0
-                    && !super::tip_stage::tip_ahead_frozen_for_soft_retry()
-                    && self.preferred_tip_owner().as_deref() == Some(peer_id)
-                    && self.tip_sticky_usable(peer_id)
-                {
-                    // Sticky dual-pipe after tip lands (C1g: not while tip_missing).
-                    let sticky_window: u64 = latch_env!(u64, {
-                        std::env::var("BLVM_IBD_STICKY_PIPE_WINDOW")
-                            .ok()
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(512)
-                            .clamp(256, 2048)
-                    });
-                    // Mousetrap F1 REVERT: sticky frontier = claim pipeline (pre-F KEEP).
-                    let frontier = Self::tip_pipeline_frontier(&guard, next_needed, sticky_window);
-                    let assign_f = frontier;
-                    let pipe_f = super::tip_stage::pipe_frontier(next_needed);
-                    let body_f = if contig_now > 0 {
-                        next_needed.saturating_add(contig_now.saturating_sub(1))
-                    } else {
-                        next_needed.saturating_sub(1)
-                    };
-                    let sticky_batch: u64 =
-                        Self::gap_preempt_batch_raw().unwrap_or(128).clamp(64, 256);
-                    let band_end = next_needed.saturating_add(sticky_window);
-                    // Sticky dual-pipe is the KEEP hero's near-H pipe. Do not
-                    // apply wan_ahead_stripe_floor (H+grown) here — dest-au
-                    // did, and cheese pin then saw start>H. Floor stays on
-                    // C1g other-peer stripes below.
-                    let part_start = frontier.saturating_add(1);
-                    let part_end_raw = part_start
-                        .saturating_add(sticky_batch.saturating_sub(1))
-                        .min(band_end);
-                    // Manual REVERT 2026-08-03: part_start>tip gate cratered tip90 (c1ggate
-                    // 77.8 / c1gclaim 100 vs forcedeb 108.9). Tip reassigns were accidental
-                    // re-arm when claims outlived in_flight; fix is stale-claim prune above,
-                    // not blocking C1g when frontier falls to tip-1.
-                    if part_start <= band_end {
-                        if let Some((_, part_end)) =
-                            self.clip_end_to_headers(part_start, part_end_raw)
-                        {
-                            if !(local_ahead && !assign_wan_gap && part_start > next_needed)
-                                && part_start <= max_start
-                                && part_end >= part_start
-                                && !Self::range_overlaps_inflight(&guard, part_start, part_end)
-                                && !self.chunk_range_in_flight(&guard, part_start, part_end)
-                                && self.try_insert_dynamic(&mut guard, peer_id, part_start, part_end)
-                                {
-                                Self::log_pipe_f(
-                                    next_needed,
-                                    assign_f,
-                                    pipe_f,
-                                    body_f,
-                                    peer_id,
-                                    "sticky",
-                                );
-                                tracing::warn!(
-                                    "[IBD_STICKY_DUAL] peer={} {}-{} tip={} frontier={} — same-peer next stripe",
-                                    peer_id,
-                                    part_start,
-                                    part_end,
-                                    next_needed,
-                                    frontier,
-                                );
-                                return Some((part_start, part_end));
-                                }
-                        }
-                    }
-                }
-                // Dense-local (wan crawl with body_tip=0 / no headers): use LOCAL ahead
-                // gating — WAN distress/contig freeze must not starve dens KEEP partitions.
-                // During HANDOFF_PRIME, freeze local ahead too: multi-peer W28c partitions
-                // through body tip while sticky primes past tip leave Swiss-cheese holes
-                // (true-wan freeze @437205 / wait 437206, reorder≈108, tip60 never armed).
-                let allow_ahead = if Self::no_farm_enabled() {
-                    false
-                } else if assign_wan_gap {
-                    !c1g_freeze_past_tip
-                        && self.wan_allow_multi_peer_ahead(effective_healthy, feeder_len)
-                } else {
-                    !gap_missing && !handoff_prime
-                };
-                if effective_healthy > 0 && allow_ahead {
-                    // Multi-peer ahead after tip lands (C1g). Contiguous assign frontier
-                    // still used so stripes do not jump holes.
-                    let runway_end = next_needed.saturating_add(runway_cap.saturating_sub(1));
-                    let part_window: u64 = if assign_wan_gap {
-                        Self::tip_partition_window_raw()
-                            .unwrap_or(256)
-                            .clamp(64, 512)
-                    } else {
-                        Self::tip_partition_window_raw()
-                            .unwrap_or(512)
-                            .clamp(64, 2048)
-                    };
-                    // Mousetrap F1 REVERT (2026-08-01): stripe frontier = claim contig
-                    // (pre-F KEEP). Still log assign_F vs pipe_F for forensics.
-                    let assign_f_wan = if assign_wan_gap {
-                        Self::tip_contiguous_assign_frontier(&guard, next_needed, runway_end)
-                    } else {
-                        0
-                    };
-                    let pipe_f_wan = if assign_wan_gap {
-                        super::tip_stage::pipe_frontier(next_needed)
-                    } else {
-                        0
-                    };
-                    let body_f_wan = if contig_now > 0 {
-                        next_needed.saturating_add(contig_now.saturating_sub(1))
-                    } else {
-                        next_needed.saturating_sub(1)
-                    };
-                    let frontier = if assign_wan_gap {
-                        // Tip present: walk contiguous in-flight from tip inside runway,
-                        // then legacy window past runway.
-                        let contig =
-                            Self::tip_contiguous_assign_frontier(&guard, next_needed, runway_end);
-                        if contig >= runway_end {
-                            Self::tip_pipeline_frontier(&guard, next_needed, part_window)
-                        } else {
-                            contig
-                        }
-                    } else {
-                        Self::tip_pipeline_frontier(&guard, next_needed, part_window)
-                    };
-                    let part_start = frontier
-                        .saturating_add(1)
-                        .max(self.wan_ahead_stripe_floor(next_needed));
-                    // Leftover cheese past the inject window (live: 70657–70701
-                    // while next=70001). Skip — tip-fill owns next..next+256.
-                    // Any leftover ahead stripe ghosts the tip (live: 70671–70735
-                    // while next=70734). Only GetData (H,H) at next — not cheese.
-                    let leftover_far = local_ahead && !assign_wan_gap && part_start > next_needed;
-                    if !leftover_far && part_start <= max_start && part_start >= next_needed {
-                        let ahead_peers = guard
-                            .iter()
-                            .filter(|(p, ranges)| {
-                                p.as_str() != peer_id
-                                    && ranges.iter().any(|(s, _)| *s > next_needed)
-                            })
-                            .count();
-                        let holes_now = self.tip_bridge_holes.load(Ordering::Relaxed);
-                        let ahead_cap = if assign_wan_gap {
-                            let floor_stall = self.preferred_is_floor_sticky()
-                                && self
-                                    .sticky_recent_bps(next_needed, a6m_recent_window_secs())
-                                    .map(|(bps, _, elapsed)| {
-                                        elapsed >= (a6m_recent_window_secs() as f64) * 0.8
-                                            && bps < a6m_floor_open_slot_min_bps()
-                                    })
-                                    .unwrap_or(false);
-                            // W123: sticky hole-band freeze (not raw holes — W47).
-                            self.tip_ahead_hole_band_update(feeder_len);
-                            let tip_distress = Self::tip_is_distressed()
-                                || self.tip_ahead_hole_freeze.load(Ordering::Relaxed);
-                            // No ahead_cap bypass on under-target (W3c ahead flood FAIL; W3 REVERT).
-                            if floor_stall || tip_distress {
-                                0
-                            } else {
-                                Self::tip_ahead_peer_cap()
-                            }
-                        } else {
-                            usize::MAX
-                        };
-                        if assign_wan_gap && ahead_peers >= ahead_cap {
-                            // Tip owner / retry only — ahead cap reached.
-                        } else if assign_wan_gap && !self.wan_peer_may_take_ahead_stripe(peer_id) {
-                            // Mute sticky / unprobed: no C1g runway stripe (dual-pipe is separate).
-                        } else if assign_wan_gap {
-                            // C1g: tip already in reorder here; stripe from contiguous frontier.
-                            let ahead_batch = runway_stripe.min(32u64.min(preempt_batch));
-                            let part_end = part_start.saturating_add(ahead_batch.saturating_sub(1));
-                            if part_end >= part_start
-                                && !Self::range_overlaps_inflight(&guard, part_start, part_end)
-                                && !self.chunk_range_in_flight(&guard, part_start, part_end)
-                                && self.try_insert_dynamic(&mut guard, peer_id, part_start, part_end)
-                                {
-                                Self::log_pipe_f(
-                                    next_needed,
-                                    assign_f_wan,
-                                    pipe_f_wan,
-                                    body_f_wan,
-                                    peer_id,
-                                    "stripe",
-                                );
-                                if tip_missing && part_start > next_needed {
-                                    static C1G_AHEAD_LOG: std::sync::atomic::AtomicU64 =
-                                        std::sync::atomic::AtomicU64::new(0);
-                                    let now = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_secs())
-                                        .unwrap_or(0);
-                                    let prev = C1G_AHEAD_LOG.load(Ordering::Relaxed);
-                                    if now.saturating_sub(prev) >= 5
-                                        && C1G_AHEAD_LOG
-                                            .compare_exchange(
-                                                prev,
-                                                now,
-                                                Ordering::Relaxed,
-                                                Ordering::Relaxed,
-                                            )
-                                            .is_ok()
-                                    {
-                                        tracing::warn!(
-                                            "[IBD_C1G_AHEAD] peer={} {}-{} tip={} covering={} — start>H while tip_missing",
-                                            peer_id,
-                                            part_start,
-                                            part_end,
-                                            next_needed,
-                                            raw_covering
-                                        );
-                                    }
-                                }
-                                tracing::debug!(
-                                    "gap preempt: assigning {}-{} to {} (C1g runway stripe, tip={}, frontier={}, ahead_peers={}, holes={}, runway={})",
-                                    part_start,
-                                    part_end,
-                                    peer_id,
-                                    next_needed,
-                                    frontier,
-                                    ahead_peers + 1,
-                                    holes_now,
-                                    runway_cap
-                                );
-                                return Some((part_start, part_end));
-                                }
-                        } else {
-                            // Non-WAN: ahead partitions stay at 32 with chunk-map clip.
-                            // C1u: never multi-peer past body tip (live cheese: ahead
-                            // GetData'd 304672 while tip=304418 → TIP_HOLE_AHEAD cliff).
-                            // When frontier reaches body tip, tip-owner primes WAN GetData.
-                            let body_tip = self.wan_body_tip.load(Ordering::Relaxed);
-                            if body_tip > 0 && part_start > body_tip {
-                                if !super::synthetic_wan::bulk_local_disk_stream() {
-                                    if let Some(range) = self.try_assign_handoff_prime(
-                                        peer_id,
-                                        next_needed,
-                                        &mut guard,
-                                        "ahead_frontier",
-                                    ) {
-                                        drop(guard);
-                                        return Some(range);
-                                    }
-                                }
-                            } else {
-                                // C1u: far-local fill to body tip — allow up to 256 so two
-                                // max_in_flight=1 peers can cover HANDOFF_PRIME without
-                                // completes (dens KEEP c1u_local_ahead…). Default stays 32.
-                                let ahead_batch = if body_tip > 0 && part_start <= body_tip {
-                                    body_tip
-                                        .saturating_sub(part_start)
-                                        .saturating_add(1)
-                                        .min(256)
-                                        .max(preempt_batch.min(32))
-                                } else {
-                                    preempt_batch.min(32)
-                                };
-                                let mut part_end =
-                                    part_start.saturating_add(ahead_batch.saturating_sub(1));
-                                if body_tip > 0 {
-                                    part_end = part_end.min(body_tip);
-                                }
-                                // Do not walk leftover cheese past the inject/handoff window.
-                                part_end = part_end.min(max_start);
-                                if let Some((_, pe)) = self
-                                    .chunks
-                                    .iter()
-                                    .find(|(s, e)| *s <= part_start && part_start <= *e)
-                                    .copied()
-                                {
-                                    part_end = part_end.min(pe);
-                                }
-                                if part_end >= part_start
-                                    && !Self::range_overlaps_inflight(&guard, part_start, part_end)
-                                    && !self.chunk_range_in_flight(&guard, part_start, part_end)
-                                    && self.try_insert_dynamic(
-                                        &mut guard, peer_id, part_start, part_end,
-                                    ) {
-                                    tracing::debug!(
-                                        "gap preempt: assigning {}-{} to {} (W28c ahead partition, tip={}, frontier={})",
-                                        part_start,
-                                        part_end,
-                                        peer_id,
-                                        next_needed,
-                                        frontier
-                                    );
-                                    return Some((part_start, part_end));
-                                    }
-                            }
-                        }
-                    }
-                }
-            }
         }
         leftover_get_work_phase(
             peer_id,
@@ -3111,7 +3147,10 @@ impl ChunkAssigner {
         let mut rq = self.retry_queue.lock().unwrap();
         let mut added = 0u64;
         for h in from..from.saturating_add(count) {
-            if rq.iter().any(|e| e.start == h && e.end == h && e.exclude == exclude) {
+            if rq
+                .iter()
+                .any(|e| e.start == h && e.end == h && e.exclude == exclude)
+            {
                 continue;
             }
             rq.push_front(RetryEntry::fresh(h, h, exclude.clone()));
@@ -3161,11 +3200,7 @@ impl ChunkAssigner {
         let peers: Vec<String> = {
             let g = self.in_flight_per_peer.lock().unwrap();
             g.iter()
-                .filter(|(_, ranges)| {
-                    ranges
-                        .iter()
-                        .any(|&(s, e)| s <= height && height <= e)
-                })
+                .filter(|(_, ranges)| ranges.iter().any(|&(s, e)| s <= height && height <= e))
                 .map(|(p, _)| p.clone())
                 .collect()
         };
