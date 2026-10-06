@@ -649,6 +649,7 @@ impl Node {
                     match bs
                         .store_header(&info.tip_hash, &info.tip_header)
                         .and_then(|_| bs.store_height(0, &info.tip_hash))
+                        .and_then(|_| bs.store_recent_header(0, &info.tip_header))
                     {
                         Ok(()) => info!(
                             "[START_COMPONENTS] Indexed genesis header in blockstore (height 0)"

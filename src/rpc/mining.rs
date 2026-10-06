@@ -838,6 +838,32 @@ impl MiningRpc {
             .as_ref()
             .ok_or_else(|| RpcError::internal_error("generatetoaddress requires storage"))?;
 
+        // Required-work checks read the parent from the blockstore, and the
+        // median-time check reads `recent_headers`. `chain().initialize` writes
+        // chain info only, so index genesis in both places before mining.
+        if let Ok(Some(info)) = storage.chain().load_chain_info() {
+            if info.height == 0 {
+                let blocks = storage.blocks();
+                if matches!(blocks.get_hash_by_height(0), Ok(None)) {
+                    blocks
+                        .store_header(&info.tip_hash, &info.tip_header)
+                        .map_err(|e| {
+                            RpcError::internal_error(format!(
+                                "generatetoaddress: index genesis: {e}"
+                            ))
+                        })?;
+                    blocks.store_height(0, &info.tip_hash).map_err(|e| {
+                        RpcError::internal_error(format!("generatetoaddress: index genesis: {e}"))
+                    })?;
+                }
+                blocks
+                    .store_recent_header(0, &info.tip_header)
+                    .map_err(|e| {
+                        RpcError::internal_error(format!("generatetoaddress: index genesis: {e}"))
+                    })?;
+            }
+        }
+
         let nblocks = param_u64_required(params, 0, "generatetoaddress")?;
         if nblocks > MAX_BLOCKS {
             return Err(RpcError::invalid_params(format!(
@@ -927,8 +953,14 @@ impl MiningRpc {
                         RpcError::internal_error(format!("generatetoaddress: template failed: {e}"))
                     })?
             };
-            // A block mined in the same second as its parent is not later than the median.
-            let median_time_past = blvm_protocol::bip113::get_median_time_past(&prev_headers);
+            // Connect checks this timestamp against `recent_headers`, not the
+            // 2016-header template window. Use that same slice here.
+            let mtp_headers = storage.blocks().get_recent_headers(11).unwrap_or_default();
+            let median_time_past = if mtp_headers.is_empty() {
+                blvm_protocol::bip113::get_median_time_past(&prev_headers)
+            } else {
+                blvm_protocol::bip113::get_median_time_past(&mtp_headers)
+            };
             if block.header.timestamp <= median_time_past {
                 block.header.timestamp = median_time_past.saturating_add(1);
             }
