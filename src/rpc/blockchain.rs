@@ -837,33 +837,24 @@ impl BlockchainRpc {
                         .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {}", e))?;
 
                     // Rewind UTXO set from tip down to start_height using undo logs.
-                    // Each undo log contains: spent UTXOs to restore + created outputs to remove.
+                    // Must apply disconnect semantics matching blvm_consensus::reorganization:
+                    // 1. First remove created outputs (new_utxo)
+                    // 2. Then restore spent inputs (previous_utxo)
                     let mut rewind_failed = false;
                     for height in (start_height..=tip_height).rev() {
                         if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(height) {
                             match blockstore.get_undo_log(&block_hash) {
                                 Ok(Some(undo_log)) => {
-                                    // Apply the undo: restore spent UTXOs, remove created outputs
-                                    // Each UndoEntry has:
-                                    // - outpoint: the outpoint that was spent
-                                    // - previous_utxo: the UTXO that existed before (needs to be restored)
+                                    // Phase 1: Remove created outputs (reverse the creation)
                                     for entry in undo_log.entries.iter() {
-                                        // Restore the spent UTXO
-                                        if let Some(ref prev_utxo) = entry.previous_utxo {
-                                            utxo_set.insert(entry.outpoint, prev_utxo.clone());
+                                        if entry.new_utxo.is_some() {
+                                            utxo_set.remove(&entry.outpoint);
                                         }
                                     }
-                                    // Remove the outputs created by this block
-                                    if let Ok(Some(block)) = blockstore.get_block(&block_hash) {
-                                        for tx in block.transactions.iter() {
-                                            let txid = blvm_protocol::block::calculate_tx_id(tx);
-                                            for (out_idx, _) in tx.outputs.iter().enumerate() {
-                                                let outpoint = blvm_protocol::OutPoint {
-                                                    hash: txid,
-                                                    index: out_idx as u32,
-                                                };
-                                                utxo_set.remove(&outpoint);
-                                            }
+                                    // Phase 2: Restore spent inputs (reverse the spend)
+                                    for entry in undo_log.entries.iter() {
+                                        if let Some(ref prev_utxo) = entry.previous_utxo {
+                                            utxo_set.insert(entry.outpoint, prev_utxo.clone());
                                         }
                                     }
                                 }
@@ -942,20 +933,21 @@ impl BlockchainRpc {
                         }
 
                         // Check level 4: Full UTXO validation (reconnect block)
+                        // Uses per-block height MTP (not tip-relative) for proper replay
                         #[cfg(feature = "production")]
                         if check_level >= 4 {
                             if let Some(ref mut utxo_set) = utxo_set_for_level4 {
                                 if let Some(engine_arc) = engine_arc_opt {
                                     let protocol_version = engine_arc.get_protocol_version();
-                                    let witnesses_result = prepare_block_validation_context(
+
+                                    // Load witnesses for this block
+                                    let witnesses = match crate::node::block_processor::load_witnesses_for_block(
                                         blockstore.as_ref(),
                                         &block,
                                         height,
                                         protocol_version,
-                                    );
-
-                                    let witnesses = match witnesses_result {
-                                        Ok((w, _)) => w,
+                                    ) {
+                                        Ok(w) => w,
                                         Err(e) => {
                                             errors.push(format!(
                                                 "Block at height {height} witness load error: {e}"
@@ -964,16 +956,56 @@ impl BlockchainRpc {
                                         }
                                     };
 
-                                    match validate_block_with_context(
-                                        blockstore.as_ref(),
-                                        engine_arc,
-                                        &block,
-                                        &witnesses,
-                                        utxo_set,
+                                    // Get MTP headers at this block's height (not tip-relative)
+                                    let mtp_headers = blockstore
+                                        .headers_before_height_for_mtp(height)
+                                        .ok()
+                                        .filter(|h| !h.is_empty());
+
+                                    let median_time_past = mtp_headers
+                                        .as_ref()
+                                        .map(|h| blvm_protocol::bip113::get_median_time_past(h))
+                                        .unwrap_or(0);
+
+                                    let network_time = crate::utils::current_timestamp();
+
+                                    // Create validation context with correct per-height MTP
+                                    let mut context = match blvm_protocol::validation::ProtocolValidationContext::new(
+                                        protocol_version,
                                         height,
                                     ) {
-                                        Ok(blvm_protocol::ValidationResult::Valid) => {}
-                                        Ok(blvm_protocol::ValidationResult::Invalid(reason)) => {
+                                        Ok(c) => c,
+                                        Err(e) => {
+                                            errors.push(format!(
+                                                "Block at height {height} context error: {e}"
+                                            ));
+                                            break;
+                                        }
+                                    };
+                                    context.context_data.insert(
+                                        "median_time_past".to_string(),
+                                        median_time_past.to_string(),
+                                    );
+                                    context.context_data.insert(
+                                        "network_time".to_string(),
+                                        network_time.to_string(),
+                                    );
+
+                                    // Validate and connect block
+                                    let owned_utxo = std::mem::take(utxo_set);
+                                    match engine_arc.validate_and_connect_block_with_difficulty(
+                                        &block,
+                                        &witnesses,
+                                        &owned_utxo,
+                                        height,
+                                        mtp_headers.as_deref(),
+                                        &context,
+                                        Some(blockstore.difficulty_ancestor_lookup()),
+                                    ) {
+                                        Ok((blvm_protocol::ValidationResult::Valid, new_utxo)) => {
+                                            *utxo_set = new_utxo;
+                                        }
+                                        Ok((blvm_protocol::ValidationResult::Invalid(reason), _)) => {
                                             errors.push(format!(
                                                 "Block at height {height} invalid: {reason}"
                                             ));

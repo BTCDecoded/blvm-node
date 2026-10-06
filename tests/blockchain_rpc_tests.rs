@@ -73,7 +73,7 @@ async fn test_verify_chain_with_spends_returns_true() {
                 hash: [0u8; 32],
                 index: 0xffffffff,
             },
-            script_sig: vec![0x04, 0xff, 0xff, 0x00, 0x1d],
+            script_sig: vec![0x00, 0xff], // BIP34 height 0: OP_0 + padding
             sequence: 0xffffffff,
         }],
         outputs: blvm_protocol::tx_outputs![blvm_protocol::TransactionOutput {
@@ -249,5 +249,193 @@ async fn test_verify_chain_with_spends_returns_true() {
     assert!(
         result_default.as_bool() == Some(true),
         "verifychain default should return true for chain with spends, got: {result_default}"
+    );
+}
+
+/// Test that verifychain level 4 works correctly with undo logs.
+/// Level 4 requires undo logs to rewind the UTXO set before replaying blocks.
+/// This test uses coinbase-only blocks to verify undo log rewind mechanics
+/// without hitting coinbase maturity constraints (which require 100 blocks).
+#[tokio::test]
+#[cfg(feature = "production")]
+async fn test_verify_chain_level4_with_undo_logs() {
+    use blvm_consensus::reorganization::{BlockUndoLog, UndoEntry};
+    use std::sync::Arc as StdArc;
+
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
+
+    // Create genesis block with a coinbase transaction
+    let coinbase_script: blvm_node::ByteString = vec![0x51].into(); // OP_1
+    let coinbase_output_value = 50_000_000_00i64;
+
+    let genesis_coinbase = blvm_protocol::Transaction {
+        version: 1,
+        inputs: blvm_protocol::tx_inputs![blvm_protocol::TransactionInput {
+            prevout: blvm_node::OutPoint {
+                hash: [0u8; 32],
+                index: 0xffffffff,
+            },
+            script_sig: vec![0x00, 0xff], // BIP34 height 0: OP_0 + padding
+            sequence: 0xffffffff,
+        }],
+        outputs: blvm_protocol::tx_outputs![blvm_protocol::TransactionOutput {
+            value: coinbase_output_value,
+            script_pubkey: coinbase_script.clone().into(),
+        }],
+        lock_time: 0,
+    };
+
+    let genesis_header = blvm_protocol::BlockHeader {
+        version: 0x20000000, // BIP9 version bits (required for regtest consensus)
+        prev_block_hash: [0u8; 32],
+        merkle_root: blvm_protocol::mining::calculate_merkle_root(&[genesis_coinbase.clone()])
+            .unwrap(),
+        timestamp: 1_231_006_505,
+        bits: 0x0f00ffff,
+        nonce: 1,
+    };
+
+    let genesis_block = blvm_node::Block {
+        header: genesis_header.clone(),
+        transactions: vec![genesis_coinbase.clone()].into_boxed_slice(),
+    };
+
+    let genesis_hash = storage.blocks().get_block_hash(&genesis_block);
+    storage.blocks().store_block(&genesis_block).unwrap();
+    storage.blocks().store_height(0, &genesis_hash).unwrap();
+    storage.chain().initialize(&genesis_header).unwrap();
+
+    // Store genesis header for MTP
+    storage.blocks().store_recent_header(0, &genesis_header).unwrap();
+
+    // Store empty witnesses for genesis block (required for regtest where segwit is active)
+    let genesis_witnesses: Vec<Vec<blvm_protocol::segwit::Witness>> = genesis_block
+        .transactions
+        .iter()
+        .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
+        .collect();
+    storage.blocks().store_witness(&genesis_hash, &genesis_witnesses).unwrap();
+
+    // Add the coinbase UTXO to the UTXO set
+    let coinbase_txid = blvm_protocol::block::calculate_tx_id(&genesis_coinbase);
+    let coinbase_outpoint = blvm_node::OutPoint {
+        hash: coinbase_txid,
+        index: 0,
+    };
+    let genesis_coinbase_utxo = blvm_node::UTXO {
+        value: coinbase_output_value,
+        script_pubkey: coinbase_script.clone().into(),
+        height: 0,
+        is_coinbase: true,
+    };
+    storage
+        .utxos()
+        .add_utxo(&coinbase_outpoint, &genesis_coinbase_utxo)
+        .unwrap();
+
+    // Create undo log for genesis block (coinbase output created)
+    let genesis_undo = BlockUndoLog {
+        entries: vec![UndoEntry {
+            outpoint: coinbase_outpoint,
+            previous_utxo: None, // No previous UTXO (this is a creation)
+            new_utxo: Some(StdArc::new(genesis_coinbase_utxo.clone())),
+        }],
+    };
+    storage.blocks().store_undo_log(&genesis_hash, &genesis_undo).unwrap();
+
+    // Create block 1 with just a coinbase (no spends due to coinbase maturity)
+    let block1_coinbase = blvm_protocol::Transaction {
+        version: 1,
+        inputs: blvm_protocol::tx_inputs![blvm_protocol::TransactionInput {
+            prevout: blvm_node::OutPoint {
+                hash: [0u8; 32],
+                index: 0xffffffff,
+            },
+            script_sig: vec![0x01, 0x01], // BIP34 height 1
+            sequence: 0xffffffff,
+        }],
+        outputs: blvm_protocol::tx_outputs![blvm_protocol::TransactionOutput {
+            value: coinbase_output_value,
+            script_pubkey: coinbase_script.clone().into(),
+        }],
+        lock_time: 0,
+    };
+
+    let block1_txs = vec![block1_coinbase.clone()];
+    let block1_merkle = blvm_protocol::mining::calculate_merkle_root(&block1_txs).unwrap();
+
+    let block1_header = blvm_protocol::BlockHeader {
+        version: 0x20000000, // BIP9 version bits (required for regtest consensus)
+        prev_block_hash: genesis_hash,
+        merkle_root: block1_merkle,
+        timestamp: 1_231_006_605,
+        bits: 0x0f00ffff,
+        nonce: 2,
+    };
+
+    let block1 = blvm_node::Block {
+        header: block1_header.clone(),
+        transactions: block1_txs.into_boxed_slice(),
+    };
+
+    let block1_hash = storage.blocks().get_block_hash(&block1);
+    storage.blocks().store_block(&block1).unwrap();
+    storage.blocks().store_height(1, &block1_hash).unwrap();
+    storage.blocks().store_recent_header(1, &block1_header).unwrap();
+    storage
+        .chain()
+        .update_tip(&block1_hash, &block1_header, 1)
+        .unwrap();
+
+    // Store empty witnesses for block 1 (required for regtest where segwit is active)
+    let block1_witnesses: Vec<Vec<blvm_protocol::segwit::Witness>> = block1
+        .transactions
+        .iter()
+        .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
+        .collect();
+    storage.blocks().store_witness(&block1_hash, &block1_witnesses).unwrap();
+
+    // Add block1 coinbase output to UTXO set
+    let block1_coinbase_txid = blvm_protocol::block::calculate_tx_id(&block1_coinbase);
+    let block1_coinbase_outpoint = blvm_node::OutPoint {
+        hash: block1_coinbase_txid,
+        index: 0,
+    };
+    let block1_coinbase_utxo = blvm_node::UTXO {
+        value: coinbase_output_value,
+        script_pubkey: coinbase_script.into(),
+        height: 1,
+        is_coinbase: true,
+    };
+    storage
+        .utxos()
+        .add_utxo(&block1_coinbase_outpoint, &block1_coinbase_utxo)
+        .unwrap();
+
+    // Create undo log for block 1 (only coinbase output created)
+    let block1_undo = BlockUndoLog {
+        entries: vec![
+            UndoEntry {
+                outpoint: block1_coinbase_outpoint,
+                previous_utxo: None,
+                new_utxo: Some(StdArc::new(block1_coinbase_utxo)),
+            },
+        ],
+    };
+    storage.blocks().store_undo_log(&block1_hash, &block1_undo).unwrap();
+
+    // Test verifychain at level 4
+    let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
+    let rpc = BlockchainRpc::with_dependencies_and_protocol(storage, protocol);
+
+    // Level 4: Full UTXO validation with undo log rewind
+    // This tests that:
+    // 1. Undo logs are correctly loaded and applied (rewind)
+    // 2. Blocks are correctly replayed (validation + UTXO creation)
+    let result_level4 = rpc.verify_chain(Some(4), Some(10)).await.unwrap();
+    assert!(
+        result_level4.as_bool() == Some(true),
+        "verifychain level 4 should return true for valid chain with undo logs, got: {result_level4}"
     );
 }
