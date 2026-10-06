@@ -217,13 +217,14 @@ pub fn validate_block_with_context(
 
     // Validate block with protocol validation — move UTXO set in, no clone
     let owned_utxo = std::mem::take(utxo_set);
-    let (result, new_utxo_set) = protocol.validate_and_connect_block(
+    let (result, new_utxo_set) = protocol.validate_and_connect_block_with_difficulty(
         block,
         witnesses,
         &owned_utxo,
         height,
         recent_headers.as_deref(),
         &context,
+        Some(blockstore.difficulty_ancestor_lookup()),
     )?;
 
     *utxo_set = new_utxo_set;
@@ -319,6 +320,7 @@ pub fn validate_block_with_context_and_undo(
     let mut consensus_ctx =
         protocol.connect_block_validation_context(recent_headers.as_deref(), network_time);
     consensus_ctx.sequence_prev_mtp = Some(blockstore.sequence_prev_mtp_lookup());
+    consensus_ctx.difficulty_ancestor = Some(blockstore.difficulty_ancestor_lookup());
     let owned_utxo = std::mem::take(utxo_set);
     let (result, new_utxo_set, undo_log) =
         blvm_consensus::block::connect_block(block, witnesses, owned_utxo, height, &consensus_ctx)?;

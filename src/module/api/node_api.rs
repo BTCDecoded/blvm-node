@@ -407,25 +407,11 @@ impl NodeApiImpl {
                 ModuleError::OperationError(module_error_msg::NO_CHAIN_TIP.to_string())
             })?;
 
-        let prev_headers = if let Ok(recent) = self.storage.blocks().get_recent_headers(2016) {
-            if recent.len() >= 2 {
-                recent
-            } else {
-                let mut headers = Vec::new();
-                if let Ok(Some(current_height)) = self.storage.chain().get_height() {
-                    for h in 0..=current_height.min(2015) {
-                        if let Ok(Some(hash)) = self.storage.blocks().get_hash_by_height(h) {
-                            if let Ok(Some(header)) = self.storage.blocks().get_header(&hash) {
-                                headers.push(header);
-                            }
-                        }
-                    }
-                }
-                headers
-            }
-        } else {
-            Vec::new()
-        };
+        let prev_headers = self
+            .storage
+            .blocks()
+            .headers_back_from(height, 2016)
+            .unwrap_or_default();
 
         let mempool_manager = self.mempool_manager.as_ref().ok_or_else(|| {
             ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())

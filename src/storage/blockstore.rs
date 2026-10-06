@@ -816,6 +816,40 @@ impl BlockStore {
         std::sync::Arc::new(move |height| store.median_time_at_height(height).ok().flatten())
     }
 
+    /// Compact bits and timestamp of the header at `height`, for required-work checks.
+    pub fn difficulty_ancestor_lookup(
+        &self,
+    ) -> blvm_consensus::block::DifficultyAncestor {
+        let store = self.clone();
+        std::sync::Arc::new(move |height| {
+            store
+                .get_header_at_height(height)
+                .ok()
+                .flatten()
+                .map(|header| (header.bits, header.timestamp))
+        })
+    }
+
+    /// Oldest-to-newest headers ending at `end_height`, at most `count` blocks.
+    ///
+    /// Stops at the first missing header so the slice stays a contiguous suffix
+    /// of the chain. Callers that compute required work index it by height.
+    pub fn headers_back_from(&self, end_height: u64, count: usize) -> Result<Vec<BlockHeader>> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let start = end_height.saturating_sub(count as u64 - 1);
+        let mut rev = Vec::with_capacity(count.min((end_height - start) as usize + 1));
+        for height in (start..=end_height).rev() {
+            match self.get_header_at_height(height)? {
+                Some(header) => rev.push(header),
+                None => break,
+            }
+        }
+        rev.reverse();
+        Ok(rev)
+    }
+
     /// Headers for BIP113 MTP immediately before `before_height` (oldest→newest, ≤11).
     ///
     /// Prefer this over [`get_recent_headers`] when validating at a height far below tip.

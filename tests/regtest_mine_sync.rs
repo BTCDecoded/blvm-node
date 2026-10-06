@@ -118,7 +118,7 @@ async fn regtest_mine_blocks_then_sync_follower() -> anyhow::Result<()> {
 
         let mut prev_headers = storage_m
             .blocks()
-            .get_recent_headers(2016)
+            .headers_back_from(connect_height.saturating_sub(1), 2016)
             .unwrap_or_default();
         if prev_headers.len() < 2 {
             prev_headers = vec![prev_header.clone(), prev_header.clone()];

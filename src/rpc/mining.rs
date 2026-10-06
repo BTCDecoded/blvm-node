@@ -303,7 +303,7 @@ impl MiningRpc {
         let prev_header = self
             .get_tip_header()?
             .ok_or_else(|| RpcError::internal_error("No chain tip"))?;
-        let prev_headers = self.get_headers_for_difficulty()?;
+        let prev_headers = self.headers_for_work(template_block_height.saturating_sub(1))?;
 
         // 2. Get mempool transactions
         let mempool_txs: Vec<Transaction> = self.get_mempool_transactions()?;
@@ -473,51 +473,15 @@ impl MiningRpc {
         }
     }
 
-    fn get_headers_for_difficulty(&self) -> RpcResult<Vec<BlockHeader>> {
-        if let Some(ref storage) = self.storage {
-            // Get last 2016 headers for difficulty adjustment
-            // Consensus layer requires at least 2 headers for difficulty adjustment
-            // Try to get recent headers (up to 2016)
-            if let Ok(recent_headers) = storage.blocks().get_recent_headers(2016) {
-                if recent_headers.len() >= 2 {
-                    Ok(recent_headers)
-                } else {
-                    // If we have fewer than 2 headers, try to get headers by height
-                    let mut headers = Vec::new();
-                    if let Ok(Some(height)) = storage.chain().get_height() {
-                        // Get headers from height 0 up to current height (oldest first for difficulty adjustment)
-                        for h in 0..=height.min(2015) {
-                            if let Ok(Some(hash)) = storage.blocks().get_hash_by_height(h) {
-                                if let Ok(Some(header)) = storage.blocks().get_header(&hash) {
-                                    headers.push(header);
-                                }
-                            }
-                        }
-                    }
-                    if headers.len() >= 2 {
-                        // Headers are already in oldest-to-newest order (height 0, 1, 2, ...)
-                        Ok(headers)
-                    } else if headers.len() == 1 {
-                        // If we only have 1 header, we can't do difficulty adjustment properly
-                        // Return empty to let the consensus layer handle it
-                        Ok(vec![])
-                    } else {
-                        Ok(vec![])
-                    }
-                }
-            } else if let Some(tip) = storage
-                .chain()
-                .get_tip_header()
-                .map_err(|e| RpcError::internal_error(format!("Failed to get tip: {e}")))?
-            {
-                // Fallback: duplicate tip to satisfy 2-header requirement
-                Ok(vec![tip.clone(), tip])
-            } else {
-                Ok(vec![])
-            }
-        } else {
-            Ok(vec![])
-        }
+    /// Oldest-to-newest headers ending at `parent_height` (up to one difficulty period).
+    fn headers_for_work(&self, parent_height: u64) -> RpcResult<Vec<BlockHeader>> {
+        let Some(ref storage) = self.storage else {
+            return Ok(vec![]);
+        };
+        storage
+            .blocks()
+            .headers_back_from(parent_height, 2016)
+            .map_err(|e| RpcError::internal_error(format!("Failed to load difficulty headers: {e}")))
     }
 
     fn get_mempool_transactions(&self) -> RpcResult<Vec<Transaction>> {
@@ -909,7 +873,7 @@ impl MiningRpc {
 
             let mut prev_headers = storage
                 .blocks()
-                .get_recent_headers(2016)
+                .headers_back_from(connect_height.saturating_sub(1), 2016)
                 .unwrap_or_default();
             if prev_headers.len() < 2 {
                 prev_headers = vec![prev_header.clone(), prev_header.clone()];

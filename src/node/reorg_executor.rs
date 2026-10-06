@@ -200,6 +200,7 @@ pub fn try_activate_heavier_fork(
     };
 
     let mtp_store = blockstore.clone();
+    let difficulty_store = blockstore.clone();
     let mut connect_context =
         move |_height: u64,
               recent_headers: Option<&[blvm_consensus::types::BlockHeader]>,
@@ -212,6 +213,7 @@ pub fn try_activate_heavier_fork(
                 net,
             );
             ctx.sequence_prev_mtp = Some(mtp_store.sequence_prev_mtp_lookup());
+            ctx.difficulty_ancestor = Some(difficulty_store.difficulty_ancestor_lookup());
             ctx
         };
 
