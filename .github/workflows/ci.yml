@@ -275,6 +275,54 @@ jobs:
       - name: Strip [patch.crates-io] for crates.io-only CI
         uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
 
+      - name: Early disk cleanup (free cargo caches and sibling run dirs)
+        run: |
+          echo "=== Pre-test disk status ==="
+          df -h / || true
+          df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true
+          # Show /mnt/data if distinct volume (common self-hosted runner layout)
+          df -h /mnt/data 2>/dev/null || true
+
+          # RUNNER_TEMP is the per-runner-process temp used as CARGO_HOME by this workflow.
+          # Clean stale cargo registry/git before the heavy test build to avoid ENOSPC.
+          CARGO_TEMP="${RUNNER_TEMP}/cargo"
+          if [ -d "$CARGO_TEMP" ]; then
+            echo "=== Cleaning stale cargo registry/git in $CARGO_TEMP ==="
+            # Remove registry src cache (large unpacked crates) — will be re-fetched as needed
+            rm -rf "$CARGO_TEMP/registry/src" 2>/dev/null || true
+            # Remove old git checkouts (can grow unbounded across runs)
+            rm -rf "$CARGO_TEMP/git/checkouts" 2>/dev/null || true
+            # Prune registry cache entries not accessed in last 7 days
+            find "$CARGO_TEMP/registry/cache" -type f -atime +7 -delete 2>/dev/null || true
+          fi
+
+          # Clean sibling run dirs under BLVM_RUNNER_DATA_ROOT (same pattern as Setup and late cleanup).
+          BUILD_ROOT="${BLVM_RUNNER_DATA_ROOT}"
+          RUN_ID="${{ github.run_id }}"
+          if [ -d "$BUILD_ROOT" ]; then
+            echo "=== Purging sibling run dirs under $BUILD_ROOT (keeping $RUN_ID only) ==="
+            find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
+              -not -name "$RUN_ID" \
+              -exec rm -rf {} + 2>/dev/null || true
+          fi
+
+          # Clean runner-cache target dirs if they exist and are large
+          for CACHE_TARGET in "${{ github.workspace }}/.build/runner-cache/target" "/tmp/runner-cache/target"; do
+            if [ -d "$CACHE_TARGET" ]; then
+              SIZE=$(du -sb "$CACHE_TARGET" 2>/dev/null | cut -f1 || echo 0)
+              # If over 10GB, prune stale entries older than 60 minutes
+              if [ "$SIZE" -gt $((10 * 1024 * 1024 * 1024)) ]; then
+                echo "=== $CACHE_TARGET >10GB ($SIZE bytes) — pruning entries >60min old ==="
+                find "$CACHE_TARGET" -mindepth 1 -maxdepth 1 -type d -mmin +60 -exec rm -rf {} + 2>/dev/null || true
+              fi
+            fi
+          done
+
+          echo "=== Post-cleanup disk status ==="
+          df -h / || true
+          df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true
+          df -h /mnt/data 2>/dev/null || true
+
       - name: Clean leftover path overrides
         run: |
           if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
@@ -347,10 +395,25 @@ jobs:
       - name: Dump disk usage on failure
         if: failure()
         run: |
-          echo "=== df -h ==="
+          echo "=== df -h (all relevant volumes) ==="
           df -h /
+          df -h /mnt/data 2>/dev/null || true
+          df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true
+          df -h "${CARGO_HOME:-$HOME/.cargo}" 2>/dev/null || true
           echo ""
-          echo "=== Top 10 largest directories ==="
+          echo "=== Key paths ==="
+          echo "RUNNER_TEMP=${RUNNER_TEMP:-<unset>}"
+          echo "CARGO_HOME=${CARGO_HOME:-<unset>}"
+          echo "BLVM_RUNNER_DATA_ROOT=${BLVM_RUNNER_DATA_ROOT:-<unset>}"
+          echo "BLVM_BUILD_TARGET=${BLVM_BUILD_TARGET:-<unset>}"
+          echo ""
+          echo "=== Size of key directories ==="
+          du -sh "${RUNNER_TEMP}/cargo" 2>/dev/null || echo "RUNNER_TEMP/cargo: (not found)"
+          du -sh "${CARGO_HOME:-$HOME/.cargo}" 2>/dev/null || echo "CARGO_HOME: (not found)"
+          du -sh "${BLVM_RUNNER_DATA_ROOT}" 2>/dev/null || echo "BLVM_RUNNER_DATA_ROOT: (not found)"
+          du -sh "${BLVM_BUILD_TARGET}" 2>/dev/null || echo "BLVM_BUILD_TARGET: (not found)"
+          echo ""
+          echo "=== Top 10 largest directories under / ==="
           du -x --max-depth=4 / 2>/dev/null \
             | sort -rh \
             | grep -v -e '^[0-9]*\s*/proc' -e '^[0-9]*\s*/sys' -e '^[0-9]*\s*/dev' \
@@ -789,6 +852,52 @@ jobs:
       - name: Strip [patch.crates-io] for crates.io-only CI
         uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
 
+      - name: Early disk cleanup (free cargo caches and sibling run dirs)
+        run: |
+          echo "=== Pre-fuzz disk status ==="
+          df -h / || true
+          df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true
+          df -h /mnt/data 2>/dev/null || true
+
+          # RUNNER_TEMP is the per-runner-process temp used as CARGO_HOME by this workflow.
+          # Clean stale cargo registry/git before the heavy fuzz build to avoid ENOSPC.
+          CARGO_TEMP="${RUNNER_TEMP}/cargo"
+          if [ -d "$CARGO_TEMP" ]; then
+            echo "=== Cleaning stale cargo registry/git in $CARGO_TEMP ==="
+            rm -rf "$CARGO_TEMP/registry/src" 2>/dev/null || true
+            rm -rf "$CARGO_TEMP/git/checkouts" 2>/dev/null || true
+            find "$CARGO_TEMP/registry/cache" -type f -atime +7 -delete 2>/dev/null || true
+          fi
+
+          # Clean sibling run dirs under BLVM_RUNNER_DATA_ROOT (same pattern as Setup/Test).
+          BUILD_ROOT="${BLVM_RUNNER_DATA_ROOT}"
+          RUN_ID="${{ github.run_id }}"
+          if [ -d "$BUILD_ROOT" ]; then
+            echo "=== Purging sibling run dirs under $BUILD_ROOT (keeping $RUN_ID only) ==="
+            find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
+              -not -name "$RUN_ID" \
+              -exec rm -rf {} + 2>/dev/null || true
+          fi
+
+          # Clean runner-cache target dirs if bloated
+          for CACHE_TARGET in "${{ github.workspace }}/.build/runner-cache/target" "/tmp/runner-cache/target"; do
+            if [ -d "$CACHE_TARGET" ]; then
+              SIZE=$(du -sb "$CACHE_TARGET" 2>/dev/null | cut -f1 || echo 0)
+              if [ "$SIZE" -gt $((10 * 1024 * 1024 * 1024)) ]; then
+                echo "=== $CACHE_TARGET >10GB ($SIZE bytes) — pruning entries >60min old ==="
+                find "$CACHE_TARGET" -mindepth 1 -maxdepth 1 -type d -mmin +60 -exec rm -rf {} + 2>/dev/null || true
+              fi
+            fi
+          done
+
+          # Clean stale fuzz build artifacts from prior runs
+          rm -rf fuzz/target 2>/dev/null || true
+
+          echo "=== Post-cleanup disk status ==="
+          df -h / || true
+          df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true
+          df -h /mnt/data 2>/dev/null || true
+
       - name: Cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
@@ -848,9 +957,6 @@ jobs:
         run: |
           chmod +x init_corpus.sh
           ./init_corpus.sh
-
-      - name: Clean stale fuzz build artifacts
-        run: rm -rf fuzz/target
 
       # cargo-fuzz injects its own sancov + ASAN flags; clear the global RUSTFLAGS.
       - name: Build fuzz binaries
