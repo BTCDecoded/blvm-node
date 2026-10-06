@@ -202,9 +202,10 @@ impl NetworkRpc {
         debug!("RPC: ping");
 
         if let Some(ref network) = self.network_manager {
-            network.ping_all_peers().await.map_err(|e| {
-                RpcError::internal_error(format!("Failed to ping peers: {e}"))
-            })?;
+            network
+                .ping_all_peers()
+                .await
+                .map_err(|e| RpcError::internal_error(format!("Failed to ping peers: {e}")))?;
         }
 
         Ok(Value::Null)

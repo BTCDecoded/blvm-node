@@ -91,7 +91,10 @@ async fn test_ping_rpc_without_network_manager_returns_null() {
     // When network_manager is None, ping should gracefully return null (no-op)
     let rpc = NetworkRpc::new();
     let result = rpc.ping(&json!([])).await;
-    assert!(result.is_ok(), "ping RPC should succeed without network manager");
+    assert!(
+        result.is_ok(),
+        "ping RPC should succeed without network manager"
+    );
     assert!(
         result.unwrap().is_null(),
         "ping RPC should return null without network manager"
