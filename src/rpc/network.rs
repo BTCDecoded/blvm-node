@@ -188,13 +188,24 @@ impl NetworkRpc {
 
     /// Ping connected peers
     ///
+    /// Sends a P2P ping message to all connected peers. The ping message includes
+    /// a nonce that peers must echo back in a pong message.
+    ///
+    /// This method handles all transport types (TCP, Quinn, Iroh) via
+    /// `NetworkManager::ping_all_peers()`. Each transport sends the same
+    /// Bitcoin protocol ping message.
+    ///
     /// Params: []
+    /// Returns: null (Bitcoin Core compatible)
     pub async fn ping(&self, _params: &Value) -> RpcResult<Value> {
         #[cfg(debug_assertions)]
         debug!("RPC: ping");
 
-        // Ping RPC just sets a flag, actual ping happens in network thread
-        // Network manager should handle ping in background task if needed
+        if let Some(ref network) = self.network_manager {
+            network.ping_all_peers().await.map_err(|e| {
+                RpcError::internal_error(format!("Failed to ping peers: {e}"))
+            })?;
+        }
 
         Ok(Value::Null)
     }
