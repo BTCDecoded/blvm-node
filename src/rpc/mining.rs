@@ -481,7 +481,9 @@ impl MiningRpc {
         storage
             .blocks()
             .headers_back_from(parent_height, 2016)
-            .map_err(|e| RpcError::internal_error(format!("Failed to load difficulty headers: {e}")))
+            .map_err(|e| {
+                RpcError::internal_error(format!("Failed to load difficulty headers: {e}"))
+            })
     }
 
     fn get_mempool_transactions(&self) -> RpcResult<Vec<Transaction>> {

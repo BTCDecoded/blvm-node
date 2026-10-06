@@ -817,9 +817,7 @@ impl BlockStore {
     }
 
     /// Compact bits and timestamp of the header at `height`, for required-work checks.
-    pub fn difficulty_ancestor_lookup(
-        &self,
-    ) -> blvm_consensus::block::DifficultyAncestor {
+    pub fn difficulty_ancestor_lookup(&self) -> blvm_consensus::block::DifficultyAncestor {
         let store = self.clone();
         std::sync::Arc::new(move |height| {
             store
