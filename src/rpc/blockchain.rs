@@ -787,7 +787,7 @@ impl BlockchainRpc {
     ///
     /// Bitcoin Core checklevel semantics:
     /// - Level 0: Check block exists
-    /// - Level 1: Check block can be deserialized  
+    /// - Level 1: Check block can be deserialized
     /// - Level 2: Check merkle root
     /// - Level 3: Check block header linkage (prev_block_hash)
     /// - Level 4: Full UTXO validation (requires rewinding UTXO set with undo logs)
