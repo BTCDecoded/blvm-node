@@ -941,20 +941,21 @@ impl BlockchainRpc {
                                     let protocol_version = engine_arc.get_protocol_version();
 
                                     // Load witnesses for this block
-                                    let witnesses = match crate::node::block_processor::load_witnesses_for_block(
-                                        blockstore.as_ref(),
-                                        &block,
-                                        height,
-                                        protocol_version,
-                                    ) {
-                                        Ok(w) => w,
-                                        Err(e) => {
-                                            errors.push(format!(
+                                    let witnesses =
+                                        match crate::node::block_processor::load_witnesses_for_block(
+                                            blockstore.as_ref(),
+                                            &block,
+                                            height,
+                                            protocol_version,
+                                        ) {
+                                            Ok(w) => w,
+                                            Err(e) => {
+                                                errors.push(format!(
                                                 "Block at height {height} witness load error: {e}"
                                             ));
-                                            break;
-                                        }
-                                    };
+                                                break;
+                                            }
+                                        };
 
                                     // Get MTP headers at this block's height (not tip-relative)
                                     let mtp_headers = blockstore
@@ -1005,7 +1006,10 @@ impl BlockchainRpc {
                                         Ok((blvm_protocol::ValidationResult::Valid, new_utxo)) => {
                                             *utxo_set = new_utxo;
                                         }
-                                        Ok((blvm_protocol::ValidationResult::Invalid(reason), _)) => {
+                                        Ok((
+                                            blvm_protocol::ValidationResult::Invalid(reason),
+                                            _,
+                                        )) => {
                                             errors.push(format!(
                                                 "Block at height {height} invalid: {reason}"
                                             ));

@@ -53,7 +53,7 @@ async fn test_get_chain_name_without_protocol() {
 
 /// Test that verifychain returns true on a chain with non-coinbase spends.
 /// This is the key regression test for GitHub issue #10.
-/// 
+///
 /// Prior to the fix, verifychain would attempt full UTXO validation at all check levels,
 /// which would fail on blocks with spends because those blocks were already applied to
 /// the tip UTXO set.
@@ -307,7 +307,10 @@ async fn test_verify_chain_level4_with_undo_logs() {
     storage.chain().initialize(&genesis_header).unwrap();
 
     // Store genesis header for MTP
-    storage.blocks().store_recent_header(0, &genesis_header).unwrap();
+    storage
+        .blocks()
+        .store_recent_header(0, &genesis_header)
+        .unwrap();
 
     // Store empty witnesses for genesis block (required for regtest where segwit is active)
     let genesis_witnesses: Vec<Vec<blvm_protocol::segwit::Witness>> = genesis_block
@@ -315,7 +318,10 @@ async fn test_verify_chain_level4_with_undo_logs() {
         .iter()
         .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
         .collect();
-    storage.blocks().store_witness(&genesis_hash, &genesis_witnesses).unwrap();
+    storage
+        .blocks()
+        .store_witness(&genesis_hash, &genesis_witnesses)
+        .unwrap();
 
     // Add the coinbase UTXO to the UTXO set
     let coinbase_txid = blvm_protocol::block::calculate_tx_id(&genesis_coinbase);
@@ -342,7 +348,10 @@ async fn test_verify_chain_level4_with_undo_logs() {
             new_utxo: Some(StdArc::new(genesis_coinbase_utxo.clone())),
         }],
     };
-    storage.blocks().store_undo_log(&genesis_hash, &genesis_undo).unwrap();
+    storage
+        .blocks()
+        .store_undo_log(&genesis_hash, &genesis_undo)
+        .unwrap();
 
     // Create block 1 with just a coinbase (no spends due to coinbase maturity)
     let block1_coinbase = blvm_protocol::Transaction {
@@ -382,7 +391,10 @@ async fn test_verify_chain_level4_with_undo_logs() {
     let block1_hash = storage.blocks().get_block_hash(&block1);
     storage.blocks().store_block(&block1).unwrap();
     storage.blocks().store_height(1, &block1_hash).unwrap();
-    storage.blocks().store_recent_header(1, &block1_header).unwrap();
+    storage
+        .blocks()
+        .store_recent_header(1, &block1_header)
+        .unwrap();
     storage
         .chain()
         .update_tip(&block1_hash, &block1_header, 1)
@@ -394,7 +406,10 @@ async fn test_verify_chain_level4_with_undo_logs() {
         .iter()
         .map(|tx| tx.inputs.iter().map(|_| Vec::new()).collect())
         .collect();
-    storage.blocks().store_witness(&block1_hash, &block1_witnesses).unwrap();
+    storage
+        .blocks()
+        .store_witness(&block1_hash, &block1_witnesses)
+        .unwrap();
 
     // Add block1 coinbase output to UTXO set
     let block1_coinbase_txid = blvm_protocol::block::calculate_tx_id(&block1_coinbase);
@@ -415,15 +430,16 @@ async fn test_verify_chain_level4_with_undo_logs() {
 
     // Create undo log for block 1 (only coinbase output created)
     let block1_undo = BlockUndoLog {
-        entries: vec![
-            UndoEntry {
-                outpoint: block1_coinbase_outpoint,
-                previous_utxo: None,
-                new_utxo: Some(StdArc::new(block1_coinbase_utxo)),
-            },
-        ],
+        entries: vec![UndoEntry {
+            outpoint: block1_coinbase_outpoint,
+            previous_utxo: None,
+            new_utxo: Some(StdArc::new(block1_coinbase_utxo)),
+        }],
     };
-    storage.blocks().store_undo_log(&block1_hash, &block1_undo).unwrap();
+    storage
+        .blocks()
+        .store_undo_log(&block1_hash, &block1_undo)
+        .unwrap();
 
     // Test verifychain at level 4
     let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
