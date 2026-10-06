@@ -837,22 +837,20 @@ impl BlockchainRpc {
                         .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {}", e))?;
 
                     // Rewind UTXO set from tip down to start_height using undo logs.
-                    // Must apply disconnect semantics matching blvm_consensus::reorganization:
-                    // 1. First remove created outputs (new_utxo)
-                    // 2. Then restore spent inputs (previous_utxo)
+                    // Apply disconnect semantics matching blvm_consensus::reorganization::disconnect_block:
+                    // One pass per entry: remove new_utxo then restore previous_utxo.
+                    // This handles same-block create→spend correctly (restore wins over remove).
                     let mut rewind_failed = false;
                     for height in (start_height..=tip_height).rev() {
                         if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(height) {
                             match blockstore.get_undo_log(&block_hash) {
                                 Ok(Some(undo_log)) => {
-                                    // Phase 1: Remove created outputs (reverse the creation)
                                     for entry in undo_log.entries.iter() {
+                                        // Remove created output (if this entry created one)
                                         if entry.new_utxo.is_some() {
                                             utxo_set.remove(&entry.outpoint);
                                         }
-                                    }
-                                    // Phase 2: Restore spent inputs (reverse the spend)
-                                    for entry in undo_log.entries.iter() {
+                                        // Restore spent input (if this entry spent one)
                                         if let Some(ref prev_utxo) = entry.previous_utxo {
                                             utxo_set.insert(entry.outpoint, prev_utxo.clone());
                                         }
