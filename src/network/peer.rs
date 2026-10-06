@@ -77,6 +77,52 @@ pub struct Peer {
 }
 
 impl Peer {
+    /// Create a minimal peer instance for testing purposes.
+    ///
+    /// This constructor creates a peer with mock channels that discard all messages.
+    /// The peer is marked as connected but does not perform actual network I/O.
+    /// Use this only in tests to verify peer state changes (e.g., ping nonce).
+    #[doc(hidden)]
+    pub fn new_for_testing(addr: SocketAddr) -> Self {
+        let (message_tx, _) = mpsc::unbounded_channel();
+        let (send_tx, _) = mpsc::unbounded_channel();
+        let transport_addr = super::transport::TransportAddr::Tcp(addr);
+        let now = current_timestamp();
+
+        Self {
+            addr,
+            transport_addr,
+            message_tx,
+            send_tx,
+            connected: true,
+            conntime: now,
+            last_send: now,
+            last_recv: now,
+            bytes_sent: 0,
+            bytes_recv: 0,
+            quality_score: 0.5,
+            successful_exchanges: 0,
+            failed_exchanges: 0,
+            avg_response_time_ms: 0.0,
+            last_block_received: None,
+            last_tx_received: None,
+            services: 0,
+            version: 70015,
+            user_agent: Some("/test-peer/".to_string()),
+            start_height: 0,
+            is_outbound: false,
+            best_block_hash: None,
+            best_block_height: None,
+            chainwork: None,
+            permissions: 0,
+            is_manual: false,
+            last_block_announcement: None,
+            pending_ping_nonce: None,
+            ping_sent_time: None,
+            ping_timeout_seconds: 1200,
+        }
+    }
+
     /// Create a new peer connection from a TransportConnection
     ///
     /// This is the preferred method as it supports all transport types (TCP, Quinn, Iroh).
@@ -579,6 +625,11 @@ impl Peer {
             }
             _ => false, // Nonce mismatch or no pending ping
         }
+    }
+
+    /// Get the pending ping nonce (if any)
+    pub fn pending_ping_nonce(&self) -> Option<u64> {
+        self.pending_ping_nonce
     }
 
     /// Check if ping has timed out

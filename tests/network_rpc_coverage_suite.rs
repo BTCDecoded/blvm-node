@@ -42,6 +42,66 @@ async fn test_ping_and_dos_protection_smoke() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_ping_rpc_sets_peer_nonce() {
+    use blvm_node::network::peer::Peer;
+    use blvm_node::network::transport::TransportAddr;
+
+    let addr: SocketAddr = "127.0.0.1:18411".parse().unwrap();
+    let network_manager = Arc::new(NetworkManager::new(addr));
+    let rpc = NetworkRpc::with_dependencies(network_manager.clone());
+
+    // Add a test peer to the peer manager
+    let peer_addr: SocketAddr = "192.168.1.100:8333".parse().unwrap();
+    let test_peer = Peer::new_for_testing(peer_addr);
+    let transport_addr = TransportAddr::Tcp(peer_addr);
+
+    {
+        let mut pm = network_manager.peer_manager().await;
+        pm.add_peer(transport_addr.clone(), test_peer).unwrap();
+    }
+
+    // Verify peer has no pending ping nonce initially
+    {
+        let pm = network_manager.peer_manager().await;
+        let peer = pm.get_peer(&transport_addr).unwrap();
+        assert!(
+            peer.pending_ping_nonce().is_none(),
+            "Peer should have no pending ping initially"
+        );
+    }
+
+    // Call ping RPC - this should call ping_all_peers() internally
+    let result = rpc.ping(&json!([])).await;
+    assert!(result.is_ok(), "ping RPC should succeed");
+    assert!(result.unwrap().is_null(), "ping RPC should return null");
+
+    // Verify peer now has a pending ping nonce
+    {
+        let pm = network_manager.peer_manager().await;
+        let peer = pm.get_peer(&transport_addr).unwrap();
+        assert!(
+            peer.pending_ping_nonce().is_some(),
+            "Peer should have pending ping nonce after ping RPC"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_ping_rpc_without_network_manager_returns_null() {
+    // When network_manager is None, ping should gracefully return null (no-op)
+    let rpc = NetworkRpc::new();
+    let result = rpc.ping(&json!([])).await;
+    assert!(
+        result.is_ok(),
+        "ping RPC should succeed without network manager"
+    );
+    assert!(
+        result.unwrap().is_null(),
+        "ping RPC should return null without network manager"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_list_banned_and_clear_banned() {
     let rpc = rpc_with_network();
     let banned = rpc.list_banned(&json!([])).await.unwrap();
