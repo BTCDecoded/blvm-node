@@ -1120,6 +1120,13 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          # Release pushes tags with REPO_ACCESS_TOKEN. checkout@v6 otherwise
+          # persists GITHUB_TOKEN via http.extraheader / includeIf credentials,
+          # which overrides a URL-embedded token. GITHUB_TOKEN cannot hold
+          # workflows:write, so tag pushes fail (GH013) when the release range
+          # modified .github/workflows/*. See docs.github.com Apps "Choosing
+          # permissions" (Workflows for .github/workflows) and actions/checkout#162.
+          persist-credentials: false
       
 
       - name: Strip [patch.crates-io] for crates.io-only CI
@@ -1542,9 +1549,23 @@ jobs:
             exit 1
           fi
 
+          # Drop any leftover Actions credentials so the URL token is what git sends.
+          git config --local --unset-all 'http.https://github.com/.extraheader' 2>/dev/null || true
+          git config --local --name-only --get-regexp '^includeIf\.gitdir:' 2>/dev/null | while read -r key; do
+            git config --local --unset-all "$key" 2>/dev/null || true
+          done || true
+
           git remote set-url origin "https://x-access-token:${REPO_ACCESS_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git tag -a "$VERSION_TAG" -m "Release ${VERSION_TAG}"
-          git -c credential.helper= push origin "$VERSION_TAG"
+          if ! git -c credential.helper= push origin "$VERSION_TAG" 2>/tmp/tag-push.err; then
+            cat /tmp/tag-push.err >&2
+            if grep -qiE 'workflows permission|workflow scope' /tmp/tag-push.err; then
+              echo "::error::Tag push rejected: authenticating credential lacks Workflows permission, and this release range modified .github/workflows/. REST POST /git/refs does not bypass this (same App permission). Tag manually as a human: git fetch origin && git tag -a ${VERSION_TAG} ${{ github.sha }} -m 'Release ${VERSION_TAG}' && git push origin ${VERSION_TAG}. If REPO_ACCESS_TOKEN is a GitHub App installation token, grant that App Workflows: Read and write (Contents alone is not enough)."
+            else
+              echo "::error::Failed to push release tag ${VERSION_TAG}"
+            fi
+            exit 1
+          fi
           echo "✅ Created and pushed tag ${VERSION_TAG}"
       
       - name: Create GitHub Release
