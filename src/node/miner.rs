@@ -1905,7 +1905,10 @@ mod tests {
         storage.chain().initialize(&genesis).unwrap();
         // Required-work checks read the parent header from the blockstore, not chain_info.
         let genesis_hash = storage.chain().get_tip_hash().unwrap().unwrap();
-        storage.blocks().store_header(&genesis_hash, &genesis).unwrap();
+        storage
+            .blocks()
+            .store_header(&genesis_hash, &genesis)
+            .unwrap();
         storage.blocks().store_height(0, &genesis_hash).unwrap();
 
         let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
