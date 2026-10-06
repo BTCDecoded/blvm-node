@@ -784,6 +784,16 @@ impl BlockchainRpc {
     /// Verify blockchain database
     ///
     /// Params: [checklevel (optional, default: 3), numblocks (optional, default: 288)]
+    ///
+    /// Bitcoin Core checklevel semantics:
+    /// - Level 0: Check block exists
+    /// - Level 1: Check block can be deserialized
+    /// - Level 2: Check merkle root
+    /// - Level 3: Check block header linkage (prev_block_hash)
+    /// - Level 4: Full UTXO validation (requires rewinding UTXO set with undo logs)
+    ///
+    /// Note: Level 4 requires undo logs to be stored during initial sync. Without undo logs,
+    /// level 4 validation will report an error and fall back to level 3 checks.
     pub async fn verify_chain(
         &self,
         checklevel: Option<u64>,
@@ -795,11 +805,6 @@ impl BlockchainRpc {
         );
 
         if let Some(ref storage) = self.storage {
-            let engine_arc = self
-                .protocol
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Protocol engine not initialised"))?;
-
             let check_level = checklevel.unwrap_or(3);
             let num_blocks = numblocks.unwrap_or(288);
 
@@ -812,66 +817,77 @@ impl BlockchainRpc {
             let start_height = tip_height.saturating_sub(num_blocks);
 
             let mut errors = Vec::new();
-            let mut utxo_set = storage
-                .utxos()
-                .get_all_utxos()
-                .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {}", e))?;
-
             let blockstore = storage.blocks();
 
-            let protocol_version = engine_arc.get_protocol_version();
+            // For level 4 (full UTXO validation), we need to rewind the UTXO set
+            // to the state before start_height, then reconnect blocks.
+            // This requires undo logs to be available.
+            #[cfg(feature = "production")]
+            let mut utxo_set_for_level4: Option<blvm_protocol::UtxoSet> = None;
+            #[cfg(feature = "production")]
+            let engine_arc_opt = self.protocol.as_ref();
+
+            #[cfg(feature = "production")]
+            if check_level >= 4 {
+                if let Some(_engine_arc) = engine_arc_opt {
+                    // Load the current tip UTXO set
+                    let mut utxo_set = storage
+                        .utxos()
+                        .get_all_utxos()
+                        .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {}", e))?;
+
+                    // Rewind UTXO set from tip down to start_height using undo logs.
+                    // Apply disconnect semantics matching blvm_consensus::reorganization::disconnect_block:
+                    // One pass per entry: remove new_utxo then restore previous_utxo.
+                    // This handles same-block create→spend correctly (restore wins over remove).
+                    let mut rewind_failed = false;
+                    for height in (start_height..=tip_height).rev() {
+                        if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(height) {
+                            match blockstore.get_undo_log(&block_hash) {
+                                Ok(Some(undo_log)) => {
+                                    for entry in undo_log.entries.iter() {
+                                        // Remove created output (if this entry created one)
+                                        if entry.new_utxo.is_some() {
+                                            utxo_set.remove(&entry.outpoint);
+                                        }
+                                        // Restore spent input (if this entry spent one)
+                                        if let Some(ref prev_utxo) = entry.previous_utxo {
+                                            utxo_set.insert(entry.outpoint, prev_utxo.clone());
+                                        }
+                                    }
+                                }
+                                Ok(None) => {
+                                    // No undo log available - cannot do level 4 validation
+                                    errors.push(format!(
+                                        "Level 4 validation requires undo logs; missing for height {height}"
+                                    ));
+                                    rewind_failed = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    errors.push(format!(
+                                        "Failed to load undo log for height {height}: {e}"
+                                    ));
+                                    rewind_failed = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if !rewind_failed {
+                        utxo_set_for_level4 = Some(utxo_set);
+                    }
+                } else {
+                    errors.push("Level 4 validation requires protocol engine".to_string());
+                }
+            }
 
             // Verify blocks from start_height to tip
             for height in start_height..=tip_height {
                 if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(height) {
                     if let Ok(Some(block)) = storage.blocks().get_block(&block_hash) {
-                        let witnesses_result = prepare_block_validation_context(
-                            blockstore.as_ref(),
-                            &block,
-                            height,
-                            protocol_version,
-                        );
-
-                        let witnesses = match witnesses_result {
-                            Ok((w, _)) => w,
-                            Err(e) => {
-                                errors.push(format!(
-                                    "Block at height {height} witness load error: {e}"
-                                ));
-                                if check_level >= 4 {
-                                    break;
-                                }
-                                continue;
-                            }
-                        };
-
-                        match validate_block_with_context(
-                            blockstore.as_ref(),
-                            engine_arc,
-                            &block,
-                            &witnesses,
-                            &mut utxo_set,
-                            height,
-                        ) {
-                            Ok(blvm_protocol::ValidationResult::Valid) => {}
-                            Ok(blvm_protocol::ValidationResult::Invalid(reason)) => {
-                                errors.push(format!("Block at height {height} invalid: {reason}"));
-                                if check_level >= 4 {
-                                    // Level 4: Stop on first error
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                errors.push(format!(
-                                    "Block at height {height} validation error: {e}"
-                                ));
-                                if check_level >= 4 {
-                                    break;
-                                }
-                            }
-                        }
-
-                        // Check level 3: Verify block header linkage
+                        // Check level 3+: Verify block header linkage
                         if check_level >= 3 && height > 0 {
                             if let Ok(Some(prev_hash)) =
                                 storage.blocks().get_hash_by_height(height - 1)
@@ -890,7 +906,7 @@ impl BlockchainRpc {
                             }
                         }
 
-                        // Check level 2: Verify merkle root
+                        // Check level 2+: Verify merkle root
                         if check_level >= 2 {
                             use blvm_protocol::mining::{
                                 calculate_merkle_root, calculate_merkle_root_from_tx_ids,
@@ -909,6 +925,100 @@ impl BlockchainRpc {
                                     ));
                                     if check_level >= 4 {
                                         break;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Check level 4: Full UTXO validation (reconnect block)
+                        // Uses per-block height MTP (not tip-relative) for proper replay
+                        #[cfg(feature = "production")]
+                        if check_level >= 4 {
+                            if let Some(ref mut utxo_set) = utxo_set_for_level4 {
+                                if let Some(engine_arc) = engine_arc_opt {
+                                    let protocol_version = engine_arc.get_protocol_version();
+
+                                    // Load witnesses for this block
+                                    let witnesses =
+                                        match crate::node::block_processor::load_witnesses_for_block(
+                                            blockstore.as_ref(),
+                                            &block,
+                                            height,
+                                            protocol_version,
+                                        ) {
+                                            Ok(w) => w,
+                                            Err(e) => {
+                                                errors.push(format!(
+                                                "Block at height {height} witness load error: {e}"
+                                            ));
+                                                break;
+                                            }
+                                        };
+
+                                    // Get MTP headers at this block's height (not tip-relative)
+                                    let mtp_headers = blockstore
+                                        .headers_before_height_for_mtp(height)
+                                        .ok()
+                                        .filter(|h| !h.is_empty());
+
+                                    let median_time_past = mtp_headers
+                                        .as_ref()
+                                        .map(|h| blvm_protocol::bip113::get_median_time_past(h))
+                                        .unwrap_or(0);
+
+                                    let network_time = crate::utils::current_timestamp();
+
+                                    // Create validation context with correct per-height MTP
+                                    let mut context = match blvm_protocol::validation::ProtocolValidationContext::new(
+                                        protocol_version,
+                                        height,
+                                    ) {
+                                        Ok(c) => c,
+                                        Err(e) => {
+                                            errors.push(format!(
+                                                "Block at height {height} context error: {e}"
+                                            ));
+                                            break;
+                                        }
+                                    };
+                                    context.context_data.insert(
+                                        "median_time_past".to_string(),
+                                        median_time_past.to_string(),
+                                    );
+                                    context.context_data.insert(
+                                        "network_time".to_string(),
+                                        network_time.to_string(),
+                                    );
+
+                                    // Validate and connect block
+                                    let owned_utxo = std::mem::take(utxo_set);
+                                    match engine_arc.validate_and_connect_block_with_difficulty(
+                                        &block,
+                                        &witnesses,
+                                        &owned_utxo,
+                                        height,
+                                        mtp_headers.as_deref(),
+                                        &context,
+                                        Some(blockstore.difficulty_ancestor_lookup()),
+                                    ) {
+                                        Ok((blvm_protocol::ValidationResult::Valid, new_utxo)) => {
+                                            *utxo_set = new_utxo;
+                                        }
+                                        Ok((
+                                            blvm_protocol::ValidationResult::Invalid(reason),
+                                            _,
+                                        )) => {
+                                            errors.push(format!(
+                                                "Block at height {height} invalid: {reason}"
+                                            ));
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            errors.push(format!(
+                                                "Block at height {height} validation error: {e}"
+                                            ));
+                                            break;
+                                        }
                                     }
                                 }
                             }
