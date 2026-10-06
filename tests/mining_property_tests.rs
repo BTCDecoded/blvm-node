@@ -7,7 +7,7 @@ use blvm_node::rpc::mining::MiningRpc;
 use blvm_node::storage::Storage;
 use blvm_protocol::Transaction;
 use blvm_protocol::serialization::serialize_transaction;
-use blvm_protocol::types::{BlockHeader, OutPoint, TransactionInput, TransactionOutput};
+use blvm_protocol::types::{Block, BlockHeader, OutPoint, TransactionInput, TransactionOutput};
 use proptest::prelude::*;
 use proptest::test_runner::Config as ProptestConfig;
 use sha2::{Digest, Sha256};
@@ -15,6 +15,83 @@ use std::sync::Arc;
 use tempfile::TempDir;
 mod common;
 use common::*;
+
+/// Set up storage with a properly indexed chain at the given height.
+///
+/// Unlike just calling `chain().initialize()` and `chain().update_tip()`, this function
+/// also indexes blocks in the blockstore so that `block_count()` returns the correct value.
+/// The network is configured as regtest so CSV/segwit/taproot are active from genesis.
+fn setup_storage_for_height(
+    storage: &Storage,
+    height: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let genesis_header = BlockHeader {
+        version: 1,
+        prev_block_hash: [0u8; 32],
+        merkle_root: [0u8; 32],
+        timestamp: 1231006505,
+        bits: 0x0f00ffff,
+        nonce: 2083236893,
+    };
+
+    storage.chain().initialize(&genesis_header)?;
+
+    let genesis_block = Block {
+        header: genesis_header.clone(),
+        transactions: vec![Transaction {
+            version: 1,
+            inputs: blvm_protocol::tx_inputs![],
+            outputs: blvm_protocol::tx_outputs![],
+            lock_time: 0,
+        }]
+        .into_boxed_slice(),
+    };
+
+    let genesis_hash = storage.blocks().get_block_hash(&genesis_block);
+
+    storage.blocks().store_block(&genesis_block)?;
+    storage.blocks().store_height(0, &genesis_hash)?;
+    storage.blocks().store_recent_header(0, &genesis_header)?;
+
+    let mut prev_hash = genesis_hash;
+    let mut prev_timestamp = genesis_header.timestamp;
+
+    for h in 1..=height {
+        let block_header = BlockHeader {
+            version: 1,
+            prev_block_hash: prev_hash,
+            merkle_root: [h as u8; 32],
+            timestamp: prev_timestamp + 600,
+            bits: 0x0f00ffff,
+            nonce: 0,
+        };
+
+        let block = Block {
+            header: block_header.clone(),
+            transactions: vec![Transaction {
+                version: 1,
+                inputs: blvm_protocol::tx_inputs![],
+                outputs: blvm_protocol::tx_outputs![],
+                lock_time: 0,
+            }]
+            .into_boxed_slice(),
+        };
+
+        let block_hash = storage.blocks().get_block_hash(&block);
+
+        storage.blocks().store_block(&block)?;
+        storage.blocks().store_height(h, &block_hash)?;
+        storage.blocks().store_recent_header(h, &block_header)?;
+        storage.chain().update_tip(&block_hash, &block_header, h)?;
+
+        prev_hash = block_hash;
+        prev_timestamp = block_header.timestamp;
+    }
+
+    patch_storage_chain_network_regtest(storage)?;
+
+    Ok(())
+}
 
 // Strategy function for generating arbitrary Transaction (can't impl Arbitrary for re-exported type)
 fn transaction_strategy() -> BoxedStrategy<Transaction> {
@@ -148,6 +225,10 @@ proptest! {
 }
 
 /// Property: Template height matches input height
+///
+/// `get_block_template` uses `block_count()` to determine the next block's height.
+/// After indexing genesis, a chain at tip height N has N+1 blocks (0..=N), so the
+/// template for the next block reports height N+1.
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(10))] // Limit cases due to expensive setup
     #[test]
@@ -161,28 +242,8 @@ proptest! {
         let mempool = Arc::new(MempoolManager::new());
         let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
 
-        // Initialize chain state
-        let genesis_header = BlockHeader {
-            version: 1,
-            prev_block_hash: [0u8; 32],
-            merkle_root: [0u8; 32],
-            timestamp: 1231006505,
-            bits: 0x1d00ffff,
-            nonce: 2083236893,
-        };
-        storage.chain().initialize(&genesis_header).unwrap();
-
-        // Set height
-        let tip_hash = random_hash();
-        let tip_header = BlockHeader {
-            version: 1,
-            prev_block_hash: random_hash(),
-            merkle_root: random_hash(),
-            timestamp: 1231006505 + height * 600,
-            bits: 0x1d00ffff,
-            nonce: 0,
-        };
-        storage.chain().update_tip(&tip_hash, &tip_header, height).unwrap();
+        // Set up storage with blocks indexed up to `height`
+        setup_storage_for_height(&storage, height).unwrap();
 
         // Get template
         let params = serde_json::json!([]);
@@ -191,7 +252,9 @@ proptest! {
         if result.is_ok() {
             let template = result.unwrap();
             let template_height = template.get("height").unwrap().as_u64().unwrap();
-            prop_assert_eq!(template_height, height);
+            // Template height is the *next* block to mine: chain has blocks 0..=height,
+            // so the next block is at height+1.
+            prop_assert_eq!(template_height, height + 1);
         }
     }
 }
@@ -210,28 +273,8 @@ proptest! {
         let mempool = Arc::new(MempoolManager::new());
         let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
 
-        // Initialize chain state
-        let genesis_header = BlockHeader {
-            version: 1,
-            prev_block_hash: [0u8; 32],
-            merkle_root: [0u8; 32],
-            timestamp: 1231006505,
-            bits: 0x1d00ffff,
-            nonce: 2083236893,
-        };
-        storage.chain().initialize(&genesis_header).unwrap();
-
-        // Set height
-        let tip_hash = random_hash();
-        let tip_header = BlockHeader {
-            version: 1,
-            prev_block_hash: random_hash(),
-            merkle_root: random_hash(),
-            timestamp: 1231006505 + height * 600,
-            bits: 0x1d00ffff,
-            nonce: 0,
-        };
-        storage.chain().update_tip(&tip_hash, &tip_header, height).unwrap();
+        // Set up storage with blocks indexed up to `height`
+        setup_storage_for_height(&storage, height).unwrap();
 
         // Get template
         let params = serde_json::json!([]);
@@ -257,27 +300,8 @@ proptest! {
         let mempool = Arc::new(MempoolManager::new());
         let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
 
-        // Initialize chain state
-        let genesis_header = BlockHeader {
-            version: 1,
-            prev_block_hash: [0u8; 32],
-            merkle_root: [0u8; 32],
-            timestamp: 1231006505,
-            bits: 0x1d00ffff,
-            nonce: 2083236893,
-        };
-        storage.chain().initialize(&genesis_header).unwrap();
-
-        let tip_hash = random_hash();
-        let tip_header = BlockHeader {
-            version: 1,
-            prev_block_hash: random_hash(),
-            merkle_root: random_hash(),
-            timestamp: 1231006505 + height * 600,
-            bits: 0x1d00ffff,
-            nonce: 0,
-        };
-        storage.chain().update_tip(&tip_hash, &tip_header, height).unwrap();
+        // Set up storage with blocks indexed up to `height`
+        setup_storage_for_height(&storage, height).unwrap();
 
         let params = serde_json::json!([]);
         let result = rt.block_on(mining.get_block_template(&params));
@@ -305,27 +329,8 @@ proptest! {
         let mempool = Arc::new(MempoolManager::new());
         let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
 
-        // Initialize chain state
-        let genesis_header = BlockHeader {
-            version: 1,
-            prev_block_hash: [0u8; 32],
-            merkle_root: [0u8; 32],
-            timestamp: 1231006505,
-            bits: 0x1d00ffff,
-            nonce: 2083236893,
-        };
-        storage.chain().initialize(&genesis_header).unwrap();
-
-        let tip_hash = random_hash();
-        let tip_header = BlockHeader {
-            version: 1,
-            prev_block_hash: random_hash(),
-            merkle_root: random_hash(),
-            timestamp: 1231006505 + height * 600,
-            bits: 0x1d00ffff,
-            nonce: 0,
-        };
-        storage.chain().update_tip(&tip_hash, &tip_header, height).unwrap();
+        // Set up storage with blocks indexed up to `height`
+        setup_storage_for_height(&storage, height).unwrap();
 
         let params = serde_json::json!([]);
         let result = rt.block_on(mining.get_block_template(&params));
@@ -341,7 +346,10 @@ proptest! {
     }
 }
 
-/// Property: Rules array always contains at least "csv"
+/// Property: Rules array always contains at least "csv" (on regtest)
+///
+/// On regtest, CSV/segwit/taproot are active from genesis. This property verifies
+/// that the template correctly reports active rules at all heights.
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(10))] // Limit cases due to expensive setup
     #[test]
@@ -353,27 +361,8 @@ proptest! {
         let mempool = Arc::new(MempoolManager::new());
         let mining = MiningRpc::with_dependencies(storage.clone(), mempool);
 
-        // Initialize chain state
-        let genesis_header = BlockHeader {
-            version: 1,
-            prev_block_hash: [0u8; 32],
-            merkle_root: [0u8; 32],
-            timestamp: 1231006505,
-            bits: 0x1d00ffff,
-            nonce: 2083236893,
-        };
-        storage.chain().initialize(&genesis_header).unwrap();
-
-        let tip_hash = random_hash();
-        let tip_header = BlockHeader {
-            version: 1,
-            prev_block_hash: random_hash(),
-            merkle_root: random_hash(),
-            timestamp: 1231006505 + height * 600,
-            bits: 0x1d00ffff,
-            nonce: 0,
-        };
-        storage.chain().update_tip(&tip_hash, &tip_header, height).unwrap();
+        // Set up storage with blocks indexed up to `height` (configures regtest network)
+        setup_storage_for_height(&storage, height).unwrap();
 
         let params = serde_json::json!([]);
         let result = rt.block_on(mining.get_block_template(&params));
