@@ -451,6 +451,25 @@ impl ChainState {
         })
     }
 
+    /// Canonical tree name only when `ibd_utxo_canonical_tree` was stored.
+    ///
+    /// [`Self::get_ibd_utxo_canonical_tree`] defaults to `ibd_utxos` when the key
+    /// is absent. Resume must not treat that default as a Phase 3 snapshot:
+    /// stray `ibd_utxos` rows with an empty ckpt are not the export.
+    pub fn get_stored_ibd_utxo_canonical_tree(&self) -> Result<Option<String>> {
+        Ok(match self.chain_info.get(b"ibd_utxo_canonical_tree")? {
+            Some(data) if !data.is_empty() => {
+                let s = String::from_utf8_lossy(&data).into_owned();
+                if crate::storage::ibd_engine::is_ibd_utxo_tree_name(&s) {
+                    Some(s)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+    }
+
     /// Record which named tree holds the tip UTXO set after Phase 3 promote.
     pub fn set_ibd_utxo_canonical_tree(&self, name: &str) -> Result<()> {
         anyhow::ensure!(

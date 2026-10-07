@@ -8,7 +8,7 @@ use crate::storage::blockstore::BlockStore;
 use anyhow::Result;
 use blvm_protocol::features::FeatureRegistry;
 use blvm_protocol::types::ARC_BLOCK_CREATED;
-use blvm_protocol::{Block, Hash, ProtocolVersion, segwit::Witness};
+use blvm_protocol::{segwit::Witness, Block, Hash, ProtocolVersion};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -32,6 +32,7 @@ pub fn cached_feature_registry(protocol_version: ProtocolVersion) -> &'static Fe
     static TESTNET3: OnceLock<FeatureRegistry> = OnceLock::new();
     static REGTEST: OnceLock<FeatureRegistry> = OnceLock::new();
     static SIGNET: OnceLock<FeatureRegistry> = OnceLock::new();
+    static TESTNET4: OnceLock<FeatureRegistry> = OnceLock::new();
     match protocol_version {
         ProtocolVersion::BitcoinV1 => {
             MAINNET.get_or_init(|| FeatureRegistry::for_protocol(ProtocolVersion::BitcoinV1))
@@ -44,6 +45,9 @@ pub fn cached_feature_registry(protocol_version: ProtocolVersion) -> &'static Fe
         }
         ProtocolVersion::Signet => {
             SIGNET.get_or_init(|| FeatureRegistry::for_protocol(ProtocolVersion::Signet))
+        }
+        ProtocolVersion::Testnet4 => {
+            TESTNET4.get_or_init(|| FeatureRegistry::for_protocol(ProtocolVersion::Testnet4))
         }
     }
 }
@@ -368,7 +372,11 @@ pub fn incremental_ibd_prune_window(
         return 0;
     }
     let window = prune_window_size.max(min_blocks_to_keep);
-    if window == 0 { 0 } else { window }
+    if window == 0 {
+        0
+    } else {
+        window
+    }
 }
 
 /// Header-tip horizon for the validation flush. `0` means do not skip for prune.
@@ -1156,8 +1164,8 @@ mod tests {
     use blvm_protocol::{
         Block, BlockHeader, OutPoint, Transaction, TransactionInput, TransactionOutput,
     };
-    use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn temp_blockstore() -> BlockStore {
@@ -1752,20 +1760,18 @@ mod tests {
         let mut reorder_buffer = std::collections::BTreeMap::new();
         let already_dispatched = rustc_hash::FxHashSet::default();
         let mut log_miss = rustc_hash::FxHashSet::default();
-        assert!(
-            coordinator_inject_local_gap(
-                &blockstore,
-                ProtocolVersion::BitcoinV1,
-                500,
-                0,
-                499,
-                &mut reorder_buffer,
-                &already_dispatched,
-                &mut log_miss,
-                false,
-            )
-            .unwrap()
-        );
+        assert!(coordinator_inject_local_gap(
+            &blockstore,
+            ProtocolVersion::BitcoinV1,
+            500,
+            0,
+            499,
+            &mut reorder_buffer,
+            &already_dispatched,
+            &mut log_miss,
+            false,
+        )
+        .unwrap());
         assert!(reorder_buffer.contains_key(&500));
     }
 
@@ -2220,20 +2226,18 @@ mod tests {
         let mut reorder_buffer = std::collections::BTreeMap::new();
         let already_dispatched = rustc_hash::FxHashSet::default();
         let mut log_miss = rustc_hash::FxHashSet::default();
-        assert!(
-            coordinator_inject_local_gap(
-                &blockstore,
-                ProtocolVersion::BitcoinV1,
-                500,
-                400, // start-time confirmed — must not block inject at h=500
-                499,
-                &mut reorder_buffer,
-                &already_dispatched,
-                &mut log_miss,
-                false,
-            )
-            .unwrap()
-        );
+        assert!(coordinator_inject_local_gap(
+            &blockstore,
+            ProtocolVersion::BitcoinV1,
+            500,
+            400, // start-time confirmed — must not block inject at h=500
+            499,
+            &mut reorder_buffer,
+            &already_dispatched,
+            &mut log_miss,
+            false,
+        )
+        .unwrap());
         assert!(reorder_buffer.contains_key(&500));
     }
 
@@ -2269,20 +2273,18 @@ mod tests {
         let mut log_miss = rustc_hash::FxHashSet::default();
         // Reports success (in-pipeline) but must NOT put a block in the reorder buffer.
         // Do not assert on ARC_BLOCK_CREATED — that global is shared across parallel tests.
-        assert!(
-            coordinator_inject_local_gap(
-                &blockstore,
-                ProtocolVersion::BitcoinV1,
-                500,
-                0,
-                499,
-                &mut reorder_buffer,
-                &already_dispatched,
-                &mut log_miss,
-                true,
-            )
-            .unwrap()
-        );
+        assert!(coordinator_inject_local_gap(
+            &blockstore,
+            ProtocolVersion::BitcoinV1,
+            500,
+            0,
+            499,
+            &mut reorder_buffer,
+            &already_dispatched,
+            &mut log_miss,
+            true,
+        )
+        .unwrap());
         assert!(
             reorder_buffer.is_empty(),
             "already-dispatched height must not be re-loaded into reorder_buffer"
@@ -2330,20 +2332,18 @@ mod tests {
         already_dispatched.insert(500);
         already_dispatched.insert(501);
         let mut log_miss = rustc_hash::FxHashSet::default();
-        assert!(
-            coordinator_inject_local_gap(
-                &blockstore,
-                ProtocolVersion::BitcoinV1,
-                500,
-                0,
-                499,
-                &mut reorder_buffer,
-                &already_dispatched,
-                &mut log_miss,
-                true,
-            )
-            .unwrap()
-        );
+        assert!(coordinator_inject_local_gap(
+            &blockstore,
+            ProtocolVersion::BitcoinV1,
+            500,
+            0,
+            499,
+            &mut reorder_buffer,
+            &already_dispatched,
+            &mut log_miss,
+            true,
+        )
+        .unwrap());
         assert_eq!(
             reorder_buffer.len(),
             1,
@@ -2385,20 +2385,18 @@ mod tests {
         let mut already_dispatched = rustc_hash::FxHashSet::default();
         already_dispatched.insert(500);
         let mut log_miss = rustc_hash::FxHashSet::default();
-        assert!(
-            coordinator_inject_local_gap(
-                &blockstore,
-                ProtocolVersion::BitcoinV1,
-                500,
-                0,
-                499,
-                &mut reorder_buffer,
-                &already_dispatched,
-                &mut log_miss,
-                false, // tip not confirmed in pipeline
-            )
-            .unwrap()
-        );
+        assert!(coordinator_inject_local_gap(
+            &blockstore,
+            ProtocolVersion::BitcoinV1,
+            500,
+            0,
+            499,
+            &mut reorder_buffer,
+            &already_dispatched,
+            &mut log_miss,
+            false, // tip not confirmed in pipeline
+        )
+        .unwrap());
         assert!(
             reorder_buffer.contains_key(&500),
             "unconfirmed dispatched tip must reload from disk"

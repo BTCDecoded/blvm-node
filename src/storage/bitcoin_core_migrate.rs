@@ -3,26 +3,26 @@
 //! Used by `blvm migrate core` and the standalone migrate-bitcoin-core binary.
 
 use super::assumeutxo::AssumeUtxoManager;
-use super::bitcoin_core_blocks::{BitcoinCoreBlockReader, read_block_at_file_pos};
+use super::bitcoin_core_blocks::{read_block_at_file_pos, BitcoinCoreBlockReader};
 use super::bitcoin_core_format::{
-    BLOCK_HAVE_DATA, core_utxo_key_to_outpoint_key, get_key_prefix, parse_best_block_value,
-    parse_block_index_key, parse_coin, parse_core_coin, parse_disk_block_index, read_core_varint,
+    core_utxo_key_to_outpoint_key, get_key_prefix, parse_best_block_value, parse_block_index_key,
+    parse_coin, parse_core_coin, parse_disk_block_index, read_core_varint, BLOCK_HAVE_DATA,
 };
 use super::bitcoin_core_obfuscation::CoreDbObfuscation;
 use super::bitcoin_core_storage::BitcoinCoreStorage;
 use super::bitcoin_detection::{BitcoinCoreDetection, CoreDataNetwork};
 use super::blockstore::BlockStore;
 use super::chainstate::{ChainInfo, ChainParams, ChainState};
-use super::database::{DatabaseBackend, create_database, default_backend};
+use super::database::{create_database, default_backend, DatabaseBackend};
 use super::txindex::TxIndex;
 use super::utxostore::UtxoStore;
 use anyhow::{Context, Result};
-use blvm_muhash::{MuHash3072, serialize_coin_for_muhash};
+use blvm_muhash::{serialize_coin_for_muhash, MuHash3072};
 use blvm_protocol::{Hash, UTXO};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, warn};
 
@@ -947,6 +947,7 @@ impl Migrator {
             CoreDataNetwork::Testnet => "testnet",
             CoreDataNetwork::Regtest => "regtest",
             CoreDataNetwork::Signet => "signet",
+            CoreDataNetwork::Testnet4 => "testnet4",
         };
 
         let info = ChainInfo {
@@ -1521,8 +1522,8 @@ pub fn assess_core_block_coverage(
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockImportJob, CoreBlockCoverage, core_migrate_block_workers_effective,
-        prepare_block_import_jobs, sample_verify_heights,
+        core_migrate_block_workers_effective, prepare_block_import_jobs, sample_verify_heights,
+        BlockImportJob, CoreBlockCoverage,
     };
 
     #[test]

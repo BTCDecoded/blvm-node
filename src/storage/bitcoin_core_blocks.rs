@@ -27,6 +27,7 @@ const MAGIC_MAINNET: [u8; 4] = [0xF9, 0xBE, 0xB4, 0xD9];
 const MAGIC_TESTNET: [u8; 4] = [0x0B, 0x11, 0x09, 0x07];
 const MAGIC_REGTEST: [u8; 4] = [0xFA, 0xBF, 0xB5, 0xDA];
 const MAGIC_SIGNET: [u8; 4] = [0x0A, 0x03, 0xCF, 0x40];
+const MAGIC_TESTNET4: [u8; 4] = [0x1c, 0x16, 0x3f, 0x28];
 
 const OBFUSCATION_KEY_SIZE: usize = 8;
 
@@ -76,6 +77,7 @@ fn network_magic(network: CoreDataNetwork) -> &'static [u8; 4] {
         CoreDataNetwork::Testnet => &MAGIC_TESTNET,
         CoreDataNetwork::Regtest => &MAGIC_REGTEST,
         CoreDataNetwork::Signet => &MAGIC_SIGNET,
+        CoreDataNetwork::Testnet4 => &MAGIC_TESTNET4,
     }
 }
 
@@ -167,6 +169,7 @@ impl BitcoinCoreBlockReader {
                 CoreDataNetwork::Testnet => "testnet",
                 CoreDataNetwork::Regtest => "regtest",
                 CoreDataNetwork::Signet => "signet",
+                CoreDataNetwork::Testnet4 => "testnet4",
             };
             dir.join(format!("block_index_{network_str}.bin"))
         });
@@ -367,6 +370,7 @@ impl BitcoinCoreBlockReader {
             CoreDataNetwork::Testnet => "testnet",
             CoreDataNetwork::Regtest => "regtest",
             CoreDataNetwork::Signet => "signet",
+            CoreDataNetwork::Testnet4 => "testnet4",
         };
 
         if cache.network != network_str {
@@ -409,6 +413,7 @@ impl BitcoinCoreBlockReader {
             CoreDataNetwork::Testnet => "testnet",
             CoreDataNetwork::Regtest => "regtest",
             CoreDataNetwork::Signet => "signet",
+            CoreDataNetwork::Testnet4 => "testnet4",
         };
 
         let cache = BlockIndexCache {

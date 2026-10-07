@@ -696,6 +696,7 @@ pub fn default_assume_valid_height_for_network(network: &str) -> u64 {
     match network.to_lowercase().as_str() {
         "mainnet" | "bitcoinv1" => 912_683,  // Core mainnet default
         "testnet" | "testnet3" => 4_550_000, // Core testnet default
+        "testnet4" => 0,                     // full verification; no assume-valid skip
         "signet" => 267_665,                 // Core signet default
         _ => 0,                              // Regtest and unknown: validate all
     }

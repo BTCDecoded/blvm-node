@@ -22,6 +22,7 @@ pub enum CoreDataNetwork {
     Testnet,
     Regtest,
     Signet,
+    Testnet4,
 }
 
 impl CoreDataNetwork {
@@ -31,6 +32,7 @@ impl CoreDataNetwork {
             CoreDataNetwork::Testnet => "testnet3",
             CoreDataNetwork::Regtest => "regtest",
             CoreDataNetwork::Signet => "signet",
+            CoreDataNetwork::Testnet4 => "testnet4",
         }
     }
 }
@@ -44,6 +46,7 @@ impl std::str::FromStr for CoreDataNetwork {
             "testnet" => Ok(CoreDataNetwork::Testnet),
             "regtest" => Ok(CoreDataNetwork::Regtest),
             "signet" => Ok(CoreDataNetwork::Signet),
+            "testnet4" => Ok(CoreDataNetwork::Testnet4),
             _ => Err(format!("Unknown network: {s}")),
         }
     }
@@ -56,6 +59,7 @@ impl std::fmt::Display for CoreDataNetwork {
             CoreDataNetwork::Testnet => write!(f, "testnet"),
             CoreDataNetwork::Regtest => write!(f, "regtest"),
             CoreDataNetwork::Signet => write!(f, "signet"),
+            CoreDataNetwork::Testnet4 => write!(f, "testnet4"),
         }
     }
 }

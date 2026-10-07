@@ -39,7 +39,7 @@ pub mod utxostore;
 
 use crate::config::PruningConfig;
 use anyhow::{Context, Result};
-use database::{Database, DatabaseBackend, create_database, default_backend, fallback_backend};
+use database::{create_database, default_backend, fallback_backend, Database, DatabaseBackend};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -50,6 +50,26 @@ use bitcoin_core_storage::BitcoinCoreStorage;
 use bitcoin_detection::BitcoinCoreDetection;
 #[cfg(feature = "rocksdb")]
 use bitcoin_detection::CoreDataNetwork;
+
+/// Which named tree holds the durable UTXO snapshot for an engine resume.
+///
+/// Slot ckpt wins when it has rows. Otherwise the stored canonical tree, when
+/// it has rows and is a different name. An unset canonical key does not fall
+/// through to `ibd_utxos`: Phase 3 writes that key only after the full export.
+pub(crate) fn engine_resume_snapshot_name<'a>(
+    slot_ckpt: &'a str,
+    slot_has_rows: bool,
+    stored_canonical: Option<&'a str>,
+    canonical_has_rows: bool,
+) -> Option<&'a str> {
+    if slot_has_rows {
+        return Some(slot_ckpt);
+    }
+    match stored_canonical {
+        Some(name) if canonical_has_rows && name != slot_ckpt => Some(name),
+        _ => None,
+    }
+}
 
 /// Storage manager that coordinates all storage operations
 pub struct Storage {
@@ -79,6 +99,7 @@ impl Storage {
                 blvm_protocol::types::Network::Testnet => CoreDataNetwork::Testnet,
                 blvm_protocol::types::Network::Regtest => CoreDataNetwork::Regtest,
                 blvm_protocol::types::Network::Signet => CoreDataNetwork::Signet,
+                blvm_protocol::types::Network::Testnet4 => CoreDataNetwork::Testnet4,
             };
             Storage::new_inner(data_dir, core_network)
         }
@@ -297,6 +318,7 @@ impl Storage {
             blvm_protocol::types::Network::Testnet => CoreDataNetwork::Testnet,
             blvm_protocol::types::Network::Regtest => CoreDataNetwork::Regtest,
             blvm_protocol::types::Network::Signet => CoreDataNetwork::Signet,
+            blvm_protocol::types::Network::Testnet4 => CoreDataNetwork::Testnet4,
         }
     }
 
@@ -308,7 +330,7 @@ impl Storage {
         storage_config: Option<&crate::config::StorageConfig>,
     ) -> Result<PathBuf> {
         use bitcoin_core_migrate::{
-            MigrateCoreArgs, has_migration_marker, migrate_core_data, read_migration_marker,
+            has_migration_marker, migrate_core_data, read_migration_marker, MigrateCoreArgs,
         };
 
         let auto_migrate = storage_config
@@ -955,6 +977,46 @@ impl Storage {
         let name = self.chain().get_ibd_utxo_canonical_tree()?;
         self.open_tree(&name)
             .with_context(|| format!("open canonical IBD UTXO tree {name}"))
+    }
+
+    /// Open the tree engine resume should seed from.
+    ///
+    /// Active ckpt when it has rows. Otherwise the explicitly stored canonical
+    /// tree when that tree has rows and is not the empty slot. `None` means
+    /// both snapshots are missing: replay from genesis. The default canonical
+    /// name `ibd_utxos` is not used when the key was never written.
+    pub fn open_engine_resume_snapshot(
+        &self,
+    ) -> Result<Option<(String, std::sync::Arc<dyn database::Tree>)>> {
+        let slot = self.chain().get_engine_ckpt_slot().unwrap_or(0);
+        let slot_name = crate::storage::ibd_engine::ckpt_tree_for_slot(slot);
+        let slot_has_rows = self
+            .open_tree(slot_name)
+            .ok()
+            .and_then(|tree| tree.is_empty().ok())
+            == Some(false);
+        let stored = self.chain().get_stored_ibd_utxo_canonical_tree()?;
+        let canonical_has_rows = match stored.as_deref() {
+            Some(name) if name != slot_name => {
+                self.open_tree(name)
+                    .ok()
+                    .and_then(|tree| tree.is_empty().ok())
+                    == Some(false)
+            }
+            _ => false,
+        };
+        let Some(name) = engine_resume_snapshot_name(
+            slot_name,
+            slot_has_rows,
+            stored.as_deref(),
+            canonical_has_rows,
+        ) else {
+            return Ok(None);
+        };
+        let tree = self
+            .open_tree(name)
+            .with_context(|| format!("open engine resume snapshot {name}"))?;
+        Ok(Some((name.to_string(), tree)))
     }
 
     /// Ensure LMDB map headroom for Phase 3 without destroying the active checkpoint.

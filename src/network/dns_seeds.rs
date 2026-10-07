@@ -39,6 +39,12 @@ pub const MAINNET_ARCHIVE_DNS_SEEDS: &[&str] = &[
     "x1.seed.bitcoin.wiz.biz",
 ];
 
+/// Testnet4 DNS seeds (BIP94).
+pub const TESTNET4_DNS_SEEDS: &[&str] = &[
+    "seed.testnet4.bitcoin.sprovoost.nl",
+    "seed.testnet4.wiz.biz",
+];
+
 /// Testnet DNS seeds
 pub const TESTNET_DNS_SEEDS: &[&str] = &[
     "testnet-seed.bitcoin.jonasschnelli.ch",

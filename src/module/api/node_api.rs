@@ -38,6 +38,7 @@ fn consensus_network_from_storage(storage: &Storage) -> ConsensusNetwork {
         "testnet" => ConsensusNetwork::Testnet,
         "regtest" => ConsensusNetwork::Regtest,
         "signet" => ConsensusNetwork::Signet,
+        "testnet4" => ConsensusNetwork::Testnet4,
         _ => ConsensusNetwork::Mainnet,
     }
 }

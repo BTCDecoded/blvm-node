@@ -19,7 +19,7 @@
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 const MARKER_FILE: &str = "ibd_utxo_repair_required";
 
@@ -208,38 +208,87 @@ pub(crate) fn reconcile_ibd_utxo_watermark_with_disk(
         return Ok(0);
     }
     let engine_enabled = crate::config::ibd::ibd_engine_enabled(None);
+    // Export height names a snapshot. The active ckpt is that snapshot when it
+    // has rows. Phase 3 full watermark export clears both ckpt trees and stores
+    // the snapshot in `ibd_utxos` with `ibd_utxo_canonical_tree` set — that key
+    // must keep the watermark. Stray `ibd_utxos` rows with the key unset are
+    // not a snapshot (testnet4: export_h=155499, ckpt_a empty).
+    let mut export_ckpt_missing = false;
     if engine_enabled {
-        if let Some(_eh) = storage
+        if let Some(eh) = storage
             .chain()
             .get_engine_export_height()?
             .filter(|&h| h > 0)
         {
             let slot = storage.chain().get_engine_ckpt_slot()?;
             let ckpt_name = crate::storage::ibd_engine::ckpt_tree_for_slot(slot);
-            if let Ok(tree) = storage.open_tree(ckpt_name) {
-                if !tree.is_empty()? {
+            let ckpt_has_rows = storage
+                .open_tree(ckpt_name)
+                .ok()
+                .and_then(|tree| tree.is_empty().ok())
+                == Some(false);
+            let stored = storage.chain().get_stored_ibd_utxo_canonical_tree()?;
+            let canonical_has_rows = match stored.as_deref() {
+                Some(name) if name != ckpt_name => {
+                    storage
+                        .open_tree(name)
+                        .ok()
+                        .and_then(|tree| tree.is_empty().ok())
+                        == Some(false)
+                }
+                _ => false,
+            };
+            if crate::storage::engine_resume_snapshot_name(
+                ckpt_name,
+                ckpt_has_rows,
+                stored.as_deref(),
+                canonical_has_rows,
+            )
+            .is_some()
+            {
+                if !ckpt_has_rows {
+                    // Catch-up calls resume every 5s. Phase 3 leaves the ckpt
+                    // empty for the life of the process, so log the keep once.
+                    static LOGGED_CANONICAL_KEEP: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if !LOGGED_CANONICAL_KEEP.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        info!(
+                            "[ibd_autorepair] engine export height {eh} but {ckpt_name} empty — \
+                             keeping watermark; canonical {} has the snapshot",
+                            stored.unwrap_or_default()
+                        );
+                    } else {
+                        debug!(
+                            "[ibd_autorepair] engine export height {eh} but {ckpt_name} empty — \
+                             keeping watermark; canonical {} has the snapshot",
+                            stored.unwrap_or_default()
+                        );
+                    }
+                }
+                return Ok(watermark_val);
+            }
+            warn!(
+                "[ibd_autorepair] engine export height {eh} but {ckpt_name} empty — \
+                 resetting watermark to 0 (no stored canonical snapshot)"
+            );
+            export_ckpt_missing = true;
+        }
+        if !export_ckpt_missing {
+            if let Some(root) = storage.data_dir() {
+                if crate::storage::database::legacy_ibd_utxo_standalone_has_data(&root) {
                     return Ok(watermark_val);
                 }
             }
-            warn!(
-                "[ibd_autorepair] engine export height set but {} empty — checking legacy/main",
-                ckpt_name
-            );
-        }
-        if let Some(root) = storage.data_dir() {
-            if crate::storage::database::legacy_ibd_utxo_standalone_has_data(&root) {
+            let tree = storage.open_tree("ibd_utxos")?;
+            if !tree.is_empty()? {
                 return Ok(watermark_val);
             }
+            warn!(
+                "[ibd_autorepair] engine mode: ibd_utxo_watermark={} but no engine ckpt, legacy \
+                 standalone, or main ibd_utxos data — resetting durable engine metadata to 0",
+                watermark_val
+            );
         }
-        let tree = storage.open_tree("ibd_utxos")?;
-        if !tree.is_empty()? {
-            return Ok(watermark_val);
-        }
-        warn!(
-            "[ibd_autorepair] engine mode: ibd_utxo_watermark={} but no engine ckpt, legacy \
-             standalone, or main ibd_utxos data — resetting durable engine metadata to 0",
-            watermark_val
-        );
         storage.chain().force_reset_engine_checkpoint_metadata()?;
         storage.chain().force_set_ibd_utxo_watermark(0)?;
         // Also wipe leftover flat engine files. Leaving segments/sidecar with a high
@@ -1168,6 +1217,133 @@ mod ibd_autorepair_tests {
         assert_eq!(
             reconcile_ibd_utxo_watermark_with_disk(&storage, 100).unwrap(),
             100
+        );
+    }
+
+    #[test]
+    fn reconcile_resets_when_export_label_has_empty_ckpt_and_ibd_utxos_rows() {
+        let _guard = crate::ibd_test_lock::guard();
+        unsafe {
+            std::env::set_var("BLVM_IBD_ENGINE", "1");
+        }
+        let dir = TempDir::new().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        storage.chain().force_set_engine_ckpt_slot(0).unwrap();
+        storage
+            .chain()
+            .force_set_engine_export_height(155_499)
+            .unwrap();
+        storage
+            .chain()
+            .force_set_ibd_utxo_watermark(155_499)
+            .unwrap();
+        storage
+            .open_tree("ibd_utxos")
+            .unwrap()
+            .insert(b"k", b"v")
+            .unwrap();
+        assert!(storage
+            .open_tree("ibd_utxos_ckpt_a")
+            .unwrap()
+            .is_empty()
+            .unwrap());
+
+        assert_eq!(
+            reconcile_ibd_utxo_watermark_with_disk(&storage, 155_499).unwrap(),
+            0
+        );
+        assert_eq!(storage.chain().get_utxo_watermark().unwrap(), Some(0));
+        assert_eq!(storage.chain().get_engine_export_height().unwrap(), Some(0));
+        unsafe {
+            std::env::remove_var("BLVM_IBD_ENGINE");
+        }
+    }
+
+    #[test]
+    fn reconcile_keeps_watermark_when_phase3_canonical_ibd_utxos_is_set() {
+        let _guard = crate::ibd_test_lock::guard();
+        unsafe {
+            std::env::set_var("BLVM_IBD_ENGINE", "1");
+        }
+        let dir = TempDir::new().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        storage.chain().force_set_engine_ckpt_slot(0).unwrap();
+        storage
+            .chain()
+            .force_set_engine_export_height(155_512)
+            .unwrap();
+        storage
+            .chain()
+            .force_set_ibd_utxo_watermark(155_512)
+            .unwrap();
+        storage
+            .chain()
+            .set_ibd_utxo_canonical_tree("ibd_utxos")
+            .unwrap();
+        storage
+            .open_tree("ibd_utxos")
+            .unwrap()
+            .insert(b"k", b"v")
+            .unwrap();
+        assert!(storage
+            .open_tree("ibd_utxos_ckpt_a")
+            .unwrap()
+            .is_empty()
+            .unwrap());
+
+        assert_eq!(
+            reconcile_ibd_utxo_watermark_with_disk(&storage, 155_512).unwrap(),
+            155_512
+        );
+        assert_eq!(
+            storage.chain().get_engine_export_height().unwrap(),
+            Some(155_512)
+        );
+        let snap = storage.open_engine_resume_snapshot().unwrap();
+        let (name, tree) = snap.expect("canonical snapshot");
+        assert_eq!(name, "ibd_utxos");
+        assert!(!tree.is_empty().unwrap());
+        unsafe {
+            std::env::remove_var("BLVM_IBD_ENGINE");
+        }
+    }
+
+    #[test]
+    fn resume_snapshot_name_ignores_default_ibd_utxos() {
+        assert_eq!(
+            crate::storage::engine_resume_snapshot_name("ibd_utxos_ckpt_a", true, None, false),
+            Some("ibd_utxos_ckpt_a")
+        );
+        assert_eq!(
+            crate::storage::engine_resume_snapshot_name("ibd_utxos_ckpt_a", false, None, true),
+            None
+        );
+        assert_eq!(
+            crate::storage::engine_resume_snapshot_name(
+                "ibd_utxos_ckpt_a",
+                false,
+                Some("ibd_utxos"),
+                true
+            ),
+            Some("ibd_utxos")
+        );
+        assert_eq!(
+            crate::storage::engine_resume_snapshot_name(
+                "ibd_utxos_ckpt_a",
+                false,
+                Some("ibd_utxos_ckpt_a"),
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            crate::storage::engine_resume_snapshot_name(
+                "ibd_utxos_ckpt_a",
+                false,
+                Some("ibd_utxos"),
+                false
+            ),
+            None
         );
     }
 }

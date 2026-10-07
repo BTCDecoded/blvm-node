@@ -129,6 +129,7 @@ impl BlockchainRpc {
                 blvm_protocol::ProtocolVersion::Testnet3 => "testnet",
                 blvm_protocol::ProtocolVersion::Regtest => "regtest",
                 blvm_protocol::ProtocolVersion::Signet => "signet",
+                blvm_protocol::ProtocolVersion::Testnet4 => "testnet4",
             })
             .unwrap_or("regtest") // Default fallback
     }
@@ -140,6 +141,7 @@ impl BlockchainRpc {
                 return match info.chain_params.network.as_str() {
                     "mainnet" => "main",
                     "testnet" => "test",
+                    "testnet4" => "testnet4",
                     "regtest" => "regtest",
                     _ => "main",
                 };

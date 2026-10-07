@@ -1,10 +1,10 @@
 //! Incremental MuHash3072 over the `ibd_utxos` tree during parallel IBD.
 
-use crate::storage::Storage;
 use crate::storage::chainstate::ChainState;
 use crate::storage::disk_utxo::key_to_outpoint;
+use crate::storage::Storage;
 use anyhow::{Context, Result};
-use blvm_muhash::{MuHash3072, serialize_coin_for_muhash};
+use blvm_muhash::{serialize_coin_for_muhash, MuHash3072};
 use blvm_protocol::types::UTXO;
 
 pub(crate) fn load_ibd_muhash_from_chain(chain: &ChainState) -> Result<MuHash3072> {
@@ -44,9 +44,12 @@ pub(crate) fn reset_engine_resume_muhash_baseline(
     Ok(())
 }
 
-/// One-shot backfill: scan the active engine checkpoint tree and persist `ibd_engine_export_muhash`.
+/// One-shot backfill: scan the resume snapshot and persist `ibd_engine_export_muhash`.
 ///
-/// Safe to run offline against the data directory (node stopped). Idempotent when snapshot exists.
+/// The active ckpt wins when it has rows. Phase 3 full watermark export clears both
+/// ckpt trees and leaves the snapshot in the stored canonical tree (`ibd_utxos`).
+/// Safe to run offline against the data directory (node stopped). Idempotent when
+/// the export snapshot already exists.
 pub fn backfill_engine_export_muhash_if_missing(storage: &Storage) -> Result<bool> {
     use crate::storage::ibd_engine::ckpt_tree_for_slot;
     use crate::storage::utxo_value_codec::decode_utxo_with_codec;
@@ -60,16 +63,12 @@ pub fn backfill_engine_export_muhash_if_missing(storage: &Storage) -> Result<boo
         return Ok(false);
     }
 
-    let slot = chain.get_engine_ckpt_slot()?;
-    let tree_name = ckpt_tree_for_slot(slot);
-    let tree = storage
-        .open_tree(tree_name)
-        .with_context(|| format!("open checkpoint tree {tree_name}"))?;
-    if tree.is_empty().unwrap_or(true) {
+    let slot_name = ckpt_tree_for_slot(chain.get_engine_ckpt_slot()?);
+    let Some((tree_name, tree)) = storage.open_engine_resume_snapshot()? else {
         anyhow::bail!(
-            "cannot backfill export MuHash: {tree_name} empty at export_height={export_height}"
+            "cannot backfill export MuHash: {slot_name} empty at export_height={export_height}"
         );
-    }
+    };
 
     let codec = storage.utxo_value_codec();
     let t0 = std::time::Instant::now();
@@ -330,11 +329,11 @@ pub(crate) fn verify_ibd_utxo_muhash_startup(storage: &Storage) -> Result<()> {
 #[cfg(all(test, feature = "heed3"))]
 mod verify_tests {
     use super::*;
-    use crate::storage::Storage;
     use crate::storage::database::DatabaseBackend;
     use crate::storage::disk_utxo::outpoint_to_key;
-    use crate::storage::utxo_value_codec::{ValueCodec, encode_utxo_with_codec};
-    use blvm_muhash::{MUHASH_RUNNING_STATE_BYTES, MuHash3072};
+    use crate::storage::utxo_value_codec::{encode_utxo_with_codec, ValueCodec};
+    use crate::storage::Storage;
+    use blvm_muhash::{MuHash3072, MUHASH_RUNNING_STATE_BYTES};
     use blvm_protocol::types::{OutPoint, UTXO};
     use tempfile::TempDir;
 
@@ -372,5 +371,82 @@ mod verify_tests {
             .unwrap();
 
         verify_ibd_utxo_muhash_startup(&storage).expect("heed3 scan_heed3 MuHash verify");
+    }
+}
+
+#[cfg(test)]
+mod backfill_tests {
+    use super::*;
+    use crate::storage::disk_utxo::outpoint_to_key;
+    use crate::storage::utxo_value_codec::encode_utxo_with_codec;
+    use blvm_protocol::types::{OutPoint, UTXO};
+    use tempfile::TempDir;
+
+    fn one_utxo_row(storage: &Storage) {
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![0x51].into(),
+            height: 1,
+            is_coinbase: true,
+        };
+        let op = OutPoint {
+            hash: [7u8; 32],
+            index: 0,
+        };
+        let codec = storage.utxo_value_codec();
+        storage
+            .open_tree("ibd_utxos")
+            .unwrap()
+            .insert(
+                &outpoint_to_key(&op),
+                &encode_utxo_with_codec(codec, &utxo).unwrap(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn backfill_errors_when_ckpt_empty_and_canonical_key_unset() {
+        let dir = TempDir::new().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        storage
+            .chain()
+            .force_set_engine_export_height(155_522)
+            .unwrap();
+        one_utxo_row(&storage);
+        let err = backfill_engine_export_muhash_if_missing(&storage).unwrap_err();
+        assert!(err.to_string().contains("ibd_utxos_ckpt_a empty"), "{err}");
+        assert!(storage
+            .chain()
+            .get_engine_export_muhash()
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn backfill_scans_canonical_ibd_utxos_when_ckpt_empty() {
+        let dir = TempDir::new().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        storage
+            .chain()
+            .force_set_engine_export_height(155_522)
+            .unwrap();
+        storage
+            .chain()
+            .set_ibd_utxo_canonical_tree("ibd_utxos")
+            .unwrap();
+        one_utxo_row(&storage);
+        assert!(storage
+            .open_tree("ibd_utxos_ckpt_a")
+            .unwrap()
+            .is_empty()
+            .unwrap());
+
+        assert!(backfill_engine_export_muhash_if_missing(&storage).unwrap());
+        assert!(storage
+            .chain()
+            .get_engine_export_muhash()
+            .unwrap()
+            .is_some());
+        assert!(!backfill_engine_export_muhash_if_missing(&storage).unwrap());
     }
 }

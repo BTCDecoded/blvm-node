@@ -746,6 +746,7 @@ impl MiningRpc {
             ConsensusNetwork::Regtest | ConsensusNetwork::Signet => {
                 (BIP112_CSV_ACTIVATION_REGTEST, 0u64, 0u64)
             }
+            ConsensusNetwork::Testnet4 => (1, 1, 1),
         };
 
         let mut rules = Vec::new();
@@ -773,6 +774,7 @@ impl MiningRpc {
             "testnet" => ConsensusNetwork::Testnet,
             "regtest" => ConsensusNetwork::Regtest,
             "signet" => ConsensusNetwork::Signet,
+            "testnet4" => ConsensusNetwork::Testnet4,
             _ => ConsensusNetwork::Mainnet,
         }
     }

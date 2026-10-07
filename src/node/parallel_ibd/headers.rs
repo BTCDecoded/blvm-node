@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use blvm_protocol::BlockHeader;
 use tokio::task::JoinSet;
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 use tracing::{debug, info, warn};
 
 /// One checkpoint-bounded header download range: `[start, end]` with GetHeaders locator.
@@ -68,9 +68,9 @@ pub(crate) fn simulate_header_range_schedule(
     assigned
 }
 
-use crate::network::NetworkManager;
 use crate::network::peer_scoring::PeerScorer;
 use crate::network::protocol::{GetHeadersMessage, ProtocolMessage, ProtocolParser};
+use crate::network::NetworkManager;
 use crate::node::event_publisher::EventPublisher;
 use crate::storage::blockstore::BlockStore;
 use crate::storage::hashing::double_sha256;
@@ -112,21 +112,46 @@ pub(crate) fn empty_headers_is_ibd_tip(
     fetched_tip + 1 > start_height
 }
 
-/// H08: child links to parent when parent header is stored, else compare to expected hash bytes.
+/// H08: child links to the parent this walk has already accepted.
+///
+/// A stored row at `height - 1` is that parent only when its hash is `last_hash`.
+/// During a rewind the corrected parent is still in the uncommitted batch, so the
+/// row on disk is the old tip. Linking against that row rejects the replacement
+/// even though `prev` equals `last_hash` (testnet4 catch-up at height 155499).
 fn header_links_to_parent(
     blockstore: &BlockStore,
     header: &BlockHeader,
     height: u64,
     last_hash: &[u8; 32],
 ) -> Result<bool> {
-    if height > 0 {
-        if let Some(parent) = blockstore.get_header_at_height(height - 1)? {
-            return Ok(blvm_consensus::block::validate_prev_block_hash(
-                header, &parent,
-            ));
+    let stored = if height > 0 {
+        blockstore
+            .get_header_at_height(height - 1)?
+            .map(|parent| blvm_consensus::block::block_header_hash(&parent))
+    } else {
+        None
+    };
+    Ok(header_prev_links(
+        stored.as_ref(),
+        last_hash,
+        &header.prev_block_hash,
+    ))
+}
+
+/// `stored_parent_hash` is the hash of the header row already at this height's parent.
+/// `last_hash` is the parent accepted by this walk, including a header in the current
+/// batch that has not been committed. `prev` is the candidate header's prev hash.
+pub(crate) fn header_prev_links(
+    stored_parent_hash: Option<&[u8; 32]>,
+    last_hash: &[u8; 32],
+    prev: &[u8; 32],
+) -> bool {
+    if let Some(parent_hash) = stored_parent_hash {
+        if parent_hash == last_hash {
+            return prev == parent_hash;
         }
     }
-    Ok(header.prev_block_hash == *last_hash)
+    prev == last_hash
 }
 
 /// Bitcoin Core-style GetHeaders locator heights (tip, tip-1, … then doubling).
@@ -975,5 +1000,45 @@ mod n13_tests {
         );
         assert!(empty_headers_is_ibd_tip(963_969, 1, 963_969));
         assert!(!empty_headers_is_ibd_tip(499_999, 500_000, 963_969));
+    }
+
+    /// Testnet4 catch-up: rewind accepts a new 155498 in the batch, then the next
+    /// header's prev equals that in-memory hash. The disk row at 155498 is the old
+    /// tip and must not be the parent.
+    #[test]
+    fn stale_disk_parent_links_to_in_batch_hash() {
+        let disk_155498 = [0x11u8; 32];
+        let accepted_155498 = [0x22u8; 32];
+        let unrelated = [0x33u8; 32];
+
+        assert!(
+            header_prev_links(Some(&disk_155498), &accepted_155498, &accepted_155498),
+            "prev matches the header just accepted in this batch"
+        );
+        assert!(
+            !header_prev_links(Some(&disk_155498), &accepted_155498, &disk_155498),
+            "a header that extends the stale disk row is not this walk's child"
+        );
+        assert!(!header_prev_links(
+            Some(&disk_155498),
+            &accepted_155498,
+            &unrelated
+        ));
+
+        // Committed parent: disk hash and walk hash are the same.
+        assert!(header_prev_links(
+            Some(&accepted_155498),
+            &accepted_155498,
+            &accepted_155498
+        ));
+        assert!(!header_prev_links(
+            Some(&accepted_155498),
+            &accepted_155498,
+            &disk_155498
+        ));
+
+        // No row yet (header still inside the same uncommitted batch).
+        assert!(header_prev_links(None, &accepted_155498, &accepted_155498));
+        assert!(!header_prev_links(None, &accepted_155498, &disk_155498));
     }
 }

@@ -1679,6 +1679,7 @@ impl Node {
             ProtocolVersion::BitcoinV1 => "mainnet",
             ProtocolVersion::Testnet3 => "testnet",
             ProtocolVersion::Signet => "signet",
+            ProtocolVersion::Testnet4 => "testnet4",
             ProtocolVersion::Regtest => {
                 // Regtest doesn't use DNS seeds
                 info!("Regtest network: skipping DNS seed discovery");

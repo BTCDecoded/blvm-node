@@ -24,6 +24,8 @@ pub use blvm_protocol::network::{AddrV2Message, RejectMessage};
 pub const BITCOIN_MAGIC_MAINNET: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
 pub const BITCOIN_MAGIC_TESTNET: [u8; 4] = [0x0b, 0x11, 0x09, 0x07];
 pub const BITCOIN_MAGIC_REGTEST: [u8; 4] = [0xfa, 0xbf, 0xb5, 0xda];
+pub const BITCOIN_MAGIC_TESTNET4: [u8; 4] = [0x1c, 0x16, 0x3f, 0x28];
+pub const BITCOIN_MAGIC_SIGNET: [u8; 4] = [0x0f, 0x1b, 0xf2, 0xe1];
 
 /// Active network magic (LE u32). Set once at node startup via `ProtocolParser::set_network_magic`.
 /// Defaults to mainnet magic so that unit tests that do not call `set_network_magic` still work.
@@ -963,6 +965,10 @@ impl ProtocolParser {
             .to_le_bytes();
         if magic == BITCOIN_MAGIC_TESTNET {
             ("testnet", 18333)
+        } else if magic == BITCOIN_MAGIC_TESTNET4 {
+            ("testnet4", 48333)
+        } else if magic == BITCOIN_MAGIC_SIGNET {
+            ("signet", 38333)
         } else if magic == BITCOIN_MAGIC_REGTEST {
             ("regtest", 18444)
         } else {
