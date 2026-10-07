@@ -703,6 +703,10 @@ impl MiningCoordinator {
     }
 
     fn bip34_coinbase_script(height: u64) -> Vec<u8> {
+        if (1..=16).contains(&height) {
+            // OP_1..=OP_16. A second byte keeps the coinbase scriptSig at its minimum length.
+            return vec![0x50 + height as u8, 0xff];
+        }
         let h = height.min(u64::from(u32::MAX));
         let mut height_bytes = Vec::new();
         let mut x = h;

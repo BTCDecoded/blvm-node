@@ -32,6 +32,9 @@ fn regtest_coinbase_script_sig(height: u64) -> Vec<u8> {
         // OP_0 (BIP34 height 0) + padding: consensus requires coinbase scriptSig length 2..=100.
         return vec![0x00, 0xff];
     }
+    if (1..=16).contains(&height) {
+        return vec![0x50 + height as u8, 0xff];
+    }
     let mut n = height;
     let mut height_bytes = Vec::new();
     while n > 0 {

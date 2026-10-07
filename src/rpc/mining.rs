@@ -797,6 +797,9 @@ impl MiningRpc {
         if height == 0 {
             return vec![0x00, 0xff];
         }
+        if (1..=16).contains(&height) {
+            return vec![0x50 + height as u8, 0xff];
+        }
         let mut n = height;
         let mut height_bytes = Vec::new();
         while n > 0 {

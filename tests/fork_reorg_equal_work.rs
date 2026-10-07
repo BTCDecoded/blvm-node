@@ -19,6 +19,8 @@ const FORK_SALT: u64 = 42_000;
 fn regtest_coinbase_script_sig(height: u64, fork_salt: u64) -> Vec<u8> {
     let mut script = if height == 0 {
         vec![0x00, 0xff]
+    } else if (1..=16).contains(&height) {
+        vec![0x50 + height as u8, 0xff]
     } else {
         let mut n = height;
         let mut height_bytes = Vec::new();
