@@ -453,8 +453,16 @@ impl Storage {
         }
     }
 
+    /// Attempt to open a Bitcoin Core block reader for reuse.
+    ///
+    /// Returns `None` if:
+    /// - Reuse is not enabled (via config or marker)
+    /// - The Core blocks directory doesn't exist
+    /// - The network cannot be determined (e.g., custom signet `signet_<hash>` directories)
+    ///
+    /// Exposed as `pub(crate)` for integration testing.
     #[cfg(feature = "rocksdb")]
-    fn open_core_block_reader_for_store(
+    pub(crate) fn open_core_block_reader_for_store(
         blvm_store: &Path,
         core_datadir: Option<&Path>,
         storage_config: Option<&crate::config::StorageConfig>,
@@ -487,11 +495,24 @@ impl Storage {
             return None;
         }
 
-        let network = marker
+        let network = match marker
             .as_ref()
             .and_then(|m| CoreDataNetwork::from_str(&m.network).ok())
-            .or_else(|| BitcoinCoreDetection::detect_network(&core_dir))
-            .unwrap_or(CoreDataNetwork::Mainnet);
+        {
+            Some(n) => n,
+            None => match BitcoinCoreDetection::detect_network_strict(&core_dir) {
+                Ok(n) => n,
+                Err(e) => {
+                    warn!(
+                        "[CORE_IMPORT] Cannot determine network for Core datadir {:?}: {e}. \
+                         Skipping Core block reuse. Specify network in migration marker or use \
+                         a standard directory layout.",
+                        core_dir
+                    );
+                    return None;
+                }
+            },
+        };
 
         match bitcoin_core_blocks::BitcoinCoreBlockReader::new_with_cache(
             &blocks_dir,

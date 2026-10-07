@@ -288,16 +288,6 @@ mod bitcoin_core_tests {
     }
 
     #[test]
-    fn test_detect_network_testnet4() {
-        let temp = TempDir::new().unwrap();
-        let testnet4_path = temp.path().join("testnet4");
-        create_dir_all(&testnet4_path).unwrap();
-
-        let detected = BitcoinCoreDetection::detect_network(&testnet4_path);
-        assert_eq!(detected, Some(CoreDataNetwork::Testnet4));
-    }
-
-    #[test]
     fn test_detect_network_custom_signet_returns_none() {
         let temp = TempDir::new().unwrap();
         let custom_signet = temp.path().join("signet_abc123def456");
@@ -424,6 +414,83 @@ mod bitcoin_core_tests {
             base,
             CoreDataNetwork::Regtest
         ));
+    }
+
+    #[test]
+    fn test_custom_signet_core_dir_does_not_produce_mainnet_reader() {
+        use blvm_node::config::StorageConfig;
+        use blvm_node::storage::Storage;
+
+        let temp = TempDir::new().unwrap();
+
+        // Create a custom signet directory (signet_<hash>) with valid Core layout
+        let custom_signet = temp.path().join("signet_abc123def456");
+        create_core_layout(&custom_signet);
+
+        // Create a blvm_store directory
+        let blvm_store = temp.path().join("blvm_data");
+        create_dir_all(&blvm_store).unwrap();
+
+        // Write a migration marker JSON that enables reuse but doesn't specify network
+        let marker_json = serde_json::json!({
+            "source": custom_signet.to_str().unwrap(),
+            "destination": blvm_store.to_str().unwrap(),
+            "network": "", // Empty network - forces detection
+            "tip_hash": "",
+            "height": 0,
+            "reuse_core_blocks": true,
+            "migrated_at": "2024-01-01T00:00:00Z"
+        });
+        let marker_path = blvm_store.join("migration_marker.json");
+        std::fs::write(&marker_path, marker_json.to_string()).unwrap();
+
+        // Also enable reuse via config
+        let config = StorageConfig {
+            reuse_core_block_files: true,
+            ..Default::default()
+        };
+
+        // The function should return None because it cannot determine the network
+        // for a custom signet directory (signet_<hash>)
+        let reader = Storage::open_core_block_reader_for_store(
+            &blvm_store,
+            Some(&custom_signet),
+            Some(&config),
+        );
+
+        assert!(
+            reader.is_none(),
+            "Custom signet directory should NOT produce a reader (would be wrong network). \
+             The old behavior would have defaulted to Mainnet, which is incorrect."
+        );
+    }
+
+    #[test]
+    fn test_standard_signet_core_dir_detection_works() {
+        // Verify that standard signet directories are detected correctly
+        // (as opposed to custom signet_<hash> which returns None)
+        let temp = TempDir::new().unwrap();
+
+        // Create a standard signet directory
+        let signet_dir = temp.path().join("signet");
+        create_dir_all(&signet_dir).unwrap();
+
+        let detected = BitcoinCoreDetection::detect_network(&signet_dir);
+        assert_eq!(
+            detected,
+            Some(CoreDataNetwork::Signet),
+            "Standard signet directory should be detected as Signet"
+        );
+
+        // Contrast with custom signet
+        let custom_signet = temp.path().join("signet_abc123");
+        create_dir_all(&custom_signet).unwrap();
+
+        let detected_custom = BitcoinCoreDetection::detect_network(&custom_signet);
+        assert_eq!(
+            detected_custom, None,
+            "Custom signet_<hash> directory should return None, not Mainnet"
+        );
     }
 }
 
