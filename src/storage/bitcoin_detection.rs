@@ -125,9 +125,16 @@ impl BitcoinCoreDetection {
         true
     }
 
-    /// Check if directory contains Bitcoin Core data (alias for [`is_core_layout_at`]).
-    fn is_bitcoin_core_dir(dir: &Path, _network: CoreDataNetwork) -> bool {
-        Self::is_core_layout_at(dir)
+    /// Check if `base_dir` contains Bitcoin Core data for the given network.
+    ///
+    /// Mainnet data lives at the root of `base_dir`. Other networks use a
+    /// network-specific subdirectory: `testnet3/`, `testnet4/`, `signet/`, `regtest/`.
+    pub fn is_bitcoin_core_dir(base_dir: &Path, network: CoreDataNetwork) -> bool {
+        let data_dir = match network {
+            CoreDataNetwork::Mainnet => base_dir.to_path_buf(),
+            other => base_dir.join(other.directory_name()),
+        };
+        Self::is_core_layout_at(&data_dir)
     }
 
     /// Detect database format (LevelDB)
@@ -160,40 +167,77 @@ impl BitcoinCoreDetection {
 
     /// Detect network from data directory
     ///
-    /// Attempts to detect the network by checking directory structure
-    /// and configuration files.
+    /// Attempts to detect the network by checking directory structure.
+    /// Returns `None` if the network cannot be determined (caller must decide
+    /// what to do—we do NOT silently fall back to mainnet).
     pub fn detect_network(data_dir: &Path) -> Option<CoreDataNetwork> {
-        // Check directory name
-        if let Some(dir_name) = data_dir.file_name().and_then(|n| n.to_str()) {
-            match dir_name {
-                "testnet3" => return Some(CoreDataNetwork::Testnet),
-                "testnet4" => return Some(CoreDataNetwork::Testnet4),
-                "regtest" => return Some(CoreDataNetwork::Regtest),
-                "signet" => return Some(CoreDataNetwork::Signet),
-                _ => {}
-            }
+        let dir_name = data_dir.file_name().and_then(|n| n.to_str())?;
+
+        // Check well-known network subdirectory names
+        match dir_name {
+            "testnet3" => return Some(CoreDataNetwork::Testnet),
+            "testnet4" => return Some(CoreDataNetwork::Testnet4),
+            "regtest" => return Some(CoreDataNetwork::Regtest),
+            "signet" => return Some(CoreDataNetwork::Signet),
+            _ => {}
         }
 
-        // Check parent directory
+        // Detect custom signet directories (signet_<challenge_hash>).
+        // These are valid Bitcoin Core signet data directories but we cannot
+        // auto-detect which signet network they belong to. Return None so the
+        // caller can require explicit network selection.
+        if dir_name.starts_with("signet_") {
+            return None;
+        }
+
+        // If the directory is ".bitcoin" or "bitcoind" (common base names), it's mainnet
+        if dir_name == ".bitcoin" || dir_name == "bitcoind" {
+            return Some(CoreDataNetwork::Mainnet);
+        }
+
+        // Check parent directory for additional context
         if let Some(parent) = data_dir.parent() {
             if let Some(parent_name) = parent.file_name().and_then(|n| n.to_str()) {
+                // If parent is .bitcoin, the given path is a network subdir
                 if parent_name == ".bitcoin" {
-                    // Check if we're in a subdirectory
-                    if let Some(dir_name) = data_dir.file_name().and_then(|n| n.to_str()) {
-                        match dir_name {
-                            "testnet3" => return Some(CoreDataNetwork::Testnet),
-                            "testnet4" => return Some(CoreDataNetwork::Testnet4),
-                            "regtest" => return Some(CoreDataNetwork::Regtest),
-                            "signet" => return Some(CoreDataNetwork::Signet),
-                            _ => return Some(CoreDataNetwork::Mainnet),
-                        }
-                    }
+                    // Already checked known names above; if we're here, it's unrecognized
+                    return None;
                 }
             }
         }
 
-        // Default to mainnet if we can't determine
-        Some(CoreDataNetwork::Mainnet)
+        // Cannot determine network from directory structure
+        None
+    }
+
+    /// Detect network from data directory, returning an error for ambiguous cases.
+    ///
+    /// Unlike [`detect_network`], this method returns an explicit error when the
+    /// directory appears to be a custom signet (`signet_<hash>`) rather than
+    /// silently returning `None`. Use this when you need a clear error message.
+    pub fn detect_network_strict(data_dir: &Path) -> Result<CoreDataNetwork> {
+        let dir_name = data_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("Invalid data directory path"))?;
+
+        // Detect custom signet directories and reject with a clear error
+        if dir_name.starts_with("signet_") {
+            return Err(anyhow::anyhow!(
+                "Custom signet directory detected: '{}'. \
+                 Custom signets require explicit --network signet. \
+                 Cannot auto-detect network from signet_<hash> directories.",
+                dir_name
+            ));
+        }
+
+        Self::detect_network(data_dir).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cannot determine network from directory '{}'. \
+                 Please specify the network explicitly with --network.",
+                dir_name
+            )
+        })
     }
 
     /// Verify database integrity
@@ -248,6 +292,14 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn create_core_layout(dir: &Path) {
+        let chainstate = dir.join("chainstate");
+        std::fs::create_dir_all(&chainstate).unwrap();
+        std::fs::write(chainstate.join("CURRENT"), "MANIFEST-000001\n").unwrap();
+        std::fs::write(chainstate.join("MANIFEST-000001"), b"").unwrap();
+        std::fs::create_dir_all(dir.join("blocks")).unwrap();
+    }
+
     #[test]
     fn test_detect_network_from_path() {
         let temp = TempDir::new().unwrap();
@@ -286,6 +338,62 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_network_signet() {
+        let temp = TempDir::new().unwrap();
+        let signet_path = temp.path().join("signet");
+        std::fs::create_dir_all(&signet_path).unwrap();
+
+        assert_eq!(
+            BitcoinCoreDetection::detect_network(&signet_path),
+            Some(CoreDataNetwork::Signet)
+        );
+    }
+
+    #[test]
+    fn test_detect_network_custom_signet_returns_none() {
+        let temp = TempDir::new().unwrap();
+        let custom_signet = temp.path().join("signet_abc123def456");
+        std::fs::create_dir_all(&custom_signet).unwrap();
+
+        assert_eq!(BitcoinCoreDetection::detect_network(&custom_signet), None);
+    }
+
+    #[test]
+    fn test_detect_network_strict_custom_signet_errors() {
+        let temp = TempDir::new().unwrap();
+        let custom_signet = temp.path().join("signet_abc123def456");
+        std::fs::create_dir_all(&custom_signet).unwrap();
+
+        let result = BitcoinCoreDetection::detect_network_strict(&custom_signet);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Custom signet directory detected"));
+        assert!(err.contains("signet_abc123def456"));
+    }
+
+    #[test]
+    fn test_detect_network_mainnet_base_dir() {
+        let temp = TempDir::new().unwrap();
+        let bitcoin_dir = temp.path().join(".bitcoin");
+        std::fs::create_dir_all(&bitcoin_dir).unwrap();
+
+        assert_eq!(
+            BitcoinCoreDetection::detect_network(&bitcoin_dir),
+            Some(CoreDataNetwork::Mainnet)
+        );
+    }
+
+    #[test]
+    fn test_detect_network_unknown_subdir_returns_none() {
+        let temp = TempDir::new().unwrap();
+        let bitcoin_dir = temp.path().join(".bitcoin");
+        let unknown = bitcoin_dir.join("unknown_network");
+        std::fs::create_dir_all(&unknown).unwrap();
+
+        assert_eq!(BitcoinCoreDetection::detect_network(&unknown), None);
+    }
+
+    #[test]
     fn test_core_data_network_display_roundtrip() {
         for network in [
             CoreDataNetwork::Mainnet,
@@ -316,5 +424,128 @@ mod tests {
     fn test_get_standard_paths() {
         let paths = BitcoinCoreDetection::get_standard_paths(CoreDataNetwork::Mainnet);
         assert!(!paths.is_empty());
+    }
+
+    #[test]
+    fn test_is_bitcoin_core_dir_mainnet() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path();
+        create_core_layout(base);
+
+        assert!(BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Mainnet
+        ));
+        assert!(!BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Testnet
+        ));
+    }
+
+    #[test]
+    fn test_is_bitcoin_core_dir_testnet3() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path();
+        let testnet_dir = base.join("testnet3");
+        create_core_layout(&testnet_dir);
+
+        assert!(BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Testnet
+        ));
+        assert!(!BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Mainnet
+        ));
+    }
+
+    #[test]
+    fn test_is_bitcoin_core_dir_testnet4() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path();
+        let testnet4_dir = base.join("testnet4");
+        create_core_layout(&testnet4_dir);
+
+        assert!(BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Testnet4
+        ));
+        assert!(!BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Mainnet
+        ));
+        assert!(!BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Testnet
+        ));
+    }
+
+    #[test]
+    fn test_is_bitcoin_core_dir_signet() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path();
+        let signet_dir = base.join("signet");
+        create_core_layout(&signet_dir);
+
+        assert!(BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Signet
+        ));
+        assert!(!BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Mainnet
+        ));
+    }
+
+    #[test]
+    fn test_is_bitcoin_core_dir_regtest() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path();
+        let regtest_dir = base.join("regtest");
+        create_core_layout(&regtest_dir);
+
+        assert!(BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Regtest
+        ));
+        assert!(!BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Mainnet
+        ));
+    }
+
+    #[test]
+    fn test_is_bitcoin_core_dir_multiple_networks() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path();
+        create_core_layout(base);
+        create_core_layout(&base.join("testnet3"));
+        create_core_layout(&base.join("testnet4"));
+
+        assert!(BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Mainnet
+        ));
+        assert!(BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Testnet
+        ));
+        assert!(BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Testnet4
+        ));
+        assert!(!BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Signet
+        ));
+    }
+
+    #[test]
+    fn test_core_data_network_directory_names() {
+        assert_eq!(CoreDataNetwork::Mainnet.directory_name(), "");
+        assert_eq!(CoreDataNetwork::Testnet.directory_name(), "testnet3");
+        assert_eq!(CoreDataNetwork::Testnet4.directory_name(), "testnet4");
+        assert_eq!(CoreDataNetwork::Signet.directory_name(), "signet");
+        assert_eq!(CoreDataNetwork::Regtest.directory_name(), "regtest");
     }
 }
