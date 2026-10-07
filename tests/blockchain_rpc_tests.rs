@@ -130,7 +130,7 @@ async fn test_verify_chain_with_spends_returns_true() {
                 hash: [0u8; 32],
                 index: 0xffffffff,
             },
-            script_sig: vec![0x01, 0x01],
+            script_sig: vec![0x51, 0xff], // OP_1, BIP34 height 1
             sequence: 0xffffffff,
         }],
         outputs: blvm_protocol::tx_outputs![blvm_protocol::TransactionOutput {
@@ -361,7 +361,7 @@ async fn test_verify_chain_level4_with_undo_logs() {
                 hash: [0u8; 32],
                 index: 0xffffffff,
             },
-            script_sig: vec![0x01, 0x01], // BIP34 height 1
+            script_sig: vec![0x51, 0xff], // OP_1, BIP34 height 1
             sequence: 0xffffffff,
         }],
         outputs: blvm_protocol::tx_outputs![blvm_protocol::TransactionOutput {
