@@ -43,10 +43,10 @@ impl std::str::FromStr for CoreDataNetwork {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "mainnet" => Ok(CoreDataNetwork::Mainnet),
-            "testnet" => Ok(CoreDataNetwork::Testnet),
+            "testnet" | "testnet3" => Ok(CoreDataNetwork::Testnet),
+            "testnet4" => Ok(CoreDataNetwork::Testnet4),
             "regtest" => Ok(CoreDataNetwork::Regtest),
             "signet" => Ok(CoreDataNetwork::Signet),
-            "testnet4" => Ok(CoreDataNetwork::Testnet4),
             _ => Err(format!("Unknown network: {s}")),
         }
     }
@@ -167,6 +167,7 @@ impl BitcoinCoreDetection {
         if let Some(dir_name) = data_dir.file_name().and_then(|n| n.to_str()) {
             match dir_name {
                 "testnet3" => return Some(CoreDataNetwork::Testnet),
+                "testnet4" => return Some(CoreDataNetwork::Testnet4),
                 "regtest" => return Some(CoreDataNetwork::Regtest),
                 "signet" => return Some(CoreDataNetwork::Signet),
                 _ => {}
@@ -181,6 +182,7 @@ impl BitcoinCoreDetection {
                     if let Some(dir_name) = data_dir.file_name().and_then(|n| n.to_str()) {
                         match dir_name {
                             "testnet3" => return Some(CoreDataNetwork::Testnet),
+                            "testnet4" => return Some(CoreDataNetwork::Testnet4),
                             "regtest" => return Some(CoreDataNetwork::Regtest),
                             "signet" => return Some(CoreDataNetwork::Signet),
                             _ => return Some(CoreDataNetwork::Mainnet),
@@ -255,6 +257,58 @@ mod tests {
         assert_eq!(
             BitcoinCoreDetection::detect_network(&testnet_path),
             Some(CoreDataNetwork::Testnet)
+        );
+    }
+
+    #[test]
+    fn test_detect_testnet4_from_path() {
+        let temp = TempDir::new().unwrap();
+        let testnet4_path = temp.path().join("testnet4");
+        std::fs::create_dir_all(&testnet4_path).unwrap();
+
+        assert_eq!(
+            BitcoinCoreDetection::detect_network(&testnet4_path),
+            Some(CoreDataNetwork::Testnet4)
+        );
+    }
+
+    #[test]
+    fn test_detect_testnet4_under_bitcoin_parent() {
+        let temp = TempDir::new().unwrap();
+        let bitcoin_dir = temp.path().join(".bitcoin");
+        let testnet4_path = bitcoin_dir.join("testnet4");
+        std::fs::create_dir_all(&testnet4_path).unwrap();
+
+        assert_eq!(
+            BitcoinCoreDetection::detect_network(&testnet4_path),
+            Some(CoreDataNetwork::Testnet4)
+        );
+    }
+
+    #[test]
+    fn test_core_data_network_display_roundtrip() {
+        for network in [
+            CoreDataNetwork::Mainnet,
+            CoreDataNetwork::Testnet,
+            CoreDataNetwork::Testnet4,
+            CoreDataNetwork::Regtest,
+            CoreDataNetwork::Signet,
+        ] {
+            let s = network.to_string();
+            let parsed: CoreDataNetwork = s.parse().unwrap();
+            assert_eq!(parsed, network);
+        }
+    }
+
+    #[test]
+    fn test_from_str_testnet3_alias() {
+        assert_eq!(
+            "testnet3".parse::<CoreDataNetwork>().unwrap(),
+            CoreDataNetwork::Testnet
+        );
+        assert_eq!(
+            "testnet".parse::<CoreDataNetwork>().unwrap(),
+            CoreDataNetwork::Testnet
         );
     }
 
