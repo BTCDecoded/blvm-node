@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use blvm_protocol::BlockHeader;
 use tokio::task::JoinSet;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
 /// One checkpoint-bounded header download range: `[start, end]` with GetHeaders locator.
@@ -68,9 +68,9 @@ pub(crate) fn simulate_header_range_schedule(
     assigned
 }
 
+use crate::network::NetworkManager;
 use crate::network::peer_scoring::PeerScorer;
 use crate::network::protocol::{GetHeadersMessage, ProtocolMessage, ProtocolParser};
-use crate::network::NetworkManager;
 use crate::node::event_publisher::EventPublisher;
 use crate::storage::blockstore::BlockStore;
 use crate::storage::hashing::double_sha256;

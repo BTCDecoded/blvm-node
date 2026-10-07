@@ -1242,11 +1242,13 @@ mod ibd_autorepair_tests {
             .unwrap()
             .insert(b"k", b"v")
             .unwrap();
-        assert!(storage
-            .open_tree("ibd_utxos_ckpt_a")
-            .unwrap()
-            .is_empty()
-            .unwrap());
+        assert!(
+            storage
+                .open_tree("ibd_utxos_ckpt_a")
+                .unwrap()
+                .is_empty()
+                .unwrap()
+        );
 
         assert_eq!(
             reconcile_ibd_utxo_watermark_with_disk(&storage, 155_499).unwrap(),
@@ -1285,11 +1287,13 @@ mod ibd_autorepair_tests {
             .unwrap()
             .insert(b"k", b"v")
             .unwrap();
-        assert!(storage
-            .open_tree("ibd_utxos_ckpt_a")
-            .unwrap()
-            .is_empty()
-            .unwrap());
+        assert!(
+            storage
+                .open_tree("ibd_utxos_ckpt_a")
+                .unwrap()
+                .is_empty()
+                .unwrap()
+        );
 
         assert_eq!(
             reconcile_ibd_utxo_watermark_with_disk(&storage, 155_512).unwrap(),

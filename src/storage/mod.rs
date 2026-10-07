@@ -39,7 +39,7 @@ pub mod utxostore;
 
 use crate::config::PruningConfig;
 use anyhow::{Context, Result};
-use database::{create_database, default_backend, fallback_backend, Database, DatabaseBackend};
+use database::{Database, DatabaseBackend, create_database, default_backend, fallback_backend};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -330,7 +330,7 @@ impl Storage {
         storage_config: Option<&crate::config::StorageConfig>,
     ) -> Result<PathBuf> {
         use bitcoin_core_migrate::{
-            has_migration_marker, migrate_core_data, read_migration_marker, MigrateCoreArgs,
+            MigrateCoreArgs, has_migration_marker, migrate_core_data, read_migration_marker,
         };
 
         let auto_migrate = storage_config
