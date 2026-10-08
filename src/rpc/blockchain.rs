@@ -17,7 +17,7 @@ use crate::utils::{
     with_custom_timeout,
 };
 use anyhow::Result;
-use blvm_protocol::{BlockHeader, SEGWIT_ACTIVATION_MAINNET, TAPROOT_ACTIVATION_MAINNET};
+use blvm_protocol::{SEGWIT_ACTIVATION_MAINNET, TAPROOT_ACTIVATION_MAINNET};
 use serde_json::{Number, Value, json};
 use std::path::Path;
 use std::sync::Arc;
@@ -161,32 +161,24 @@ impl BlockchainRpc {
         blvm_protocol::pow::difficulty_from_bits(bits).unwrap_or(1.0)
     }
 
-    /// Calculate median time from recent headers (BIP113)
-    fn calculate_median_time(headers: &[BlockHeader]) -> u64 {
-        if headers.is_empty() {
-            return 0;
+    /// Median time of the header at `height` and up to 10 ancestors.
+    ///
+    /// This is the block's own median, not the tip window in `recent_headers`.
+    fn median_time_through_height(&self, storage: &Storage, height: u64, fallback: u64) -> u64 {
+        match storage.blocks().headers_back_from(height, 11) {
+            Ok(headers) if !headers.is_empty() => {
+                blvm_protocol::bip113::get_median_time_past(&headers)
+            }
+            _ => fallback,
         }
-        let mut timestamps: Vec<u64> = headers.iter().map(|h| h.timestamp).collect();
-        timestamps.sort();
-        let mid = timestamps.len() / 2;
-        timestamps[mid]
     }
 
-    /// Calculate block subsidy based on height
-    /// Bitcoin subsidy: 50 BTC initially, halves every 210,000 blocks
-    fn calculate_block_subsidy(height: u64) -> u64 {
-        const INITIAL_SUBSIDY: u64 = 50_000_000_000; // 50 BTC in satoshis
-        const HALVING_INTERVAL: u64 = 210_000;
-
-        let halvings = height / HALVING_INTERVAL;
-
-        // Subsidy halves each halving, but can't go below 0
-        if halvings >= 64 {
-            // After 64 halvings, subsidy is 0 (satoshi precision limit)
-            return 0;
-        }
-
-        INITIAL_SUBSIDY >> halvings
+    fn block_subsidy(&self, height: u64) -> u64 {
+        let network = crate::storage::resolve_consensus_network(
+            self.protocol.as_deref(),
+            self.storage.as_deref(),
+        );
+        blvm_protocol::ConsensusProof::new().get_block_subsidy_for_network(height, network) as u64
     }
 
     /// Wire-format block sizes for RPC (stripped, total with witness when stored, BIP141 weight).
@@ -281,12 +273,7 @@ impl BlockchainRpc {
                 1.0
             };
 
-            // Calculate mediantime from recent headers
-            let mediantime = if let Ok(recent_headers) = storage.blocks().get_recent_headers(11) {
-                Self::calculate_median_time(&recent_headers)
-            } else {
-                0
-            };
+            let mediantime = self.median_time_through_height(storage, height, 0);
 
             let chainwork = storage
                 .chain()
@@ -407,15 +394,11 @@ impl BlockchainRpc {
                     let (stripped_size, block_size, block_weight) =
                         Self::compute_block_wire_sizes(&block, witnesses.as_deref());
 
-                    // Calculate median time from recent headers
-                    let mediantime = if block_height.is_some() {
-                        if let Ok(recent_headers) = storage.blocks().get_recent_headers(11) {
-                            Self::calculate_median_time(&recent_headers)
-                        } else {
-                            block.header.timestamp
+                    let mediantime = match block_height {
+                        Some(height) => {
+                            self.median_time_through_height(storage, height, block.header.timestamp)
                         }
-                    } else {
-                        block.header.timestamp
+                        None => block.header.timestamp,
                     };
 
                     // Calculate difficulty
@@ -542,15 +525,11 @@ impl BlockchainRpc {
                         .map(|h| Self::calculate_confirmations(h, tip_height))
                         .unwrap_or(0);
 
-                    // Calculate mediantime from recent headers at this height
-                    let mediantime = if block_height.is_some() {
-                        if let Ok(recent_headers) = storage.blocks().get_recent_headers(11) {
-                            Self::calculate_median_time(&recent_headers)
-                        } else {
-                            header.timestamp
+                    let mediantime = match block_height {
+                        Some(height) => {
+                            self.median_time_through_height(storage, height, header.timestamp)
                         }
-                    } else {
-                        header.timestamp
+                        None => header.timestamp,
                     };
 
                     // Calculate difficulty
@@ -1307,7 +1286,7 @@ impl BlockchainRpc {
                     .sum::<u64>();
 
                 // Calculate block subsidy
-                let subsidy = Self::calculate_block_subsidy(height);
+                let subsidy = self.block_subsidy(height);
 
                 // Total fees = coinbase outputs minus block subsidy (satoshis).
                 let total_fees = if !block.transactions.is_empty() {

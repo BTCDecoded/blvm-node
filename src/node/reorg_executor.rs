@@ -17,32 +17,88 @@ fn protocol_network(protocol: &BitcoinProtocolEngine) -> Network {
     protocol.get_protocol_version().consensus_network()
 }
 
-/// Walk parent links in the block index from `tip` toward genesis (ascending height).
-pub fn collect_chain_to_tip(
+fn load_reorg_block(blockstore: &BlockStore, hash: &Hash) -> Result<Block> {
+    blockstore
+        .get_block(hash)?
+        .with_context(|| format!("missing block {hash:?} for reorg"))
+}
+
+/// Blocks from the common ancestor through each tip, oldest first.
+///
+/// The two slices start on the same block. Walking a fixed number of parents
+/// from each tip separately shifts the windows when the tips differ in height,
+/// and the ancestor search then reports that the chains do not meet.
+pub fn collect_fork_chains(
     storage: &Storage,
     blockstore: &BlockStore,
-    tip: &Hash,
-) -> Result<Vec<Block>> {
+    active_tip: &Hash,
+    candidate_tip: &Hash,
+) -> Result<(Vec<Block>, Vec<Block>)> {
     let index = storage.chain().block_index();
-    let mut blocks = Vec::new();
-    let mut current = *tip;
-    let mut guard = 0u64;
-    while guard < 10_000 {
-        guard += 1;
-        let Some(entry) = index.get(&current)? else {
-            break;
-        };
-        let block = blockstore
-            .get_block(&current)?
-            .with_context(|| format!("missing block {current:?} for reorg"))?;
-        blocks.push(block);
-        if entry.height == 0 {
+    let active_entry = index
+        .get(active_tip)?
+        .context("active tip missing from block index")?;
+    let candidate_entry = index
+        .get(candidate_tip)?
+        .context("candidate tip missing from block index")?;
+
+    let mut active_hash = *active_tip;
+    let mut candidate_hash = *candidate_tip;
+    let mut active_height = active_entry.height;
+    let mut candidate_height = candidate_entry.height;
+    let mut active_above = Vec::new();
+    let mut candidate_above = Vec::new();
+
+    while active_height > candidate_height {
+        active_above.push(load_reorg_block(blockstore, &active_hash)?);
+        let entry = index
+            .get(&active_hash)?
+            .with_context(|| format!("missing index entry {active_hash:?}"))?;
+        active_hash = entry.prev_hash;
+        active_height -= 1;
+    }
+    while candidate_height > active_height {
+        candidate_above.push(load_reorg_block(blockstore, &candidate_hash)?);
+        let entry = index
+            .get(&candidate_hash)?
+            .with_context(|| format!("missing index entry {candidate_hash:?}"))?;
+        candidate_hash = entry.prev_hash;
+        candidate_height -= 1;
+    }
+
+    let mut active_fork = Vec::new();
+    let mut candidate_fork = Vec::new();
+    loop {
+        if active_hash == candidate_hash {
+            let ancestor = load_reorg_block(blockstore, &active_hash)?;
+            active_fork.push(ancestor.clone());
+            candidate_fork.push(ancestor);
             break;
         }
-        current = entry.prev_hash;
+        active_fork.push(load_reorg_block(blockstore, &active_hash)?);
+        candidate_fork.push(load_reorg_block(blockstore, &candidate_hash)?);
+        if active_height == 0 {
+            anyhow::bail!("chains do not share a common ancestor");
+        }
+        let active_entry = index
+            .get(&active_hash)?
+            .with_context(|| format!("missing index entry {active_hash:?}"))?;
+        let candidate_entry = index
+            .get(&candidate_hash)?
+            .with_context(|| format!("missing index entry {candidate_hash:?}"))?;
+        active_hash = active_entry.prev_hash;
+        candidate_hash = candidate_entry.prev_hash;
+        active_height -= 1;
+        candidate_height -= 1;
     }
-    blocks.reverse();
-    Ok(blocks)
+
+    active_fork.reverse();
+    candidate_fork.reverse();
+    active_above.reverse();
+    candidate_above.reverse();
+    active_fork.extend(active_above);
+    candidate_fork.extend(candidate_above);
+    Ok((active_fork, candidate_fork))
 }
 
 fn witnesses_for_chain(
@@ -79,12 +135,17 @@ fn refresh_active_height_index(
 ) -> Result<()> {
     let index = storage.chain().block_index();
     let mut current = *tip;
-    let mut guard = 0u64;
-    while guard < 10_000 {
-        guard += 1;
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        if !seen.insert(current) {
+            break;
+        }
         let Some(entry) = index.get(&current)? else {
             break;
         };
+        if blockstore.get_hash_by_height(entry.height)?.as_ref() == Some(&current) {
+            break;
+        }
         blockstore.store_height(entry.height, &current)?;
         if entry.height == 0 {
             break;
@@ -160,8 +221,8 @@ pub fn try_activate_heavier_fork(
     }
 
     let (active_tip, active_height) = storage.chain().get_tip_hash_and_height()?;
-    let current_chain = collect_chain_to_tip(storage, blockstore, &active_tip)?;
-    let new_chain = collect_chain_to_tip(storage, blockstore, candidate_tip)?;
+    let (current_chain, new_chain) =
+        collect_fork_chains(storage, blockstore, &active_tip, candidate_tip)?;
     if current_chain.is_empty() || new_chain.is_empty() {
         return Ok(false);
     }

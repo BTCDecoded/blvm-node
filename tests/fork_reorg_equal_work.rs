@@ -17,28 +17,7 @@ const PREFIX_HEIGHT: u64 = 7;
 const FORK_SALT: u64 = 42_000;
 
 fn regtest_coinbase_script_sig(height: u64, fork_salt: u64) -> Vec<u8> {
-    let mut script = if height == 0 {
-        vec![0x00, 0xff]
-    } else if (1..=16).contains(&height) {
-        vec![0x50 + height as u8, 0xff]
-    } else {
-        let mut n = height;
-        let mut height_bytes = Vec::new();
-        while n > 0 {
-            height_bytes.push((n & 0xff) as u8);
-            n >>= 8;
-        }
-        if height_bytes.last().is_some_and(|&b| b & 0x80 != 0) {
-            height_bytes.push(0x00);
-        }
-        let mut script_sig = Vec::with_capacity(1 + height_bytes.len());
-        script_sig.push(height_bytes.len() as u8);
-        script_sig.extend_from_slice(&height_bytes);
-        if script_sig.len() < 2 {
-            script_sig.push(0x00);
-        }
-        script_sig
-    };
+    let mut script = blvm_protocol::bip_validation::encode_bip34_coinbase_script(height);
     if fork_salt != 0 {
         script.extend_from_slice(&fork_salt.to_le_bytes());
     }

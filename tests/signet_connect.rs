@@ -44,7 +44,10 @@ fn signet_genesis_connects_at_height_zero() {
         matches!(result, ValidationResult::Valid),
         "signet genesis must connect at height 0: {result:?}"
     );
-    assert!(!utxo_set.is_empty(), "genesis coinbase must create a UTXO");
+    assert!(
+        utxo_set.is_empty(),
+        "genesis coinbase stays out of the UTXO set"
+    );
 }
 
 #[test]

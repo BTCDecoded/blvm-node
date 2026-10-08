@@ -680,6 +680,10 @@ impl MiningCoordinator {
             .await
     }
 
+    fn consensus_network(&self) -> blvm_protocol::types::Network {
+        crate::storage::resolve_consensus_network(self.protocol.as_deref(), self.storage.as_deref())
+    }
+
     fn create_commons_coinbase(
         &self,
         height: u64,
@@ -691,38 +695,19 @@ impl MiningCoordinator {
         use blvm_protocol::mining::{create_coinbase_with_outputs, fit_payouts_to_reward};
 
         let consensus = ConsensusProof::new();
-        let subsidy = consensus.get_block_subsidy(height);
+        let subsidy = consensus.get_block_subsidy_for_network(height, self.consensus_network());
         let total_fees: i64 = selected_transactions
             .iter()
             .map(|tx| self.mempool.calculate_transaction_fee(tx, utxo_set) as i64)
             .sum();
         let fitted = fit_payouts_to_reward(&outputs, subsidy, total_fees)
             .map_err(|e| anyhow::anyhow!("commons payout fit: {e}"))?;
-        create_coinbase_with_outputs(height, &Self::bip34_coinbase_script(height), &fitted)
-            .map_err(|e| anyhow::anyhow!("commons coinbase: {e}"))
-    }
-
-    fn bip34_coinbase_script(height: u64) -> Vec<u8> {
-        if (1..=16).contains(&height) {
-            // OP_1..=OP_16. A second byte keeps the coinbase scriptSig at its minimum length.
-            return vec![0x50 + height as u8, 0xff];
-        }
-        let h = height.min(u64::from(u32::MAX));
-        let mut height_bytes = Vec::new();
-        let mut x = h;
-        while x > 0 {
-            height_bytes.push((x & 0xff) as u8);
-            x >>= 8;
-        }
-        if height_bytes.is_empty() {
-            height_bytes.push(0);
-        }
-        let mut script_sig = vec![height_bytes.len() as u8];
-        script_sig.extend(height_bytes);
-        if script_sig.len() < 2 {
-            script_sig = vec![0x01, 0x00];
-        }
-        script_sig
+        create_coinbase_with_outputs(
+            height,
+            &blvm_protocol::bip_validation::encode_bip34_coinbase_script(height),
+            &fitted,
+        )
+        .map_err(|e| anyhow::anyhow!("commons coinbase: {e}"))
     }
 
     /// Create coinbase transaction with subsidy + fees
@@ -736,7 +721,8 @@ impl MiningCoordinator {
 
         // 1. Get block subsidy from consensus layer
         let consensus = ConsensusProof::new();
-        let subsidy = consensus.get_block_subsidy(height) as u64;
+        let subsidy =
+            consensus.get_block_subsidy_for_network(height, self.consensus_network()) as u64;
 
         // 2. Calculate total fees from selected transactions
         let total_fees: u64 = selected_transactions
@@ -760,7 +746,7 @@ impl MiningCoordinator {
 
         // 4. Create coinbase transaction (BIP34 height in scriptSig; BIP54: lock_time = height - 13, sequence != 0xffffffff)
         let lock_time = height.saturating_sub(13);
-        let script_sig = Self::bip34_coinbase_script(height);
+        let script_sig = blvm_protocol::bip_validation::encode_bip34_coinbase_script(height);
         Ok(Transaction {
             version: 1,
             inputs: vec![blvm_protocol::TransactionInput {

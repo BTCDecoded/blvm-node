@@ -4,8 +4,8 @@
 //! and chain reorganization.
 
 use crate::node::block_processor::{
-    parse_block_from_wire, prepare_block_validation_context, store_block_with_context_and_index,
-    validate_block_with_context,
+    mtp_headers_before, parse_block_from_wire, prepare_block_validation_context,
+    store_block_with_context_and_index, validate_block_with_context,
 };
 #[cfg(feature = "production")]
 use crate::node::block_processor::{
@@ -384,10 +384,7 @@ impl SyncCoordinator {
         let (stored_witnesses, recent_headers) = if witnesses.len() == block.transactions.len() {
             (
                 witnesses.clone(),
-                blockstore
-                    .get_recent_headers(11)
-                    .ok()
-                    .filter(|headers| !headers.is_empty()),
+                mtp_headers_before(blockstore, current_height),
             )
         } else {
             prepare_block_validation_context(

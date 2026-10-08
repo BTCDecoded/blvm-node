@@ -26,22 +26,7 @@ use crate::network::{NetworkManager, transport::TransportAddr};
 use crate::node::mempool::MempoolManager;
 use crate::storage::Storage;
 use crate::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
-use blvm_protocol::types::Network as ConsensusNetwork;
 use hex;
-
-fn consensus_network_from_storage(storage: &Storage) -> ConsensusNetwork {
-    let Ok(Some(info)) = storage.chain().load_chain_info() else {
-        return ConsensusNetwork::Mainnet;
-    };
-    match info.chain_params.network.as_str() {
-        "mainnet" => ConsensusNetwork::Mainnet,
-        "testnet" => ConsensusNetwork::Testnet,
-        "regtest" => ConsensusNetwork::Regtest,
-        "signet" => ConsensusNetwork::Signet,
-        "testnet4" => ConsensusNetwork::Testnet4,
-        _ => ConsensusNetwork::Mainnet,
-    }
-}
 
 /// Node API implementation for modules
 pub struct NodeApiImpl {
@@ -444,7 +429,7 @@ impl NodeApiImpl {
             None => vec![(0, address_bytes)],
         };
 
-        let network = consensus_network_from_storage(&self.storage);
+        let network = self.storage.chain().consensus_network();
         if let Some(ids) = declared_txids {
             let declared = blvm_protocol::mining::resolve_declared_txs(&mempool_txs, ids)
                 .map_err(|e| ModuleError::op_err("Declared tx resolve failed", e))?;
