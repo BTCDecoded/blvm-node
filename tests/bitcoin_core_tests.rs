@@ -278,6 +278,174 @@ mod bitcoin_core_tests {
         create_dir_all(temp.path().join("blocks")).unwrap();
         assert!(!BitcoinCoreDetection::is_core_layout_at(temp.path()));
     }
+
+    fn create_core_layout(dir: &std::path::Path) {
+        let chainstate = dir.join("chainstate");
+        create_dir_all(&chainstate).unwrap();
+        std::fs::write(chainstate.join("CURRENT"), "MANIFEST-000001\n").unwrap();
+        std::fs::write(chainstate.join("MANIFEST-000001"), b"").unwrap();
+        create_dir_all(dir.join("blocks")).unwrap();
+    }
+
+    #[test]
+    fn test_detect_network_custom_signet_returns_none() {
+        let temp = TempDir::new().unwrap();
+        let custom_signet = temp.path().join("signet_abc123def456");
+        create_dir_all(&custom_signet).unwrap();
+
+        let detected = BitcoinCoreDetection::detect_network(&custom_signet);
+        assert_eq!(
+            detected, None,
+            "Custom signet should not silently fall back to mainnet"
+        );
+    }
+
+    #[test]
+    fn test_detect_network_strict_custom_signet_errors() {
+        let temp = TempDir::new().unwrap();
+        let custom_signet = temp.path().join("signet_0f9188f13cb7b2c71f2a335e3a4fc328");
+        create_dir_all(&custom_signet).unwrap();
+
+        let result = BitcoinCoreDetection::detect_network_strict(&custom_signet);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Custom signet directory detected"),
+            "Error should mention custom signet: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_is_bitcoin_core_dir_respects_network_argument() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path();
+        let testnet4_dir = base.join("testnet4");
+        create_core_layout(&testnet4_dir);
+
+        assert!(
+            BitcoinCoreDetection::is_bitcoin_core_dir(base, CoreDataNetwork::Testnet4),
+            "Should detect testnet4 layout in testnet4/ subdir"
+        );
+        assert!(
+            !BitcoinCoreDetection::is_bitcoin_core_dir(base, CoreDataNetwork::Mainnet),
+            "Should NOT detect mainnet when only testnet4/ exists"
+        );
+        assert!(
+            !BitcoinCoreDetection::is_bitcoin_core_dir(base, CoreDataNetwork::Testnet),
+            "Should NOT detect testnet3 when only testnet4/ exists"
+        );
+    }
+
+    #[test]
+    fn test_is_bitcoin_core_dir_mainnet_at_root() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path();
+        create_core_layout(base);
+
+        assert!(
+            BitcoinCoreDetection::is_bitcoin_core_dir(base, CoreDataNetwork::Mainnet),
+            "Should detect mainnet layout at root"
+        );
+        assert!(
+            !BitcoinCoreDetection::is_bitcoin_core_dir(base, CoreDataNetwork::Testnet4),
+            "Should NOT detect testnet4 when data is at root"
+        );
+    }
+
+    #[test]
+    fn test_testnet4_datadir_integration() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path().join(".bitcoin");
+        create_dir_all(&base).unwrap();
+
+        let testnet4_dir = base.join("testnet4");
+        create_core_layout(&testnet4_dir);
+
+        assert_eq!(
+            BitcoinCoreDetection::detect_network(&testnet4_dir),
+            Some(CoreDataNetwork::Testnet4),
+            "detect_network should identify testnet4 subdirectory"
+        );
+
+        assert!(
+            BitcoinCoreDetection::is_bitcoin_core_dir(&base, CoreDataNetwork::Testnet4),
+            "is_bitcoin_core_dir should find testnet4 data under base"
+        );
+
+        assert!(
+            BitcoinCoreDetection::is_core_layout_at(&testnet4_dir),
+            "is_core_layout_at should validate testnet4 directory structure"
+        );
+
+        assert!(
+            BitcoinCoreDetection::verify_database(&testnet4_dir).is_ok(),
+            "verify_database should pass for valid testnet4 layout"
+        );
+    }
+
+    #[test]
+    fn test_all_networks_directory_layout() {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path();
+
+        create_core_layout(base);
+        create_core_layout(&base.join("testnet3"));
+        create_core_layout(&base.join("testnet4"));
+        create_core_layout(&base.join("signet"));
+        create_core_layout(&base.join("regtest"));
+
+        assert!(BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Mainnet
+        ));
+        assert!(BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Testnet
+        ));
+        assert!(BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Testnet4
+        ));
+        assert!(BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Signet
+        ));
+        assert!(BitcoinCoreDetection::is_bitcoin_core_dir(
+            base,
+            CoreDataNetwork::Regtest
+        ));
+    }
+
+    // The reader-level custom signet test lives in src/storage/core_reuse_tests.rs:
+    // `Storage::open_core_block_reader_for_store` is pub(crate).
+
+    #[test]
+    fn test_standard_signet_core_dir_detection_works() {
+        // Verify that standard signet directories are detected correctly
+        // (as opposed to custom signet_<hash> which returns None)
+        let temp = TempDir::new().unwrap();
+
+        // Create a standard signet directory
+        let signet_dir = temp.path().join("signet");
+        create_dir_all(&signet_dir).unwrap();
+
+        let detected = BitcoinCoreDetection::detect_network(&signet_dir);
+        assert_eq!(
+            detected,
+            Some(CoreDataNetwork::Signet),
+            "Standard signet directory should be detected as Signet"
+        );
+
+        // Contrast with custom signet
+        let custom_signet = temp.path().join("signet_abc123");
+        create_dir_all(&custom_signet).unwrap();
+
+        let detected_custom = BitcoinCoreDetection::detect_network(&custom_signet);
+        assert_eq!(
+            detected_custom, None,
+            "Custom signet_<hash> directory should return None, not Mainnet"
+        );
+    }
 }
 
 #[cfg(not(feature = "rocksdb"))]

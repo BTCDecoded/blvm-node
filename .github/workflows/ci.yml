@@ -392,6 +392,12 @@ jobs:
       - name: Run tests (stratum-v2 feature, lib)
         run: cargo test --features stratum-v2 --lib
 
+      # `rocksdb` is not in default features but gates Bitcoin Core import / block-file
+      # reuse (src/storage/bitcoin_core_*, core_reuse_tests, tests/bitcoin_core_tests.rs,
+      # tests/core_drop_in_integration.rs). Without this step that code is never tested.
+      - name: Run tests (rocksdb feature)
+        run: cargo test --features rocksdb
+
       - name: Dump disk usage on failure
         if: failure()
         run: |

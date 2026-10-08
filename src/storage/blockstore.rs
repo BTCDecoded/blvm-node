@@ -115,6 +115,14 @@ impl Clone for BlockStore {
 }
 
 impl BlockStore {
+    /// Network of the attached Bitcoin Core block-file reader, if any (rocksdb only).
+    #[cfg(feature = "rocksdb")]
+    pub fn bitcoin_core_reader_network(
+        &self,
+    ) -> Option<crate::storage::bitcoin_detection::CoreDataNetwork> {
+        self.bitcoin_core_reader.as_ref().map(|r| r.network())
+    }
+
     /// Create a new block store
     pub fn new(db: Arc<dyn Database>) -> Result<Self> {
         Self::new_with_compression(
