@@ -183,6 +183,11 @@ impl BitcoinCoreBlockReader {
         })
     }
 
+    /// Network whose block magic this reader expects.
+    pub fn network(&self) -> CoreDataNetwork {
+        self.network
+    }
+
     /// Get the magic bytes for the network
     fn get_magic(&self) -> &[u8; 4] {
         network_magic(self.network)

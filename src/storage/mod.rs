@@ -19,6 +19,8 @@ pub mod blockstore;
 pub mod chainstate;
 #[cfg(feature = "utxo-commitments")]
 pub mod commitment_store;
+#[cfg(all(test, feature = "rocksdb"))]
+mod core_reuse_tests;
 pub mod database;
 pub mod disk_utxo;
 pub mod hashing;
@@ -469,20 +471,23 @@ impl Storage {
 
     /// Attempt to open a Bitcoin Core block reader for reuse.
     ///
+    /// The network is resolved by [`BitcoinCoreDetection::resolve_reuse_network`]:
+    /// migration marker, then Core folder name, then `node_network`, all known
+    /// sources required to agree.
+    ///
     /// Returns `None` if:
     /// - Reuse is not enabled (via config or marker)
     /// - The Core blocks directory doesn't exist
-    /// - The network cannot be determined (e.g., custom signet `signet_<hash>` directories)
-    ///
-    /// Exposed as `pub(crate)` for integration testing.
+    /// - The network cannot be resolved: custom signet (`signet_<hash>`) folder,
+    ///   sources that disagree, or no source at all
     #[cfg(feature = "rocksdb")]
     pub(crate) fn open_core_block_reader_for_store(
         blvm_store: &Path,
         core_datadir: Option<&Path>,
         storage_config: Option<&crate::config::StorageConfig>,
+        node_network: Option<blvm_protocol::types::Network>,
     ) -> Option<Arc<bitcoin_core_blocks::BitcoinCoreBlockReader>> {
         use bitcoin_core_migrate::read_migration_marker;
-        use std::str::FromStr;
 
         let marker = read_migration_marker(blvm_store).ok().flatten();
         let reuse = storage_config
@@ -509,23 +514,19 @@ impl Storage {
             return None;
         }
 
-        let network = match marker
-            .as_ref()
-            .and_then(|m| CoreDataNetwork::from_str(&m.network).ok())
-        {
-            Some(n) => n,
-            None => match BitcoinCoreDetection::detect_network_strict(&core_dir) {
-                Ok(n) => n,
-                Err(e) => {
-                    warn!(
-                        "[CORE_IMPORT] Cannot determine network for Core datadir {:?}: {e}. \
-                         Skipping Core block reuse. Specify network in migration marker or use \
-                         a standard directory layout.",
-                        core_dir
-                    );
-                    return None;
-                }
-            },
+        let network = match BitcoinCoreDetection::resolve_reuse_network(
+            &core_dir,
+            marker.as_ref().map(|m| m.network.as_str()),
+            node_network.map(Self::protocol_to_core_network),
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                warn!(
+                    "[CORE_IMPORT] Skipping Core block reuse for {:?}: {e}",
+                    core_dir
+                );
+                return None;
+            }
         };
 
         match bitcoin_core_blocks::BitcoinCoreBlockReader::new_with_cache(
@@ -552,11 +553,18 @@ impl Storage {
         blvm_store: &Path,
         core_datadir: Option<&Path>,
         storage_config: Option<&crate::config::StorageConfig>,
+        node_network: Option<blvm_protocol::types::Network>,
     ) -> Result<Arc<blockstore::BlockStore>> {
+        #[cfg(not(feature = "rocksdb"))]
+        let _ = node_network;
         #[cfg(feature = "rocksdb")]
         {
-            let reader =
-                Self::open_core_block_reader_for_store(blvm_store, core_datadir, storage_config);
+            let reader = Self::open_core_block_reader_for_store(
+                blvm_store,
+                core_datadir,
+                storage_config,
+                node_network,
+            );
             if let Some(reader) = reader {
                 return Ok(Arc::new(
                     blockstore::BlockStore::new_with_bitcoin_core_reader(db, Some(reader))?,
@@ -610,7 +618,9 @@ impl Storage {
                 compression_config,
                 storage_config,
                 core_datadir,
-                Some(network),
+                // The caller's network, not the Mainnet default: Core block reuse must
+                // not treat "unknown" as mainnet.
+                consensus_network,
             )
         }
         #[cfg(not(feature = "compression"))]
@@ -618,8 +628,13 @@ impl Storage {
             // When compression feature is disabled, use the internal implementation
             let store_path = data_dir.as_ref();
             let db = Arc::from(create_database(store_path, backend, storage_config)?);
-            let blockstore =
-                Self::open_blockstore(Arc::clone(&db), store_path, core_datadir, storage_config)?;
+            let blockstore = Self::open_blockstore(
+                Arc::clone(&db),
+                store_path,
+                core_datadir,
+                storage_config,
+                consensus_network,
+            )?;
             let utxostore = Arc::new(utxostore::UtxoStore::new(Arc::clone(&db))?);
             let chainstate = chainstate::ChainState::new(Arc::clone(&db))?;
 
@@ -752,6 +767,7 @@ impl Storage {
                     store_path,
                     core_datadir,
                     storage_config,
+                    consensus_network,
                 );
                 Arc::new(
                     blockstore::BlockStore::new_with_compression_and_bitcoin_core_reader(
@@ -777,8 +793,13 @@ impl Storage {
         };
 
         #[cfg(not(feature = "compression"))]
-        let blockstore =
-            Self::open_blockstore(Arc::clone(&db), store_path, core_datadir, storage_config)?;
+        let blockstore = Self::open_blockstore(
+            Arc::clone(&db),
+            store_path,
+            core_datadir,
+            storage_config,
+            consensus_network,
+        )?;
         let utxostore = if let Some(compression) = &compression_config {
             Arc::new(utxostore::UtxoStore::new_with_compression(
                 Arc::clone(&db),

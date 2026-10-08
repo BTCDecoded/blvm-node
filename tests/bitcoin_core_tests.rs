@@ -416,54 +416,8 @@ mod bitcoin_core_tests {
         ));
     }
 
-    #[test]
-    fn test_custom_signet_core_dir_does_not_produce_mainnet_reader() {
-        use blvm_node::config::StorageConfig;
-        use blvm_node::storage::Storage;
-
-        let temp = TempDir::new().unwrap();
-
-        // Create a custom signet directory (signet_<hash>) with valid Core layout
-        let custom_signet = temp.path().join("signet_abc123def456");
-        create_core_layout(&custom_signet);
-
-        // Create a blvm_store directory
-        let blvm_store = temp.path().join("blvm_data");
-        create_dir_all(&blvm_store).unwrap();
-
-        // Write a migration marker JSON that enables reuse but doesn't specify network
-        let marker_json = serde_json::json!({
-            "source": custom_signet.to_str().unwrap(),
-            "destination": blvm_store.to_str().unwrap(),
-            "network": "", // Empty network - forces detection
-            "tip_hash": "",
-            "height": 0,
-            "reuse_core_blocks": true,
-            "migrated_at": "2024-01-01T00:00:00Z"
-        });
-        let marker_path = blvm_store.join("migration_marker.json");
-        std::fs::write(&marker_path, marker_json.to_string()).unwrap();
-
-        // Also enable reuse via config
-        let config = StorageConfig {
-            reuse_core_block_files: true,
-            ..Default::default()
-        };
-
-        // The function should return None because it cannot determine the network
-        // for a custom signet directory (signet_<hash>)
-        let reader = Storage::open_core_block_reader_for_store(
-            &blvm_store,
-            Some(&custom_signet),
-            Some(&config),
-        );
-
-        assert!(
-            reader.is_none(),
-            "Custom signet directory should NOT produce a reader (would be wrong network). \
-             The old behavior would have defaulted to Mainnet, which is incorrect."
-        );
-    }
+    // The reader-level custom signet test lives in src/storage/core_reuse_tests.rs:
+    // `Storage::open_core_block_reader_for_store` is pub(crate).
 
     #[test]
     fn test_standard_signet_core_dir_detection_works() {
