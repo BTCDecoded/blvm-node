@@ -315,7 +315,7 @@ impl MiningRpc {
         let coinbase_script = self.extract_coinbase_script(params).unwrap_or_default();
         let coinbase_address = self.extract_coinbase_address(params).unwrap_or_default();
 
-        let network = self.consensus_network_from_storage();
+        let network = self.consensus_network();
         let mempool_witnesses =
             self.build_mempool_witnesses_for_template(&utxo_set, &mempool_txs)?;
         // Commons outputs when the module is loaded; else value 0 tops up the caller address.
@@ -713,8 +713,11 @@ impl MiningRpc {
     }
 
     fn calculate_coinbase_value(&self, template: &BlockTemplate, _height: Natural) -> u64 {
-        // Use blvm-consensus's get_block_subsidy (formally verified)
-        let subsidy = self.consensus.get_block_subsidy(template.height) as u64;
+        // Regtest halves every 150 blocks. Other networks stay on 210,000.
+        let network = self.consensus_network();
+        let subsidy = self
+            .consensus
+            .get_block_subsidy_for_network(template.height, network) as u64;
 
         // Calculate total fees from transactions
         let fees: u64 = template
@@ -729,7 +732,7 @@ impl MiningRpc {
     /// Active BIP9-style `rules` for `getblocktemplate`, aligned with [`ForkActivationTable`]
     /// (`blvm-consensus::activation`) and shared activation constants.
     fn get_active_rules(&self, height: Natural) -> Vec<String> {
-        let network = self.consensus_network_from_storage();
+        let network = self.consensus_network();
         // Match `ForkActivationTable::from_network` (Core testnet3 vs mainnet);
         // regtest activates CSV/segwit/taproot from genesis (0).
         let (csv_h, segwit_h, taproot_h) = match network {
@@ -762,63 +765,29 @@ impl MiningRpc {
         rules
     }
 
-    fn consensus_network_from_storage(&self) -> ConsensusNetwork {
-        let Some(ref storage) = self.storage else {
-            return ConsensusNetwork::Mainnet;
-        };
-        let Ok(Some(info)) = storage.chain().load_chain_info() else {
-            return ConsensusNetwork::Mainnet;
-        };
-        match info.chain_params.network.as_str() {
-            "mainnet" => ConsensusNetwork::Mainnet,
-            "testnet" => ConsensusNetwork::Testnet,
-            "regtest" => ConsensusNetwork::Regtest,
-            "signet" => ConsensusNetwork::Signet,
-            "testnet4" => ConsensusNetwork::Testnet4,
-            _ => ConsensusNetwork::Mainnet,
-        }
+    fn consensus_network(&self) -> ConsensusNetwork {
+        crate::storage::resolve_consensus_network(
+            self.protocol_engine.as_deref(),
+            self.storage.as_deref(),
+        )
     }
 
-    fn get_min_time(&self, _height: Natural) -> Natural {
-        // BIP113: median time-past of last 11 blocks + 1 (minimum allowed block time).
+    fn get_min_time(&self, height: Natural) -> Natural {
+        // BIP113: median of the 11 headers before this template, plus one.
         if let Some(ref storage) = self.storage {
-            if let Ok(recent_headers) = storage.blocks().get_recent_headers(11) {
-                if !recent_headers.is_empty() {
-                    return blvm_protocol::bip113::get_median_time_past(&recent_headers)
-                        .saturating_add(1);
+            if height > 0 {
+                if let Ok(headers) = storage.blocks().headers_back_from(height - 1, 11) {
+                    if !headers.is_empty() {
+                        return blvm_protocol::bip113::get_median_time_past(&headers)
+                            .saturating_add(1);
+                    }
                 }
             }
         }
         current_timestamp() as Natural
     }
 
-    /// BIP34 height in coinbase `scriptSig` (regtest has BIP34 from height 0).
-    fn regtest_coinbase_script_sig(height: u64) -> Vec<u8> {
-        if height == 0 {
-            return vec![0x00, 0xff];
-        }
-        if (1..=16).contains(&height) {
-            return vec![0x50 + height as u8, 0xff];
-        }
-        let mut n = height;
-        let mut height_bytes = Vec::new();
-        while n > 0 {
-            height_bytes.push((n & 0xff) as u8);
-            n >>= 8;
-        }
-        if height_bytes.last().is_some_and(|&b| b & 0x80 != 0) {
-            height_bytes.push(0x00);
-        }
-        let mut script_sig = Vec::with_capacity(1 + height_bytes.len());
-        script_sig.push(height_bytes.len() as u8);
-        script_sig.extend_from_slice(&height_bytes);
-        if script_sig.len() < 2 {
-            script_sig.push(0x00);
-        }
-        script_sig
-    }
-
-    /// Mine blocks on regtest and attach them to the local chain (Core-style `generatetoaddress`).
+    /// Mine blocks on regtest and attach them to the local chain (`generatetoaddress`).
     ///
     /// Params: `[nblocks, address, maxtries?]`. Uses the same block construction path as the
     /// regtest integration test (`create_new_block`, version 4, `SyncCoordinator::process_block`).
@@ -912,7 +881,8 @@ impl MiningRpc {
                 prev_headers = vec![prev_header.clone(), prev_header.clone()];
             }
 
-            let coinbase_script = Self::regtest_coinbase_script_sig(connect_height);
+            let coinbase_script =
+                blvm_protocol::bip_validation::encode_bip34_coinbase_script(connect_height);
 
             let mut block = if let Some(outputs) = self.try_commons_gbt_outputs().await? {
                 let template = self
@@ -958,9 +928,16 @@ impl MiningRpc {
                         RpcError::internal_error(format!("generatetoaddress: template failed: {e}"))
                     })?
             };
-            // Connect checks this timestamp against `recent_headers`, not the
-            // 2016-header template window. Use that same slice here.
-            let mtp_headers = storage.blocks().get_recent_headers(11).unwrap_or_default();
+            // Connect checks this timestamp against the 11 headers before the
+            // block, not the 2016-header template window.
+            let mtp_headers = if connect_height > 0 {
+                storage
+                    .blocks()
+                    .headers_back_from(connect_height - 1, 11)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             let median_time_past = if mtp_headers.is_empty() {
                 blvm_protocol::bip113::get_median_time_past(&prev_headers)
             } else {
@@ -1135,7 +1112,7 @@ impl MiningRpc {
             network_time,
             median_time_past: 0,
         });
-        let network = self.consensus_network_from_storage();
+        let network = self.consensus_network();
 
         match self.consensus.validate_block_with_time_context(
             &block,

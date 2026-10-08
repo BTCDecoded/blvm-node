@@ -6,6 +6,7 @@ use crate::storage::block_index::{BlockIndex, BlockIndexStatus};
 use crate::storage::database::{Database, Tree};
 use anyhow::Result;
 use blvm_muhash::MUHASH_RUNNING_STATE_BYTES;
+use blvm_protocol::types::Network;
 use blvm_protocol::{BlockHeader, Hash};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -46,8 +47,20 @@ impl Default for ChainParams {
             network: "mainnet".to_string(),
             genesis_hash: Hash::default(),
             max_target: 0x00000000ffff0000u64,
-            subsidy_halving_interval: 210000,
+            subsidy_halving_interval: blvm_protocol::constants::HALVING_INTERVAL,
         }
+    }
+}
+
+/// Stored `chain_params.network` string to the consensus network enum.
+/// Unknown names are mainnet, matching a missing chain info record.
+pub fn consensus_network_from_stored_name(name: &str) -> Network {
+    match name {
+        "testnet" => Network::Testnet,
+        "testnet4" => Network::Testnet4,
+        "regtest" => Network::Regtest,
+        "signet" => Network::Signet,
+        _ => Network::Mainnet,
     }
 }
 
@@ -146,6 +159,15 @@ impl ChainState {
         let data = bincode::serialize(info)?;
         self.chain_info.insert(b"current", &data)?;
         Ok(())
+    }
+
+    /// Consensus network recorded in chain info. Missing info is mainnet.
+    pub fn consensus_network(&self) -> Network {
+        self.load_chain_info()
+            .ok()
+            .flatten()
+            .map(|info| consensus_network_from_stored_name(&info.chain_params.network))
+            .unwrap_or(Network::Mainnet)
     }
 
     /// Load current chain information
@@ -1159,5 +1181,39 @@ impl ChainState {
 
         // Calculate Bitcoin double SHA256 hash
         double_sha256(&header_data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::consensus_network_from_stored_name;
+    use blvm_protocol::types::Network;
+
+    #[test]
+    fn stored_network_name_maps_once() {
+        assert_eq!(
+            consensus_network_from_stored_name("mainnet"),
+            Network::Mainnet
+        );
+        assert_eq!(
+            consensus_network_from_stored_name("testnet"),
+            Network::Testnet
+        );
+        assert_eq!(
+            consensus_network_from_stored_name("testnet4"),
+            Network::Testnet4
+        );
+        assert_eq!(
+            consensus_network_from_stored_name("regtest"),
+            Network::Regtest
+        );
+        assert_eq!(
+            consensus_network_from_stored_name("signet"),
+            Network::Signet
+        );
+        assert_eq!(
+            consensus_network_from_stored_name("unknown"),
+            Network::Mainnet
+        );
     }
 }

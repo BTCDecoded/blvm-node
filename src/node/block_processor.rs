@@ -136,6 +136,21 @@ pub fn store_block_with_context_and_index(
     Ok(())
 }
 
+/// Headers whose median is the time bound for a block at `height`.
+///
+/// The bound is the median of the ancestors, so the window ends at `height - 1`.
+/// The tip's `recent_headers` window is a different chain once this block is not
+/// the next block after the tip.
+pub(crate) fn mtp_headers_before(blockstore: &BlockStore, height: u64) -> Option<Vec<BlockHeader>> {
+    if height == 0 {
+        return None;
+    }
+    blockstore
+        .headers_back_from(height - 1, 11)
+        .ok()
+        .filter(|headers| !headers.is_empty())
+}
+
 /// Retrieve witnesses and headers for block validation
 // CRITICAL FIX: witnesses is now Vec<Vec<Witness>> (one Vec per transaction, each containing one Witness per input)
 pub fn prepare_block_validation_context(
@@ -146,11 +161,7 @@ pub fn prepare_block_validation_context(
 ) -> Result<(Vec<Vec<Witness>>, Option<Vec<BlockHeader>>)> {
     let witnesses = load_witnesses_for_block(blockstore, block, current_height, protocol_version)?;
 
-    // Get recent headers for median time-past (BIP113)
-    let recent_headers = blockstore
-        .get_recent_headers(11)
-        .ok()
-        .filter(|headers| !headers.is_empty());
+    let recent_headers = mtp_headers_before(blockstore, current_height);
 
     Ok((witnesses, recent_headers))
 }
@@ -190,11 +201,7 @@ pub fn validate_block_with_context(
         return Ok(invalid);
     }
 
-    // Get recent headers for median time-past
-    let recent_headers = blockstore
-        .get_recent_headers(11)
-        .ok()
-        .filter(|headers| !headers.is_empty());
+    let recent_headers = mtp_headers_before(blockstore, height);
 
     // Compute median time-past (BIP113) from recent headers, if available
     let median_time_past = recent_headers
@@ -242,10 +249,7 @@ pub fn validate_block_protocol_only(
     height: u64,
     utxo_set: &UtxoSet,
 ) -> Result<ValidationResult> {
-    let recent_headers = blockstore
-        .get_recent_headers(11)
-        .ok()
-        .filter(|headers| !headers.is_empty());
+    let recent_headers = mtp_headers_before(blockstore, height);
 
     let median_time_past = recent_headers
         .as_ref()
@@ -288,10 +292,7 @@ pub fn validate_block_with_context_and_undo(
         ));
     }
 
-    let recent_headers = blockstore
-        .get_recent_headers(11)
-        .ok()
-        .filter(|headers| !headers.is_empty());
+    let recent_headers = mtp_headers_before(blockstore, height);
 
     let median_time_past = recent_headers
         .as_ref()

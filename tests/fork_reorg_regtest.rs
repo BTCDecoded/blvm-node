@@ -22,28 +22,7 @@ const MAIN_TIP_HEIGHT: u64 = LINEAR_BLOCK_COUNT;
 const FORK_TIP_HEIGHT: u64 = MAIN_TIP_HEIGHT + 1;
 
 fn regtest_coinbase_script_sig(height: u64) -> Vec<u8> {
-    if height == 0 {
-        return vec![0x00, 0xff];
-    }
-    if (1..=16).contains(&height) {
-        return vec![0x50 + height as u8, 0xff];
-    }
-    let mut n = height;
-    let mut height_bytes = Vec::new();
-    while n > 0 {
-        height_bytes.push((n & 0xff) as u8);
-        n >>= 8;
-    }
-    if height_bytes.last().is_some_and(|&b| b & 0x80 != 0) {
-        height_bytes.push(0x00);
-    }
-    let mut script_sig = Vec::with_capacity(1 + height_bytes.len());
-    script_sig.push(height_bytes.len() as u8);
-    script_sig.extend_from_slice(&height_bytes);
-    if script_sig.len() < 2 {
-        script_sig.push(0x00);
-    }
-    script_sig
+    blvm_protocol::bip_validation::encode_bip34_coinbase_script(height)
 }
 
 fn witnesses_for(block: &Block) -> Vec<Vec<Witness>> {
