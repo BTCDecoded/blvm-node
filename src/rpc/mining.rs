@@ -694,22 +694,14 @@ impl MiningRpc {
 
     fn calculate_weight(&self, tx: &Transaction) -> u64 {
         use blvm_protocol::block::calculate_tx_id;
-        use blvm_protocol::serialization::serialize_transaction_with_witness;
-        use blvm_protocol::serialization::transaction::serialize_transaction;
-        use blvm_protocol::witness::calculate_transaction_weight_segwit;
+        use blvm_protocol::segwit::transaction_weight_from_stacks;
 
-        let base_size = serialize_transaction(tx).len() as u64;
-        if let Some(ref mempool) = self.mempool {
+        let stacks = self.mempool.as_ref().and_then(|mempool| {
             let txid = calculate_tx_id(tx);
-            if let Some(witnesses) = mempool.get_transaction_witnesses(&txid) {
-                if witnesses.iter().any(|stack| !stack.is_empty()) {
-                    let total_size =
-                        serialize_transaction_with_witness(tx, &witnesses).len() as u64;
-                    return calculate_transaction_weight_segwit(base_size, total_size);
-                }
-            }
-        }
-        base_size * 4
+            mempool.get_transaction_witnesses(&txid)
+        });
+        transaction_weight_from_stacks(tx, stacks.as_deref())
+            .unwrap_or_else(|_| transaction_weight_from_stacks(tx, None).unwrap_or(0))
     }
 
     fn calculate_coinbase_value(&self, template: &BlockTemplate, _height: Natural) -> u64 {

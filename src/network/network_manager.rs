@@ -2571,28 +2571,54 @@ impl NetworkManager {
         txs: &[blvm_protocol::Transaction],
     ) -> Result<()> {
         if let Some(ref mempool_manager) = self.mempool_manager {
-            // Route through MempoolManager so policy (min-fee, spam filter,
-            // ancestor limits, RBF) is enforced. add_transaction uses interior
-            // mutability (&self) so this is safe from Arc context.
             for tx in txs {
                 if let Err(e) = mempool_manager.add_transaction(tx.clone()) {
                     tracing::debug!("Transaction rejected by mempool: {}", e);
                 }
             }
+            return Ok(());
+        }
+        let utxo_lock = self.utxo_set.lock().await;
+        let mempool_lock = self.mempool.lock().await;
+        for tx in txs {
+            let _ = self.consensus.accept_to_memory_pool(
+                tx,
+                &utxo_lock,
+                &mempool_lock,
+                0,
+                None,
+                Network::Mainnet,
+            );
+        }
+        Ok(())
+    }
+
+    /// Submit one transaction, keeping its witness stacks when they were on the wire.
+    pub(crate) async fn submit_transaction_with_witness(
+        &self,
+        tx: blvm_protocol::Transaction,
+        witnesses: Option<Vec<blvm_protocol::segwit::Witness>>,
+    ) -> Result<()> {
+        if let Some(ref mempool_manager) = self.mempool_manager {
+            // Route through MempoolManager so policy (min-fee, spam filter,
+            // ancestor limits, RBF) is enforced. add_transaction uses interior
+            // mutability (&self) so this is safe from Arc context.
+            if let Err(e) = mempool_manager.add_transaction_with_witness(tx, witnesses) {
+                tracing::debug!("Transaction rejected by mempool: {}", e);
+            }
         } else {
             // Fallback: no MempoolManager configured, accept via consensus layer.
             let utxo_lock = self.utxo_set.lock().await;
             let mempool_lock = self.mempool.lock().await;
-            for tx in txs {
-                let _ = self.consensus.accept_to_memory_pool(
-                    tx,
-                    &utxo_lock,
-                    &mempool_lock,
-                    0,
-                    None,
-                    Network::Mainnet,
-                );
-            }
+            let _ = self.consensus.accept_to_memory_pool_with_witness(
+                &tx,
+                witnesses.as_deref(),
+                &utxo_lock,
+                &mempool_lock,
+                0,
+                None,
+                Network::Mainnet,
+            );
         }
         Ok(())
     }

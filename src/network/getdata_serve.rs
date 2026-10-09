@@ -16,7 +16,7 @@
 //!   fanout / dual-lane write already REVERT’d dens tip30.
 
 use crate::config::getdata_serve_pipe_depth;
-use crate::network::inventory::{MSG_BLOCK, MSG_TX, MSG_WITNESS_BLOCK};
+use crate::network::inventory::{MSG_BLOCK, MSG_TX, MSG_WITNESS_BLOCK, MSG_WITNESS_TX};
 use crate::network::network_manager::NetworkManager;
 use crate::network::protocol::{
     BlockMessage, GetDataMessage, InventoryVector, NotFoundMessage, ProtocolMessage,
@@ -30,6 +30,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{info, warn};
+
+fn inventory_requests_tx(inv_type: u32) -> bool {
+    inv_type == MSG_TX || inv_type == MSG_WITNESS_TX
+}
 
 impl NetworkManager {
     /// Answer a peer `getdata` using chain/mempool storage.
@@ -110,11 +114,11 @@ impl NetworkManager {
                     }
                 }
                 MSG_BLOCK | MSG_WITNESS_BLOCK => missing.push(item.clone()),
-                MSG_TX => {
+                inv_type if inventory_requests_tx(inv_type) => {
                     let res = if self.is_tx_serve_denied(&item.hash) {
                         Ok(None)
                     } else {
-                        build_tx_wire(&txindex, mempool_mgr, &item.hash)
+                        build_tx_wire(&txindex, blockstore.as_ref(), mempool_mgr, &item.hash)
                     };
                     match res {
                         Ok(Some(wire)) => {
@@ -229,11 +233,11 @@ impl NetworkManager {
                     }
                 }
                 MSG_BLOCK | MSG_WITNESS_BLOCK => missing.push(item.clone()),
-                MSG_TX => {
+                inv_type if inventory_requests_tx(inv_type) => {
                     let res = if self.is_tx_serve_denied(&item.hash) {
                         Ok(None)
                     } else {
-                        build_tx_wire(&txindex, mempool_mgr, &item.hash)
+                        build_tx_wire(&txindex, blockstore.as_ref(), mempool_mgr, &item.hash)
                     };
                     match res {
                         Ok(Some(wire)) => {
@@ -318,18 +322,51 @@ fn build_block_wire(
     Ok(Some(ProtocolParser::serialize_message(&msg)?))
 }
 
+fn witnesses_for_indexed_tx(
+    txindex: &crate::storage::txindex::TxIndex,
+    blockstore: &crate::storage::blockstore::BlockStore,
+    hash: &blvm_protocol::Hash,
+) -> Vec<blvm_protocol::segwit::Witness> {
+    let Ok(Some(meta)) = txindex.get_metadata(hash) else {
+        return Vec::new();
+    };
+    let Ok(Some(block_witnesses)) = blockstore.get_witness(&meta.block_hash) else {
+        return Vec::new();
+    };
+    block_witnesses
+        .get(meta.tx_index as usize)
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn build_tx_wire(
     txindex: &crate::storage::txindex::TxIndex,
+    blockstore: &crate::storage::blockstore::BlockStore,
     mempool_mgr: Option<&std::sync::Arc<crate::node::mempool::MempoolManager>>,
     hash: &blvm_protocol::Hash,
 ) -> Result<Option<Vec<u8>>> {
     if let Ok(Some(tx)) = txindex.get_transaction(hash) {
-        let msg = ProtocolMessage::Tx(TxMessage { transaction: tx });
+        let mut witnesses = witnesses_for_indexed_tx(txindex, blockstore, hash);
+        if witnesses.iter().all(|stack| stack.is_empty()) {
+            if let Some(from_pool) = mempool_mgr.and_then(|mm| mm.get_transaction_witnesses(hash)) {
+                if from_pool.iter().any(|stack| !stack.is_empty()) {
+                    witnesses = from_pool;
+                }
+            }
+        }
+        let msg = ProtocolMessage::Tx(TxMessage {
+            transaction: tx,
+            witnesses,
+        });
         return Ok(Some(ProtocolParser::serialize_message(&msg)?));
     }
     if let Some(mm) = mempool_mgr {
         if let Some(tx) = mm.get_transaction(hash) {
-            let msg = ProtocolMessage::Tx(TxMessage { transaction: tx });
+            let witnesses = mm.get_transaction_witnesses(hash).unwrap_or_default();
+            let msg = ProtocolMessage::Tx(TxMessage {
+                transaction: tx,
+                witnesses,
+            });
             return Ok(Some(ProtocolParser::serialize_message(&msg)?));
         }
     }
@@ -340,7 +377,9 @@ fn build_tx_wire(
 mod tests {
     use super::*;
     use crate::network::NetworkManager;
-    use crate::network::inventory::{MSG_BLOCK, MSG_TX};
+    use crate::network::inventory::{
+        MSG_BLOCK, MSG_TX, MSG_WITNESS_BLOCK, MSG_WITNESS_FLAG, MSG_WITNESS_TX,
+    };
     use crate::node::mempool::MempoolManager;
     use crate::storage::Storage;
     use blvm_protocol::block::calculate_tx_id;
@@ -464,6 +503,15 @@ mod tests {
     }
 
     #[test]
+    fn witness_tx_getdata_is_a_transaction_request() {
+        assert_eq!(MSG_WITNESS_TX, MSG_TX | MSG_WITNESS_FLAG);
+        assert!(inventory_requests_tx(MSG_WITNESS_TX));
+        assert!(inventory_requests_tx(MSG_TX));
+        assert!(!inventory_requests_tx(MSG_WITNESS_BLOCK));
+        assert!(!inventory_requests_tx(MSG_BLOCK));
+    }
+
+    #[test]
     fn build_tx_wire_prefers_index_then_mempool() {
         let temp = TempDir::new().unwrap();
         let storage = Storage::new(temp.path()).unwrap();
@@ -478,15 +526,74 @@ mod tests {
             .transactions()
             .index_transaction(&tx, &[0x55; 32], 0, 0)
             .unwrap();
-        let from_index = build_tx_wire(storage.transactions().as_ref(), None, &hash).unwrap();
+        let from_index = build_tx_wire(
+            storage.transactions().as_ref(),
+            storage.blocks().as_ref(),
+            None,
+            &hash,
+        )
+        .unwrap();
         assert!(from_index.is_some());
         let mempool = Arc::new(MempoolManager::new());
         let unknown = [0x66u8; 32];
         assert!(
-            build_tx_wire(storage.transactions().as_ref(), Some(&mempool), &unknown)
-                .unwrap()
-                .is_none()
+            build_tx_wire(
+                storage.transactions().as_ref(),
+                storage.blocks().as_ref(),
+                Some(&mempool),
+                &unknown,
+            )
+            .unwrap()
+            .is_none()
         );
+    }
+
+    #[test]
+    fn confirmed_tx_wire_includes_its_block_witness() {
+        use blvm_protocol::{OutPoint, TransactionInput, TransactionOutput};
+        let temp = TempDir::new().unwrap();
+        let storage = Storage::new(temp.path()).unwrap();
+        let tx = Transaction {
+            version: 2,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [4u8; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: 0xfffffffe,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 1000,
+                script_pubkey: Vec::new(),
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let hash = calculate_tx_id(&tx);
+        let block_hash = [0x55u8; 32];
+        storage
+            .transactions()
+            .index_transaction(&tx, &block_hash, 7, 1)
+            .unwrap();
+        let spend = vec![vec![vec![1u8, 2, 3]]];
+        storage
+            .blocks()
+            .store_witness(&block_hash, &[Vec::new(), spend.clone()])
+            .unwrap();
+        let bytes = build_tx_wire(
+            storage.transactions().as_ref(),
+            storage.blocks().as_ref(),
+            None,
+            &hash,
+        )
+        .unwrap()
+        .expect("indexed tx");
+        match ProtocolParser::parse_message(&bytes).unwrap() {
+            ProtocolMessage::Tx(msg) => assert_eq!(msg.witnesses, spend),
+            other => panic!("expected a tx message, got {other:?}"),
+        }
     }
 
     #[tokio::test]

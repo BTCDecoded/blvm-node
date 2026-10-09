@@ -11,9 +11,10 @@ use blvm_protocol::segwit::Witness;
 use blvm_protocol::wire::{
     deserialize_addr, deserialize_blocktxn, deserialize_cmpctblock, deserialize_getblocktxn,
     deserialize_getdata, deserialize_headers, deserialize_inv, deserialize_notfound,
-    deserialize_ping, deserialize_pong, deserialize_tx, serialize_addr, serialize_blocktxn,
-    serialize_cmpctblock, serialize_getblocktxn, serialize_getdata, serialize_getheaders,
-    serialize_inv, serialize_notfound, serialize_ping, serialize_pong, serialize_tx,
+    deserialize_ping, deserialize_pong, deserialize_tx_with_witness, serialize_addr,
+    serialize_blocktxn, serialize_cmpctblock, serialize_getblocktxn, serialize_getdata,
+    serialize_getheaders, serialize_inv, serialize_notfound, serialize_ping, serialize_pong,
+    serialize_tx_with_witness,
 };
 use blvm_protocol::{Block, BlockHeader, Hash, Transaction};
 use serde::{Deserialize, Serialize};
@@ -371,6 +372,9 @@ pub use blvm_protocol::network::{GetDataMessage, InvMessage, InventoryVector, No
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxMessage {
     pub transaction: Transaction,
+    /// One witness stack per input. Empty when the wire encoding has no witness flag.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub witnesses: Vec<Witness>,
 }
 
 /// FeeFilter message (BIP133) - peer advertises minimum feerate for tx relay
@@ -1129,9 +1133,12 @@ impl ProtocolParser {
                 Ok(ProtocolMessage::NotFound(msg))
             }
             cmd::TX => {
-                let tx = deserialize_tx(payload)
+                let (transaction, witnesses) = deserialize_tx_with_witness(payload)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize tx: {}", e))?;
-                Ok(ProtocolMessage::Tx(TxMessage { transaction: tx }))
+                Ok(ProtocolMessage::Tx(TxMessage {
+                    transaction,
+                    witnesses,
+                }))
             }
             cmd::FEEFILTER => {
                 // BIP133: 8-byte feerate (satoshis per KB) in little-endian
@@ -1393,7 +1400,8 @@ impl ProtocolParser {
             ),
             ProtocolMessage::Tx(msg) => (
                 cmd::TX,
-                serialize_tx(&msg.transaction).map_err(|e| anyhow::anyhow!("{e}"))?,
+                serialize_tx_with_witness(&msg.transaction, &msg.witnesses)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?,
             ),
             ProtocolMessage::FeeFilter(msg) => (cmd::FEEFILTER, msg.feerate.to_le_bytes().to_vec()),
             // Compact Block Relay (BIP152)
@@ -1610,4 +1618,61 @@ pub struct BanEntry {
 pub struct AddrMessage {
     /// List of network addresses
     pub addresses: Vec<NetworkAddress>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProtocolMessage, ProtocolParser, TxMessage};
+    use blvm_protocol::{
+        OutPoint, Transaction, TransactionInput, TransactionOutput, tx_inputs, tx_outputs,
+    };
+
+    fn one_input_tx() -> Transaction {
+        Transaction {
+            version: 2,
+            inputs: tx_inputs![TransactionInput {
+                prevout: OutPoint {
+                    hash: [4u8; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: 0xfffffffe,
+            }],
+            outputs: tx_outputs![TransactionOutput {
+                value: 1000,
+                script_pubkey: Vec::new(),
+            }],
+            lock_time: 0,
+        }
+    }
+
+    #[test]
+    fn tx_message_keeps_witness_stacks() {
+        let witnesses = vec![vec![vec![1u8, 2, 3]]];
+        let message = ProtocolMessage::Tx(TxMessage {
+            transaction: one_input_tx(),
+            witnesses: witnesses.clone(),
+        });
+        let bytes = ProtocolParser::serialize_message(&message).unwrap();
+        match ProtocolParser::parse_message(&bytes).unwrap() {
+            ProtocolMessage::Tx(parsed) => {
+                assert_eq!(parsed.witnesses, witnesses);
+                assert_eq!(parsed.transaction.inputs.len(), 1);
+            }
+            other => panic!("expected a tx message, got {other:?}"),
+        }
+
+        let legacy = ProtocolMessage::Tx(TxMessage {
+            transaction: one_input_tx(),
+            witnesses: vec![Vec::new()],
+        });
+        let legacy_bytes = ProtocolParser::serialize_message(&legacy).unwrap();
+        match ProtocolParser::parse_message(&legacy_bytes).unwrap() {
+            ProtocolMessage::Tx(parsed) => {
+                assert_eq!(parsed.witnesses.len(), 1);
+                assert!(parsed.witnesses.iter().all(|stack| stack.is_empty()));
+            }
+            other => panic!("expected a tx message, got {other:?}"),
+        }
+    }
 }

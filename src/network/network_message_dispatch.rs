@@ -54,9 +54,13 @@ pub(crate) async fn handle_network_message(
         }
         NetworkMessage::TransactionReceived(data) => {
             if let Ok(ProtocolMessage::Tx(tx_msg)) = ProtocolParser::parse_message(&data) {
-                let txs = [tx_msg.transaction.clone()];
                 ignore_error(
-                    || nm.submit_transactions_to_mempool(&txs),
+                    || {
+                        nm.submit_transaction_with_witness(
+                            tx_msg.transaction,
+                            Some(tx_msg.witnesses),
+                        )
+                    },
                     "Error processing transaction",
                 )
                 .await;

@@ -30,6 +30,7 @@ pub(crate) fn tx_wire(tx: &Transaction, witnesses: Option<&[Witness]>) -> TxWire
         let stacks = witnesses.unwrap_or(&[]);
         let padded = padded_witnesses(tx, stacks);
         serialize_transaction_with_witness(tx, &padded)
+            .unwrap_or_else(|_| serialize_transaction(tx))
     } else {
         serialize_transaction(tx)
     };

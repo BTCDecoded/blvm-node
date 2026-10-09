@@ -5,7 +5,9 @@
 use crate::config::{MempoolPolicyConfig, RbfConfig};
 use crate::node::event_publisher::EventPublisher;
 use anyhow::Result;
-use blvm_protocol::mempool::{Mempool, has_conflict_with_tx, replacement_checks, signals_rbf};
+use blvm_protocol::mempool::{
+    Mempool, has_conflict_with_tx, replacement_checks_with_witness, signals_rbf,
+};
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::{Hash, OutPoint, Transaction, UtxoSet};
 use std::cmp::Reverse;
@@ -862,11 +864,13 @@ impl MempoolManager {
             Some(config) => config.clone(),
             None => {
                 // No RBF config - use default BIP125 behavior
-                return replacement_checks(
+                return replacement_checks_with_witness(
                     new_tx,
                     existing_tx,
                     utxo_set,
                     &self.mempool.read().unwrap_or_else(|e| e.into_inner()),
+                    new_witnesses,
+                    None,
                 )
                 .map_err(|e| anyhow::anyhow!("RBF check failed: {}", e));
             }
@@ -1031,11 +1035,13 @@ impl MempoolManager {
         // Note: replacement_checks will re-check fee rate, but we've already validated with our multiplier
         // So we call it to verify the other BIP125 rules (dependencies, etc.)
         // However, since we've already done stricter checks, if replacement_checks passes, we're good
-        let bip125_result = replacement_checks(
+        let bip125_result = replacement_checks_with_witness(
             new_tx,
             existing_tx,
             utxo_set,
             &self.mempool.read().unwrap_or_else(|e| e.into_inner()),
+            new_witnesses,
+            None,
         )?;
         if !bip125_result {
             // BIP125 check failed (likely new dependencies issue)
@@ -1893,23 +1899,23 @@ impl MempoolManager {
         self.admit_vsize(tx, witnesses.as_deref(), utxo_set).0
     }
 
-    /// Transaction weight in weight units. Uses explicit witnesses when any stack is non-empty.
+    /// Transaction weight in weight units.
+    ///
+    /// Non-empty stacks use the serialized witness weight. Stacks that are all
+    /// empty are the legacy encoding, so the weight is four times the stripped size.
     fn transaction_weight(&self, tx: &Transaction, witnesses: Option<&[Witness]>) -> u64 {
-        use blvm_protocol::serialization::serialize_transaction_with_witness;
-        use blvm_protocol::serialization::transaction::serialize_transaction;
-        use blvm_protocol::witness::calculate_transaction_weight_segwit;
+        use blvm_protocol::segwit::transaction_weight_from_stacks;
 
         if let Some(wits) = witnesses {
-            if wits.iter().any(|stack| !stack.is_empty()) {
-                let base_size = serialize_transaction(tx).len() as u64;
-                let total_size = serialize_transaction_with_witness(tx, wits).len() as u64;
-                return calculate_transaction_weight_segwit(base_size, total_size);
+            if let Ok(weight) = transaction_weight_from_stacks(tx, Some(wits)) {
+                return weight;
             }
         }
         self.estimate_transaction_weight(tx)
     }
 
-    /// Weight matching `estimate_transaction_size`: non-witness weight is `4 * vsize`.
+    /// Guess used when witness stacks were not supplied.
+    /// An empty `script_sig` is counted as a native segwit input.
     fn estimate_transaction_weight(&self, tx: &Transaction) -> u64 {
         let mut base_size: usize = 10;
         let mut witness_size: usize = 0;
@@ -1935,16 +1941,11 @@ impl MempoolManager {
 
     /// Virtual size for fee-rate and RBF comparisons (vbytes).
     fn transaction_virtual_size(&self, tx: &Transaction, tx_hash: &Hash) -> usize {
-        use blvm_protocol::serialization::serialize_transaction_with_witness;
-        use blvm_protocol::serialization::transaction::serialize_transaction;
-        use blvm_protocol::witness::{calculate_transaction_weight_segwit, weight_to_vsize};
+        use blvm_protocol::segwit::transaction_weight_from_stacks;
+        use blvm_protocol::witness::weight_to_vsize;
 
-        let base_size = serialize_transaction(tx).len();
         if let Some(witnesses) = self.get_transaction_witnesses(tx_hash) {
-            if witnesses.iter().any(|stack| !stack.is_empty()) {
-                let total_size = serialize_transaction_with_witness(tx, &witnesses).len();
-                let weight =
-                    calculate_transaction_weight_segwit(base_size as u64, total_size as u64);
+            if let Ok(weight) = transaction_weight_from_stacks(tx, Some(witnesses.as_slice())) {
                 return weight_to_vsize(weight) as usize;
             }
         }
@@ -2236,5 +2237,45 @@ impl MempoolManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MempoolManager;
+    use blvm_protocol::serialization::transaction::serialize_transaction;
+    use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput};
+
+    fn legacy_empty_script() -> Transaction {
+        Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [1u8; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: 0xffffffff,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 1000,
+                script_pubkey: Vec::new(),
+            }]
+            .into(),
+            lock_time: 0,
+        }
+    }
+
+    #[test]
+    fn empty_witness_stacks_use_stripped_weight() {
+        let mempool = MempoolManager::new();
+        let tx = legacy_empty_script();
+        let stripped = (serialize_transaction(&tx).len() as u64).saturating_mul(4);
+        assert_eq!(
+            mempool.transaction_weight(&tx, Some(&[Vec::new()])),
+            stripped
+        );
+        assert!(mempool.estimate_transaction_weight(&tx) > stripped);
     }
 }
