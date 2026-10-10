@@ -320,6 +320,8 @@ pub struct NetworkAddress {
     pub services: u64,
     pub ip: [u8; 16],
     pub port: u16,
+    /// Advertised unix time from the addr message.
+    pub time: u32,
 }
 
 /// Ping message
@@ -435,6 +437,8 @@ pub struct BlockTxnMessage {
     pub block_hash: Hash,
     /// Requested transactions in order
     pub transactions: Vec<Transaction>,
+    /// Witness stacks, one per transaction, when the wire message carried them.
+    pub witnesses: Option<Vec<Vec<blvm_protocol::segwit::Witness>>>,
 }
 
 /// GetUTXOSet message - Request UTXO set at specific height
@@ -1059,11 +1063,13 @@ impl ProtocolParser {
                     services: version_msg.services,
                     timestamp: version_msg.timestamp,
                     addr_recv: NetworkAddress {
+                        time: 0,
                         services: version_msg.addr_recv.services,
                         ip: version_msg.addr_recv.ip,
                         port: version_msg.addr_recv.port,
                     },
                     addr_from: NetworkAddress {
+                        time: 0,
                         services: version_msg.addr_from.services,
                         ip: version_msg.addr_from.ip,
                         port: version_msg.addr_from.port,
@@ -1178,6 +1184,7 @@ impl ProtocolParser {
                 Ok(ProtocolMessage::BlockTxn(BlockTxnMessage {
                     block_hash: wire.block_hash,
                     transactions: wire.transactions,
+                    witnesses: wire.witnesses,
                 }))
             }
             // UTXO commitment protocol extensions
@@ -1234,6 +1241,7 @@ impl ProtocolParser {
                             services: a.services,
                             ip: a.ip,
                             port: a.port,
+                            time: a.time,
                         })
                         .collect(),
                 }))
@@ -1311,11 +1319,13 @@ impl ProtocolParser {
                     services: msg.services,
                     timestamp: msg.timestamp,
                     addr_recv: NetworkAddress {
+                        time: 0,
                         services: msg.addr_recv.services,
                         ip: msg.addr_recv.ip,
                         port: msg.addr_recv.port,
                     },
                     addr_from: NetworkAddress {
+                        time: 0,
                         services: msg.addr_from.services,
                         ip: msg.addr_from.ip,
                         port: msg.addr_from.port,
@@ -1439,7 +1449,7 @@ impl ProtocolParser {
                 let wire = blvm_protocol::network::BlockTxnMessage {
                     block_hash: msg.block_hash,
                     transactions: msg.transactions.clone(),
-                    witnesses: None,
+                    witnesses: msg.witnesses.clone(),
                 };
                 (
                     cmd::BLOCKTXN,
@@ -1493,6 +1503,7 @@ impl ProtocolParser {
                             services: a.services,
                             ip: a.ip,
                             port: a.port,
+                            time: a.time,
                         })
                         .collect(),
                 };

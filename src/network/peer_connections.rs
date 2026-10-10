@@ -196,12 +196,13 @@ impl NetworkManager {
             match iroh_transport.connect(transport_addr.clone()).await {
                 Ok(conn) => {
                     let placeholder_socket = SocketAddr::from(([0, 0, 0, 0], 0));
-                    let peer = peer::Peer::from_transport_connection(
+                    let mut peer = peer::Peer::from_transport_connection(
                         conn,
                         placeholder_socket,
                         transport_addr.clone(),
                         self.peer_tx().clone(),
                     );
+                    peer.set_is_outbound(true);
 
                     {
                         let mut pm = self.peer_manager_mutex().lock().await;
@@ -673,15 +674,14 @@ impl NetworkManager {
                     .connect_stream_with_timeout(addr, connect_secs)
                     .await?;
                 let transport_addr = TransportAddr::Tcp(addr);
-                Ok((
-                    peer::Peer::from_tcp_stream_split(
-                        stream,
-                        addr,
-                        self.peer_tx().clone(),
-                        self.protocol_limits().max_protocol_message_length,
-                    ),
-                    transport_addr,
-                ))
+                let mut peer = peer::Peer::from_tcp_stream_split(
+                    stream,
+                    addr,
+                    self.peer_tx().clone(),
+                    self.protocol_limits().max_protocol_message_length,
+                );
+                peer.set_is_outbound(true);
+                Ok((peer, transport_addr))
             }
             #[cfg(feature = "quinn")]
             TransportType::Quinn => {
@@ -694,15 +694,14 @@ impl NetworkManager {
                     let quinn_addr = TransportAddr::Quinn(addr);
                     let quinn_addr_clone = quinn_addr.clone();
                     let conn = quinn.connect(quinn_addr_clone.clone()).await?;
-                    Ok((
-                        peer::Peer::from_transport_connection(
-                            conn,
-                            addr,
-                            quinn_addr_clone.clone(),
-                            self.peer_tx().clone(),
-                        ),
-                        quinn_addr_clone,
-                    ))
+                    let mut peer = peer::Peer::from_transport_connection(
+                        conn,
+                        addr,
+                        quinn_addr_clone.clone(),
+                        self.peer_tx().clone(),
+                    );
+                    peer.set_is_outbound(true);
+                    Ok((peer, quinn_addr_clone))
                 } else {
                     Err(anyhow::anyhow!("Quinn transport not available"))
                 }

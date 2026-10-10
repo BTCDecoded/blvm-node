@@ -143,6 +143,16 @@ fn test_policy_config_defaults() {
     assert_eq!(policy.mempool_expiry_hours, 336); // 14 days
 }
 
+fn unexecuted_checksigs(n: usize) -> Vec<u8> {
+    use blvm_protocol::opcodes::{OP_0, OP_CHECKSIG, OP_ENDIF, OP_IF};
+    let mut script = Vec::with_capacity(n + 3);
+    script.push(OP_0);
+    script.push(OP_IF);
+    script.extend(std::iter::repeat(OP_CHECKSIG).take(n));
+    script.push(OP_ENDIF);
+    script
+}
+
 fn funded_utxo(prevout: blvm_protocol::OutPoint, value: i64) -> blvm_protocol::UtxoSet {
     let mut utxo_set = blvm_protocol::UtxoSet::default();
     utxo_set.insert(
@@ -187,7 +197,7 @@ fn sigop_adjusted_vsize_rejects_underpriced_tx() {
         hash: [7u8; 32],
         index: 0,
     };
-    let script_sig = vec![0xac; 80];
+    let script_sig = unexecuted_checksigs(80);
     let tx = tx_with_script_sig(prevout, script_sig, 48_400);
     let mempool = MempoolManager::new();
     mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded_utxo(
@@ -225,7 +235,7 @@ fn sigop_cost_above_standard_cap_is_rejected() {
         hash: [8u8; 32],
         index: 0,
     };
-    let tx = tx_with_script_sig(prevout, vec![0xac; 4001], 1);
+    let tx = tx_with_script_sig(prevout, unexecuted_checksigs(4001), 1);
     let mempool = MempoolManager::new();
     mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded_utxo(
         prevout, 50_000_000,
@@ -247,12 +257,24 @@ fn ancestor_limit_uses_sigop_adjusted_vsize() {
     let parent = tx_with_script_sig(parent_prevout, vec![], 40_000);
     let parent_hash = calculate_tx_id(&parent);
     let witness: Vec<blvm_protocol::Witness> = vec![vec![vec![0u8; 200]]];
+    let mut parent_utxo = funded_utxo(parent_prevout, 50_000);
+    {
+        use blvm_protocol::opcodes::{OP_2, PUSH_32_BYTES};
+        let mut program = vec![OP_2, PUSH_32_BYTES, 1];
+        program.resize(34, 0);
+        parent_utxo.insert(
+            parent_prevout,
+            Arc::new(blvm_protocol::UTXO {
+                value: 50_000,
+                script_pubkey: program.into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+    }
 
     let mempool = MempoolManager::new();
-    mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded_utxo(
-        parent_prevout,
-        50_000,
-    ))));
+    mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(parent_utxo)));
     mempool.set_policy_config(Some(MempoolPolicyConfig::default()));
     assert!(
         mempool

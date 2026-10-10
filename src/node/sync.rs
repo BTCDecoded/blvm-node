@@ -164,6 +164,7 @@ pub struct SyncCoordinator {
     state_machine: SyncStateMachine,
     block_provider: InMemoryBlockProvider,
     event_publisher: Option<Arc<EventPublisher>>,
+    mempool: Option<Arc<crate::node::mempool::MempoolManager>>,
 }
 
 impl Default for SyncCoordinator {
@@ -178,6 +179,7 @@ impl Clone for SyncCoordinator {
             state_machine: SyncStateMachine::new(),
             block_provider: InMemoryBlockProvider::new(),
             event_publisher: self.event_publisher.clone(),
+            mempool: self.mempool.clone(),
         }
     }
 }
@@ -189,12 +191,18 @@ impl SyncCoordinator {
             state_machine: SyncStateMachine::new(),
             block_provider: InMemoryBlockProvider::new(),
             event_publisher: None,
+            mempool: None,
         }
     }
 
     /// Attach an event publisher for fork-choice reorg notifications.
     pub fn set_event_publisher(&mut self, publisher: Option<Arc<EventPublisher>>) {
         self.event_publisher = publisher;
+    }
+
+    /// Pool updated when a heavier fork becomes the active chain.
+    pub fn set_mempool(&mut self, mempool: Option<Arc<crate::node::mempool::MempoolManager>>) {
+        self.mempool = mempool;
     }
 
     /// Mark sync complete when chainstate is already current (no IBD download).
@@ -588,6 +596,7 @@ impl SyncCoordinator {
                 &block_hash,
                 utxo_set,
                 self.event_publisher.as_ref(),
+                self.mempool.as_deref(),
             )? {
                 // Side-chain block stored; active tip unchanged.
             }

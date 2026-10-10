@@ -35,6 +35,14 @@ pub trait MempoolProvider: Send + Sync {
     fn get_transaction_witnesses(&self, hash: &[u8; 32]) -> Option<Vec<Witness>>;
 }
 
+/// Outcome of offering one transaction to the template.
+#[derive(PartialEq, Eq)]
+enum BlockSelect {
+    Added,
+    Skip,
+    Full,
+}
+
 /// Transaction selector for block building
 pub struct TransactionSelector {
     /// Maximum block size
@@ -72,71 +80,467 @@ impl TransactionSelector {
 
     /// Select transactions for block
     /// Note: Requires UTXO set for fee calculation - caller must provide it
+    ///
+    /// Candidates arrive in fee-rate order. A spend of a parent still in the pool
+    /// is held until that parent is selected, so the template lists the parent first.
+    /// A transaction that does not fit is skipped. Later transactions that do fit
+    /// are still included. Parents below the fee floor are included when a waiting
+    /// descendant pays a package rate at or above that floor. The package contains
+    /// that descendant and every unselected ancestor it still spends.
     pub fn select_transactions(
         &self,
         mempool: &dyn MempoolProvider,
         utxo_set: &blvm_protocol::UtxoSet,
     ) -> Vec<Transaction> {
-        let mut selected = Vec::new();
-        let mut current_size = 0;
-        let mut current_weight = 0;
+        use std::collections::{HashSet, VecDeque};
 
-        // Get prioritized transactions (with UTXO set for fee calculation)
-        // MempoolManager.get_prioritized_transactions() already returns transactions
-        // sorted by fee rate (descending) calculated with real UTXO set
+        let mut selected = Vec::new();
+        let mut selected_ids = HashSet::new();
+        let mut current_size = 0usize;
+        let mut current_weight = 0u64;
+        let mut waiting: VecDeque<Transaction> = VecDeque::new();
+
         let transactions = mempool.get_prioritized_transactions(1000, utxo_set);
 
         for tx in transactions {
-            use blvm_protocol::block::calculate_tx_id;
-            let txid = calculate_tx_id(&tx);
-            let input_witnesses = mempool.get_transaction_witnesses(&txid);
-            let tx_stripped = blvm_consensus::transaction::calculate_transaction_size(&tx);
-            let tx_weight = bip141_weight(&tx, input_witnesses.as_deref());
-            let tx_vsize = transaction_vsize(&tx, input_witnesses.as_deref());
-
-            // Check if adding this transaction would exceed limits
-            if current_size + tx_stripped > self.max_block_size
-                || current_weight + tx_weight > self.max_block_weight
-            {
-                break;
-            }
-
-            // Check minimum fee rate (sat/vB) using real UTXO set
-            let fee_rate = self.calculate_fee_rate_with_utxo(&tx, utxo_set, tx_vsize);
-            if fee_rate < self.min_fee_rate {
+            if selected_ids.contains(&blvm_protocol::block::calculate_tx_id(&tx)) {
                 continue;
             }
+            if self.parent_still_unselected(&tx, mempool, utxo_set, &selected_ids) {
+                waiting.push_back(tx);
+                continue;
+            }
+            match self.try_add_to_block(
+                &tx,
+                mempool,
+                utxo_set,
+                &mut selected,
+                &mut selected_ids,
+                &mut current_size,
+                &mut current_weight,
+                true,
+            ) {
+                BlockSelect::Added => {
+                    self.take_ready_dependents(
+                        mempool,
+                        utxo_set,
+                        &mut waiting,
+                        &mut selected,
+                        &mut selected_ids,
+                        &mut current_size,
+                        &mut current_weight,
+                    );
+                }
+                BlockSelect::Skip => {
+                    if let Some((parents, child)) =
+                        self.paying_package(&tx, mempool, utxo_set, &waiting, &selected_ids)
+                    {
+                        let mut package: Vec<&Transaction> = parents.iter().collect();
+                        package.push(&child);
+                        if self.package_fits(&package, mempool, current_size, current_weight) {
+                            let mut added = false;
+                            for parent_tx in &parents {
+                                if selected_ids
+                                    .contains(&blvm_protocol::block::calculate_tx_id(parent_tx))
+                                {
+                                    continue;
+                                }
+                                if self.try_add_to_block(
+                                    parent_tx,
+                                    mempool,
+                                    utxo_set,
+                                    &mut selected,
+                                    &mut selected_ids,
+                                    &mut current_size,
+                                    &mut current_weight,
+                                    false,
+                                ) == BlockSelect::Added
+                                {
+                                    added = true;
+                                }
+                            }
+                            if added {
+                                self.take_ready_dependents(
+                                    mempool,
+                                    utxo_set,
+                                    &mut waiting,
+                                    &mut selected,
+                                    &mut selected_ids,
+                                    &mut current_size,
+                                    &mut current_weight,
+                                );
+                            }
+                        }
+                    }
+                }
+                BlockSelect::Full => {}
+            }
+        }
 
-            selected.push(tx);
-            current_size += tx_stripped;
-            current_weight += tx_weight;
+        let waiting_children: Vec<Transaction> = waiting.drain(..).collect();
+        for child in waiting_children {
+            if selected_ids.contains(&blvm_protocol::block::calculate_tx_id(&child)) {
+                continue;
+            }
+            let Some(parents) = self.unselected_ancestors(&child, mempool, utxo_set, &selected_ids)
+            else {
+                continue;
+            };
+            if parents.is_empty() {
+                continue;
+            }
+            let mut package_fee = self.transaction_fee(&child, utxo_set, mempool);
+            let mut package_vsize = self.tx_vsize(&child, mempool);
+            for parent_tx in &parents {
+                package_fee = package_fee
+                    .saturating_add(self.transaction_fee(parent_tx, utxo_set, mempool));
+                package_vsize = package_vsize.saturating_add(self.tx_vsize(parent_tx, mempool));
+            }
+            if package_vsize == 0
+                || package_fee / (package_vsize as u64) < self.min_fee_rate
+            {
+                continue;
+            }
+            for parent_tx in &parents {
+                if selected_ids.contains(&blvm_protocol::block::calculate_tx_id(parent_tx)) {
+                    continue;
+                }
+                let _ = self.try_add_to_block(
+                    parent_tx,
+                    mempool,
+                    utxo_set,
+                    &mut selected,
+                    &mut selected_ids,
+                    &mut current_size,
+                    &mut current_weight,
+                    false,
+                );
+            }
+            let _ = self.try_add_to_block(
+                &child,
+                mempool,
+                utxo_set,
+                &mut selected,
+                &mut selected_ids,
+                &mut current_size,
+                &mut current_weight,
+                false,
+            );
         }
 
         selected
     }
 
-    /// Fee rate (sat/vB) using UTXO set and virtual size.
+    /// True when an input spends a pool transaction that is not yet in the template.
+    fn parent_still_unselected(
+        &self,
+        tx: &Transaction,
+        mempool: &dyn MempoolProvider,
+        utxo_set: &blvm_protocol::UtxoSet,
+        selected_ids: &std::collections::HashSet<[u8; 32]>,
+    ) -> bool {
+        tx.inputs.iter().any(|input| {
+            if utxo_set.get(&input.prevout).is_some() {
+                return false;
+            }
+            mempool.get_transaction(&input.prevout.hash).is_some()
+                && !selected_ids.contains(&input.prevout.hash)
+        })
+    }
+
+    fn try_add_to_block(
+        &self,
+        tx: &Transaction,
+        mempool: &dyn MempoolProvider,
+        utxo_set: &blvm_protocol::UtxoSet,
+        selected: &mut Vec<Transaction>,
+        selected_ids: &mut std::collections::HashSet<[u8; 32]>,
+        current_size: &mut usize,
+        current_weight: &mut u64,
+        enforce_fee: bool,
+    ) -> BlockSelect {
+        use blvm_protocol::block::calculate_tx_id;
+
+        let txid = calculate_tx_id(tx);
+        let input_witnesses = mempool.get_transaction_witnesses(&txid);
+        let tx_stripped = blvm_consensus::transaction::calculate_transaction_size(tx);
+        let tx_weight = bip141_weight(tx, input_witnesses.as_deref());
+        let tx_vsize = transaction_vsize(tx, input_witnesses.as_deref());
+
+        if *current_size + tx_stripped > self.max_block_size
+            || *current_weight + tx_weight > self.max_block_weight
+        {
+            return BlockSelect::Full;
+        }
+
+        let fee_rate = self.calculate_fee_rate_with_utxo(tx, utxo_set, tx_vsize, mempool);
+        if enforce_fee && fee_rate < self.min_fee_rate {
+            return BlockSelect::Skip;
+        }
+
+        selected.push(tx.clone());
+        selected_ids.insert(txid);
+        *current_size += tx_stripped;
+        *current_weight += tx_weight;
+        BlockSelect::Added
+    }
+
+    /// Append deferred spends whose parents are now in the template.
+    ///
+    /// A ready spend that does not fit is left out. The rest of the queue is still tried.
+    fn take_ready_dependents(
+        &self,
+        mempool: &dyn MempoolProvider,
+        utxo_set: &blvm_protocol::UtxoSet,
+        waiting: &mut std::collections::VecDeque<Transaction>,
+        selected: &mut Vec<Transaction>,
+        selected_ids: &mut std::collections::HashSet<[u8; 32]>,
+        current_size: &mut usize,
+        current_weight: &mut u64,
+    ) {
+        use std::collections::VecDeque;
+
+        loop {
+            let mut added = false;
+            let mut still_waiting = VecDeque::new();
+            while let Some(tx) = waiting.pop_front() {
+                if selected_ids.contains(&blvm_protocol::block::calculate_tx_id(&tx)) {
+                    continue;
+                }
+                if self.parent_still_unselected(&tx, mempool, utxo_set, selected_ids) {
+                    still_waiting.push_back(tx);
+                    continue;
+                }
+                match self.try_add_to_block(
+                    &tx,
+                    mempool,
+                    utxo_set,
+                    selected,
+                    selected_ids,
+                    current_size,
+                    current_weight,
+                    true,
+                ) {
+                    BlockSelect::Added => added = true,
+                    BlockSelect::Skip | BlockSelect::Full => {}
+                }
+            }
+            *waiting = still_waiting;
+            if !added {
+                return;
+            }
+        }
+    }
+
+    /// Ancestors a waiting descendant will pay for, together with that descendant.
+    ///
+    /// The descendant meets the fee floor on its own. Its unselected ancestors are
+    /// ordered so each parent precedes its child. The package includes `anchor`.
+    fn paying_package(
+        &self,
+        anchor: &Transaction,
+        mempool: &dyn MempoolProvider,
+        utxo_set: &blvm_protocol::UtxoSet,
+        waiting: &std::collections::VecDeque<Transaction>,
+        selected_ids: &std::collections::HashSet<[u8; 32]>,
+    ) -> Option<(Vec<Transaction>, Transaction)> {
+        use blvm_protocol::block::calculate_tx_id;
+
+        let anchor_id = calculate_tx_id(anchor);
+        for child in waiting {
+            let child_vsize = self.tx_vsize(child, mempool);
+            if child_vsize == 0 {
+                continue;
+            }
+            let child_fee = self.transaction_fee(child, utxo_set, mempool);
+            if child_fee / (child_vsize as u64) < self.min_fee_rate {
+                continue;
+            }
+            let Some(parents) = self.unselected_ancestors(child, mempool, utxo_set, selected_ids)
+            else {
+                continue;
+            };
+            if !parents
+                .iter()
+                .any(|parent| calculate_tx_id(parent) == anchor_id)
+            {
+                continue;
+            }
+
+            let mut package_fee = child_fee;
+            let mut package_vsize = child_vsize;
+            for parent_tx in &parents {
+                package_fee =
+                    package_fee.saturating_add(self.transaction_fee(parent_tx, utxo_set, mempool));
+                package_vsize = package_vsize.saturating_add(self.tx_vsize(parent_tx, mempool));
+            }
+            if package_vsize > 0 && package_fee / (package_vsize as u64) >= self.min_fee_rate {
+                return Some((parents, child.clone()));
+            }
+        }
+        None
+    }
+
+    /// Unselected mempool ancestors of `tx`, each parent before its children.
+    fn unselected_ancestors(
+        &self,
+        tx: &Transaction,
+        mempool: &dyn MempoolProvider,
+        utxo_set: &blvm_protocol::UtxoSet,
+        selected_ids: &std::collections::HashSet<[u8; 32]>,
+    ) -> Option<Vec<Transaction>> {
+        let mut ordered = Vec::new();
+        let mut visiting = std::collections::HashSet::new();
+        let mut done = std::collections::HashSet::new();
+
+        fn walk(
+            tx: &Transaction,
+            mempool: &dyn MempoolProvider,
+            utxo_set: &blvm_protocol::UtxoSet,
+            selected_ids: &std::collections::HashSet<[u8; 32]>,
+            visiting: &mut std::collections::HashSet<[u8; 32]>,
+            done: &mut std::collections::HashSet<[u8; 32]>,
+            ordered: &mut Vec<Transaction>,
+        ) -> bool {
+            for input in &tx.inputs {
+                if utxo_set.get(&input.prevout).is_some()
+                    || selected_ids.contains(&input.prevout.hash)
+                    || done.contains(&input.prevout.hash)
+                {
+                    continue;
+                }
+                if !visiting.insert(input.prevout.hash) {
+                    return false;
+                }
+                let Some(parent_tx) = mempool.get_transaction(&input.prevout.hash) else {
+                    return false;
+                };
+                if parent_tx
+                    .outputs
+                    .get(input.prevout.index as usize)
+                    .is_none()
+                {
+                    return false;
+                }
+                if !walk(
+                    &parent_tx,
+                    mempool,
+                    utxo_set,
+                    selected_ids,
+                    visiting,
+                    done,
+                    ordered,
+                ) {
+                    return false;
+                }
+                visiting.remove(&input.prevout.hash);
+                done.insert(input.prevout.hash);
+                ordered.push(parent_tx);
+            }
+            true
+        }
+
+        if !walk(
+            tx,
+            mempool,
+            utxo_set,
+            selected_ids,
+            &mut visiting,
+            &mut done,
+            &mut ordered,
+        ) {
+            return None;
+        }
+        Some(ordered)
+    }
+
+    fn package_fits(
+        &self,
+        txs: &[&Transaction],
+        mempool: &dyn MempoolProvider,
+        current_size: usize,
+        current_weight: u64,
+    ) -> bool {
+        use blvm_protocol::block::calculate_tx_id;
+
+        let mut size = current_size;
+        let mut weight = current_weight;
+        for tx in txs {
+            let witnesses = mempool.get_transaction_witnesses(&calculate_tx_id(tx));
+            let stripped = blvm_consensus::transaction::calculate_transaction_size(tx);
+            let tx_weight = bip141_weight(tx, witnesses.as_deref());
+            size = size.saturating_add(stripped);
+            weight = weight.saturating_add(tx_weight);
+            if size > self.max_block_size || weight > self.max_block_weight {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn tx_vsize(&self, tx: &Transaction, mempool: &dyn MempoolProvider) -> usize {
+        use blvm_protocol::block::calculate_tx_id;
+
+        let witnesses = mempool.get_transaction_witnesses(&calculate_tx_id(tx));
+        transaction_vsize(tx, witnesses.as_deref())
+    }
+
+    /// Fee rate (sat/vB) using the chain UTXO set and virtual size.
+    ///
+    /// A prevout missing from the chain set is priced from the parent transaction
+    /// still in the pool. The running input sum stays within `MAX_MONEY`.
     fn calculate_fee_rate_with_utxo(
         &self,
         tx: &Transaction,
         utxo_set: &blvm_protocol::UtxoSet,
         tx_vsize: usize,
+        mempool: &dyn MempoolProvider,
     ) -> u64 {
         if tx_vsize == 0 {
             return 0;
         }
+        self.transaction_fee(tx, utxo_set, mempool) / tx_vsize as u64
+    }
 
+    fn transaction_fee(
+        &self,
+        tx: &Transaction,
+        utxo_set: &blvm_protocol::UtxoSet,
+        mempool: &dyn MempoolProvider,
+    ) -> u64 {
+        let max_money = blvm_protocol::constants::MAX_MONEY;
         let mut input_total = 0u64;
         for input in &tx.inputs {
-            if let Some(utxo) = utxo_set.get(&input.prevout) {
-                input_total += utxo.value as u64;
+            let sats = if let Some(utxo) = utxo_set.get(&input.prevout) {
+                (0..=max_money)
+                    .contains(&utxo.value)
+                    .then_some(utxo.value as u64)
+            } else {
+                mempool
+                    .get_transaction(&input.prevout.hash)
+                    .and_then(|parent| parent.outputs.get(input.prevout.index as usize).cloned())
+                    .and_then(|output| {
+                        (0..=max_money)
+                            .contains(&output.value)
+                            .then_some(output.value as u64)
+                    })
+            };
+            if let Some(sats) = sats {
+                let Some(sum) = input_total
+                    .checked_add(sats)
+                    .filter(|sum| *sum <= max_money as u64)
+                else {
+                    return 0;
+                };
+                input_total = sum;
             }
         }
 
-        let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
-        let fee = input_total.saturating_sub(output_total);
-
-        fee / tx_vsize as u64
+        // An output outside the money range is not a fee. Casting it would wrap.
+        let Some(output_total) = crate::node::mempool::output_sum_sats(tx) else {
+            return 0;
+        };
+        input_total.saturating_sub(output_total)
     }
 
     /// Get maximum block size
@@ -744,8 +1148,8 @@ impl MiningCoordinator {
             height, subsidy, total_fees, coinbase_value
         );
 
-        // 4. Create coinbase transaction (BIP34 height in scriptSig; BIP54: lock_time = height - 13, sequence != 0xffffffff)
-        let lock_time = height.saturating_sub(13);
+        // 4. Create coinbase transaction (BIP34 height in scriptSig; BIP54: lock_time = height - 1, sequence != 0xffffffff)
+        let lock_time = height.saturating_sub(1);
         let script_sig = blvm_protocol::bip_validation::encode_bip34_coinbase_script(height);
         Ok(Transaction {
             version: 1,
@@ -818,6 +1222,7 @@ impl MiningCoordinator {
         let witnesses = self.build_witnesses_for_block(&block, &utxo)?;
 
         let mut coord = crate::node::sync::SyncCoordinator::new();
+        coord.set_mempool(Some(std::sync::Arc::clone(&self.mempool)));
         if let Some(ep) = &self.event_publisher {
             coord.set_event_publisher(Some(std::sync::Arc::clone(ep)));
         }
@@ -834,6 +1239,7 @@ impl MiningCoordinator {
         if !accepted {
             anyhow::bail!("Mined block rejected at height {connect_height}");
         }
+        self.mempool.remove_for_connected_block(&block.transactions);
 
         info!("Mined block connected at height {connect_height}");
         if let Some(ep) = &self.event_publisher {
@@ -998,6 +1404,12 @@ impl MockMempoolProvider {
         self.prioritized_transactions.sort_by(|a, b| b.1.cmp(&a.1));
     }
 
+    /// Present for `get_transaction`, absent from the prioritized window.
+    pub fn add_unranked(&mut self, tx: Transaction) {
+        let hash = self.calculate_tx_hash(&tx);
+        self.transactions.insert(hash, tx);
+    }
+
     pub fn clear(&mut self) {
         self.transactions.clear();
         self.prioritized_transactions.clear();
@@ -1122,6 +1534,79 @@ mod tests {
     }
 
     #[test]
+    fn below_floor_parent_outside_the_window_is_mined_with_its_child() {
+        use blvm_protocol::constants::SEQUENCE_FINAL;
+        use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::{OutPoint, Transaction, TransactionInput};
+
+        let selector = TransactionSelector::new();
+        let mut mempool = MockMempoolProvider::new();
+        let parent_key = {
+            let mut hash = [0u8; 32];
+            hash[0] = 1;
+            hash[1] = 1;
+            hash[2] = 1;
+            hash
+        };
+        let funding = OutPoint {
+            hash: [7u8; 32],
+            index: 0,
+        };
+        let parent = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: funding,
+                script_sig: Vec::new(),
+                sequence: SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 9_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let child = Transaction {
+            version: 2,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: parent_key,
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 100,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        mempool.add_unranked(parent.clone());
+        mempool.add_transaction(child.clone());
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            funding,
+            std::sync::Arc::new(blvm_protocol::UTXO {
+                value: 9_001,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        let selected = selector.select_transactions(&mempool, &utxo_set);
+        assert!(
+            selected.iter().any(|tx| tx.version == parent.version
+                && tx.outputs[0].value == parent.outputs[0].value),
+            "parent outside the window was left out"
+        );
+        assert!(selected.iter().any(|tx| tx.version == child.version));
+    }
+
+    #[test]
     fn test_transaction_selector_size_calculation() {
         let selector = TransactionSelector::new();
         let tx = create_test_transaction(1, 1000);
@@ -1146,8 +1631,104 @@ mod tests {
                 is_coinbase: false,
             }),
         );
-        let fee_rate = selector.calculate_fee_rate_with_utxo(&tx, &utxo_set, vsize);
+        let fee_rate = selector.calculate_fee_rate_with_utxo(
+            &tx,
+            &utxo_set,
+            vsize,
+            &MockMempoolProvider::new(),
+        );
         assert!(fee_rate > 0);
+    }
+
+    #[test]
+    fn template_fee_ignores_a_negative_output() {
+        use blvm_protocol::constants::SEQUENCE_FINAL;
+        use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::{OutPoint, Transaction, TransactionInput};
+
+        let selector = TransactionSelector::new();
+        let funding = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            funding,
+            std::sync::Arc::new(blvm_protocol::UTXO {
+                value: 50_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        let spend = |outputs: Vec<TransactionOutput>| Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: funding,
+                script_sig: Vec::new(),
+                sequence: SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: outputs.into(),
+            lock_time: 0,
+        };
+        let negative = spend(vec![
+            TransactionOutput {
+                value: 1_000,
+                script_pubkey: vec![OP_1],
+            },
+            TransactionOutput {
+                value: -1,
+                script_pubkey: vec![OP_1],
+            },
+        ]);
+        let positive = spend(vec![TransactionOutput {
+            value: 40_000,
+            script_pubkey: vec![OP_1],
+        }]);
+        let mempool = MockMempoolProvider::new();
+        assert_eq!(selector.transaction_fee(&negative, &utxo_set, &mempool), 0);
+        assert_eq!(
+            selector.transaction_fee(&positive, &utxo_set, &mempool),
+            10_000
+        );
+    }
+
+    #[test]
+    fn selector_includes_a_smaller_tx_after_one_that_does_not_fit() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+
+        let small = create_test_transaction(1, 1_000);
+        let mut large = create_test_transaction(2, 1_000);
+        large.outputs[0].script_pubkey = vec![OP_1; 800];
+
+        let small_size = blvm_consensus::transaction::calculate_transaction_size(&small);
+        let large_size = blvm_consensus::transaction::calculate_transaction_size(&large);
+        assert!(large_size > small_size);
+
+        let selector = TransactionSelector::with_params(small_size, 4_000_000, 1);
+        let mut mempool = MockMempoolProvider::new();
+        mempool.add_transaction(large.clone());
+        mempool.add_transaction(small.clone());
+
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            blvm_protocol::OutPoint {
+                hash: [0u8; 32],
+                index: 0,
+            },
+            std::sync::Arc::new(blvm_protocol::UTXO {
+                value: 100_000_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+
+        let selected = selector.select_transactions(&mempool, &utxo_set);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(calculate_tx_id(&selected[0]), calculate_tx_id(&small));
     }
 
     #[test]

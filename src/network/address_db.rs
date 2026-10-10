@@ -13,6 +13,19 @@ use std::net::{IpAddr, SocketAddr};
 #[cfg(feature = "iroh")]
 use iroh::PublicKey;
 
+/// Addresses older than this, and timestamp 0, are stored and not relayed.
+pub const ADDR_RELAY_HORIZON_SECS: u64 = 30 * 24 * 60 * 60;
+
+pub fn address_within_relay_horizon(time: u32) -> bool {
+    if time == 0 {
+        return false;
+    }
+    let now = current_timestamp();
+    let advertised = time as u64;
+    advertised <= now.saturating_add(10 * 60)
+        && now.saturating_sub(advertised) <= ADDR_RELAY_HORIZON_SECS
+}
+
 /// Address entry with metadata
 #[derive(Debug, Clone)]
 pub struct AddressEntry {
@@ -94,15 +107,21 @@ impl AddressDatabase {
         }
     }
 
-    /// Add or update an address
+    /// Add or update an address.
+    ///
+    /// An advertisement older than the relay horizon, including timestamp 0,
+    /// is stored with that time and is not marked as just seen.
     pub fn add_address(&mut self, addr: NetworkAddress, services: u64) {
+        let refresh = address_within_relay_horizon(addr.time);
         // Convert NetworkAddress to SocketAddr for key
         let socket_addr = self.network_addr_to_socket(&addr);
 
         match self.addresses.get_mut(&socket_addr) {
             Some(entry) => {
-                // Update existing entry.
-                entry.update_seen();
+                entry.addr.time = addr.time;
+                if refresh {
+                    entry.update_seen();
+                }
                 if services != 0 {
                     // Only OR-merge when the caller has concrete service information.
                     entry.services |= services;
@@ -116,8 +135,12 @@ impl AddressDatabase {
                 if self.total_count() >= self.max_addresses {
                     self.evict_oldest_unified();
                 }
-                self.addresses
-                    .insert(socket_addr, AddressEntry::new(addr, services));
+                let mut entry = AddressEntry::new(addr, services);
+                if !refresh {
+                    entry.first_seen = entry.addr.time as u64;
+                    entry.last_seen = entry.addr.time as u64;
+                }
+                self.addresses.insert(socket_addr, entry);
             }
         }
     }
@@ -273,7 +296,8 @@ impl AddressDatabase {
     /// Check if address is banned
     pub fn is_banned(&self, addr: &NetworkAddress, ban_list: &HashMap<SocketAddr, u64>) -> bool {
         let socket_addr = self.network_addr_to_socket(addr);
-        if let Some(unban_timestamp) = ban_list.get(&socket_addr) {
+        let ban_key = SocketAddr::new(socket_addr.ip(), 0);
+        if let Some(unban_timestamp) = ban_list.get(&ban_key) {
             let now = current_timestamp();
             // Check if ban has expired
             if *unban_timestamp == u64::MAX || now < *unban_timestamp {
@@ -339,6 +363,7 @@ impl AddressDatabase {
                 }
                 // Create a placeholder NetworkAddress for Iroh (not used, just for consistency)
                 let placeholder_addr = NetworkAddress {
+                    time: 0,
                     services,
                     ip: [0; 16],
                     port: 0,
@@ -543,6 +568,7 @@ mod tests {
             services: 0,
             ip: ip_bytes,
             port,
+            time: current_timestamp() as u32,
         }
     }
 
@@ -659,7 +685,7 @@ mod tests {
     fn test_is_banned() {
         let db = AddressDatabase::new(100);
         let addr = create_test_address("192.168.1.1", 8333);
-        let socket = SocketAddr::new("192.168.1.1".parse().unwrap(), 8333);
+        let socket = SocketAddr::new("192.168.1.1".parse().unwrap(), 0);
         let mut ban_list = HashMap::new();
 
         // Not banned
@@ -689,7 +715,7 @@ mod tests {
         let banned = create_test_address("192.168.1.1", 8333);
         let public = create_test_address("8.8.8.8", 8333);
 
-        let socket_banned = SocketAddr::new("192.168.1.1".parse().unwrap(), 8333);
+        let socket_banned = SocketAddr::new("192.168.1.1".parse().unwrap(), 0);
         let socket_connected = SocketAddr::new("8.8.8.8".parse().unwrap(), 8333);
         let mut ban_list = HashMap::new();
         ban_list.insert(socket_banned, u64::MAX);
@@ -779,5 +805,18 @@ mod tests {
         let public_key = PublicKey::from_bytes(&key_bytes).unwrap();
         db.add_iroh_address(public_key, 1);
         assert_eq!(db.total_count(), 2);
+    }
+
+    #[test]
+    fn timestamp_zero_is_stored_and_not_handed_out() {
+        let mut db = AddressDatabase::new(10);
+        let mut addr = create_test_address("8.8.8.8", 8333);
+        addr.time = 0;
+        db.add_address(addr.clone(), 1);
+        let socket = db.network_addr_to_socket(&addr);
+        let stored = db.addresses.get(&socket).expect("stored");
+        assert_eq!(stored.addr.time, 0);
+        let handed = db.get_fresh_addresses(10);
+        assert!(handed.iter().all(|a| a.time != 0));
     }
 }

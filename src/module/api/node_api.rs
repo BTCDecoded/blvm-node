@@ -681,9 +681,12 @@ impl NodeAPI for NodeApiImpl {
             })
             .sum();
 
-        // Calculate total fee from transactions
+        // Calculate total fee from transactions. Confirmed inputs come from
+        // storage. An output created by another pool transaction is priced from
+        // that parent. Values outside the money range are not added.
         let total_fee_sats = tokio::task::spawn_blocking({
             let storage = Arc::clone(&self.storage);
+            let mempool = Arc::clone(mempool);
             let transactions_clone = transactions.clone();
             move || {
                 let mut total_fee = 0u64;
@@ -693,17 +696,14 @@ impl NodeAPI for NodeApiImpl {
                         continue;
                     }
 
-                    // Calculate fee: sum(inputs) - sum(outputs)
-                    let mut input_total = 0u64;
+                    let mut utxo_set = blvm_protocol::UtxoSet::default();
                     for input in &tx.inputs {
                         if let Ok(Some(utxo)) = storage.utxos().get_utxo(&input.prevout) {
-                            input_total = input_total.saturating_add(utxo.value as u64);
+                            utxo_set.insert(input.prevout, Arc::new(utxo));
                         }
                     }
-
-                    let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
-                    let fee = input_total.saturating_sub(output_total);
-                    total_fee = total_fee.saturating_add(fee);
+                    total_fee =
+                        total_fee.saturating_add(mempool.calculate_transaction_fee(&tx, &utxo_set));
                 }
                 total_fee
             }
@@ -2329,5 +2329,87 @@ mod commons_gbt_tests {
         assert_eq!(outs.len(), 1);
         assert_eq!(outs[0].0, 5);
         assert_eq!(outs[0].1, vec![0x51]);
+    }
+}
+
+#[cfg(test)]
+mod mempool_size_tests {
+    use super::*;
+    use crate::module::traits::NodeAPI;
+    use blvm_protocol::opcodes::OP_1;
+    use blvm_protocol::{TransactionInput, TransactionOutput};
+
+    fn spend(prevout: OutPoint, output_value: i64) -> Transaction {
+        Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout,
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: output_value,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn mempool_size_counts_a_parent_output_and_ignores_a_negative_value() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let funding = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        let negative = OutPoint {
+            hash: [9u8; 32],
+            index: 0,
+        };
+        storage
+            .utxos()
+            .add_utxo(
+                &funding,
+                &UTXO {
+                    value: 50_000,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 0,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+        storage
+            .utxos()
+            .add_utxo(
+                &negative,
+                &UTXO {
+                    value: -1,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 0,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+
+        let mempool = Arc::new(MempoolManager::new());
+        let parent = spend(funding, 40_000);
+        assert!(mempool.add_transaction(parent.clone()).unwrap());
+        let child = spend(
+            OutPoint {
+                hash: blvm_protocol::block::calculate_tx_id(&parent),
+                index: 0,
+            },
+            25_000,
+        );
+        assert!(mempool.add_transaction(child).unwrap());
+        assert!(mempool.add_transaction(spend(negative, 1_000)).unwrap());
+
+        let api = NodeApiImpl::with_dependencies(storage, None, None, Some(mempool), None);
+        let size = api.get_mempool_size().await.unwrap();
+        assert_eq!(size.transaction_count, 3);
+        assert_eq!(size.total_fee_sats, 25_000);
     }
 }

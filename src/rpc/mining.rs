@@ -30,7 +30,7 @@ use blvm_protocol::{
 };
 use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 use blvm_protocol::{
-    ConsensusProof, ValidationResult,
+    ConsensusProof,
     types::{BlockHeader, ByteString, Natural, Transaction, UtxoSet},
 };
 use hex;
@@ -291,10 +291,11 @@ impl MiningRpc {
         // one block behind after the first connect. Blockstore count matches the next index.
         let template_block_height: Natural = if let Some(ref storage) = self.storage {
             storage
-                .blocks()
-                .block_count()
-                .map_err(|e| RpcError::internal_error(format!("Failed to count blocks: {e}")))?
-                as u64
+                .chain()
+                .get_height()
+                .map_err(|e| RpcError::internal_error(format!("Failed to read tip height: {e}")))?
+                .unwrap_or(0)
+                .saturating_add(1)
         } else {
             return Err(RpcError::internal_error(
                 "getblocktemplate requires storage".to_string(),
@@ -643,25 +644,13 @@ impl MiningRpc {
     }
 
     fn calculate_transaction_fee(&self, tx: &Transaction) -> u64 {
-        // Use MempoolManager's fee calculation if available
-        if let Some(ref _mempool) = self.mempool {
-            if let Ok(utxo_set) = self.get_utxo_set() {
-                // Try to use mempool's fee calculation method if available
-                // For now, calculate directly using UTXO set (mempool uses same logic)
-                let mut input_total = 0u64;
-                for input in &tx.inputs {
-                    if let Some(utxo) = utxo_set.get(&input.prevout) {
-                        input_total += utxo.value as u64;
-                    }
-                }
-                let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
-                input_total.saturating_sub(output_total)
-            } else {
-                0
-            }
-        } else {
-            0
-        }
+        let Some(mempool) = self.mempool.as_ref() else {
+            return 0;
+        };
+        let Ok(utxo_set) = self.get_utxo_set() else {
+            return 0;
+        };
+        mempool.calculate_transaction_fee(tx, &utxo_set)
     }
 
     fn count_sigops(&self, tx: &Transaction) -> u32 {
@@ -842,6 +831,9 @@ impl MiningRpc {
         let max_tries = param_u64_default(params, 2, 2_000_000);
 
         let mut coord = SyncCoordinator::new();
+        if let Some(ref mempool) = self.mempool {
+            coord.set_mempool(Some(Arc::clone(mempool)));
+        }
         if let Some(ref ep) = self.event_publisher {
             coord.set_event_publisher(Some(Arc::clone(ep)));
         }
@@ -875,13 +867,14 @@ impl MiningRpc {
 
             let coinbase_script =
                 blvm_protocol::bip_validation::encode_bip34_coinbase_script(connect_height);
+            let pool_txs = self.get_mempool_transactions()?;
 
             let mut block = if let Some(outputs) = self.try_commons_gbt_outputs().await? {
                 let template = self
                     .consensus
                     .create_block_template_with_outputs(
                         &utxo,
-                        &[],
+                        &pool_txs,
                         connect_height,
                         &prev_header,
                         &prev_headers,
@@ -906,7 +899,7 @@ impl MiningRpc {
                 self.consensus
                     .create_new_block_with_time(
                         &utxo,
-                        &[],
+                        &pool_txs,
                         connect_height,
                         &prev_header,
                         &prev_headers,
@@ -986,10 +979,15 @@ impl MiningRpc {
                     "generatetoaddress: block rejected at height {connect_height}"
                 )));
             }
+            if let Some(ref mempool) = self.mempool {
+                mempool.remove_for_connected_block(&mined.transactions);
+            }
 
             let block_hash = storage.blocks().as_ref().get_block_hash(&mined);
 
-            out_hashes.push(Value::String(hex::encode(block_hash)));
+            out_hashes.push(Value::String(crate::storage::hashing::hash_to_rpc_hex(
+                &block_hash,
+            )));
 
             if let Some(ref ep) = self.event_publisher {
                 ep.publish_block_mined(&block_hash, connect_height, None)
@@ -1057,105 +1055,79 @@ impl MiningRpc {
             ));
         }
 
-        // Full attach path: queue for the main run loop (regtest mining + any submitblock user).
+        let storage = self.storage.as_ref().ok_or_else(|| {
+            RpcError::internal_error("submitblock: storage is required to connect the block".to_string())
+        })?;
+        let protocol = self.protocol_engine.as_ref().ok_or_else(|| {
+            RpcError::internal_error(
+                "submitblock: protocol engine is required to connect the block".to_string(),
+            )
+        })?;
+        let tip = storage
+            .chain()
+            .get_tip_hash()
+            .map_err(|e| RpcError::internal_error(format!("Failed to get chain tip: {e}")))?
+            .ok_or_else(|| {
+                RpcError::internal_error("submitblock: chain not initialized (no tip)".to_string())
+            })?;
+        let prev_ok = if let Ok(Some(tip_header)) = storage.blocks().get_header(&tip) {
+            blvm_consensus::block::validate_prev_block_hash(&block.header, &tip_header)
+        } else {
+            block.header.prev_block_hash == tip
+        };
+        if !prev_ok {
+            return Err(RpcError::invalid_params(
+                "submitblock: prev_block_hash does not match current chain tip".to_string(),
+            ));
+        }
+        let tip_height = self.get_current_height()?.unwrap_or(0);
+        let connect_height = tip_height.saturating_add(1);
+        let mut utxo = self.get_utxo_set()?;
+        let mut coord = SyncCoordinator::new();
+        if let Some(ref mempool) = self.mempool {
+            coord.set_mempool(Some(Arc::clone(mempool)));
+        }
+        if let Some(ref ep) = self.event_publisher {
+            coord.set_event_publisher(Some(Arc::clone(ep)));
+        }
+        let accepted = coord
+            .connect_mined_block(
+                storage.blocks().as_ref(),
+                protocol.as_ref(),
+                storage,
+                &block,
+                &witnesses,
+                connect_height,
+                &mut utxo,
+            )
+            .map_err(|e| RpcError::invalid_params(format!("submitblock: {e}")))?;
+        if !accepted {
+            return Err(RpcError::invalid_params(
+                "submitblock: block was not connected".to_string(),
+            ));
+        }
+        if let Some(ref mempool) = self.mempool {
+            mempool.remove_for_connected_block(&block.transactions);
+        }
+        let block_hash = storage.blocks().get_block_hash(&block);
+        if let Some(ref ep) = self.event_publisher {
+            ep.publish_block_mined(&block_hash, connect_height, None)
+                .await;
+        }
         if let Some(ref nm) = self.network_manager {
-            if let Some(ref storage) = self.storage {
-                let tip = storage
-                    .chain()
-                    .get_tip_hash()
-                    .map_err(|e| RpcError::internal_error(format!("Failed to get chain tip: {e}")))?
-                    .ok_or_else(|| {
-                        RpcError::internal_error(
-                            "submitblock: chain not initialized (no tip)".to_string(),
-                        )
-                    })?;
-                let prev_ok = if let Ok(Some(tip_header)) = storage.blocks().get_header(&tip) {
-                    blvm_consensus::block::validate_prev_block_hash(&block.header, &tip_header)
-                } else {
-                    block.header.prev_block_hash == tip
-                };
-                if !prev_ok {
-                    return Err(RpcError::invalid_params(
-                        "submitblock: prev_block_hash does not match current chain tip".to_string(),
-                    ));
+            use crate::network::protocol::{BlockMessage, ProtocolMessage, ProtocolParser};
+            let p2p_msg = ProtocolMessage::Block(BlockMessage {
+                block: block.clone(),
+                witnesses: witnesses.clone(),
+            });
+            if let Ok(framed) = ProtocolParser::serialize_message(&p2p_msg) {
+                if let Err(e) = nm.broadcast(framed).await {
+                    warn!("submitblock: P2P broadcast failed at height {connect_height}: {e}");
                 }
-            }
-            let queued_len = block_bytes.len();
-            nm.queue_block(block_bytes);
-            debug!("submitblock: queued {queued_len} bytes for run-loop processing");
-            if let Some(ref ep) = self.event_publisher {
-                if let Some(ref storage) = self.storage {
-                    let block_hash = storage.blocks().get_block_hash(&block);
-                    let height = self.get_current_height()?.unwrap_or(0);
-                    ep.publish_block_mined(&block_hash, height, None).await;
-                }
-            }
-            return Ok(Value::Null);
-        }
-
-        // Headless / tests: legacy consensus-only check (does not attach to chain).
-        let height = self
-            .get_current_height()?
-            .ok_or_else(|| RpcError::internal_error("Chain not initialized"))?;
-        let utxo_set = self.get_utxo_set()?;
-
-        let network_time = current_timestamp();
-        let time_context = Some(blvm_protocol::types::TimeContext {
-            network_time,
-            median_time_past: 0,
-        });
-        let network = self.consensus_network();
-
-        match self.consensus.validate_block_with_time_context(
-            &block,
-            &[],
-            utxo_set,
-            height,
-            time_context,
-            network,
-        ) {
-            Ok((ValidationResult::Valid, _)) => {
-                debug!("submitblock: validation-only success (no network manager)");
-                if let Some(ref ep) = self.event_publisher {
-                    if let Some(ref storage) = self.storage {
-                        let block_hash = storage.blocks().get_block_hash(&block);
-                        ep.publish_block_mined(&block_hash, height, None).await;
-                    }
-                }
-                Ok(Value::Null)
-            }
-            Ok((ValidationResult::Invalid(reason), _)) => {
-                if let Some(ref ep) = self.event_publisher {
-                    if let Some(ref storage) = self.storage {
-                        let block_hash = storage.blocks().get_block_hash(&block);
-                        ep.publish_consensus_rule_violation(
-                            "block_validation",
-                            Some(&block_hash),
-                            None,
-                            &reason,
-                        )
-                        .await;
-                    }
-                }
-                Err(RpcError::invalid_params(format!("Invalid block: {reason}")))
-            }
-            Err(e) => {
-                let err_msg = format!("Validation error: {e}");
-                if let Some(ref ep) = self.event_publisher {
-                    if let Some(ref storage) = self.storage {
-                        let block_hash = storage.blocks().get_block_hash(&block);
-                        ep.publish_consensus_rule_violation(
-                            "block_validation",
-                            Some(&block_hash),
-                            None,
-                            &err_msg,
-                        )
-                        .await;
-                    }
-                }
-                Err(RpcError::internal_error(err_msg))
             }
         }
+        let _ = block_bytes;
+        Ok(Value::Null)
     }
 
     /// Estimate smart fee rate
@@ -1198,8 +1170,8 @@ impl MiningRpc {
                 let size = self.calculate_weight(tx) as usize;
 
                 if size > 0 {
-                    // Fee rate in BTC per vbyte
-                    let rate = (fee as f64) / (size as f64) / 100_000_000.0; // Convert satoshis to BTC
+                    let vsize = (size as u64).div_ceil(4).max(1);
+                    let rate = (fee as f64) / (vsize as f64) * 1000.0 / 100_000_000.0;
                     fee_rates.push(rate);
                 }
             }
@@ -1248,15 +1220,8 @@ impl MiningRpc {
         .and_then(|p| p.as_i64())
         .ok_or_else(|| RpcError::invalid_params("Fee delta required".to_string()))?;
 
-        let hash_bytes = hex::decode(txid)
+        let hash = crate::storage::hashing::hash_from_rpc_hex(txid)
             .map_err(|e| RpcError::invalid_params(format!("Invalid transaction ID: {e}")))?;
-        if hash_bytes.len() != 32 {
-            return Err(RpcError::invalid_params(
-                "Transaction ID must be 32 bytes".to_string(),
-            ));
-        }
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&hash_bytes);
 
         if let Some(ref mempool) = self.mempool {
             if mempool.prioritise_transaction(&hash, fee_delta) {
@@ -1337,4 +1302,333 @@ pub(crate) fn mempool_witnesses_for_template(
             Ok(None)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MiningRpc;
+    use crate::node::mempool::MempoolManager;
+    use crate::storage::Storage;
+    use blvm_protocol::opcodes::OP_1;
+    use blvm_protocol::{
+        OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet,
+    };
+    use std::sync::Arc;
+
+    fn spend(prevout: OutPoint, output_value: i64) -> Transaction {
+        Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout,
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: output_value,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        }
+    }
+
+    #[test]
+    fn mining_fee_counts_a_mempool_parent_and_ignores_an_out_of_range_value() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let mempool = Arc::new(MempoolManager::new());
+
+        let funding = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        let negative = OutPoint {
+            hash: [9u8; 32],
+            index: 0,
+        };
+        let mut utxo_set = UtxoSet::default();
+        utxo_set.insert(
+            funding,
+            Arc::new(UTXO {
+                value: 50_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        utxo_set.insert(
+            negative,
+            Arc::new(UTXO {
+                value: -1,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        for (outpoint, utxo) in &utxo_set {
+            storage.utxos().add_utxo(outpoint, utxo).unwrap();
+        }
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set)));
+
+        let parent = spend(funding, 40_000);
+        assert!(mempool.add_transaction(parent.clone()).unwrap());
+        let child = spend(
+            OutPoint {
+                hash: blvm_protocol::block::calculate_tx_id(&parent),
+                index: 0,
+            },
+            25_000,
+        );
+
+        let mining = MiningRpc::with_dependencies(storage, mempool);
+        assert_eq!(mining.calculate_transaction_fee(&child), 15_000);
+        assert_eq!(mining.calculate_transaction_fee(&spend(negative, 1_000)), 0);
+    }
+
+    #[test]
+    fn mining_fee_does_not_wrap_a_negative_output() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let mempool = Arc::new(MempoolManager::new());
+
+        let funding = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 0,
+            is_coinbase: false,
+        };
+        storage.utxos().add_utxo(&funding, &utxo).unwrap();
+        let mut utxo_set = UtxoSet::default();
+        utxo_set.insert(funding, Arc::new(utxo));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set)));
+
+        let mut wrapped = spend(funding, 1_000);
+        wrapped.outputs.push(TransactionOutput {
+            value: -1,
+            script_pubkey: vec![OP_1],
+        });
+
+        let mining = MiningRpc::with_dependencies(storage, mempool);
+        assert_eq!(mining.calculate_transaction_fee(&wrapped), 0);
+        assert_eq!(
+            mining.calculate_transaction_fee(&spend(funding, 40_000)),
+            10_000
+        );
+    }
+
+    #[tokio::test]
+    async fn submitblock_without_storage_returns_an_error() {
+        let mining = MiningRpc::new();
+        assert!(
+            mining
+                .submit_block(&serde_json::json!(["00"]))
+                .await
+                .is_err()
+        );
+    }
+
+    fn regtest_mining() -> (
+        tempfile::TempDir,
+        Arc<Storage>,
+        Arc<MempoolManager>,
+        MiningRpc,
+    ) {
+        use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+        let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
+        let genesis = protocol.get_network_params().genesis_block.header.clone();
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(dir.path()).unwrap());
+        storage.chain().initialize(&genesis).unwrap();
+        let mempool = Arc::new(MempoolManager::new());
+        let mining = MiningRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool))
+            .with_protocol_engine(protocol);
+        (dir, storage, mempool, mining)
+    }
+
+    fn one_block_params() -> serde_json::Value {
+        serde_json::json!([
+            1u64,
+            "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+            2_000_000u64
+        ])
+    }
+
+    #[tokio::test]
+    async fn empty_pool_is_coinbase_only_and_the_hash_matches_get_block() {
+        use blvm_protocol::block::calculate_tx_id;
+        use crate::rpc::blockchain::BlockchainRpc;
+        use crate::storage::hashing::hash_to_rpc_hex;
+
+        let (_dir, storage, _mempool, mining) = regtest_mining();
+        let mined = mining.generate_to_address(&one_block_params()).await.unwrap();
+        let block_hash = mined[0].as_str().unwrap().to_string();
+        let tip = storage.chain().get_tip_hash().unwrap().unwrap();
+        let block = storage.blocks().get_block(&tip).unwrap().unwrap();
+        assert_eq!(block.transactions.len(), 1);
+        assert_eq!(block_hash, hash_to_rpc_hex(&tip));
+
+        let chain = BlockchainRpc::with_dependencies(Arc::clone(&storage));
+        let best = chain.get_best_block_hash().await.unwrap();
+        assert_eq!(best.as_str(), Some(block_hash.as_str()));
+        let shown = chain.get_block(&block_hash).await.unwrap();
+        assert_eq!(
+            shown["merkleroot"].as_str(),
+            Some(hash_to_rpc_hex(&block.header.merkle_root).as_str())
+        );
+        assert_eq!(
+            shown["tx"][0].as_str(),
+            Some(hash_to_rpc_hex(&calculate_tx_id(&block.transactions[0])).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn fee_paying_pool_transaction_is_mined() {
+        let (_dir, storage, mempool, mining) = regtest_mining();
+        let funding = OutPoint {
+            hash: [3u8; 32],
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 0,
+            is_coinbase: false,
+        };
+        storage.utxos().add_utxo(&funding, &utxo).unwrap();
+        let mut set = UtxoSet::default();
+        set.insert(funding, Arc::new(utxo));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set)));
+        let tx = spend(funding, 40_000);
+        assert!(mempool.add_transaction(tx.clone()).unwrap());
+
+        mining.generate_to_address(&one_block_params()).await.unwrap();
+        let tip = storage.chain().get_tip_hash().unwrap().unwrap();
+        let block = storage.blocks().get_block(&tip).unwrap().unwrap();
+        assert!(
+            block.transactions.len() > 1,
+            "pool transaction must follow the coinbase"
+        );
+        assert_eq!(block.transactions[1].outputs[0].value, 40_000);
+    }
+
+    #[tokio::test]
+    async fn pruned_body_keeps_the_template_at_the_next_height() {
+        let (_dir, storage, _mempool, mining) = regtest_mining();
+        mining.generate_to_address(&one_block_params()).await.unwrap();
+        let tip = storage.chain().get_tip_hash().unwrap().unwrap();
+        let height = storage.chain().get_height().unwrap().unwrap();
+        storage.blocks().remove_block_body(&tip).unwrap();
+        let template = mining
+            .get_block_template(&serde_json::json!([]))
+            .await
+            .unwrap();
+        assert_eq!(template["height"].as_u64(), Some(height + 1));
+    }
+
+    #[tokio::test]
+    async fn submitblock_returns_null_only_after_the_block_connects() {
+        use crate::module::api::events::EventManager;
+        use crate::module::traits::EventType;
+        use crate::node::event_publisher::EventPublisher;
+        use blvm_protocol::serialization::serialize_block_with_witnesses;
+        use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+
+        let (_dir, storage, _mempool, mining) = regtest_mining();
+        mining.generate_to_address(&one_block_params()).await.unwrap();
+        let tip = storage.chain().get_tip_hash().unwrap().unwrap();
+        let block = storage.blocks().get_block(&tip).unwrap().unwrap();
+        let witnesses = storage
+            .blocks()
+            .get_witness(&tip)
+            .unwrap()
+            .unwrap_or_else(|| vec![vec![]; block.transactions.len()]);
+        let bytes = serialize_block_with_witnesses(&block, &witnesses, true);
+
+        let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
+        let genesis = protocol.get_network_params().genesis_block.header.clone();
+        let dir = tempfile::TempDir::new().unwrap();
+        let fresh = Arc::new(Storage::new(dir.path()).unwrap());
+        fresh.chain().initialize(&genesis).unwrap();
+        let genesis_hash = fresh.chain().get_tip_hash().unwrap().unwrap();
+        fresh
+            .blocks()
+            .store_header(&genesis_hash, &genesis)
+            .unwrap();
+        fresh.blocks().store_height(0, &genesis_hash).unwrap();
+        fresh
+            .blocks()
+            .store_recent_header(0, &genesis)
+            .unwrap();
+        let events = Arc::new(EventManager::new());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        events
+            .subscribe_module("lock".into(), vec![EventType::BlockMined], tx)
+            .await
+            .unwrap();
+        let publisher = Arc::new(EventPublisher::new(Arc::clone(&events)));
+        let submit = MiningRpc::with_dependencies(
+            Arc::clone(&fresh),
+            Arc::new(MempoolManager::new()),
+        )
+            .with_protocol_engine(protocol)
+            .with_event_publisher(Some(publisher));
+        let result = submit
+            .submit_block(&serde_json::json!([hex::encode(&bytes)]))
+            .await
+            .unwrap();
+        assert!(result.is_null());
+        assert_eq!(fresh.chain().get_height().unwrap().unwrap(), 1);
+        assert!(rx.try_recv().is_ok());
+
+        let rejected = submit
+            .submit_block(&serde_json::json!([hex::encode(&bytes)]))
+            .await;
+        assert!(rejected.is_err());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn one_sat_per_virtual_byte_quotes_before_the_mode_multiplier() {
+        use blvm_protocol::segwit::transaction_weight_from_stacks;
+
+        let (_dir, storage, mempool, mining) = regtest_mining();
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        let funding = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let mut tx = spend(funding, 50_000);
+        tx.inputs[0].script_sig = vec![OP_1];
+        let vsize = transaction_weight_from_stacks(&tx, None)
+            .unwrap()
+            .div_ceil(4)
+            .max(1) as i64;
+        tx.outputs[0].value = 50_000;
+        let utxo = UTXO {
+            value: 50_000 + vsize,
+            script_pubkey: vec![OP_1].into(),
+            height: 0,
+            is_coinbase: false,
+        };
+        storage.utxos().add_utxo(&funding, &utxo).unwrap();
+        let mut set = UtxoSet::default();
+        set.insert(funding, Arc::new(utxo));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set)));
+        mempool.set_policy_config(Some(policy));
+        assert!(mempool.add_transaction(tx).unwrap());
+
+        let quote = mining
+            .estimate_smart_fee(&serde_json::json!([6u64, "unset"]))
+            .await
+            .unwrap();
+        assert!((quote["feerate"].as_f64().unwrap() - 0.00001).abs() < 1e-12);
+        assert_eq!(quote["blocks"].as_u64(), Some(6));
+    }
 }

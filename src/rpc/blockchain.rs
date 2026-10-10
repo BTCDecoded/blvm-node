@@ -17,13 +17,51 @@ use crate::utils::{
     with_custom_timeout,
 };
 use anyhow::Result;
-use blvm_protocol::{SEGWIT_ACTIVATION_MAINNET, TAPROOT_ACTIVATION_MAINNET};
 use serde_json::{Number, Value, json};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
 const ZERO_HASH_STR: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+fn non_coinbase_fee_sats(
+    block: &blvm_protocol::Block,
+    undo: &blvm_consensus::reorganization::BlockUndoLog,
+) -> Vec<u64> {
+    let mut spent: std::collections::HashMap<blvm_protocol::OutPoint, u64> =
+        std::collections::HashMap::new();
+    for entry in &undo.entries {
+        if let Some(prev) = &entry.previous_utxo {
+            if let Ok(value) = u64::try_from(prev.value) {
+                spent.insert(entry.outpoint, value);
+            }
+        }
+    }
+    let mut fees = Vec::new();
+    for tx in block.transactions.iter().skip(1) {
+        let mut inputs = 0u64;
+        let mut known = true;
+        for input in &tx.inputs {
+            match spent.get(&input.prevout) {
+                Some(value) => inputs = inputs.saturating_add(*value),
+                None => {
+                    known = false;
+                    break;
+                }
+            }
+        }
+        if !known {
+            continue;
+        }
+        let outputs: u64 = tx
+            .outputs
+            .iter()
+            .filter_map(|output| u64::try_from(output.value).ok())
+            .sum();
+        fees.push(inputs.saturating_sub(outputs));
+    }
+    fees
+}
 
 thread_local! {
     static CACHED_TIP_HEIGHT: crate::rpc::cache::ThreadLocalTimedCache<u64> =
@@ -42,6 +80,61 @@ fn decode_hash32(hex: &str) -> Result<[u8; 32], RpcError> {
 
 fn encode_hash32_rpc(hash: &[u8; 32]) -> String {
     crate::storage::hashing::hash_to_rpc_hex(hash)
+}
+
+fn spent_scripts_from_undo(storage: &Storage, hash: &blvm_protocol::Hash) -> Vec<Vec<u8>> {
+    let mut scripts = Vec::new();
+    #[cfg(feature = "production")]
+    if let Ok(Some(undo)) = storage.blocks().get_undo_log(hash) {
+        for entry in &undo.entries {
+            if let Some(prev) = &entry.previous_utxo {
+                scripts.push(prev.script_pubkey.as_ref().to_vec());
+            }
+        }
+    }
+    #[cfg(not(feature = "production"))]
+    let _ = (storage, hash);
+    scripts
+}
+
+fn previous_filter_header(storage: &Storage, header: &blvm_protocol::BlockHeader) -> [u8; 32] {
+    storage
+        .blocks()
+        .get_filter_header(&header.prev_block_hash)
+        .ok()
+        .flatten()
+        .unwrap_or([0u8; 32])
+}
+
+fn chain_filter_header(filter: &[u8], prev: &[u8; 32]) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(filter.len() + 32);
+    buf.extend_from_slice(filter);
+    buf.extend_from_slice(prev);
+    crate::storage::hashing::double_sha256(&buf)
+}
+
+fn filter_index_synced(storage: &Storage, tip_height: u64) -> bool {
+    let Ok(Some(tip_hash)) = storage.chain().get_tip_hash() else {
+        return false;
+    };
+    if tip_hash == blvm_protocol::Hash::default() {
+        return false;
+    }
+    // Missing headers are at the tip until the index catches up, so stop there.
+    for height in (0..=tip_height).rev() {
+        let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height) else {
+            return false;
+        };
+        if storage.blocks().get_filter_header(&hash).ok().flatten().is_none() {
+            return false;
+        }
+    }
+    true
+}
+
+fn in_money_range(value: i64) -> bool {
+    const MAX_MONEY: i64 = 21_000_000 * 100_000_000;
+    value >= 0 && value <= MAX_MONEY
 }
 
 /// Blockchain RPC methods
@@ -143,6 +236,7 @@ impl BlockchainRpc {
                     "testnet" => "test",
                     "testnet4" => "testnet4",
                     "regtest" => "regtest",
+                    "signet" => "signet",
                     _ => "main",
                 };
             }
@@ -150,7 +244,9 @@ impl BlockchainRpc {
         match self.get_chain_name() {
             "mainnet" => "main",
             "testnet" => "test",
+            "testnet4" => "testnet4",
             "regtest" => "regtest",
+            "signet" => "signet",
             _ => "main",
         }
     }
@@ -236,6 +332,31 @@ impl BlockchainRpc {
         work.gbt_target_hex()
     }
 
+    fn softforks_json(&self, height: u64) -> Value {
+        use blvm_consensus::activation::ForkActivationTable;
+        use blvm_consensus::types::Network;
+        let network = match self.core_chain_field() {
+            "test" => Network::Testnet,
+            "testnet4" => Network::Testnet4,
+            "regtest" => Network::Regtest,
+            "signet" => Network::Signet,
+            _ => Network::Mainnet,
+        };
+        let table = ForkActivationTable::from_network(network);
+        json!({
+            "segwit": {
+                "type": "buried",
+                "active": height >= table.segwit,
+                "height": table.segwit
+            },
+            "taproot": {
+                "type": "buried",
+                "active": height >= table.taproot,
+                "height": table.taproot
+            }
+        })
+    }
+
     /// Get blockchain information
     ///
     /// Includes softfork information based on feature flags from blvm-protocol
@@ -243,22 +364,17 @@ impl BlockchainRpc {
         #[cfg(debug_assertions)]
         debug!("RPC: getblockchaininfo");
 
-        let softforks = json!({
-            "segwit": {
-                "type": "buried",
-                "active": true,
-                "height": SEGWIT_ACTIVATION_MAINNET
-            },
-            "taproot": {
-                "type": "buried",
-                "active": true,
-                "height": TAPROOT_ACTIVATION_MAINNET
-            }
-        });
+        let softforks = self.softforks_json(0);
 
         if let Some(ref storage) = self.storage {
             let (best_hash, height) = storage.chain().get_tip_hash_and_height()?;
-            let block_count = storage.blocks().block_count().unwrap_or(0);
+            let header_height = storage
+                .blocks()
+                .highest_stored_height()
+                .ok()
+                .flatten()
+                .unwrap_or(height);
+            let softforks = self.softforks_json(height);
 
             let best_hash_hex = CACHED_TIP_HASH_HEX.with(|c| {
                 c.get_or_refresh(CACHE_REFRESH_TIP, &(best_hash, height), || {
@@ -287,12 +403,12 @@ impl BlockchainRpc {
             Ok(json!({
                 "chain": self.core_chain_field(),
                 "blocks": height,
-                "headers": block_count,
+                "headers": header_height,
                 "bestblockhash": best_hash_hex,
                 "difficulty": difficulty,
                 "mediantime": mediantime,
-                "verificationprogress": if height > 0 { 1.0 } else { 0.0 },
-                "initialblockdownload": height == 0,
+                "verificationprogress": 0.0,
+                "initialblockdownload": true,
                 "chainwork": chainwork_hex,
                 "size_on_disk": if let Some(ref storage) = self.storage {
                     storage.disk_size().unwrap_or(0)
@@ -410,7 +526,7 @@ impl BlockchainRpc {
                         .iter()
                         .map(|tx| {
                             let tx_hash = blvm_protocol::block::calculate_tx_id(tx);
-                            hex::encode(tx_hash)
+                            encode_hash32_rpc(&tx_hash)
                         })
                         .collect();
 
@@ -444,7 +560,7 @@ impl BlockchainRpc {
                         "height": block_height.unwrap_or(0),
                         "version": block.header.version,
                         "versionHex": format!("{:08x}", block.header.version),
-                        "merkleroot": hex::encode(block.header.merkle_root),
+                        "merkleroot": encode_hash32_rpc(&block.header.merkle_root),
                         "tx": tx_ids,
                         "time": block.header.timestamp,
                         "mediantime": mediantime,
@@ -568,7 +684,7 @@ impl BlockchainRpc {
                         "height": block_height.unwrap_or(0),
                         "version": header.version,
                         "versionHex": format!("{:08x}", header.version),
-                        "merkleroot": hex::encode(header.merkle_root),
+                        "merkleroot": encode_hash32_rpc(&header.merkle_root),
                         "time": header.timestamp,
                         "mediantime": mediantime,
                         "nonce": header.nonce as u32,
@@ -707,7 +823,9 @@ impl BlockchainRpc {
             } else {
                 let utxos = storage.utxos().get_all_utxos()?;
                 let txouts = utxos.len();
-                let total_amount: u64 = utxos.values().map(|utxo| utxo.value as u64).sum();
+                let total_amount = crate::storage::chainstate::utxo_money_total(
+                    utxos.values().map(|utxo| utxo.value),
+                );
                 let muhash = Self::calculate_utxo_muhash(&utxos);
 
                 Ok(json!({
@@ -1061,12 +1179,12 @@ impl BlockchainRpc {
             } else {
                 for (hash, entry) in indexed_tips {
                     let branchlen = index.branch_length(&hash, &tip_hash)?;
-                    let status = if hash == tip_hash {
-                        "active"
-                    } else if storage.chain().is_invalid(&hash).unwrap_or(false)
+                    let status = if storage.chain().is_invalid(&hash).unwrap_or(false)
                         || entry.status == crate::storage::block_index::BlockIndexStatus::Invalid
                     {
                         "invalid"
+                    } else if hash == tip_hash {
+                        "active"
                     } else {
                         "valid"
                     };
@@ -1241,15 +1359,7 @@ impl BlockchainRpc {
                             )))
                         })?
                 } else {
-                    // Parse as hash
-                    let hash_bytes = hex::decode(hoh)
-                        .map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
-                    if hash_bytes.len() != 32 {
-                        return Err(anyhow::anyhow!("Block hash must be 32 bytes"));
-                    }
-                    let mut hash = [0u8; 32];
-                    hash.copy_from_slice(&hash_bytes);
-                    hash
+                    decode_hash32(hoh).map_err(|e| anyhow::anyhow!("Invalid block hash: {e}"))?
                 }
             } else {
                 // Default to tip
@@ -1277,64 +1387,108 @@ impl BlockchainRpc {
                 let output_count: usize =
                     block.transactions.iter().map(|tx| tx.outputs.len()).sum();
 
-                // Sum output values
-                let total_out: u64 = block
-                    .transactions
-                    .iter()
-                    .flat_map(|tx| tx.outputs.iter())
-                    .map(|out| out.value as u64)
-                    .sum::<u64>();
+                // Sum output values inside the money range. A value outside that range is left out.
+                let total_out = u64::try_from(crate::storage::chainstate::utxo_money_total(
+                    block
+                        .transactions
+                        .iter()
+                        .flat_map(|tx| tx.outputs.iter().map(|out| out.value)),
+                ))
+                .unwrap_or(u64::MAX);
 
                 // Calculate block subsidy
                 let subsidy = self.block_subsidy(height);
 
                 // Total fees = coinbase outputs minus block subsidy (satoshis).
                 let total_fees = if !block.transactions.is_empty() {
-                    let coinbase_outputs: u64 = block.transactions[0]
-                        .outputs
-                        .iter()
-                        .map(|out| out.value as u64)
-                        .sum();
+                    let coinbase_outputs =
+                        u64::try_from(crate::storage::chainstate::utxo_money_total(
+                            block.transactions[0].outputs.iter().map(|out| out.value),
+                        ))
+                        .unwrap_or(u64::MAX);
                     coinbase_outputs.saturating_sub(subsidy)
                 } else {
                     0
                 };
 
-                let non_coinbase_vsize: u64 = if tx_count > 1 {
-                    block
-                        .transactions
-                        .iter()
-                        .skip(1)
-                        .map(|tx| {
-                            use blvm_protocol::serialization::transaction::serialize_transaction;
-                            serialize_transaction(tx).len() as u64
-                        })
-                        .sum()
-                } else {
-                    0
+                let tx_vsize = |index: usize, tx: &blvm_protocol::Transaction| -> u64 {
+                    let witness = witnesses
+                        .as_ref()
+                        .and_then(|all| all.get(index))
+                        .map(|stack| stack.as_slice());
+                    let (_, _, _, vsize) =
+                        crate::rpc::rawtx::RawTxRpc::calculate_segwit_sizes(tx, witness);
+                    (vsize as u64).max(1)
                 };
+                let non_coinbase_vsize: u64 = block
+                    .transactions
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .map(|(index, tx)| tx_vsize(index, tx))
+                    .sum();
                 let avgfeerate = if non_coinbase_vsize > 0 {
                     total_fees as f64 / non_coinbase_vsize as f64 * 1000.0 / 100_000_000.0
                 } else {
                     0.0
                 };
+                #[cfg(feature = "production")]
+                let tx_fees = storage
+                    .blocks()
+                    .get_undo_log(&block_hash)
+                    .ok()
+                    .flatten()
+                    .map(|undo| non_coinbase_fee_sats(&block, &undo))
+                    .unwrap_or_default();
+                #[cfg(not(feature = "production"))]
+                let tx_fees: Vec<u64> = Vec::new();
+                let mut sorted_fees = tx_fees.clone();
+                sorted_fees.sort_unstable();
+                let min_fee_sats = sorted_fees.first().copied().unwrap_or(0);
+                let max_fee_sats = sorted_fees.last().copied().unwrap_or(0);
+                let median_fee_sats = if sorted_fees.is_empty() {
+                    0
+                } else {
+                    sorted_fees[sorted_fees.len() / 2]
+                };
+                let fee_btc = |sats: u64| sats as f64 / 100_000_000.0;
+                let mut rates: Vec<f64> = block
+                    .transactions
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .zip(tx_fees.iter())
+                    .map(|((index, tx), fee)| {
+                        *fee as f64 / tx_vsize(index, tx) as f64 * 1000.0 / 100_000_000.0
+                    })
+                    .collect();
+                rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let rate_at = |pct: usize| -> f64 {
+                    if rates.is_empty() {
+                        0.0
+                    } else {
+                        rates[pct * (rates.len() - 1) / 100]
+                    }
+                };
+                let min_feerate = rates.first().copied().unwrap_or(0.0);
+                let max_feerate = rates.last().copied().unwrap_or(0.0);
 
                 Ok(json!({
                     "avgfee": if tx_count > 1 { total_fees as f64 / (tx_count - 1) as f64 / 100_000_000.0 } else { 0.0 },
                     "avgfeerate": avgfeerate,
                     "avgtxsize": if tx_count > 0 { block_size / tx_count } else { 0 },
                     "blockhash": encode_hash32_rpc(&block_hash),
-                    "feerate_percentiles": [0, 0, 0, 0, 0],
+                    "feerate_percentiles": [rate_at(10), rate_at(25), rate_at(50), rate_at(75), rate_at(90)],
                     "height": height,
                     "ins": input_count,
-                    "maxfee": 0.0,
-                    "maxfeerate": 0.0,
+                    "maxfee": fee_btc(max_fee_sats),
+                    "maxfeerate": max_feerate,
                     "maxtxsize": 0,
-                    "medianfee": 0.0,
-                    "mediantime": block.header.timestamp,
+                    "medianfee": fee_btc(median_fee_sats),
+                    "mediantime": self.median_time_through_height(storage, height, block.header.timestamp),
                     "mediantxsize": 0,
-                    "minfee": 0.0,
-                    "minfeerate": 0.0,
+                    "minfee": fee_btc(min_fee_sats),
+                    "minfeerate": min_feerate,
                     "mintxsize": 0,
                     "outs": output_count,
                     "subsidy": subsidy,
@@ -1464,6 +1618,69 @@ impl BlockchainRpc {
         }
     }
 
+    /// Disconnect `target` and every descendant that is still the active chain.
+    /// One walk from the tip collects that chain; each block is undone once.
+    fn disconnect_invalid_block(
+        &self,
+        storage: &Storage,
+        target: &blvm_protocol::Hash,
+    ) -> Result<()> {
+        let Some(tip) = storage.chain().get_tip_hash()? else {
+            return Ok(());
+        };
+        let mut chain = Vec::new();
+        let mut cursor = tip;
+        let mut found = false;
+        for _ in 0..100_000 {
+            chain.push(cursor);
+            if cursor == *target {
+                found = true;
+                break;
+            }
+            let Some(header) = storage.blocks().get_header(&cursor)? else {
+                break;
+            };
+            if header.prev_block_hash == [0u8; 32] || header.prev_block_hash == cursor {
+                break;
+            }
+            cursor = header.prev_block_hash;
+        }
+        if !found {
+            return Ok(());
+        }
+        for hash in chain {
+            let Some(header) = storage.blocks().get_header(&hash)? else {
+                break;
+            };
+            #[cfg(feature = "production")]
+            if let Ok(Some(undo)) = storage.blocks().get_undo_log(&hash) {
+                for entry in &undo.entries {
+                    if entry.new_utxo.is_some() {
+                        let _ = storage.utxos().remove_utxo(&entry.outpoint);
+                    }
+                    if let Some(prev) = &entry.previous_utxo {
+                        let _ = storage.utxos().add_utxo(&entry.outpoint, prev.as_ref());
+                    }
+                }
+            }
+            let height = storage.chain().get_height()?.unwrap_or(0);
+            if height == 0 {
+                break;
+            }
+            let parent = header.prev_block_hash;
+            let Some(parent_header) = storage.blocks().get_header(&parent)? else {
+                break;
+            };
+            storage
+                .chain()
+                .update_tip(&parent, &parent_header, height - 1)?;
+            if hash != *target {
+                let _ = storage.chain().mark_invalid(&hash);
+            }
+        }
+        Ok(())
+    }
+
     /// Invalidate block
     ///
     /// Params: ["blockhash"] (block hash to invalidate)
@@ -1492,7 +1709,7 @@ impl BlockchainRpc {
             decode_hash32(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
 
         if let Some(ref storage) = self.storage {
-            // Mark block as invalid
+            self.disconnect_invalid_block(storage, &hash)?;
             storage.chain().mark_invalid(&hash)?;
 
             // Publish BlockDisconnected for payment reorg handling
@@ -1505,14 +1722,9 @@ impl BlockchainRpc {
             if let Some(ref ep) = self.event_publisher {
                 ep.publish_block_disconnected(&hash, height).await;
 
-                // If we invalidated the current tip, publish ChainReorg (old_tip=invalidated, new_tip=prev)
-                if let Ok(Some(tip_hash)) = storage.chain().get_tip_hash() {
-                    if hash == tip_hash {
-                        warn!("Invalidated current chain tip - publishing ChainReorg");
-                        if let Ok(Some(header)) = storage.blocks().get_header(&hash) {
-                            let new_tip = header.prev_block_hash;
-                            ep.publish_chain_reorg(&hash, &new_tip).await;
-                        }
+                if let Ok(Some(new_tip)) = storage.chain().get_tip_hash() {
+                    if new_tip != hash {
+                        ep.publish_chain_reorg(&hash, &new_tip).await;
                     }
                 }
             }
@@ -1753,28 +1965,15 @@ impl BlockchainRpc {
                 // For now, generate filter directly
                 use blvm_protocol::bip158::build_block_filter;
 
-                // Get previous outpoint scripts from UTXO set
-                // For each input, find the UTXO and get its script_pubkey
-                let mut previous_scripts = Vec::new();
-                if let Ok(utxo_set) = storage.utxos().get_all_utxos() {
-                    for tx in &block.transactions {
-                        for input in &tx.inputs {
-                            if let Some(utxo) = utxo_set.get(&input.prevout) {
-                                previous_scripts.push(utxo.script_pubkey.clone());
-                            }
-                        }
-                    }
-                }
-
-                let previous_scripts_bytes: Vec<Vec<u8>> = previous_scripts
-                    .iter()
-                    .map(|s| s.as_ref().to_vec())
-                    .collect();
-                match build_block_filter(&block.transactions, &previous_scripts_bytes) {
+                let previous_scripts = spent_scripts_from_undo(storage, &hash);
+                match build_block_filter(&block.transactions, &previous_scripts) {
                     Ok(filter) => {
+                        let prev_header = previous_filter_header(storage, &block.header);
+                        let header = chain_filter_header(&filter.filter_data, &prev_header);
+                        let _ = storage.blocks().store_filter_header(&hash, &header);
                         Ok(json!({
                             "filter": hex::encode(&filter.filter_data),
-                            "header": hex::encode([0u8; 32]), // Would calculate filter header
+                            "header": hex::encode(header),
                         }))
                     }
                     Err(e) => Err(anyhow::anyhow!("Failed to build filter: {}", e)),
@@ -1816,7 +2015,7 @@ impl BlockchainRpc {
                 "indexed_value_buckets": index_stats.indexed_value_buckets,
             },
             "basic block filter index": {
-                "synced": true,
+                "synced": filter_index_synced(&storage, best_block_height),
                 "best_block_height": best_block_height
             }
         }))
@@ -1851,7 +2050,7 @@ impl BlockchainRpc {
             .iter()
             .map(|tx| {
                 let tx_hash = blvm_protocol::block::calculate_tx_id(tx);
-                hex::encode(tx_hash)
+                encode_hash32_rpc(&tx_hash)
             })
             .collect();
 
@@ -2052,6 +2251,16 @@ impl BlockchainRpc {
         let script_pubkey = Self::resolve_script_pubkey_param(address)?;
 
         if let Some(ref storage) = self.storage {
+            let index_on = storage
+                .transactions()
+                .get_index_stats()
+                .map(|stats| stats.address_index_enabled)
+                .unwrap_or(false);
+            if !index_on {
+                return Err(anyhow::anyhow!(
+                    "getaddressinfo: address index is not enabled"
+                ));
+            }
             // Get transactions for this address
             let transactions = storage
                 .transactions()
@@ -2064,31 +2273,33 @@ impl BlockchainRpc {
             let mut balance: i64 = 0;
             let mut utxo_count = 0;
             let mut received: i64 = 0;
-            let mut sent: i64 = 0;
+            let sent: i64;
 
             for tx in &transactions {
                 use blvm_protocol::block::calculate_tx_id;
                 let txid = calculate_tx_id(tx);
 
                 for (idx, output) in tx.outputs.iter().enumerate() {
-                    if output.script_pubkey == script_pubkey {
+                    if output.script_pubkey.as_slice() == script_pubkey.as_slice()
+                        && in_money_range(output.value)
+                    {
                         received += output.value;
-                        // Check if UTXO is spent
                         let outpoint = blvm_protocol::OutPoint {
                             hash: txid,
                             index: idx as u32,
                         };
                         if storage.utxos().get_utxo(&outpoint).ok().flatten().is_some() {
-                            // UTXO is unspent
                             balance += output.value;
                             utxo_count += 1;
-                        } else {
-                            // UTXO is spent
-                            sent += output.value;
                         }
                     }
                 }
             }
+            sent = storage
+                .transactions()
+                .spent_value_for_script(&script_pubkey)
+                .unwrap_or(0);
+            let script_type = crate::rpc::rawtx::script_pubkey_type(&script_pubkey);
 
             Ok(json!({
                 "address": address,
@@ -2096,10 +2307,10 @@ impl BlockchainRpc {
                 "ismine": false,
                 "iswatchonly": false,
                 "isscript": false,
-                "iswitness": false,
+                "iswitness": script_type.starts_with("witness"),
                 "witness_version": Value::Null,
                 "witness_program": Value::Null,
-                "script_type": "nonstandard",
+                "script_type": script_type,
                 "pubkey": Value::Null,
                 "embedded": Value::Null,
                 "iscompressed": Value::Null,
@@ -2116,31 +2327,440 @@ impl BlockchainRpc {
                 "utxo_count": utxo_count
             }))
         } else {
-            Ok(json!({
-                "address": address,
-                "scriptPubKey": hex::encode(&script_pubkey),
-                "ismine": false,
-                "iswatchonly": false,
-                "isscript": false,
-                "iswitness": false,
-                "witness_version": Value::Null,
-                "witness_program": Value::Null,
-                "script_type": "nonstandard",
-                "pubkey": Value::Null,
-                "embedded": Value::Null,
-                "iscompressed": Value::Null,
-                "label": "",
-                "timestamp": Value::Null,
-                "hdkeypath": Value::Null,
-                "hdseedid": Value::Null,
-                "hdmasterfingerprint": Value::Null,
-                "labels": [],
-                "balance": 0.0,
-                "received": 0.0,
-                "sent": 0.0,
-                "tx_count": 0,
-                "utxo_count": 0
-            }))
+            Err(anyhow::anyhow!(
+                "getaddressinfo: address index is not enabled"
+            ))
         }
+    }
+}
+
+#[cfg(test)]
+mod txoutset_tests {
+    use super::*;
+    use blvm_protocol::opcodes::OP_1;
+    use blvm_protocol::{OutPoint, UTXO};
+
+    #[tokio::test]
+    async fn txoutset_total_ignores_a_negative_value() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        storage
+            .utxos()
+            .add_utxo(
+                &OutPoint {
+                    hash: [1u8; 32],
+                    index: 0,
+                },
+                &UTXO {
+                    value: 50_000,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 0,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+        storage
+            .utxos()
+            .add_utxo(
+                &OutPoint {
+                    hash: [9u8; 32],
+                    index: 0,
+                },
+                &UTXO {
+                    value: -1,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 0,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+
+        let info = BlockchainRpc::with_dependencies(storage)
+            .get_txoutset_info()
+            .await
+            .unwrap();
+        let sats = (info["total_amount"].as_f64().unwrap() * 100_000_000.0).round() as u128;
+        assert_eq!(info["txouts"], 2);
+        assert_eq!(sats, 50_000);
+    }
+}
+
+#[cfg(test)]
+mod block_stats_tests {
+    use super::*;
+    use blvm_protocol::opcodes::OP_1;
+    use blvm_protocol::{
+        Block, BlockHeader, OutPoint, Transaction, TransactionInput, TransactionOutput,
+    };
+
+    fn tx_with_output(value: i64) -> Transaction {
+        Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [1u8; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn block_stats_ignore_a_negative_output() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                timestamp: 0,
+                bits: 0,
+                nonce: 0,
+            },
+            transactions: vec![tx_with_output(-1), tx_with_output(50_000)].into_boxed_slice(),
+        };
+        let hash = storage.blocks().get_block_hash(&block);
+        storage.blocks().store_block(&block).unwrap();
+
+        let stats = BlockchainRpc::with_dependencies(storage)
+            .get_block_stats(&json!([crate::storage::hashing::hash_to_rpc_hex(&hash)]))
+            .await
+            .unwrap();
+        assert_eq!(stats["outs"], 2);
+        assert_eq!(stats["total_out"].as_u64(), Some(50_000));
+        assert_eq!(stats["totalfee"].as_f64(), Some(0.0));
+    }
+
+    #[cfg(feature = "production")]
+    #[tokio::test]
+    async fn one_thousand_sat_fee_is_min_max_and_median() {
+        use blvm_consensus::reorganization::{BlockUndoLog, UndoEntry};
+        use blvm_protocol::UTXO;
+        use std::sync::Arc;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let spent = OutPoint {
+            hash: [7u8; 32],
+            index: 0,
+        };
+        let spender = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: spent,
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 1_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                timestamp: 1_600_000_000,
+                bits: 0,
+                nonce: 0,
+            },
+            transactions: vec![tx_with_output(50_000), spender].into_boxed_slice(),
+        };
+        let hash = storage.blocks().get_block_hash(&block);
+        storage.blocks().store_block(&block).unwrap();
+        let mut undo = BlockUndoLog::new();
+        undo.push(UndoEntry {
+            outpoint: spent,
+            previous_utxo: Some(Arc::new(UTXO {
+                value: 2_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 1,
+                is_coinbase: false,
+            })),
+            new_utxo: None,
+        });
+        storage.blocks().store_undo_log(&hash, &undo).unwrap();
+
+        let stats = BlockchainRpc::with_dependencies(storage)
+            .get_block_stats(&json!([crate::storage::hashing::hash_to_rpc_hex(&hash)]))
+            .await
+            .unwrap();
+        assert_eq!(stats["minfee"].as_f64(), Some(0.00001));
+        assert_eq!(stats["maxfee"].as_f64(), Some(0.00001));
+        assert_eq!(stats["medianfee"].as_f64(), Some(0.00001));
+    }
+
+    #[cfg(feature = "production")]
+    #[tokio::test]
+    async fn spent_script_is_in_the_filter_and_the_header_is_not_zero() {
+        use blvm_consensus::reorganization::{BlockUndoLog, UndoEntry};
+        use blvm_protocol::bip158::{build_block_filter, match_filter};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let spent = OutPoint {
+            hash: [9u8; 32],
+            index: 0,
+        };
+        let script = vec![OP_1];
+        let spender = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: spent,
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 1_000,
+                script_pubkey: vec![0x51],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                timestamp: 1_600_000_000,
+                bits: 0,
+                nonce: 1,
+            },
+            transactions: vec![tx_with_output(50_000), spender].into_boxed_slice(),
+        };
+        let hash = storage.blocks().get_block_hash(&block);
+        storage.blocks().store_block(&block).unwrap();
+        let mut undo = BlockUndoLog::new();
+        undo.push(UndoEntry {
+            outpoint: spent,
+            previous_utxo: Some(std::sync::Arc::new(blvm_protocol::UTXO {
+                value: 2_000,
+                script_pubkey: script.clone().into(),
+                height: 1,
+                is_coinbase: false,
+            })),
+            new_utxo: None,
+        });
+        storage.blocks().store_undo_log(&hash, &undo).unwrap();
+
+        let result = BlockchainRpc::with_dependencies(Arc::clone(&storage))
+            .get_block_filter(&json!([crate::storage::hashing::hash_to_rpc_hex(&hash)]))
+            .await
+            .unwrap();
+        let built = build_block_filter(block.transactions.as_ref(), &[script.clone()]).unwrap();
+        assert!(match_filter(&built, &script));
+        assert_eq!(
+            result["filter"].as_str().unwrap(),
+            hex::encode(&built.filter_data)
+        );
+        assert_ne!(result["header"].as_str().unwrap(), &"0".repeat(64));
+
+        let rpc = BlockchainRpc::with_dependencies(Arc::clone(&storage));
+        let before = rpc.get_index_info(&json!([])).await.unwrap();
+        assert_eq!(
+            before["basic block filter index"]["synced"].as_bool(),
+            Some(false)
+        );
+        storage.chain().initialize(&block.header).unwrap();
+        storage.blocks().store_height(0, &hash).unwrap();
+        let after = rpc.get_index_info(&json!([])).await.unwrap();
+        assert_eq!(
+            after["basic block filter index"]["synced"].as_bool(),
+            Some(true)
+        );
+    }
+
+    #[cfg(feature = "production")]
+    #[tokio::test]
+    async fn invalidate_tip_moves_to_the_parent_and_drops_the_coinbase() {
+        use blvm_consensus::reorganization::{BlockUndoLog, UndoEntry};
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::UTXO;
+        use std::sync::Arc as StdArc;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let parent = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            timestamp: 1_600_000_000,
+            bits: 0,
+            nonce: 1,
+        };
+        storage.chain().initialize(&parent).unwrap();
+        let parent_hash = storage.chain().get_tip_hash().unwrap().unwrap();
+        storage.blocks().store_header(&parent_hash, &parent).unwrap();
+
+        let coinbase = tx_with_output(50_000);
+        let coinbase_id = calculate_tx_id(&coinbase);
+        let child = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: parent_hash,
+                merkle_root: [0u8; 32],
+                timestamp: 1_600_000_001,
+                bits: 0,
+                nonce: 2,
+            },
+            transactions: vec![coinbase].into_boxed_slice(),
+        };
+        let child_hash = storage.blocks().get_block_hash(&child);
+        storage.blocks().store_block(&child).unwrap();
+        storage.blocks().store_header(&child_hash, &child.header).unwrap();
+        storage.blocks().store_height(1, &child_hash).unwrap();
+        let outpoint = OutPoint {
+            hash: coinbase_id,
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 1,
+            is_coinbase: true,
+        };
+        storage.utxos().add_utxo(&outpoint, &utxo).unwrap();
+        let mut undo = BlockUndoLog::new();
+        undo.push(UndoEntry {
+            outpoint,
+            previous_utxo: None,
+            new_utxo: Some(StdArc::new(utxo)),
+        });
+        storage.blocks().store_undo_log(&child_hash, &undo).unwrap();
+        storage
+            .chain()
+            .update_tip(&child_hash, &child.header, 1)
+            .unwrap();
+
+        BlockchainRpc::with_dependencies(Arc::clone(&storage))
+            .invalidate_block(&json!([crate::storage::hashing::hash_to_rpc_hex(&child_hash)]))
+            .await
+            .unwrap();
+
+        assert_eq!(storage.chain().get_tip_hash().unwrap().unwrap(), parent_hash);
+        assert!(storage.utxos().get_utxo(&outpoint).unwrap().is_none());
+        let tips = BlockchainRpc::with_dependencies(storage)
+            .get_chain_tips()
+            .await
+            .unwrap();
+        let old_tip = tips
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tip| tip["hash"].as_str() == Some(crate::storage::hashing::hash_to_rpc_hex(&child_hash).as_str()))
+            .unwrap();
+        assert_eq!(old_tip["status"], "invalid");
+    }
+
+    #[tokio::test]
+    async fn p2wpkh_index_off_errors_and_a_full_spend_reports_both_sides() {
+        use blvm_protocol::block::calculate_tx_id;
+
+        let script = {
+            let mut s = vec![0x00, 0x14];
+            s.extend_from_slice(&[0x11u8; 20]);
+            s
+        };
+        let temp = tempfile::TempDir::new().unwrap();
+        let off = Arc::new(Storage::new(temp.path()).unwrap());
+        assert!(
+            BlockchainRpc::with_dependencies(off)
+                .get_address_info(&json!([hex::encode(&script)]))
+                .await
+                .is_err()
+        );
+
+        let temp_on = tempfile::TempDir::new().unwrap();
+        let mut indexing = crate::config::IndexingConfig::default();
+        indexing.enable_address_index = true;
+        let on = Arc::new(
+            Storage::with_backend_pruning_and_indexing(
+                temp_on.path(),
+                crate::storage::database::default_backend(),
+                None,
+                Some(indexing),
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let tx = tx_with_output(50_000);
+        let mut paying = tx;
+        paying.outputs[0].script_pubkey = script.clone();
+        paying.outputs[0].value = 50_000;
+        let txid = calculate_tx_id(&paying);
+        on.transactions()
+            .index_transaction(&paying, &[2u8; 32], 1, 0)
+            .unwrap();
+        on.transactions()
+            .note_spend(&script, 50_000, &txid)
+            .unwrap();
+        let info = BlockchainRpc::with_dependencies(on)
+            .get_address_info(&json!([hex::encode(&script)]))
+            .await
+            .unwrap();
+        assert_eq!(info["received"].as_f64(), Some(0.0005));
+        assert_eq!(info["sent"].as_f64(), Some(0.0005));
+        assert_eq!(info["script_type"], "witness_v0_keyhash");
+    }
+
+    #[tokio::test]
+    async fn signet_stays_unknown_and_segwit_follows_its_activation_height() {
+        use crate::storage::chainstate::ChainParams;
+        use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Signet).unwrap());
+        let header = protocol.get_network_params().genesis_block.header.clone();
+        let mut params = ChainParams::default();
+        params.network = "signet".to_string();
+        storage
+            .chain()
+            .initialize_with_params(&header, params)
+            .unwrap();
+        let rpc = BlockchainRpc::with_dependencies_and_protocol(
+            Arc::clone(&storage),
+            Arc::clone(&protocol),
+        );
+        let info = rpc.get_blockchain_info().await.unwrap();
+        assert_eq!(info["chain"], "signet");
+        assert_eq!(info["initialblockdownload"], true);
+        assert_eq!(info["verificationprogress"].as_f64(), Some(0.0));
+        assert_eq!(info["softforks"]["segwit"]["active"], false);
+        assert_eq!(info["softforks"]["segwit"]["height"], 1);
+
+        let tip = storage.chain().get_tip_hash().unwrap().unwrap();
+        storage.chain().update_tip(&tip, &header, 1).unwrap();
+        let at_activation = rpc.get_blockchain_info().await.unwrap();
+        assert_eq!(at_activation["chain"], "signet");
+        assert_eq!(at_activation["initialblockdownload"], true);
+        assert_eq!(at_activation["softforks"]["segwit"]["active"], true);
+
+        let bare = tempfile::TempDir::new().unwrap();
+        let bare_storage = Arc::new(Storage::new(bare.path()).unwrap());
+        let testnet4 = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Testnet4).unwrap());
+        let named = BlockchainRpc::with_dependencies_and_protocol(bare_storage, testnet4)
+            .get_blockchain_info()
+            .await
+            .unwrap();
+        assert_eq!(named["chain"], "testnet4");
+        assert_eq!(named["initialblockdownload"], true);
     }
 }

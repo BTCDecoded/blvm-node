@@ -12,8 +12,29 @@ use crate::storage::Storage;
 use crate::utils::current_timestamp;
 use blvm_protocol::Hash;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::debug;
+
+/// Walk parent or child edges already stored on the pool. `descendants` follows children.
+fn follow_pool_edges(mempool: &MempoolManager, roots: Vec<Hash>, descendants: bool) -> Vec<Hash> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack = roots;
+    while let Some(hash) = stack.pop() {
+        if !seen.insert(hash) {
+            continue;
+        }
+        let next = if descendants {
+            mempool.descendant_hashes(&hash)
+        } else {
+            mempool.dependency_hashes(&hash)
+        };
+        stack.extend(next);
+        out.push(hash);
+    }
+    out
+}
 
 /// Mempool RPC methods
 #[derive(Clone)]
@@ -112,74 +133,89 @@ impl MempoolRpc {
 
                 for tx in transactions {
                     let txid = calculate_tx_id(&tx);
-                    let txid_hex = hex::encode(txid);
+                    let txid_hex = crate::storage::hashing::hash_to_rpc_hex(&txid);
                     let witnesses = mempool.get_transaction_witnesses(&txid);
                     let wtxid = crate::rpc::txwire::tx_wire(&tx, witnesses.as_deref()).hash_hex;
                     let size = serialize_transaction(&tx).len();
 
+                    let fee_btc = if let (Some(mempool), Some(utxo_set)) =
+                        (self.mempool.as_ref(), utxo_set.as_ref())
+                    {
+                        mempool.calculate_transaction_fee(&tx, utxo_set) as f64 / 100_000_000.0
+                    } else {
+                        0.0
+                    };
+                    let ancestors = follow_pool_edges(
+                        mempool,
+                        mempool.dependency_hashes(&txid),
+                        false,
+                    );
+                    let descendants = follow_pool_edges(
+                        mempool,
+                        mempool.descendant_hashes(&txid),
+                        true,
+                    );
+                    let fee_sats = |hash: &blvm_protocol::Hash| -> f64 {
+                        let Some(ref set) = utxo_set else {
+                            return 0.0;
+                        };
+                        mempool
+                            .get_transaction(hash)
+                            .map(|tx| mempool.calculate_transaction_fee(&tx, set) as f64 / 100_000_000.0)
+                            .unwrap_or(0.0)
+                    };
+                    let size_of = |hash: &blvm_protocol::Hash| -> usize {
+                        mempool
+                            .get_transaction(hash)
+                            .map(|tx| serialize_transaction(&tx).len())
+                            .unwrap_or(0)
+                    };
+                    let ancestor_fees = fee_btc + ancestors.iter().map(fee_sats).sum::<f64>();
+                    let descendant_fees = fee_btc + descendants.iter().map(fee_sats).sum::<f64>();
+                    let ancestor_size = size + ancestors.iter().map(size_of).sum::<usize>();
+                    let descendant_size = size + descendants.iter().map(size_of).sum::<usize>();
+                    let depends: Vec<String> = ancestors
+                        .iter()
+                        .map(crate::storage::hashing::hash_to_rpc_hex)
+                        .collect();
+                    let spentby: Vec<String> = descendants
+                        .iter()
+                        .map(crate::storage::hashing::hash_to_rpc_hex)
+                        .collect();
                     result.insert(txid_hex, json!({
                         "size": size,
-                        "fee": if let (Some(mempool), Some(utxo_set)) = (self.mempool.as_ref(), utxo_set.as_ref()) {
-                            let fee_satoshis = mempool.calculate_transaction_fee(&tx, utxo_set);
-                            fee_satoshis as f64 / 100_000_000.0
-                        } else {
-                            0.00001000
-                        },
-                        "modifiedfee": 0.00001000,
-                        "time": current_timestamp(),
+                        "fee": fee_btc,
+                        "modifiedfee": fee_btc,
+                        "time": mempool.accepted_at(&txid),
                         "height": -1,
-                        "descendantcount": 1,
-                        "descendantsize": size,
-                        "descendantfees": 0.00001000,
-                        "ancestorcount": 1,
-                        "ancestorsize": size,
-                        "ancestorfees": 0.00001000,
+                        "descendantcount": 1 + descendants.len(),
+                        "descendantsize": descendant_size,
+                        "descendantfees": descendant_fees,
+                        "ancestorcount": 1 + ancestors.len(),
+                        "ancestorsize": ancestor_size,
+                        "ancestorfees": ancestor_fees,
                         "wtxid": wtxid,
                         "fees": {
-                            "base": 0.00001000,
-                            "modified": 0.00001000,
-                            "ancestor": 0.00001000,
-                            "descendant": 0.00001000
+                            "base": fee_btc,
+                            "modified": fee_btc,
+                            "ancestor": ancestor_fees,
+                            "descendant": descendant_fees
                         },
-                        "depends": [],
-                        "spentby": [],
-                        "bip125-replaceable": false
+                        "depends": depends,
+                        "spentby": spentby,
+                        "bip125-replaceable": blvm_protocol::mempool::signals_rbf(&tx)
                     }));
                 }
                 Ok(json!(result))
             } else {
                 let txids: Vec<String> = transactions
                     .iter()
-                    .map(|tx| hex::encode(calculate_tx_id(tx)))
+                    .map(|tx| crate::storage::hashing::hash_to_rpc_hex(&calculate_tx_id(tx)))
                     .collect();
                 Ok(json!(txids))
             }
         } else if verbose {
-            Ok(json!({
-                "0000000000000000000000000000000000000000000000000000000000000000": {
-                    "size": 250,
-                    "fee": 0.00001000,
-                    "modifiedfee": 0.00001000,
-                    "time": 1231006505,
-                    "height": 0,
-                    "descendantcount": 1,
-                    "descendantsize": 250,
-                    "descendantfees": 0.00001000,
-                    "ancestorcount": 1,
-                    "ancestorsize": 250,
-                    "ancestorfees": 0.00001000,
-                    "wtxid": "0000000000000000000000000000000000000000000000000000000000000000",
-                    "fees": {
-                        "base": 0.00001000,
-                        "modified": 0.00001000,
-                        "ancestor": 0.00001000,
-                        "descendant": 0.00001000
-                    },
-                    "depends": [],
-                    "spentby": [],
-                    "bip125-replaceable": false
-                }
-            }))
+            Ok(json!({}))
         } else {
             Ok(json!([]))
         }
@@ -229,20 +265,9 @@ impl MempoolRpc {
 
         let verbose = param_bool_default(params, 1, false);
 
-        let hash_bytes = hex::decode(&txid).map_err(|e| {
-            crate::rpc::errors::RpcError::invalid_hash_format(
-                &txid,
-                Some(32),
-                Some(&format!("Invalid hex encoding: {e}")),
-            )
+        let hash = crate::storage::hashing::hash_from_rpc_hex(&txid).map_err(|e| {
+            crate::rpc::errors::RpcError::invalid_hash_format(&txid, Some(32), Some(&e))
         })?;
-        if hash_bytes.len() != 32 {
-            return Err(crate::rpc::errors::RpcError::invalid_params(
-                "Transaction ID must be 32 bytes".to_string(),
-            ));
-        }
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&hash_bytes);
 
         if let Some(ref mempool) = self.mempool {
             // Find ancestors: transactions that this transaction depends on (spends their outputs)
@@ -253,7 +278,8 @@ impl MempoolRpc {
                 let mut result = serde_json::Map::new();
                 for ancestor_hash in ancestors {
                     if let Some(ancestor_tx) = mempool.get_transaction(&ancestor_hash) {
-                        let ancestor_txid = hex::encode(ancestor_hash);
+                        let ancestor_txid =
+                            crate::storage::hashing::hash_to_rpc_hex(&ancestor_hash);
                         result.insert(
                             ancestor_txid,
                             self.build_mempool_entry_json(mempool, &ancestor_hash, &ancestor_tx),
@@ -263,7 +289,10 @@ impl MempoolRpc {
                 Ok(json!(result))
             } else {
                 // Return just transaction IDs
-                let txids: Vec<String> = ancestors.iter().map(hex::encode).collect();
+                let txids: Vec<String> = ancestors
+                    .iter()
+                    .map(crate::storage::hashing::hash_to_rpc_hex)
+                    .collect();
                 Ok(json!(txids))
             }
         } else if verbose {
@@ -283,20 +312,9 @@ impl MempoolRpc {
 
         let verbose = param_bool_default(params, 1, false);
 
-        let hash_bytes = hex::decode(&txid).map_err(|e| {
-            crate::rpc::errors::RpcError::invalid_hash_format(
-                &txid,
-                Some(32),
-                Some(&format!("Invalid hex encoding: {e}")),
-            )
+        let hash = crate::storage::hashing::hash_from_rpc_hex(&txid).map_err(|e| {
+            crate::rpc::errors::RpcError::invalid_hash_format(&txid, Some(32), Some(&e))
         })?;
-        if hash_bytes.len() != 32 {
-            return Err(crate::rpc::errors::RpcError::invalid_params(
-                "Transaction ID must be 32 bytes".to_string(),
-            ));
-        }
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&hash_bytes);
 
         if let Some(ref mempool) = self.mempool {
             // Find descendants by checking which transactions spend outputs created by this transaction which transactions spend outputs created by this transaction which transactions spend outputs created by this transaction
@@ -331,7 +349,8 @@ impl MempoolRpc {
                 let mut result = serde_json::Map::new();
                 for descendant_hash in descendants {
                     if let Some(descendant_tx) = mempool.get_transaction(&descendant_hash) {
-                        let descendant_txid = hex::encode(descendant_hash);
+                        let descendant_txid =
+                            crate::storage::hashing::hash_to_rpc_hex(&descendant_hash);
                         result.insert(
                             descendant_txid,
                             self.build_mempool_entry_json(
@@ -345,7 +364,10 @@ impl MempoolRpc {
                 Ok(json!(result))
             } else {
                 // Return just transaction IDs
-                let txids: Vec<String> = descendants.iter().map(hex::encode).collect();
+                let txids: Vec<String> = descendants
+                    .iter()
+                    .map(crate::storage::hashing::hash_to_rpc_hex)
+                    .collect();
                 Ok(json!(txids))
             }
         } else if verbose {
@@ -363,20 +385,9 @@ impl MempoolRpc {
 
         let txid = param_str_required(params, 0, "getmempoolentry")?;
 
-        let hash_bytes = hex::decode(&txid).map_err(|e| {
-            crate::rpc::errors::RpcError::invalid_hash_format(
-                &txid,
-                Some(32),
-                Some(&format!("Invalid hex encoding: {e}")),
-            )
+        let hash = crate::storage::hashing::hash_from_rpc_hex(&txid).map_err(|e| {
+            crate::rpc::errors::RpcError::invalid_hash_format(&txid, Some(32), Some(&e))
         })?;
-        if hash_bytes.len() != 32 {
-            return Err(crate::rpc::errors::RpcError::invalid_params(
-                "Transaction ID must be 32 bytes".to_string(),
-            ));
-        }
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&hash_bytes);
 
         if let Some(ref mempool) = self.mempool {
             if let Some(tx) = mempool.get_transaction(&hash) {
@@ -446,8 +457,14 @@ impl MempoolRpc {
                 "ancestor": ancestor_fees_btc,
                 "descendant": descendant_fees_btc
             },
-            "depends": ancestors.iter().map(hex::encode).collect::<Vec<_>>(),
-            "spentby": descendants.iter().map(hex::encode).collect::<Vec<_>>(),
+            "depends": ancestors
+                .iter()
+                .map(crate::storage::hashing::hash_to_rpc_hex)
+                .collect::<Vec<_>>(),
+            "spentby": descendants
+                .iter()
+                .map(crate::storage::hashing::hash_to_rpc_hex)
+                .collect::<Vec<_>>(),
             "bip125-replaceable": false
         })
     }

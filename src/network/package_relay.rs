@@ -168,24 +168,13 @@ impl TransactionPackage {
         // Calculate package ID per BIP331: SHA256 of wtxids in lexicographical order
         let package_id = PackageId::from_transactions(&transactions, witnesses);
 
-        // Calculate combined fee from UTXO set if provided
+        // Confirmed inputs come from the UTXO set. An output created by an
+        // earlier transaction in this package is priced from that parent.
+        // Values outside the money range are not added.
         let combined_fee = if let Some(utxo_set) = utxo_set {
-            // Calculate fee for each transaction: sum(inputs) - sum(outputs)
-            transactions
-                .iter()
-                .map(|tx| {
-                    let input_total: u64 = tx
-                        .inputs
-                        .iter()
-                        .filter_map(|inp| utxo_set.get(&inp.prevout))
-                        .map(|utxo| utxo.value as u64)
-                        .sum();
-                    let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
-                    input_total.saturating_sub(output_total)
-                })
-                .sum()
+            package_combined_fee(&transactions, utxo_set)
         } else {
-            0 // Fee calculation requires UTXO set
+            0
         };
 
         let combined_weight: usize = transactions
@@ -378,6 +367,47 @@ impl PackageRelay {
     }
 }
 
+/// Sum of per-transaction fees. A parent output created inside the package
+/// counts as an input of the child. An out-of-range value contributes nothing.
+fn package_combined_fee(transactions: &[Transaction], utxo_set: &blvm_protocol::UtxoSet) -> u64 {
+    use crate::node::mempool::{add_money, money_sats, output_sum_sats};
+
+    let mut created: HashMap<Hash, usize> = HashMap::new();
+    let mut total_fee = 0u64;
+    for (i, tx) in transactions.iter().enumerate() {
+        if let Some(output_total) = output_sum_sats(tx) {
+            let mut input_total = 0u64;
+            let mut within_money = true;
+            for input in &tx.inputs {
+                let sats = if let Some(utxo) = utxo_set.get(&input.prevout) {
+                    money_sats(utxo.value)
+                } else if let Some(&parent_i) = created.get(&input.prevout.hash) {
+                    transactions[parent_i]
+                        .outputs
+                        .get(input.prevout.index as usize)
+                        .and_then(|output| money_sats(output.value))
+                } else {
+                    None
+                };
+                if let Some(sats) = sats {
+                    match add_money(input_total, sats) {
+                        Some(sum) => input_total = sum,
+                        None => {
+                            within_money = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if within_money {
+                total_fee = total_fee.saturating_add(input_total.saturating_sub(output_total));
+            }
+        }
+        created.insert(calculate_tx_id(tx), i);
+    }
+    total_fee
+}
+
 /// BIP141 transaction weight (WU) for package fee-rate checks.
 fn package_transaction_weight_wu(
     tx: &Transaction,
@@ -401,4 +431,76 @@ pub enum PackageError {
 
     #[error("Package not found")]
     PackageNotFound,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blvm_protocol::opcodes::OP_1;
+    use blvm_protocol::{OutPoint, TransactionInput, TransactionOutput, UTXO};
+    use std::sync::Arc;
+
+    fn spend(prevout: OutPoint, output_value: i64) -> Transaction {
+        Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout,
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: output_value,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        }
+    }
+
+    #[test]
+    fn package_fee_counts_an_in_package_parent_and_ignores_a_negative_value() {
+        let funding = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        let negative = OutPoint {
+            hash: [9u8; 32],
+            index: 0,
+        };
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            funding,
+            Arc::new(UTXO {
+                value: 50_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        utxo_set.insert(
+            negative,
+            Arc::new(UTXO {
+                value: -1,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+
+        let parent = spend(funding, 40_000);
+        let child = spend(
+            OutPoint {
+                hash: calculate_tx_id(&parent),
+                index: 0,
+            },
+            25_000,
+        );
+        let package = TransactionPackage::new_with_utxo_set(
+            vec![parent, child, spend(negative, 1_000)],
+            Some(&utxo_set),
+        )
+        .unwrap();
+        assert_eq!(package.combined_fee, 25_000);
+    }
 }

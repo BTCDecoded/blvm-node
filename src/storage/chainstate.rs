@@ -11,6 +11,18 @@ use blvm_protocol::{BlockHeader, Hash};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// Sum of UTXO values inside the money range. A value outside that range is left out.
+pub(crate) fn utxo_money_total(values: impl IntoIterator<Item = i64>) -> u128 {
+    let max = blvm_protocol::constants::MAX_MONEY;
+    let mut total = 0u128;
+    for value in values {
+        if (0..=max).contains(&value) {
+            total = total.saturating_add(value as u128);
+        }
+    }
+    total
+}
+
 /// UTXO set statistics (cached for fast RPC lookups)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UTXOStats {
@@ -888,7 +900,7 @@ impl ChainState {
         use crate::storage::assumeutxo::AssumeUtxoManager;
 
         let txouts = utxo_set.len() as u64;
-        let total_amount: u128 = utxo_set.values().map(|utxo| utxo.value as u128).sum();
+        let total_amount = utxo_money_total(utxo_set.values().map(|utxo| utxo.value));
         let muhash = AssumeUtxoManager::calculate_utxo_hash(utxo_set).unwrap_or([0u8; 32]);
 
         let stats = UTXOStats {
@@ -1215,5 +1227,51 @@ mod tests {
             consensus_network_from_stored_name("unknown"),
             Network::Mainnet
         );
+    }
+
+    #[test]
+    fn utxo_stats_total_ignores_a_negative_value() {
+        use super::ChainState;
+        use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::{OutPoint, UTXO};
+        use std::sync::Arc;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = crate::storage::Storage::new(temp.path()).unwrap();
+        let chain: &ChainState = storage.chain();
+        let funding = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        let negative = OutPoint {
+            hash: [9u8; 32],
+            index: 0,
+        };
+        let mut set = blvm_protocol::UtxoSet::default();
+        set.insert(
+            funding,
+            Arc::new(UTXO {
+                value: 50_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        set.insert(
+            negative,
+            Arc::new(UTXO {
+                value: -1,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        let block_hash = [2u8; 32];
+        chain
+            .update_utxo_stats_cache(&block_hash, 1, &set, 1)
+            .unwrap();
+        let stats = chain.get_utxo_stats(&block_hash).unwrap().unwrap();
+        assert_eq!(stats.txouts, 2);
+        assert_eq!(stats.total_amount, 50_000);
     }
 }

@@ -9,9 +9,20 @@ use crate::rpc::params::{
 };
 use crate::utils::current_timestamp;
 use serde_json::{Value, json};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tracing::debug;
+
+fn parse_ban_ip(subnet: &str) -> RpcResult<IpAddr> {
+    if let Ok(sock) = subnet.parse::<SocketAddr>() {
+        return Ok(sock.ip());
+    }
+    subnet.parse::<IpAddr>().map_err(|_| {
+        RpcError::invalid_params(format!(
+            "setban: {subnet} is not an IP address or IP:port"
+        ))
+    })
+}
 
 /// Network RPC methods
 #[derive(Clone)]
@@ -83,6 +94,7 @@ impl NetworkRpc {
             // Clone and update only the dynamic field
             let mut result = base_info.clone();
             result["connections"] = json!(peer_count);
+            result["networkactive"] = json!(network.is_network_active());
             Ok(result)
         } else {
             Ok(json!({
@@ -130,16 +142,10 @@ impl NetworkRpc {
             for addr in peer_manager.peer_addresses() {
                 if let Some(peer) = peer_manager.get_peer(&addr) {
                     peers.push(json!({
-                        "id": match addr {
-                            crate::network::transport::TransportAddr::Tcp(sock) => sock.port() as u64,
-                            #[cfg(feature = "quinn")]
-                            crate::network::transport::TransportAddr::Quinn(sock) => sock.port() as u64,
-                            #[cfg(feature = "iroh")]
-                            crate::network::transport::TransportAddr::Iroh(_) => 0u64,
-                        },
+                        "id": peer.id(),
                         "addr": addr.to_string(),
                         "addrlocal": "",
-                        "services": "0000000000000001",
+                        "services": format!("{:016x}", peer.services()),
                         "relaytxes": true,
                         "lastsend": peer.last_send(),
                         "lastrecv": peer.last_recv(),
@@ -147,13 +153,13 @@ impl NetworkRpc {
                         "bytesrecv": peer.bytes_recv(),
                         "conntime": peer.conntime(),
                         "timeoffset": 0,
-                        "pingtime": 0.0,
+                        "pingtime": peer.ping_secs(),
                         "minping": 0.0,
                         "version": peer.version() as i64,
                         "subver": peer.user_agent().unwrap_or(&"/unknown/".to_string()).clone(),
-                        "inbound": false,
+                        "inbound": !peer.is_outbound(),
                         "addnode": false,
-                        "startingheight": 0,
+                        "startingheight": peer.start_height(),
                         "synced_headers": -1,
                         "synced_blocks": -1,
                         "inflight": [],
@@ -409,20 +415,13 @@ impl NetworkRpc {
 
         let command = param_str(params, 1).unwrap_or("add");
 
-        // Parse address/subnet
-        let addr: SocketAddr = subnet.parse().map_err(|_| {
-            RpcError::invalid_params_with_fields(
-                format!("Invalid address/subnet: {subnet}"),
-                vec![(
-                    "subnet",
-                    "Must be in format IP:port (e.g., 192.168.1.1:8333)",
-                )],
-                Some(json!([
-                    "Format: IPv4:port or [IPv6]:port",
-                    "Example: 192.168.1.1:8333 or [2001:db8::1]:8333"
-                ])),
-            )
-        })?;
+        if subnet.contains('/') {
+            return Err(RpcError::invalid_params(
+                "setban: a subnet is not accepted until a prefix parser exists".to_string(),
+            ));
+        }
+        let ip = parse_ban_ip(&subnet)?;
+        let addr = SocketAddr::new(ip, 0);
 
         // Parse bantime (seconds) - 0 = permanent
         let bantime = param_u64_default(params, 2, 86400); // Default 24 hours
@@ -456,13 +455,14 @@ impl NetworkRpc {
                     "Invalid command: {command}. Must be 'add' or 'remove'"
                 ))),
             }
+        } else if command == "add" || command == "remove" {
+            Err(RpcError::internal_error(
+                "setban: network manager is not available".to_string(),
+            ))
         } else {
-            match command {
-                "add" | "remove" => Ok(json!(null)),
-                _ => Err(RpcError::invalid_params(format!(
-                    "Invalid command: {command}. Must be 'add' or 'remove'"
-                ))),
-            }
+            Err(RpcError::invalid_params(format!(
+                "Invalid command: {command}. Must be 'add' or 'remove'"
+            )))
         }
     }
 
@@ -620,5 +620,49 @@ impl NetworkRpc {
 impl Default for NetworkRpc {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod info_locks {
+    use super::*;
+    use crate::network::peer::Peer;
+    use crate::network::transport::TransportAddr;
+    use crate::network::NetworkManager;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn networkactive_follows_setnetworkactive() {
+        let nm = Arc::new(NetworkManager::new("127.0.0.1:0".parse().unwrap()));
+        let rpc = NetworkRpc::with_dependencies(Arc::clone(&nm));
+        rpc.setnetworkactive(&json!([false])).await.unwrap();
+        let info = rpc.get_network_info().await.unwrap();
+        assert_eq!(info["networkactive"], false);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn advertised_service_bit_is_shown() {
+        let nm = Arc::new(NetworkManager::new("127.0.0.1:0".parse().unwrap()));
+        let sock: SocketAddr = "10.1.1.1:8333".parse().unwrap();
+        let mut peer = Peer::new_for_testing(sock);
+        peer.set_services(8);
+        {
+            let mut peers = nm.peer_manager().await;
+            peers
+                .add_peer(TransportAddr::Tcp(sock), peer)
+                .unwrap();
+        }
+        let info = NetworkRpc::with_dependencies(nm)
+            .get_peer_info()
+            .await
+            .unwrap();
+        assert_eq!(info[0]["services"], "0000000000000008");
+        assert_ne!(info[0]["id"].as_u64(), Some(sock.port() as u64));
+    }
+
+    #[tokio::test]
+    async fn setban_rejects_a_subnet_and_a_missing_manager() {
+        let rpc = NetworkRpc::new();
+        assert!(rpc.set_ban(&json!(["10.0.0.0/8", "add"])).await.is_err());
+        assert!(rpc.set_ban(&json!(["10.0.0.1", "add"])).await.is_err());
     }
 }

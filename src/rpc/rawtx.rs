@@ -240,7 +240,7 @@ impl RawTxRpc {
 
             use blvm_protocol::block::calculate_tx_id;
             let txid = calculate_tx_id(&tx);
-            let txid_hex = hex::encode(txid);
+            let txid_hex = Self::rpc_txid(&txid);
 
             // Check if already in mempool
             if mempool.get_transaction(&txid).is_some() {
@@ -299,12 +299,21 @@ impl RawTxRpc {
                         RpcError::internal_error(format!("Failed to get UTXO set: {e}"))
                     })?;
 
-                    // Check if all inputs exist in UTXO set
+                    // Check if all inputs exist in the chain set or an unspent pool output.
                     for input in &tx.inputs {
-                        if !utxo_set.contains_key(&input.prevout) {
+                        let in_chain = utxo_set.contains_key(&input.prevout);
+                        let in_pool = !in_chain
+                            && mempool
+                                .get_transaction(&input.prevout.hash)
+                                .and_then(|parent| {
+                                    parent.outputs.get(input.prevout.index as usize).cloned()
+                                })
+                                .is_some()
+                            && !mempool.spends_outpoint(&input.prevout);
+                        if !in_chain && !in_pool {
                             let prevout_str = format!(
                                 "{}:{}",
-                                hex::encode(input.prevout.hash),
+                                Self::rpc_txid(&input.prevout.hash),
                                 input.prevout.index
                             );
                             return Err(RpcError::with_data(
@@ -422,7 +431,7 @@ impl RawTxRpc {
                 }
             }
 
-            Ok(json!(hex::encode(txid)))
+            Ok(json!(Self::rpc_txid(&txid)))
         } else {
             Err(RpcError::invalid_params(
                 "RPC not initialized with dependencies",
@@ -738,14 +747,19 @@ impl RawTxRpc {
 
         // Pre-allocate and build vin
         let mut vin = Vec::with_capacity(tx.inputs.len());
-        for input in &tx.inputs {
+        for (i, input) in tx.inputs.iter().enumerate() {
+            let txinwitness: Vec<String> = witnesses
+                .get(i)
+                .map(|stack| stack.iter().map(|item| hex::encode(item.as_slice())).collect())
+                .unwrap_or_default();
             vin.push(json!({
-                "txid": hex::encode(input.prevout.hash),
+                "txid": Self::rpc_txid(&input.prevout.hash),
                 "vout": input.prevout.index,
                 "scriptSig": {
                     "asm": "",
                     "hex": hex::encode(&input.script_sig)
                 },
+                "txinwitness": txinwitness,
                 "sequence": input.sequence
             }));
         }
@@ -759,9 +773,7 @@ impl RawTxRpc {
                 "scriptPubKey": {
                     "asm": "",
                     "hex": hex::encode(&output.script_pubkey),
-                    "reqSigs": 1,
-                    "type": "pubkeyhash",
-                    "addresses": []
+                    "type": script_pubkey_type(output.script_pubkey.as_ref())
                 }
             }));
         }
@@ -791,7 +803,7 @@ impl RawTxRpc {
 
     /// Calculate transaction size and weight for SegWit transactions
     /// Returns (base_size, total_size, weight, vsize)
-    fn calculate_segwit_sizes(
+    pub(crate) fn calculate_segwit_sizes(
         tx: &blvm_protocol::Transaction,
         witnesses: Option<&[blvm_protocol::segwit::Witness]>,
     ) -> (usize, usize, u64, usize) {
@@ -830,9 +842,8 @@ impl RawTxRpc {
         witnesses: Option<&[blvm_protocol::segwit::Witness]>,
         verbose: bool,
     ) -> RpcResult<Value> {
-        use blvm_protocol::block::calculate_tx_id;
         let wire = crate::rpc::txwire::tx_wire(tx, witnesses);
-        let txid_hex = hex::encode(calculate_tx_id(tx));
+        let txid_hex = wire.txid_hex.clone();
         let has_witness = witnesses
             .map(|stacks| stacks.iter().any(|stack| !stack.is_empty()))
             .unwrap_or(false);
@@ -854,7 +865,7 @@ impl RawTxRpc {
                 "weight": weight,
                 "locktime": tx.lock_time,
                 "vin": tx.inputs.iter().map(|input| json!({
-                    "txid": hex::encode(input.prevout.hash),
+                    "txid": Self::rpc_txid(&input.prevout.hash),
                     "vout": input.prevout.index,
                     "scriptSig": {
                         "asm": "",
@@ -893,13 +904,7 @@ impl RawTxRpc {
 
         let verbose = param_bool_default(params, 1, false);
 
-        let txid_bytes = hex::decode(txid)
-            .map_err(|e| RpcError::invalid_params(format!("Invalid txid: {e}")))?;
-        if txid_bytes.len() != 32 {
-            return Err(RpcError::invalid_params("Invalid txid length"));
-        }
-        let mut txid_array = [0u8; 32];
-        txid_array.copy_from_slice(&txid_bytes);
+        let txid_array = Self::parse_rpc_txid(txid)?;
 
         if let Some(ref mempool) = self.mempool {
             if let Some(tx) = mempool.get_transaction(&txid_array) {
@@ -944,23 +949,8 @@ impl RawTxRpc {
             } else {
                 Err(RpcError::tx_not_found(""))
             }
-        } else if verbose {
-            Ok(json!({
-                "txid": txid,
-                "hash": txid,
-                "version": 1,
-                "size": 250,
-                "vsize": 250,
-                "weight": 1000,
-                "locktime": 0,
-                "vin": [],
-                "vout": [],
-                "hex": "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0100f2052a010000001976a914000000000000000000000000000000000000000088ac00000000"
-            }))
         } else {
-            Ok(json!(
-                "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0100f2052a010000001976a914000000000000000000000000000000000000000088ac00000000"
-            ))
+            Err(RpcError::tx_not_found(txid))
         }
     }
 
@@ -982,13 +972,7 @@ impl RawTxRpc {
 
         let include_mempool = param_bool_default(params, 2, true);
 
-        let txid_bytes = hex::decode(txid)
-            .map_err(|e| RpcError::invalid_params(format!("Invalid txid: {e}")))?;
-        if txid_bytes.len() != 32 {
-            return Err(RpcError::invalid_params("Invalid txid length"));
-        }
-        let mut txid_array = [0u8; 32];
-        txid_array.copy_from_slice(&txid_bytes);
+        let txid_array = Self::parse_rpc_txid(txid)?;
 
         use blvm_protocol::OutPoint;
         let outpoint = OutPoint {
@@ -1000,20 +984,21 @@ impl RawTxRpc {
             // Check mempool first if requested
             if include_mempool {
                 if let Some(ref mempool) = self.mempool {
+                    if mempool.spends_outpoint(&outpoint) {
+                        return Ok(Value::Null);
+                    }
                     if let Some(tx) = mempool.get_transaction(&txid_array) {
                         if (n as usize) < tx.outputs.len() {
                             let output = &tx.outputs[n as usize];
                             let (best_hash, _) = storage.chain().get_tip_hash_and_height()?;
                             return Ok(json!({
-                                "bestblock": hex::encode(best_hash),
+                                "bestblock": Self::rpc_txid(&best_hash),
                                 "confirmations": 0,
                                 "value": output.value as f64 / 100_000_000.0,
                                 "scriptPubKey": {
                                     "asm": "",
                                     "hex": hex::encode(&output.script_pubkey),
-                                    "reqSigs": 1,
-                                    "type": "pubkeyhash",
-                                    "addresses": []
+                                    "type": script_pubkey_type(output.script_pubkey.as_ref())
                                 },
                                 "coinbase": false
                             }));
@@ -1065,50 +1050,7 @@ impl RawTxRpc {
                         _ => ([0u8; 32], 0), // Fallback on error/timeout
                     };
 
-                    // Find block height containing this transaction (with timeout protection)
-                    // Use blocking task with timeout to prevent hanging
-                    let timeout_dur3 = self.storage_timeout();
-                    let tx_height = match with_custom_timeout(
-                        async {
-                            tokio::task::spawn_blocking({
-                                let storage = storage.clone();
-                                let outpoint_hash = outpoint.hash;
-                                let search_limit = tip_height.min(1000); // Limit search
-                                move || -> Result<Option<u64>, anyhow::Error> {
-                                    let mut tx_height: Option<u64> = None;
-                                    for h in 0..=search_limit {
-                                        if let Ok(Some(block_hash)) =
-                                            storage.blocks().get_hash_by_height(h)
-                                        {
-                                            if let Ok(Some(block)) =
-                                                storage.blocks().get_block(&block_hash)
-                                            {
-                                                for tx in &block.transactions {
-                                                    use blvm_protocol::block::calculate_tx_id;
-                                                    let txid = calculate_tx_id(tx);
-                                                    if txid == outpoint_hash {
-                                                        tx_height = Some(h);
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            if tx_height.is_some() {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    Ok(tx_height)
-                                }
-                            })
-                            .await
-                        },
-                        timeout_dur3,
-                    )
-                    .await
-                    {
-                        Ok(Ok(Ok(height))) => height,
-                        _ => None, // Fallback on error/timeout
-                    };
+                    let tx_height = Some(utxo.height);
 
                     let confirmations = tx_height
                         .map(|h| {
@@ -1121,17 +1063,15 @@ impl RawTxRpc {
                         .unwrap_or(0);
 
                     Ok(json!({
-                        "bestblock": hex::encode(best_hash),
+                        "bestblock": Self::rpc_txid(&best_hash),
                         "confirmations": confirmations,
                         "value": utxo.value as f64 / 100_000_000.0,
                         "scriptPubKey": {
                             "asm": "",
                             "hex": hex::encode(&utxo.script_pubkey),
-                            "reqSigs": 1,
-                            "type": "pubkeyhash",
-                            "addresses": []
+                            "type": script_pubkey_type(utxo.script_pubkey.as_ref())
                         },
-                        "coinbase": false
+                        "coinbase": utxo.is_coinbase
                     }))
                 }
                 Ok(Ok(Ok(None))) | Ok(Ok(Err(_))) | Ok(Err(_)) => {
@@ -1176,13 +1116,7 @@ impl RawTxRpc {
 
             if let Some(blockhash_str) = blockhash_opt {
                 // Use specified blockhash
-                let blockhash_bytes = hex::decode(blockhash_str)
-                    .map_err(|e| RpcError::invalid_params(format!("Invalid blockhash: {e}")))?;
-                if blockhash_bytes.len() != 32 {
-                    return Err(RpcError::invalid_params("Invalid blockhash length"));
-                }
-                let mut blockhash_array = [0u8; 32];
-                blockhash_array.copy_from_slice(&blockhash_bytes);
+                let blockhash_array = Self::parse_rpc_txid(blockhash_str)?;
                 if let Ok(Some(b)) = storage.blocks().get_block(&blockhash_array) {
                     resolved_height = storage
                         .blocks()
@@ -1210,7 +1144,7 @@ impl RawTxRpc {
                             use blvm_protocol::block::calculate_tx_id;
                             for tx in &b.transactions {
                                 let txid = calculate_tx_id(tx);
-                                let txid_hex = hex::encode(txid);
+                                let txid_hex = Self::rpc_txid(&txid);
                                 if txids
                                     .iter()
                                     .any(|tid| tid.as_str() == Some(txid_hex.as_str()))
@@ -1253,7 +1187,7 @@ impl RawTxRpc {
                 let mut match_flags = vec![false; tx_hashes.len()];
                 let mut found = 0usize;
                 for (idx, hash) in tx_hashes.iter().enumerate() {
-                    if requested.contains(&hex::encode(hash)) {
+                    if requested.contains(&Self::rpc_txid(hash)) {
                         match_flags[idx] = true;
                         found += 1;
                     }
@@ -1367,22 +1301,7 @@ impl RawTxRpc {
 
         let include_hex = param_bool_default(params, 1, false);
 
-        let hash_bytes = hex::decode(txid).map_err(|e| {
-            RpcError::invalid_hash_format(
-                txid,
-                Some(32),
-                Some(&format!("Invalid hex encoding: {e}")),
-            )
-        })?;
-        if hash_bytes.len() != 32 {
-            return Err(RpcError::invalid_hash_format(
-                txid,
-                Some(32),
-                Some("Transaction ID must be 64 hex characters (32 bytes)"),
-            ));
-        }
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&hash_bytes);
+        let hash = Self::parse_rpc_txid(txid)?;
 
         // Check mempool first
         if let Some(ref mempool) = self.mempool {
@@ -1407,7 +1326,7 @@ impl RawTxRpc {
                     "weight": weight,
                     "locktime": tx.lock_time,
                     "vin": tx.inputs.iter().map(|input| json!({
-                        "txid": hex::encode(input.prevout.hash),
+                        "txid": Self::rpc_txid(&input.prevout.hash),
                         "vout": input.prevout.index,
                         "scriptSig": hex::encode(&input.script_sig),
                         "sequence": input.sequence
@@ -1484,7 +1403,7 @@ impl RawTxRpc {
                     "weight": weight,
                     "locktime": tx.lock_time,
                     "vin": tx.inputs.iter().map(|input| json!({
-                        "txid": hex::encode(input.prevout.hash),
+                        "txid": Self::rpc_txid(&input.prevout.hash),
                         "vout": input.prevout.index,
                         "scriptSig": hex::encode(&input.script_sig),
                         "sequence": input.sequence
@@ -1499,7 +1418,7 @@ impl RawTxRpc {
                         }
                     })).collect::<Vec<_>>(),
                     "hex": if include_hex { hex::encode(&wire.bytes) } else { "".to_string() },
-                    "blockhash": block_hash.map(|h| Value::String(hex::encode(h))).unwrap_or(Value::Null),
+                    "blockhash": block_hash.map(|h| Value::String(Self::rpc_txid(&h))).unwrap_or(Value::Null),
                     "confirmations": confirmations,
                     "time": block_time,
                     "blocktime": if block_time > 0 { Some(block_time) } else { None },
@@ -1514,6 +1433,46 @@ impl RawTxRpc {
             false, // Not in mempool
             Some("Transaction not found in mempool or blockchain"),
         ))
+    }
+
+    fn rpc_txid(hash: &[u8; 32]) -> String {
+        crate::storage::hashing::hash_to_rpc_hex(hash)
+    }
+
+    fn parse_rpc_txid(hex_str: &str) -> RpcResult<[u8; 32]> {
+        crate::storage::hashing::hash_from_rpc_hex(hex_str)
+            .map_err(|e| RpcError::invalid_params(format!("Invalid txid: {e}")))
+    }
+
+    fn btc_amount_to_sats(amount: f64) -> RpcResult<u64> {
+        if !amount.is_finite() || amount < 0.0 {
+            return Err(RpcError::invalid_params(
+                "amount must be a non-negative number".to_string(),
+            ));
+        }
+        let sats = (amount * 100_000_000.0).round();
+        if sats > u64::MAX as f64 {
+            return Err(RpcError::invalid_params("amount is too large".to_string()));
+        }
+        Ok(sats as u64)
+    }
+
+    fn op_return_script(data: &[u8]) -> RpcResult<Vec<u8>> {
+        use blvm_protocol::opcodes::{OP_PUSHDATA1, OP_RETURN};
+        if data.len() > 255 {
+            return Err(RpcError::invalid_params(
+                "OP_RETURN payload longer than 255 bytes".to_string(),
+            ));
+        }
+        let mut script = vec![OP_RETURN];
+        if data.len() <= 75 {
+            script.push(data.len() as u8);
+        } else {
+            script.push(OP_PUSHDATA1);
+            script.push(data.len() as u8);
+        }
+        script.extend_from_slice(data);
+        Ok(script)
     }
 
     /// Create a raw transaction
@@ -1558,7 +1517,7 @@ impl RawTxRpc {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| RpcError::invalid_params(format!("Input {idx} missing 'txid'")))?;
 
-            let txid_bytes = hex::decode(txid_hex).map_err(|e| {
+            let txid_bytes = Self::parse_rpc_txid(txid_hex).map_err(|e| {
                 RpcError::invalid_params(format!("Invalid txid hex in input {idx}: {e}"))
             })?;
             if txid_bytes.len() != 32 {
@@ -1614,10 +1573,7 @@ impl RawTxRpc {
                     let data = hex::decode(data_hex)
                         .map_err(|e| RpcError::invalid_params(format!("Invalid data hex: {e}")))?;
 
-                    // OP_RETURN script: OP_RETURN <data>
-                    let mut script = vec![blvm_protocol::opcodes::OP_RETURN];
-                    script.push(data.len() as u8);
-                    script.extend_from_slice(&data);
+                    let script = Self::op_return_script(&data)?;
 
                     tx_outputs.push(TransactionOutput {
                         value: 0,
@@ -1635,8 +1591,7 @@ impl RawTxRpc {
                             ))
                         })?;
 
-                    // Convert amount to satoshis
-                    let satoshis = (amount * 100_000_000.0) as u64;
+                    let satoshis = Self::btc_amount_to_sats(amount)?;
 
                     // Convert address to script_pubkey
                     let script_pubkey = Self::address_to_script_pubkey(address_str)?;
@@ -1663,9 +1618,7 @@ impl RawTxRpc {
                         RpcError::invalid_params(format!("Invalid data hex in output {idx}: {e}"))
                     })?;
 
-                    let mut script = vec![blvm_protocol::opcodes::OP_RETURN];
-                    script.push(data.len() as u8);
-                    script.extend_from_slice(&data);
+                    let script = Self::op_return_script(&data)?;
 
                     tx_outputs.push(TransactionOutput {
                         value: 0,
@@ -1688,7 +1641,7 @@ impl RawTxRpc {
                             RpcError::invalid_params(format!("Output {idx} missing amount"))
                         })?;
 
-                    let satoshis = (amount * 100_000_000.0) as u64;
+                    let satoshis = Self::btc_amount_to_sats(amount)?;
                     let script_pubkey = Self::address_to_script_pubkey(address_str)?;
 
                     tx_outputs.push(TransactionOutput {
@@ -1772,5 +1725,386 @@ impl RawTxRpc {
 impl Default for RawTxRpc {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub(crate) fn script_pubkey_type(script: &[u8]) -> &'static str {
+    use blvm_protocol::opcodes::{
+        OP_0, OP_1, OP_CHECKSIG, OP_DUP, OP_EQUAL, OP_EQUALVERIFY, OP_HASH160, OP_RETURN,
+    };
+    if script.len() == 25
+        && script[0] == OP_DUP
+        && script[1] == OP_HASH160
+        && script[2] == 20
+        && script[23] == OP_EQUALVERIFY
+        && script[24] == OP_CHECKSIG
+    {
+        "pubkeyhash"
+    } else if script.len() == 23
+        && script[0] == OP_HASH160
+        && script[1] == 20
+        && script[22] == OP_EQUAL
+    {
+        "scripthash"
+    } else if script.len() == 22 && script[0] == OP_0 && script[1] == 20 {
+        "witness_v0_keyhash"
+    } else if script.len() == 34 && script[0] == OP_0 && script[1] == 32 {
+        "witness_v0_scripthash"
+    } else if script.len() == 34 && script[0] == OP_1 && script[1] == 32 {
+        "witness_v1_taproot"
+    } else if script.first() == Some(&OP_RETURN) {
+        "nulldata"
+    } else {
+        "nonstandard"
+    }
+}
+
+#[cfg(test)]
+mod createraw_locks {
+    use super::{script_pubkey_type, RawTxRpc};
+    use blvm_protocol::opcodes::{OP_PUSHDATA1, OP_RETURN};
+    use serde_json::json;
+
+    #[test]
+    fn three_satoshi_dust_and_eighty_byte_op_return() {
+        assert_eq!(RawTxRpc::btc_amount_to_sats(0.00000003).unwrap(), 3);
+        assert!(RawTxRpc::btc_amount_to_sats(-1.0).is_err());
+        let payload = vec![0xab; 80];
+        let script = RawTxRpc::op_return_script(&payload).unwrap();
+        assert_eq!(script[0], OP_RETURN);
+        assert_eq!(script[1], OP_PUSHDATA1);
+        assert_eq!(script[2], 80);
+        assert_eq!(&script[3..], payload.as_slice());
+        assert_eq!(script_pubkey_type(&script), "nulldata");
+    }
+
+    #[tokio::test]
+    async fn both_writers_emit_three_sats_and_an_eighty_byte_op_return() {
+        use blvm_protocol::opcodes::OP_PUSHDATA1;
+        let rpc = RawTxRpc::new();
+        let txid = "11".repeat(32);
+        let payload = "ab".repeat(80);
+        let address = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+        let object = rpc
+            .createrawtransaction(&json!([
+                [{"txid": txid, "vout": 0}],
+                {address: 0.00000003, "data": payload}
+            ]))
+            .await
+            .unwrap();
+        let array = rpc
+            .createrawtransaction(&json!([
+                [{"txid": txid, "vout": 0}],
+                [{"address": address, "amount": 0.00000003}, {"data": payload}]
+            ]))
+            .await
+            .unwrap();
+        for hex_tx in [object.as_str().unwrap(), array.as_str().unwrap()] {
+            let (tx, _) = RawTxRpc::deserialize_transaction_with_witness(
+                &hex::decode(hex_tx).unwrap(),
+            )
+            .unwrap();
+            assert!(tx.outputs.iter().any(|output| output.value == 3));
+            let data = tx
+                .outputs
+                .iter()
+                .find(|output| output.script_pubkey.first() == Some(&OP_RETURN))
+                .unwrap();
+            assert_eq!(data.script_pubkey[1], OP_PUSHDATA1);
+            assert_eq!(data.script_pubkey[2], 80);
+            assert_eq!(script_pubkey_type(data.script_pubkey.as_ref()), "nulldata");
+        }
+        assert!(
+            rpc.createrawtransaction(&json!([
+                [{"txid": txid, "vout": 0}],
+                {address: -1.0}
+            ]))
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn pool_parent_is_admitted_and_a_missing_output_is_rejected() {
+        use crate::node::mempool::MempoolManager;
+        use crate::storage::Storage;
+        use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet};
+        use std::sync::Arc;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let mempool = Arc::new(MempoolManager::new());
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.min_tx_fee = 0;
+        mempool.set_policy_config(Some(policy));
+        let funding = OutPoint {
+            hash: [5u8; 32],
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        storage.utxos().add_utxo(&funding, &utxo).unwrap();
+        let mut set = UtxoSet::default();
+        set.insert(funding, Arc::new(utxo));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set)));
+        let parent = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: funding,
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 40_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        assert!(mempool.add_transaction(parent.clone()).unwrap());
+        let child = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: blvm_protocol::block::calculate_tx_id(&parent),
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 30_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let child_hex = RawTxRpc::serialize_transaction_with_witness(&child, None);
+        let rpc = RawTxRpc::with_dependencies(storage, Arc::clone(&mempool), None, None);
+        let admitted = rpc
+            .sendrawtransaction(&json!([child_hex]))
+            .await
+            .unwrap();
+        assert_eq!(admitted.as_str().unwrap().len(), 64);
+        assert!(
+            mempool
+                .get_transaction(&blvm_protocol::block::calculate_tx_id(&child))
+                .is_some()
+        );
+
+        let missing = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [8u8; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 1_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let missing_hex = RawTxRpc::serialize_transaction_with_witness(&missing, None);
+        assert!(rpc.sendrawtransaction(&json!([missing_hex])).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn output_at_height_1001_reports_confirmations_and_a_spent_pool_output_is_null() {
+        use crate::node::mempool::MempoolManager;
+        use crate::storage::Storage;
+        use crate::storage::hashing::hash_to_rpc_hex;
+        use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::{BlockHeader, OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet};
+        use std::sync::Arc;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [1u8; 32],
+            timestamp: 1_600_000_000,
+            bits: 0x207fffff,
+            nonce: 1,
+        };
+        storage.chain().initialize(&header).unwrap();
+        let tip = storage.chain().get_tip_hash().unwrap().unwrap();
+        storage.chain().update_tip(&tip, &header, 2000).unwrap();
+        let created = OutPoint {
+            hash: [6u8; 32],
+            index: 0,
+        };
+        storage
+            .utxos()
+            .add_utxo(
+                &created,
+                &UTXO {
+                    value: 50_000,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 1001,
+                    is_coinbase: true,
+                },
+            )
+            .unwrap();
+        let mempool = Arc::new(MempoolManager::new());
+        let rpc = RawTxRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool), None, None);
+        let shown = rpc
+            .gettxout(&json!([hash_to_rpc_hex(&created.hash), 0, false]))
+            .await
+            .unwrap();
+        assert_eq!(shown["confirmations"].as_i64(), Some(2000 - 1001 + 1));
+        assert_eq!(shown["coinbase"].as_bool(), Some(true));
+        assert_eq!(shown["scriptPubKey"]["type"], "nonstandard");
+
+        let parent = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [2u8; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 20_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let parent_id = blvm_protocol::block::calculate_tx_id(&parent);
+        let spent = OutPoint {
+            hash: parent_id,
+            index: 0,
+        };
+        let child = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: spent,
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 10_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        mempool.add_transaction(parent).unwrap();
+        mempool.add_transaction(child).unwrap();
+        let hidden = rpc
+            .gettxout(&json!([hash_to_rpc_hex(&parent_id), 0, true]))
+            .await
+            .unwrap();
+        assert!(hidden.is_null());
+    }
+
+    #[tokio::test]
+    async fn unknown_txid_errors_and_pool_fee_is_the_base_fee() {
+        use crate::node::mempool::MempoolManager;
+        use crate::rpc::mempool::MempoolRpc;
+        use crate::storage::Storage;
+        use crate::storage::hashing::hash_to_rpc_hex;
+        use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet};
+        use std::sync::Arc;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let mempool = Arc::new(MempoolManager::new());
+        let rpc = RawTxRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool), None, None);
+        assert!(
+            rpc.getrawtransaction(&json!([hash_to_rpc_hex(&[9u8; 32])]))
+                .await
+                .is_err()
+        );
+
+        let funding = OutPoint {
+            hash: [7u8; 32],
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        storage.utxos().add_utxo(&funding, &utxo).unwrap();
+        let mut set = UtxoSet::default();
+        set.insert(funding, Arc::new(utxo.clone()));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set)));
+        let tx = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: funding,
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 40_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        assert!(mempool.add_transaction(tx.clone()).unwrap());
+        let listing = MempoolRpc::with_dependencies(mempool.clone(), storage)
+            .getrawmempool(&json!([true]))
+            .await
+            .unwrap();
+        let entry = listing.as_object().unwrap().values().next().unwrap();
+        let mut priced = UtxoSet::default();
+        priced.insert(funding, Arc::new(utxo));
+        let fee = mempool.calculate_transaction_fee(&tx, &priced) as f64 / 100_000_000.0;
+        assert_eq!(entry["fees"]["base"].as_f64(), Some(fee));
+    }
+
+    #[tokio::test]
+    async fn decoderaw_puts_one_op_1_witness_on_vin() {
+        use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput};
+        let tx = Transaction {
+            version: 2,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [1u8; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new().into(),
+                sequence: 0xfffffffe,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 1,
+                script_pubkey: RawTxRpc::op_return_script(&[0xab; 80]).unwrap().into(),
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let witnesses = vec![vec![vec![blvm_protocol::opcodes::OP_1]]];
+        let hex = RawTxRpc::serialize_transaction_with_witness(&tx, Some(&witnesses));
+        let decoded = RawTxRpc::new()
+            .decoderawtransaction(&json!([hex]))
+            .await
+            .unwrap();
+        assert_eq!(decoded["vin"][0]["txinwitness"][0], "51");
+        assert_eq!(decoded["vout"][0]["scriptPubKey"]["type"], "nulldata");
     }
 }

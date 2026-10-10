@@ -1326,6 +1326,30 @@ impl BlockStore {
         Ok(())
     }
 
+    /// Store the basic-filter header for `hash`.
+    pub fn store_filter_header(&self, hash: &Hash, header: &[u8; 32]) -> Result<()> {
+        let mut key = Vec::with_capacity(36);
+        key.extend_from_slice(b"cfh:");
+        key.extend_from_slice(hash);
+        self.block_metadata.insert(&key, header)?;
+        Ok(())
+    }
+
+    /// Load the basic-filter header for `hash`.
+    pub fn get_filter_header(&self, hash: &Hash) -> Result<Option<[u8; 32]>> {
+        let mut key = Vec::with_capacity(36);
+        key.extend_from_slice(b"cfh:");
+        key.extend_from_slice(hash);
+        match self.block_metadata.get(&key)? {
+            Some(data) if data.len() == 32 => {
+                let mut out = [0u8; 32];
+                out.copy_from_slice(&data);
+                Ok(Some(out))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Load connect undo for a block hash.
     #[cfg(feature = "production")]
     pub fn get_undo_log(

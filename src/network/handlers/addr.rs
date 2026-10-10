@@ -95,7 +95,14 @@ impl NetworkManager {
             }
         }
 
-        self.relay_addresses(peer_addr, &msg.addresses).await?;
+        let relayable: Vec<NetworkAddress> = msg
+            .addresses
+            .into_iter()
+            .filter(|addr| crate::network::address_db::address_within_relay_horizon(addr.time))
+            .collect();
+        if !relayable.is_empty() {
+            self.relay_addresses(peer_addr, &relayable).await?;
+        }
 
         Ok(())
     }
@@ -127,6 +134,7 @@ impl NetworkManager {
             .iter()
             .filter_map(|a| a.to_legacy())
             .map(|a| NetworkAddress {
+                time: a.time,
                 services: a.services,
                 ip: a.ip,
                 port: a.port,
@@ -220,6 +228,7 @@ mod tests {
             services: 1,
             ip,
             port,
+            time: current_timestamp() as u32,
         }
     }
 

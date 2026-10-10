@@ -389,9 +389,9 @@ impl UtxoStore {
         self.utxos.len()
     }
 
-    /// Get total UTXO value
+    /// Get total UTXO value. A value outside the money range is left out.
     pub fn total_value(&self) -> Result<u64> {
-        let mut total = 0u64;
+        let mut total = 0u128;
 
         for result in self.utxos.iter() {
             let (_, value) = result?;
@@ -409,10 +409,11 @@ impl UtxoStore {
             let utxo_data = value;
 
             let utxo: UTXO = self.deserialize_utxo_data(&utxo_data)?;
-            total += utxo.value as u64;
+            total =
+                total.saturating_add(crate::storage::chainstate::utxo_money_total([utxo.value]));
         }
 
-        Ok(total)
+        Ok(u64::try_from(total).unwrap_or(u64::MAX))
     }
 
     /// Convert outpoint to storage key
@@ -627,4 +628,47 @@ fn outpoint_to_key(outpoint: &OutPoint) -> Vec<u8> {
     key.extend_from_slice(&outpoint.hash);
     key.extend_from_slice(&outpoint.index.to_be_bytes());
     key
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blvm_protocol::opcodes::OP_1;
+
+    #[test]
+    fn total_value_ignores_a_negative_value() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = crate::storage::Storage::new(temp.path()).unwrap();
+        let utxos = storage.utxos();
+        utxos
+            .add_utxo(
+                &OutPoint {
+                    hash: [1u8; 32],
+                    index: 0,
+                },
+                &UTXO {
+                    value: 50_000,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 0,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+        utxos
+            .add_utxo(
+                &OutPoint {
+                    hash: [9u8; 32],
+                    index: 0,
+                },
+                &UTXO {
+                    value: -1,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 0,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(utxos.utxo_count().unwrap(), 2);
+        assert_eq!(utxos.total_value().unwrap(), 50_000);
+    }
 }

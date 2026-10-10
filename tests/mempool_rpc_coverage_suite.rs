@@ -16,7 +16,7 @@ fn rpc_with_mempool() -> (TempDir, Arc<MempoolManager>, MempoolRpc, String) {
     let mempool = Arc::new(MempoolManager::new());
     let tx = valid_transaction();
     use blvm_protocol::block::calculate_tx_id;
-    let txid = hex::encode(calculate_tx_id(&tx));
+    let txid = blvm_node::storage::hashing::hash_to_rpc_hex(&calculate_tx_id(&tx));
     mempool.add_transaction(tx).unwrap();
     let rpc = MempoolRpc::with_dependencies(mempool.clone(), storage);
     (temp_dir, mempool, rpc, txid)
@@ -93,9 +93,7 @@ async fn test_getmempoolentry_for_known_tx() {
 #[tokio::test]
 async fn test_getmempoolentry_modified_fee_in_package_totals() {
     let (_dir, mempool, rpc, txid) = rpc_with_mempool();
-    let hash_bytes = hex::decode(&txid).unwrap();
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&hash_bytes);
+    let hash = blvm_node::storage::hashing::hash_from_rpc_hex(&txid).unwrap();
     assert!(mempool.prioritise_transaction(&hash, 50_000));
 
     let entry = rpc.getmempoolentry(&json!([txid])).await.unwrap();

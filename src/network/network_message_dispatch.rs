@@ -312,11 +312,13 @@ async fn handle_peer_connected(nm: &NetworkManager, addr: TransportAddr) {
             };
             (
                 NetworkAddress {
+                    time: 0,
                     services: 0,
                     ip: peer_ip,
                     port: peer_socket.port(),
                 },
                 NetworkAddress {
+                    time: 0,
                     services: 0,
                     ip: [0u8; 16],
                     port: 0,
@@ -327,11 +329,13 @@ async fn handle_peer_connected(nm: &NetworkManager, addr: TransportAddr) {
             // handshake still conveys protocol version and services.
             (
                 NetworkAddress {
+                    time: 0,
                     services: 0,
                     ip: [0u8; 16],
                     port: 0,
                 },
                 NetworkAddress {
+                    time: 0,
                     services: 0,
                     ip: [0u8; 16],
                     port: 0,

@@ -139,6 +139,8 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                             .unwrap_or(([0u8; 32], current_height));
 
                         if let Ok(Some(block)) = blocks_arc.get_block(&block_hash) {
+                            node.mempool_manager
+                                .remove_for_connected_block(&block.transactions);
                             if block.header.bits != prev_tip_header_bits {
                                 if let Some(ep) = node
                                     .module_subsystem

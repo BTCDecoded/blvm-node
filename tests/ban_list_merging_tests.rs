@@ -14,6 +14,7 @@ fn create_ban_entry(ip: u32, port: u16, unban_timestamp: u64, reason: Option<Str
 
     BanEntry {
         addr: NetworkAddress {
+            time: 0,
             services: 0,
             ip: ip_bytes,
             port,

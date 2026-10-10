@@ -431,7 +431,9 @@ impl TxIndex {
 
         let mut bucket_updates: HashMap<u64, Vec<(Hash, u32, u64)>> = HashMap::new();
         for (output_index, output) in tx.outputs.iter().enumerate() {
-            let value = output.value as u64;
+            let Some(value) = indexed_output_sats(output.value) else {
+                continue;
+            };
             let bucket = value_to_bucket(value);
             bucket_updates
                 .entry(bucket)
@@ -576,11 +578,10 @@ impl TxIndex {
             tx_hash.copy_from_slice(&key);
             let raw = data;
             let tx: Transaction = bincode::deserialize(&raw)?;
-            if tx
-                .outputs
-                .iter()
-                .any(|o| o.value as u64 >= min_value && o.value as u64 <= max_value)
-            {
+            if tx.outputs.iter().any(|o| {
+                indexed_output_sats(o.value)
+                    .is_some_and(|sats| sats >= min_value && sats <= max_value)
+            }) {
                 self.index_values(&tx, &tx_hash)?;
             }
         }
@@ -699,6 +700,54 @@ impl TxIndex {
         Ok(transactions)
     }
 
+    /// Record that `tx_hash` spends `value` sats from `script_pubkey`.
+    pub fn note_spend(&self, script_pubkey: &[u8], value: i64, tx_hash: &Hash) -> Result<()> {
+        if !self.enable_address_index {
+            return Ok(());
+        }
+        if value < 0 || value > 21_000_000 * 100_000_000 {
+            return Ok(());
+        }
+        let address_hash = sha256(script_pubkey);
+        if !self.can_add_address_key(&address_hash)? {
+            return Ok(());
+        }
+        let mut spends = self.spend_entries(&address_hash)?;
+        spends.push((*tx_hash, value));
+        let data = bincode::serialize(&spends)?;
+        self.tree_insert_encoded(&self.address_input_index, &address_hash, &data)?;
+        let mut txs = self.get_address_transactions(&address_hash)?;
+        if !txs.contains(tx_hash) {
+            txs.push(*tx_hash);
+            let tx_list = bincode::serialize(&txs)?;
+            self.tree_insert_encoded(&self.address_tx_index, &address_hash, &tx_list)?;
+        }
+        Ok(())
+    }
+
+    /// Sum of in-range input values recorded for this script.
+    pub fn spent_value_for_script(&self, script_pubkey: &[u8]) -> Result<i64> {
+        if !self.enable_address_index {
+            return Ok(0);
+        }
+        let address_hash = sha256(script_pubkey);
+        let spends = self.spend_entries(&address_hash)?;
+        Ok(spends
+            .into_iter()
+            .filter(|(_, value)| {
+                *value >= 0 && *value <= 21_000_000 * 100_000_000
+            })
+            .map(|(_, value)| value)
+            .fold(0i64, i64::saturating_add))
+    }
+
+    fn spend_entries(&self, address_hash: &[u8; 32]) -> Result<Vec<(Hash, i64)>> {
+        match self.tree_get_decoded(&self.address_input_index, address_hash)? {
+            Some(data) if !data.is_empty() => Ok(bincode::deserialize(&data).unwrap_or_default()),
+            _ => Ok(Vec::new()),
+        }
+    }
+
     /// Get transactions by output value range
     pub fn get_transactions_by_value_range(
         &self,
@@ -808,6 +857,15 @@ impl TxIndex {
     }
 }
 
+/// Output value inside the money range. A value outside that range is not indexed.
+fn indexed_output_sats(value: i64) -> Option<u64> {
+    if (0..=blvm_protocol::constants::MAX_MONEY).contains(&value) {
+        Some(value as u64)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -901,5 +959,62 @@ mod tests {
         index.index_transaction(&tx1, &block_hash, 1, 0).unwrap();
         index.index_transaction(&tx2, &block_hash, 1, 1).unwrap();
         assert_eq!(index.get_index_stats().unwrap().indexed_addresses, 1);
+    }
+
+    fn tx_with_value(script: &[u8], value: i64) -> Transaction {
+        use blvm_protocol::constants::SEQUENCE_FINAL;
+
+        Transaction {
+            version: 2,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [1u8; 32],
+                    index: 0,
+                },
+                script_sig: vec![],
+                sequence: SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value,
+                script_pubkey: script.to_vec(),
+            }]
+            .into(),
+            lock_time: 0,
+        }
+    }
+
+    #[test]
+    fn value_index_ignores_a_negative_output() {
+        use blvm_protocol::opcodes::{OP_1, OP_2};
+
+        for strategy in [IndexingStrategy::Eager, IndexingStrategy::Lazy] {
+            let (_dir, index) = open_index(IndexingConfig {
+                enable_value_index: true,
+                strategy,
+                background_indexing: false,
+                ..Default::default()
+            });
+            let positive = tx_with_value(&[OP_1], 50_000);
+            let negative = tx_with_value(&[OP_2], -1);
+            let block_hash = [5u8; 32];
+            index
+                .index_transaction(&positive, &block_hash, 1, 0)
+                .unwrap();
+            index
+                .index_transaction(&negative, &block_hash, 1, 1)
+                .unwrap();
+
+            let in_range = index
+                .get_transactions_by_value_range(40_000, 60_000)
+                .unwrap();
+            assert_eq!(in_range.len(), 1);
+            assert_eq!(in_range[0].outputs[0].value, 50_000);
+
+            let wrapped = index
+                .get_transactions_by_value_range(u64::MAX, u64::MAX)
+                .unwrap();
+            assert!(wrapped.is_empty());
+        }
     }
 }

@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 fn create_test_ban_entry(ip: [u8; 16], port: u16, unban_timestamp: u64) -> BanEntry {
     BanEntry {
         addr: NetworkAddress {
+            time: 0,
             services: 0,
             ip,
             port,

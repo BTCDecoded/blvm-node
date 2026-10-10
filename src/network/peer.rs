@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -72,8 +73,19 @@ pub struct Peer {
     pending_ping_nonce: Option<u64>,
     /// Timestamp when ping was sent (for timeout detection)
     ping_sent_time: Option<u64>,
+    /// Monotonic time of the outstanding ping, so the reported RTT is sub-second.
+    ping_sent_at: Option<std::time::Instant>,
+    /// Last measured ping, in seconds.
+    ping_secs: f64,
+    /// Stable id for this peer. It is not the source port.
+    peer_id: u64,
     /// Ping timeout in seconds (default: 20 minutes)
     ping_timeout_seconds: u64,
+}
+
+fn next_peer_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 impl Peer {
@@ -84,12 +96,19 @@ impl Peer {
     /// Use this only in tests to verify peer state changes (e.g., ping nonce).
     #[doc(hidden)]
     pub fn new_for_testing(addr: SocketAddr) -> Self {
+        Self::pair_for_testing(addr).0
+    }
+
+    /// Same peer as [`Self::new_for_testing`], plus the channel `send_to_peer` writes.
+    pub(crate) fn pair_for_testing(
+        addr: SocketAddr,
+    ) -> (Self, mpsc::UnboundedReceiver<Vec<u8>>) {
         let (message_tx, _) = mpsc::unbounded_channel();
-        let (send_tx, _) = mpsc::unbounded_channel();
+        let (send_tx, send_rx) = mpsc::unbounded_channel();
         let transport_addr = super::transport::TransportAddr::Tcp(addr);
         let now = current_timestamp();
 
-        Self {
+        let peer = Self {
             addr,
             transport_addr,
             message_tx,
@@ -119,8 +138,12 @@ impl Peer {
             last_block_announcement: None,
             pending_ping_nonce: None,
             ping_sent_time: None,
+            ping_sent_at: None,
+            ping_secs: 0.0,
+            peer_id: next_peer_id(),
             ping_timeout_seconds: 1200,
-        }
+        };
+        (peer, send_rx)
     }
 
     /// Create a new peer connection from a TransportConnection
@@ -258,6 +281,9 @@ impl Peer {
             is_outbound: false, // Default to false, should be set by caller
             pending_ping_nonce: None,
             ping_sent_time: None,
+            ping_sent_at: None,
+            ping_secs: 0.0,
+            peer_id: next_peer_id(),
             ping_timeout_seconds: 1200, // 20 minutes default
             best_block_hash: None,
             best_block_height: None,
@@ -450,6 +476,9 @@ impl Peer {
             last_block_announcement: None, // No block announcements yet
             pending_ping_nonce: None,
             ping_sent_time: None,
+            ping_sent_at: None,
+            ping_secs: 0.0,
+            peer_id: next_peer_id(),
             ping_timeout_seconds: 1200, // 20 minutes default
         }
     }
@@ -604,6 +633,14 @@ impl Peer {
         self.is_outbound
     }
 
+    pub fn id(&self) -> u64 {
+        self.peer_id
+    }
+
+    pub fn ping_secs(&self) -> f64 {
+        self.ping_secs
+    }
+
     /// Set whether this is an outbound connection
     pub fn set_is_outbound(&mut self, is_outbound: bool) {
         self.is_outbound = is_outbound;
@@ -613,14 +650,19 @@ impl Peer {
     pub fn record_ping_sent(&mut self, nonce: u64) {
         self.pending_ping_nonce = Some(nonce);
         self.ping_sent_time = Some(current_timestamp());
+        self.ping_sent_at = Some(std::time::Instant::now());
     }
 
     /// Record that a pong was received (clears pending ping)
     pub fn record_pong_received(&mut self, nonce: u64) -> bool {
         match self.pending_ping_nonce {
             Some(pending_nonce) if pending_nonce == nonce => {
+                if let Some(sent) = self.ping_sent_at {
+                    self.ping_secs = sent.elapsed().as_secs_f64();
+                }
                 self.pending_ping_nonce = None;
                 self.ping_sent_time = None;
+                self.ping_sent_at = None;
                 true
             }
             _ => false, // Nonce mismatch or no pending ping

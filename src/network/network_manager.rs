@@ -182,6 +182,12 @@ pub struct NetworkManager {
     /// Pending blocks queue (blocks received via BlockReceived message)
     /// Separate from main message channel to avoid draining other messages
     pending_blocks: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
+    /// Compact blocks waiting on `blocktxn` for the positions `getblocktxn` asked for.
+    pub(crate) pending_compact: Arc<
+        std::sync::Mutex<
+            HashMap<[u8; 32], crate::network::compact_blocks::CompactAssembly>,
+        >,
+    >,
     /// Network statistics
     /// Optimization: Use AtomicU64 for lock-free updates
     bytes_sent: Arc<AtomicU64>,
@@ -478,6 +484,7 @@ impl NetworkManager {
                 .map(|c| Arc::new(c.clone())),
             peer_spam_violations: Arc::new(Mutex::new(HashMap::new())),
             pending_blocks: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            pending_compact: Arc::new(std::sync::Mutex::new(HashMap::new())),
             bytes_sent: Arc::new(AtomicU64::new(0)),
             bytes_received: Arc::new(AtomicU64::new(0)),
             socket_to_transport: Arc::new(Mutex::new(HashMap::new())),
@@ -714,7 +721,7 @@ impl NetworkManager {
             {
                 let ban_until = current_timestamp() + 24 * 60 * 60;
                 let mut ban_list = self.ban_list.write().await;
-                ban_list.insert(peer_addr, ban_until);
+                ban_list.insert(SocketAddr::new(peer_addr.ip(), 0), ban_until);
                 drop(ban_list);
             } else if ban_for_violation {
                 warn!(
@@ -2233,11 +2240,13 @@ impl NetworkManager {
                         std::net::IpAddr::V6(ip) => ip.octets(),
                     };
                     let addr_recv = crate::network::protocol::NetworkAddress {
+                        time: 0,
                         services: 0,
                         ip: peer_ip,
                         port: peer_socket.port(),
                     };
                     let addr_from = crate::network::protocol::NetworkAddress {
+                        time: 0,
                         services: 0,
                         ip: [0u8; 16],
                         port: 0,
@@ -2565,6 +2574,23 @@ impl NetworkManager {
             .await
     }
 
+    fn pool_finality(&self) -> (u64, Option<blvm_protocol::types::TimeContext>) {
+        let Some(storage) = self.storage.as_ref() else {
+            return (0, None);
+        };
+        let Some((height, median_time_past)) = crate::node::mempool::next_block_finality(storage)
+        else {
+            return (0, None);
+        };
+        (
+            height,
+            Some(blvm_protocol::types::TimeContext {
+                network_time: median_time_past,
+                median_time_past,
+            }),
+        )
+    }
+
     /// Submit validated transactions to the mempool
     pub(crate) async fn submit_transactions_to_mempool(
         &self,
@@ -2580,13 +2606,14 @@ impl NetworkManager {
         }
         let utxo_lock = self.utxo_set.lock().await;
         let mempool_lock = self.mempool.lock().await;
+        let (height, time_context) = self.pool_finality();
         for tx in txs {
             let _ = self.consensus.accept_to_memory_pool(
                 tx,
                 &utxo_lock,
                 &mempool_lock,
-                0,
-                None,
+                height,
+                time_context,
                 Network::Mainnet,
             );
         }
@@ -2610,13 +2637,14 @@ impl NetworkManager {
             // Fallback: no MempoolManager configured, accept via consensus layer.
             let utxo_lock = self.utxo_set.lock().await;
             let mempool_lock = self.mempool.lock().await;
+            let (height, time_context) = self.pool_finality();
             let _ = self.consensus.accept_to_memory_pool_with_witness(
                 &tx,
                 witnesses.as_deref(),
                 &utxo_lock,
                 &mempool_lock,
-                0,
-                None,
+                height,
+                time_context,
                 Network::Mainnet,
             );
         }
@@ -2760,11 +2788,12 @@ impl NetworkManager {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut ban_list = self.ban_list.write().await;
+                let key = SocketAddr::new(addr.ip(), 0);
                 if unban_timestamp == 0 {
                     // Permanent ban (use max timestamp)
-                    ban_list.insert(addr, u64::MAX);
+                    ban_list.insert(key, u64::MAX);
                 } else {
-                    ban_list.insert(addr, unban_timestamp);
+                    ban_list.insert(key, unban_timestamp);
                 }
                 drop(ban_list);
 
@@ -2788,7 +2817,7 @@ impl NetworkManager {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut ban_list = self.ban_list.write().await;
-                ban_list.remove(&addr);
+                ban_list.remove(&SocketAddr::new(addr.ip(), 0));
                 drop(ban_list);
 
                 // Publish PeerUnbanned event for module subscribers
@@ -2835,6 +2864,7 @@ impl NetworkManager {
         };
 
         let our_addr = NetworkAddress {
+            time: 0,
             services,
             ip: ip_bytes,
             port: listen_addr.port(),
@@ -2910,7 +2940,7 @@ impl NetworkManager {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let ban_list = self.ban_list.read().await;
-                if let Some(&unban_timestamp) = ban_list.get(&addr) {
+                if let Some(&unban_timestamp) = ban_list.get(&SocketAddr::new(addr.ip(), 0)) {
                     if unban_timestamp == u64::MAX {
                         return true; // Permanent ban
                     }

@@ -9,6 +9,7 @@ fn create_test_network_address(ip: [u8; 16], port: u16) -> NetworkAddress {
         services: 1,
         ip,
         port,
+        time: blvm_node::utils::current_timestamp() as u32,
     }
 }
 
@@ -21,6 +22,7 @@ fn create_ipv4_mapped_address(ipv4: [u8; 4], port: u16) -> NetworkAddress {
         services: 1,
         ip,
         port,
+        time: blvm_node::utils::current_timestamp() as u32,
     }
 }
 
@@ -163,7 +165,7 @@ fn test_address_database_remove_address() {
 fn test_address_database_is_banned() {
     let db = AddressDatabase::new(100);
     let addr = create_test_network_address([0u8; 16], 8333);
-    let socket_addr = db.network_addr_to_socket(&addr);
+    let socket_addr = SocketAddr::new(db.network_addr_to_socket(&addr).ip(), 0);
 
     let mut ban_list = HashMap::new();
     ban_list.insert(socket_addr, u64::MAX); // Permanent ban
@@ -175,7 +177,7 @@ fn test_address_database_is_banned() {
 fn test_address_database_is_banned_expired() {
     let db = AddressDatabase::new(100);
     let addr = create_test_network_address([0u8; 16], 8333);
-    let socket_addr = db.network_addr_to_socket(&addr);
+    let socket_addr = SocketAddr::new(db.network_addr_to_socket(&addr).ip(), 0);
 
     let mut ban_list = HashMap::new();
     ban_list.insert(socket_addr, 0); // Expired ban
@@ -219,7 +221,7 @@ fn test_address_database_filter_addresses() {
 fn test_address_database_filter_banned() {
     let db = AddressDatabase::new(100);
     let addr = create_test_network_address([0u8; 16], 8333);
-    let socket_addr = db.network_addr_to_socket(&addr);
+    let socket_addr = SocketAddr::new(db.network_addr_to_socket(&addr).ip(), 0);
 
     let mut ban_list = HashMap::new();
     ban_list.insert(socket_addr, u64::MAX);

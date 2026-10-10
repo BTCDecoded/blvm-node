@@ -105,29 +105,29 @@ fn encode_varint(value: u64) -> Vec<u8> {
     }
 }
 
-/// Calculate short transaction ID
+/// SipHash-2-4 keys for a compact-block short id.
 ///
-/// Uses SipHash-2-4 with keys derived from block header nonce.
-///
-/// # Arguments
-/// * `tx_hash` - Full transaction hash (32 bytes)
-/// * `nonce` - Block nonce (used to derive SipHash keys)
-///
-/// # Returns
-/// Short transaction ID (6 bytes)
-pub fn calculate_short_tx_id(tx_hash: &Hash, nonce: u64) -> ShortTxId {
-    // Derive SipHash keys from nonce
-    let k0 = nonce;
-    let k1 = nonce.wrapping_add(1);
+/// The keys are the first two little-endian 64-bit integers of
+/// SHA256(80-byte header || compact-block nonce).
+fn short_id_keys(header: &BlockHeader, nonce: u64) -> (u64, u64) {
+    let mut data = blvm_protocol::serialization::serialize_block_header(header);
+    data.extend_from_slice(&nonce.to_le_bytes());
+    let hash = Sha256::digest(&data);
+    let k0 = u64::from_le_bytes(hash[0..8].try_into().expect("sha256 prefix"));
+    let k1 = u64::from_le_bytes(hash[8..16].try_into().expect("sha256 prefix"));
+    (k0, k1)
+}
 
-    // Use SipHash-2-4 to hash the transaction hash
-    // siphasher 0.3 uses the Hasher trait from std::hash
+/// Calculate a compact-block short transaction id.
+///
+/// `wtxid` is the witness transaction id. A transaction with no witness uses
+/// the transaction id. The SipHash keys come from `header` and `nonce`.
+pub fn calculate_short_tx_id(header: &BlockHeader, wtxid: &Hash, nonce: u64) -> ShortTxId {
+    let (k0, k1) = short_id_keys(header, nonce);
     use siphasher::sip::SipHasher24;
     let mut hasher = SipHasher24::new_with_keys(k0, k1);
-    hasher.write(tx_hash);
+    hasher.write(wtxid);
     let hash_result = hasher.finish();
-
-    // Take first 6 bytes (48 bits) as short ID
     let mut short_id = [0u8; 6];
     short_id.copy_from_slice(&hash_result.to_le_bytes()[..6]);
     short_id
@@ -154,42 +154,171 @@ pub fn reconstruct_block(
 ) -> Result<Vec<usize>> {
     let mut missing_indices = Vec::new();
     let mut reconstructed_txs = Vec::new();
+    let prefilled: HashSet<usize> = compact_block
+        .prefilled_txs
+        .iter()
+        .map(|(index, _, _)| *index)
+        .collect();
+    let mut next_block_index = 0usize;
 
-    // Match short IDs with mempool transactions
-    for (index, &short_id) in compact_block.short_ids.iter().enumerate() {
-        let mut matched = false;
+    // Short ids are only the transactions that were not prefilled, in block order.
+    for &short_id in &compact_block.short_ids {
+        while prefilled.contains(&next_block_index) {
+            next_block_index = next_block_index.saturating_add(1);
+        }
+        let block_index = next_block_index;
+        next_block_index = next_block_index.saturating_add(1);
 
-        // Search mempool for transaction matching this short ID
+        // More than one pool transaction with this short id is ambiguous.
+        // The block transaction has to be requested rather than guessed.
+        let mut matches = Vec::new();
         for (tx_hash, tx) in mempool_txs {
-            let calculated_short_id = calculate_short_tx_id(tx_hash, compact_block.nonce);
+            let calculated_short_id =
+                calculate_short_tx_id(&compact_block.header, tx_hash, compact_block.nonce);
             if calculated_short_id == short_id {
-                // BIP125 + BIP152 Integration: Check for RBF conflicts
-                // If this transaction conflicts with already-matched transactions,
-                // don't use it (the block version is authoritative)
-                let has_conflict = reconstructed_txs
-                    .iter()
-                    .any(|(_, existing_tx)| has_conflict_with_tx(tx, existing_tx));
-
-                if !has_conflict {
-                    reconstructed_txs.push((index, tx.clone()));
-                    matched = true;
-                    break;
-                } else {
-                    // Conflict detected: This mempool transaction is a replacement
-                    // The block contains the authoritative version, so we'll request it
-                    // This ensures we get the correct transaction that won the RBF
-                    matched = false; // Will be requested from peer
-                    break;
-                }
+                matches.push(tx);
             }
         }
 
-        if !matched {
-            missing_indices.push(index);
+        if let [tx] = matches.as_slice() {
+            let conflicts_match = reconstructed_txs
+                .iter()
+                .any(|(_, existing_tx)| has_conflict_with_tx(tx, existing_tx));
+            let conflicts_prefilled = compact_block
+                .prefilled_txs
+                .iter()
+                .any(|(_, existing_tx, _)| has_conflict_with_tx(tx, existing_tx));
+            if conflicts_match || conflicts_prefilled {
+                missing_indices.push(block_index);
+            } else {
+                reconstructed_txs.push((block_index, (*tx).clone()));
+            }
+        } else {
+            missing_indices.push(block_index);
         }
     }
 
     Ok(missing_indices)
+}
+
+/// One slot of a compact block while `getblocktxn` / `blocktxn` are in flight.
+#[derive(Debug, Clone)]
+pub struct CompactAssembly {
+    pub header: BlockHeader,
+    pub nonce: u64,
+    /// `None` until a short-id match or a `blocktxn` fills the position.
+    pub slots: Vec<Option<(Transaction, Option<Vec<blvm_protocol::segwit::Witness>>)>>,
+    pub missing: Vec<usize>,
+}
+
+/// Place prefilled transactions and unique, non-conflicting pool matches.
+///
+/// `mempool_txs` is keyed by witness transaction id. Missing positions stay empty.
+pub fn begin_compact_assembly(
+    compact_block: &CompactBlock,
+    mempool_txs: &HashMap<Hash, (Transaction, Option<Vec<blvm_protocol::segwit::Witness>>)>,
+) -> Result<CompactAssembly> {
+    let tx_only: HashMap<Hash, Transaction> = mempool_txs
+        .iter()
+        .map(|(hash, (tx, _))| (*hash, tx.clone()))
+        .collect();
+    let missing = reconstruct_block(compact_block, &tx_only)?;
+    let n = compact_block.short_ids.len() + compact_block.prefilled_txs.len();
+    let mut slots = vec![None; n];
+    for (index, tx, witness) in &compact_block.prefilled_txs {
+        if *index >= n {
+            anyhow::bail!("prefilled compact-block index {index} is past {n}");
+        }
+        slots[*index] = Some((tx.clone(), witness.clone()));
+    }
+    let prefilled: HashSet<usize> = compact_block
+        .prefilled_txs
+        .iter()
+        .map(|(index, _, _)| *index)
+        .collect();
+    let mut next_block_index = 0usize;
+    for &short_id in &compact_block.short_ids {
+        while prefilled.contains(&next_block_index) {
+            next_block_index = next_block_index.saturating_add(1);
+        }
+        let block_index = next_block_index;
+        next_block_index = next_block_index.saturating_add(1);
+        if missing.contains(&block_index) {
+            continue;
+        }
+        let mut found = None;
+        for (tx_hash, (tx, witness)) in mempool_txs {
+            let calculated =
+                calculate_short_tx_id(&compact_block.header, tx_hash, compact_block.nonce);
+            if calculated == short_id {
+                found = Some((tx.clone(), witness.clone()));
+                break;
+            }
+        }
+        if let Some(filled) = found {
+            if block_index < slots.len() {
+                slots[block_index] = Some(filled);
+            }
+        }
+    }
+    Ok(CompactAssembly {
+        header: compact_block.header.clone(),
+        nonce: compact_block.nonce,
+        slots,
+        missing,
+    })
+}
+
+/// Fill `missing` positions from a `blocktxn`, keeping each witness stack.
+pub fn apply_blocktxn(
+    assembly: &mut CompactAssembly,
+    transactions: &[Transaction],
+    witnesses: Option<&[Vec<blvm_protocol::segwit::Witness>]>,
+) -> Result<()> {
+    if transactions.len() != assembly.missing.len() {
+        anyhow::bail!(
+            "blocktxn count {} does not match {} missing positions",
+            transactions.len(),
+            assembly.missing.len()
+        );
+    }
+    for (i, &index) in assembly.missing.iter().enumerate() {
+        if index >= assembly.slots.len() {
+            anyhow::bail!("blocktxn index {index} is past the compact block");
+        }
+        let witness = witnesses.and_then(|all| all.get(i).cloned());
+        assembly.slots[index] = Some((transactions[i].clone(), witness));
+    }
+    assembly.missing.clear();
+    Ok(())
+}
+
+/// Transactions and witness stacks in block order, after every slot is filled.
+pub fn completed_compact_block(
+    assembly: &CompactAssembly,
+) -> Result<(
+    Block,
+    Vec<Vec<blvm_protocol::segwit::Witness>>,
+)> {
+    let mut transactions = Vec::with_capacity(assembly.slots.len());
+    let mut witnesses = Vec::with_capacity(assembly.slots.len());
+    for (index, slot) in assembly.slots.iter().enumerate() {
+        let Some((tx, witness)) = slot else {
+            anyhow::bail!("compact block position {index} is still missing");
+        };
+        let stacks = witness.clone().unwrap_or_else(|| {
+            tx.inputs.iter().map(|_| Vec::new()).collect()
+        });
+        witnesses.push(stacks);
+        transactions.push(tx.clone());
+    }
+    Ok((
+        Block {
+            header: assembly.header.clone(),
+            transactions: transactions.into_boxed_slice(),
+        },
+        witnesses,
+    ))
 }
 
 /// Check if two transactions conflict (BIP125 requirement #4)
@@ -221,18 +350,31 @@ pub fn create_compact_block(
     nonce: u64,
     prefilled_indices: &HashSet<usize>,
 ) -> CompactBlock {
+    create_compact_block_with_witnesses(block, nonce, prefilled_indices, &[])
+}
+
+/// Create a compact block. `witnesses` is one optional stack list per transaction.
+/// A missing or empty stack list uses the transaction id, which equals the witness id.
+pub fn create_compact_block_with_witnesses(
+    block: &Block,
+    nonce: u64,
+    prefilled_indices: &HashSet<usize>,
+    witnesses: &[Option<Vec<blvm_protocol::segwit::Witness>>],
+) -> CompactBlock {
     let mut short_ids = Vec::new();
     let mut prefilled_txs = Vec::new();
 
-    // Calculate short IDs for all transactions
     for (index, tx) in block.transactions.iter().enumerate() {
         if prefilled_indices.contains(&index) {
-            // Include transaction in full (0-indexed per BIP152)
-            prefilled_txs.push((index, tx.clone()));
+            let witness = witnesses
+                .get(index)
+                .and_then(|stacks| stacks.clone())
+                .filter(|stacks| stacks.iter().any(|stack| !stack.is_empty()));
+            prefilled_txs.push((index, tx.clone(), witness));
         } else {
-            // Include as short ID - calculate actual transaction hash first
-            let tx_hash = calculate_tx_hash(tx);
-            let short_id = calculate_short_tx_id(&tx_hash, nonce);
+            let witness = witnesses.get(index).and_then(|stacks| stacks.as_deref());
+            let wtxid = crate::network::txhash::calculate_wtxid(tx, witness);
+            let short_id = calculate_short_tx_id(&block.header, &wtxid, nonce);
             short_ids.push(short_id);
         }
     }
@@ -370,10 +512,73 @@ mod tests {
     fn test_calculate_short_tx_id() {
         let tx_hash = [0u8; 32];
         let nonce = 12345u64;
-        let short_id = calculate_short_tx_id(&tx_hash, nonce);
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0; 32],
+            merkle_root: [0; 32],
+            timestamp: 0,
+            bits: 0,
+            nonce: 0,
+        };
+        let short_id = calculate_short_tx_id(&header, &tx_hash, nonce);
 
         // Short ID should be 6 bytes
         assert_eq!(short_id.len(), 6);
+    }
+
+    #[test]
+    fn short_id_uses_header_keys_and_witness_hash() {
+        use blvm_protocol::opcodes::OP_1;
+
+        let wtxid = [1u8; 32];
+        let nonce = 7u64;
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [2u8; 32],
+            merkle_root: [3u8; 32],
+            timestamp: 0,
+            bits: 0,
+            nonce: 0,
+        };
+        let other_header = BlockHeader {
+            merkle_root: [4u8; 32],
+            ..header.clone()
+        };
+        assert_ne!(
+            calculate_short_tx_id(&header, &wtxid, nonce),
+            calculate_short_tx_id(&other_header, &wtxid, nonce)
+        );
+
+        let tx = Transaction {
+            version: 1,
+            inputs: vec![blvm_protocol::TransactionInput {
+                prevout: blvm_protocol::OutPoint {
+                    hash: [5u8; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![blvm_protocol::TransactionOutput {
+                value: 50_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let block = Block {
+            header: header.clone(),
+            transactions: vec![tx].into_boxed_slice(),
+        };
+        let bare = create_compact_block_with_witnesses(&block, nonce, &HashSet::new(), &[]);
+        let with_witness = create_compact_block_with_witnesses(
+            &block,
+            nonce,
+            &HashSet::new(),
+            &[Some(vec![vec![vec![OP_1]]])],
+        );
+        assert_ne!(bare.short_ids, with_witness.short_ids);
     }
 
     #[test]
@@ -397,6 +602,163 @@ mod tests {
 
         // All transactions should be missing
         assert_eq!(missing.len(), 1);
+    }
+
+    #[test]
+    fn missing_short_id_keeps_the_block_index_after_a_prefilled_coinbase() {
+        use blvm_protocol::constants::SEQUENCE_FINAL;
+        use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::{OutPoint, TransactionInput, TransactionOutput};
+
+        let tx = |prev: u8, value: i64| Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [prev; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0; 32],
+            merkle_root: [0; 32],
+            timestamp: 0,
+            bits: 0,
+            nonce: 0,
+        };
+        let block = Block {
+            header,
+            transactions: vec![tx(1, 50_000), tx(2, 40_000)].into_boxed_slice(),
+        };
+        let compact = create_compact_block(&block, 7, &HashSet::from([0]));
+        assert_eq!(compact.prefilled_txs[0].0, 0);
+        assert_eq!(compact.short_ids.len(), 1);
+
+        let missing = reconstruct_block(&compact, &HashMap::new()).unwrap();
+        assert_eq!(missing, vec![1]);
+    }
+
+    #[test]
+    fn prefilled_witness_survives_wire_conversion() {
+        use blvm_protocol::constants::SEQUENCE_FINAL;
+        use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::{OutPoint, TransactionInput, TransactionOutput};
+
+        let tx = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [1u8; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 50_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0; 32],
+                merkle_root: [0; 32],
+                timestamp: 0,
+                bits: 0,
+                nonce: 0,
+            },
+            transactions: vec![tx].into_boxed_slice(),
+        };
+        let witness = vec![vec![vec![OP_1]]];
+        let compact = create_compact_block_with_witnesses(
+            &block,
+            7,
+            &HashSet::from([0]),
+            &[Some(witness.clone())],
+        );
+        assert_eq!(compact.prefilled_txs[0].2, Some(witness.clone()));
+
+        let message = blvm_protocol::network::CmpctBlockMessage::try_from(compact).unwrap();
+        assert_eq!(message.prefilled_txs[0].witness, Some(witness.clone()));
+
+        let back = blvm_protocol::bip152::CompactBlock::from(&message);
+        assert_eq!(back.prefilled_txs[0].2, Some(witness));
+    }
+
+    #[test]
+    fn ambiguous_short_id_is_requested() {
+        use blvm_protocol::constants::SEQUENCE_FINAL;
+        use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::{OutPoint, TransactionInput, TransactionOutput};
+
+        let header = BlockHeader {
+            version: 0,
+            prev_block_hash: [0; 32],
+            merkle_root: [0; 32],
+            timestamp: 0,
+            bits: 0,
+            nonce: 0,
+        };
+        let nonce = 0u64;
+        let mut first = [0u8; 32];
+        first[24] = 0x99;
+        first[25] = 0x13;
+        first[26] = 0x4b;
+        let mut second = [0u8; 32];
+        second[24] = 0xd7;
+        second[25] = 0x08;
+        second[26] = 0x79;
+        let shared = calculate_short_tx_id(&header, &first, nonce);
+        assert_eq!(shared, calculate_short_tx_id(&header, &second, nonce));
+
+        let unique = [9u8; 32];
+        let unique_id = calculate_short_tx_id(&header, &unique, nonce);
+        assert_ne!(unique_id, shared);
+
+        let tx = |version: u64| Transaction {
+            version,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [version as u8; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 50_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let mut pool = HashMap::new();
+        pool.insert(first, tx(1));
+        pool.insert(second, tx(2));
+        pool.insert(unique, tx(3));
+        let compact = CompactBlock {
+            header,
+            nonce,
+            short_ids: vec![shared, unique_id],
+            prefilled_txs: vec![],
+        };
+        let missing = reconstruct_block(&compact, &pool).unwrap();
+        assert_eq!(missing, vec![0]);
     }
 
     #[test]
@@ -457,5 +819,51 @@ mod tests {
     fn test_is_quic_transport_iroh() {
         // Iroh is QUIC
         assert_eq!(is_quic_transport(TransportType::Iroh), true);
+    }
+
+    #[test]
+    fn blocktxn_witness_fills_the_short_id_after_a_prefilled_coinbase() {
+        use blvm_protocol::constants::SEQUENCE_FINAL;
+        use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::{OutPoint, TransactionInput, TransactionOutput};
+
+        let tx = |prev: u8| Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [prev; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 50_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0; 32],
+            merkle_root: [0; 32],
+            timestamp: 0,
+            bits: 0,
+            nonce: 0,
+        };
+        let block = Block {
+            header,
+            transactions: vec![tx(1), tx(2)].into_boxed_slice(),
+        };
+        let compact = create_compact_block(&block, 7, &HashSet::from([0]));
+        let mut assembly = begin_compact_assembly(&compact, &HashMap::new()).unwrap();
+        assert_eq!(assembly.missing, vec![1]);
+        let witness = vec![vec![vec![OP_1]]];
+        apply_blocktxn(&mut assembly, &[tx(2)], Some(&[witness.clone()])).unwrap();
+        let (reconstructed, witnesses) = completed_compact_block(&assembly).unwrap();
+        assert_eq!(witnesses[1], witness);
+        assert_eq!(reconstructed.transactions[1].outputs[0].script_pubkey, vec![OP_1]);
     }
 }

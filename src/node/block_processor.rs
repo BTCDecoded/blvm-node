@@ -124,6 +124,25 @@ pub fn store_block_with_context_and_index(
             // Log error but don't fail block storage if indexing fails
             tracing::warn!("Failed to index block transactions: {}", e);
         }
+        #[cfg(feature = "production")]
+        if let Ok(Some(undo)) = blockstore.get_undo_log(&block_hash) {
+            for tx in block.transactions.iter() {
+                let tx_hash = blvm_protocol::block::calculate_tx_id(tx);
+                for input in tx.inputs.iter() {
+                    let Some(entry) = undo.entries.iter().find(|e| e.outpoint == input.prevout) else {
+                        continue;
+                    };
+                    let Some(prev) = &entry.previous_utxo else {
+                        continue;
+                    };
+                    let _ = storage.transactions().note_spend(
+                        prev.script_pubkey.as_ref(),
+                        prev.value,
+                        &tx_hash,
+                    );
+                }
+            }
+        }
         if let Err(e) = storage.chain().record_connected_block(
             &block_hash,
             height,

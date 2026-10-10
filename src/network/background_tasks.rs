@@ -439,7 +439,7 @@ impl NetworkManager {
                     }
                     {
                         let ban_list_guard = ban_list.read().await;
-                        if let Some(unban_timestamp) = ban_list_guard.get(addr) {
+                        if let Some(unban_timestamp) = ban_list_guard.get(&std::net::SocketAddr::new(addr.ip(), 0)) {
                             if *unban_timestamp != u64::MAX && now < *unban_timestamp {
                                 continue;
                             }
@@ -504,12 +504,13 @@ impl NetworkManager {
                             Ok(stream) => {
                                 info!("Successfully reconnected to peer {}", addr_clone);
 
-                                let peer = Peer::from_tcp_stream_split(
+                                let mut peer = Peer::from_tcp_stream_split(
                                     stream,
                                     addr_clone,
                                     peer_tx_clone.clone(),
                                     mml,
                                 );
+                                peer.set_is_outbound(true);
 
                                 let mut pm = peer_manager_clone.lock().await;
                                 if let Err(e) = pm.add_peer(TransportAddr::Tcp(addr_clone), peer) {

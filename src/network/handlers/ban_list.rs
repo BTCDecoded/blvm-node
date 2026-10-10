@@ -55,6 +55,7 @@ impl NetworkManager {
 
             ban_entries.push(BanEntry {
                 addr: NetworkAddress {
+                    time: 0,
                     services: 0,
                     ip: ip_bytes,
                     port: addr.port(),
@@ -154,7 +155,7 @@ impl NetworkManager {
                 IpAddr::V6(std::net::Ipv6Addr::from(ipv6_bytes))
             };
 
-            let socket_addr = SocketAddr::new(ip, entry.addr.port);
+            let socket_addr = SocketAddr::new(ip, 0);
 
             match ban_list.get(&socket_addr) {
                 Some(&existing_timestamp) => {
@@ -194,6 +195,7 @@ mod tests {
         ip[12..16].copy_from_slice(&[203, 0, 113, 1]);
         BanEntry {
             addr: NetworkAddress {
+                time: 0,
                 services: 0,
                 ip,
                 port,

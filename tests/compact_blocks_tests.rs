@@ -6,6 +6,17 @@ use blvm_node::{Block, BlockHeader, Transaction};
 use blvm_protocol::tx_inputs;
 use blvm_protocol::tx_outputs;
 
+fn short_id_header() -> BlockHeader {
+    BlockHeader {
+        version: 1,
+        prev_block_hash: [0u8; 32],
+        merkle_root: [0u8; 32],
+        timestamp: 1231006505,
+        bits: 0x1d00ffff,
+        nonce: 12345,
+    }
+}
+
 fn create_test_transaction() -> Transaction {
     Transaction {
         version: 1,
@@ -51,17 +62,18 @@ fn test_calculate_short_tx_id() {
     let tx_hash = calculate_tx_hash(&tx);
     let nonce = 12345u64;
 
-    let short_id = calculate_short_tx_id(&tx_hash, nonce);
+    let header = short_id_header();
+    let short_id = calculate_short_tx_id(&header, &tx_hash, nonce);
 
     // Short ID should be 6 bytes
     assert_eq!(short_id.len(), 6);
 
     // Same inputs should produce same short ID
-    let short_id2 = calculate_short_tx_id(&tx_hash, nonce);
+    let short_id2 = calculate_short_tx_id(&header, &tx_hash, nonce);
     assert_eq!(short_id, short_id2);
 
     // Different nonce should produce different short ID
-    let short_id3 = calculate_short_tx_id(&tx_hash, nonce + 1);
+    let short_id3 = calculate_short_tx_id(&header, &tx_hash, nonce + 1);
     assert_ne!(short_id, short_id3);
 }
 
@@ -82,8 +94,9 @@ fn test_short_tx_id_different_transactions() {
     let hash2 = calculate_tx_hash(&tx2);
     let nonce = 12345u64;
 
-    let short_id1 = calculate_short_tx_id(&hash1, nonce);
-    let short_id2 = calculate_short_tx_id(&hash2, nonce);
+    let header = short_id_header();
+    let short_id1 = calculate_short_tx_id(&header, &hash1, nonce);
+    let short_id2 = calculate_short_tx_id(&header, &hash2, nonce);
 
     // Different transactions should produce different short IDs (with high probability)
     assert_ne!(short_id1, short_id2);
@@ -113,7 +126,7 @@ fn test_compact_block_with_short_ids() {
     let tx_hash = calculate_tx_hash(&block.transactions[0]);
     let nonce = block.header.nonce;
 
-    let short_id = calculate_short_tx_id(&tx_hash, nonce);
+    let short_id = calculate_short_tx_id(&block.header, &tx_hash, nonce);
 
     let compact = CompactBlock {
         header: block.header.clone(),
@@ -191,7 +204,7 @@ fn test_compact_block_with_prefilled_txs() {
         header: block.header.clone(),
         nonce: 12345,
         short_ids: vec![],
-        prefilled_txs: vec![(0, tx.clone())],
+        prefilled_txs: vec![(0, tx.clone(), None)],
     };
 
     assert_eq!(compact.prefilled_txs.len(), 1);

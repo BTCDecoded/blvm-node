@@ -139,6 +139,7 @@ impl Node {
 
         // Wire the live UTXO set into MempoolManager so RBF fee checks use real values.
         mempool_manager_arc.set_utxo_set_arc(network_arc.utxo_set_arc());
+        mempool_manager_arc.set_storage(Arc::clone(&storage_arc));
         let metrics_arc = Arc::new(MetricsCollector::new());
         let profiler_arc = Arc::new(PerformanceProfiler::new(1000));
         let rpc = RpcManager::new(rpc_addr)
@@ -148,7 +149,8 @@ impl Node {
             .with_network_manager(Arc::clone(&network_arc))
             .with_protocol_engine(Arc::clone(&protocol_arc));
         // Note: EventPublisher will be set later in start_components() after it's created
-        let sync_coordinator = sync::SyncCoordinator::default();
+        let mut sync_coordinator = sync::SyncCoordinator::default();
+        sync_coordinator.set_mempool(Some(Arc::clone(&mempool_manager_arc)));
         let mut mining_coordinator = miner::MiningCoordinator::new(
             Arc::clone(&mempool_manager_arc),
             Some(Arc::clone(&storage_arc)),

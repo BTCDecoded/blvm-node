@@ -215,6 +215,7 @@ pub fn try_activate_heavier_fork(
     candidate_tip: &Hash,
     utxo_set: &mut UtxoSet,
     event_publisher: Option<&Arc<EventPublisher>>,
+    mempool: Option<&crate::node::mempool::MempoolManager>,
 ) -> Result<bool> {
     if !should_activate_over_active_tip(storage, candidate_tip)? {
         return Ok(false);
@@ -262,6 +263,10 @@ pub fn try_activate_heavier_fork(
 
     let mtp_store = blockstore.clone();
     let difficulty_store = blockstore.clone();
+    let header_store = blockstore.clone();
+    let get_headers = move |height: u64| -> Option<Vec<blvm_consensus::types::BlockHeader>> {
+        header_store.headers_before_height_for_mtp(height).ok()
+    };
     let mut connect_context =
         move |_height: u64,
               recent_headers: Option<&[blvm_consensus::types::BlockHeader]>,
@@ -286,7 +291,7 @@ pub fn try_activate_heavier_fork(
         owned_utxo,
         active_height,
         None::<fn(&Block) -> Option<Vec<Witness>>>,
-        None::<fn(u64) -> Option<Vec<blvm_protocol::BlockHeader>>>,
+        Some(get_headers),
         Some(get_undo),
         Some(put_undo),
         current_timestamp(),
@@ -313,6 +318,23 @@ pub fn try_activate_heavier_fork(
         .update_tip(&new_tip_hash, &new_tip_block.header, new_height)?;
     refresh_active_height_index(storage, blockstore, &new_tip_hash)?;
     storage.utxos().store_utxo_set(utxo_set)?;
+
+    if let Some(pool) = mempool {
+        let disconnected_witnesses =
+            match witnesses_for_chain(blockstore, storage, &result.disconnected_blocks, protocol) {
+                Ok(witnesses) => witnesses,
+                Err(e) => {
+                    warn!("reorg mempool readd could not load witnesses: {e}");
+                    Vec::new()
+                }
+            };
+        pool.apply_reorg(
+            &result.disconnected_blocks,
+            &disconnected_witnesses,
+            &result.connected_blocks,
+            utxo_set,
+        );
+    }
 
     publish_reorg_events(
         event_publisher,

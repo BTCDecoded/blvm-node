@@ -62,13 +62,12 @@ pub fn handle_getcfilters(
                     let filter = if let Some(cached) = filter_service.get_filter(&calculated_hash) {
                         cached
                     } else {
-                        // Generate filter on-demand
-                        // Get UTXO scripts for previous outputs
                         let mut prev_scripts = Vec::new();
-                        for tx in &block.transactions {
-                            for input in &tx.inputs {
-                                if let Ok(Some(utxo)) = storage.utxos().get_utxo(&input.prevout) {
-                                    prev_scripts.push(utxo.script_pubkey.as_ref().to_vec());
+                        #[cfg(feature = "production")]
+                        if let Ok(Some(undo)) = storage.blocks().get_undo_log(&calculated_hash) {
+                            for entry in &undo.entries {
+                                if let Some(prev) = &entry.previous_utxo {
+                                    prev_scripts.push(prev.script_pubkey.as_ref().to_vec());
                                 }
                             }
                         }

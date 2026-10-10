@@ -9,7 +9,7 @@ use blvm_protocol::mempool::{
     Mempool, has_conflict_with_tx, replacement_checks_with_witness, signals_rbf,
 };
 use blvm_protocol::segwit::Witness;
-use blvm_protocol::{Hash, OutPoint, Transaction, UtxoSet};
+use blvm_protocol::{Block, Hash, OutPoint, Transaction, TransactionOutput, UtxoSet};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
@@ -87,6 +87,204 @@ pub struct MempoolManager {
     /// Event publisher for mempool events (optional)
     /// Uses Arc for shared ownership and interior mutability
     event_publisher: RwLock<Option<Arc<EventPublisher>>>,
+    /// Live chain, so admission can read the next block's height and median time.
+    storage: RwLock<Option<Arc<crate::storage::Storage>>>,
+    /// Test tip: next-block height and median time-past. Ignored when `storage` is set.
+    chain_tip: RwLock<Option<(u64, u64)>>,
+}
+
+/// Next block height and the median time of the headers before that block.
+pub(crate) fn next_block_finality(storage: &crate::storage::Storage) -> Option<(u64, u64)> {
+    let tip = storage.chain().get_height().ok().flatten()?;
+    let next_height = tip.saturating_add(1);
+    let median_time_past = storage
+        .blocks()
+        .headers_before_height_for_mtp(next_height)
+        .ok()
+        .filter(|headers| !headers.is_empty())
+        .map(|headers| blvm_protocol::bip113::get_median_time_past(&headers))
+        .unwrap_or(0);
+    Some((next_height, median_time_past))
+}
+
+fn is_p2sh_script(script: &[u8]) -> bool {
+    use blvm_protocol::opcodes::{OP_EQUAL, OP_HASH160, PUSH_20_BYTES};
+    script.len() == 23
+        && script[0] == OP_HASH160
+        && script[1] == PUSH_20_BYTES
+        && script[22] == OP_EQUAL
+}
+
+/// Last push in a push-only script, which is the redeem script of a P2SH spend.
+fn last_script_push(script: &[u8]) -> Option<Vec<u8>> {
+    use blvm_protocol::opcodes::{
+        OP_0, OP_1, OP_1NEGATE, OP_16, OP_PUSHDATA1, OP_PUSHDATA2, OP_PUSHDATA4,
+    };
+    let mut i = 0;
+    let mut last = None;
+    while i < script.len() {
+        let opcode = script[i];
+        let (advance, data) = if opcode == OP_0 {
+            (1, Vec::new())
+        } else if opcode > OP_0 && opcode < OP_PUSHDATA1 {
+            let len = opcode as usize;
+            if i + 1 + len > script.len() {
+                return None;
+            }
+            (1 + len, script[i + 1..i + 1 + len].to_vec())
+        } else if opcode == OP_PUSHDATA1 {
+            if i + 1 >= script.len() {
+                return None;
+            }
+            let len = script[i + 1] as usize;
+            if i + 2 + len > script.len() {
+                return None;
+            }
+            (2 + len, script[i + 2..i + 2 + len].to_vec())
+        } else if opcode == OP_PUSHDATA2 {
+            if i + 2 >= script.len() {
+                return None;
+            }
+            let len = u16::from_le_bytes([script[i + 1], script[i + 2]]) as usize;
+            if i + 3 + len > script.len() {
+                return None;
+            }
+            (3 + len, script[i + 3..i + 3 + len].to_vec())
+        } else if opcode == OP_PUSHDATA4 {
+            if i + 4 >= script.len() {
+                return None;
+            }
+            let len =
+                u32::from_le_bytes([script[i + 1], script[i + 2], script[i + 3], script[i + 4]])
+                    as usize;
+            if i + 5 + len > script.len() {
+                return None;
+            }
+            (5 + len, script[i + 5..i + 5 + len].to_vec())
+        } else if opcode == OP_1NEGATE || (OP_1..=OP_16).contains(&opcode) {
+            (1, Vec::new())
+        } else {
+            return None;
+        };
+        last = Some(data);
+        i += advance;
+    }
+    last
+}
+
+fn p2sh_redeem_is_witness_program(script_pubkey: &[u8], script_sig: &[u8]) -> bool {
+    if !is_p2sh_script(script_pubkey) {
+        return false;
+    }
+    let Some(redeem) = last_script_push(script_sig) else {
+        return false;
+    };
+    blvm_protocol::witness::extract_witness_version(&redeem).is_some()
+}
+
+/// Structure, coinbase, witness-count, and script checks.
+///
+/// `prevouts` is one entry per input. A missing entry was not in the snapshot and
+/// was not created by a transaction already in the pool.
+fn consensus_checks_reject(
+    tx: &Transaction,
+    witnesses: Option<&[Witness]>,
+    prevouts: &[Option<TransactionOutput>],
+) -> bool {
+    use blvm_protocol::ValidationResult;
+    use blvm_protocol::block::calculate_script_flags_for_block_network;
+    use blvm_protocol::script::verify_script_with_context;
+    use blvm_protocol::transaction::{check_transaction, is_coinbase};
+    use blvm_protocol::types::Network;
+
+    const MEMPOOL_POLICY_HEIGHT: u64 = 1_000_000;
+
+    if is_coinbase(tx) {
+        return true;
+    }
+    if !matches!(check_transaction(tx), Ok(ValidationResult::Valid)) {
+        return true;
+    }
+    if let Some(wits) = witnesses {
+        if wits.len() != tx.inputs.len() {
+            return true;
+        }
+    }
+
+    // A witness program, native or inside a P2SH redeem script, is still a
+    // witness spend when no stack was supplied. Flag selection otherwise
+    // looks only at supplied stacks and at the tx outputs.
+    let needs_witness_flags = tx.inputs.iter().enumerate().any(|(i, input)| {
+        prevouts
+            .get(i)
+            .and_then(|output| output.as_ref())
+            .is_some_and(|output| {
+                let script = output.script_pubkey.as_slice();
+                blvm_protocol::witness::extract_witness_version(&script.to_vec()).is_some()
+                    || p2sh_redeem_is_witness_program(script, &input.script_sig)
+            })
+    });
+    let has_witness = needs_witness_flags || witnesses.is_some_and(|stacks| !stacks.is_empty());
+    let flags = calculate_script_flags_for_block_network(
+        tx,
+        has_witness,
+        MEMPOOL_POLICY_HEIGHT,
+        Network::Mainnet,
+    );
+    let sighash_prevouts: Vec<TransactionOutput> = prevouts
+        .iter()
+        .map(|output| {
+            output.clone().unwrap_or(TransactionOutput {
+                value: 0,
+                script_pubkey: Vec::new(),
+            })
+        })
+        .collect();
+
+    for (i, input) in tx.inputs.iter().enumerate() {
+        let Some(output) = prevouts.get(i).and_then(|output| output.as_ref()) else {
+            continue;
+        };
+        let witness = witnesses.and_then(|stacks| stacks.get(i));
+        let Ok(true) = verify_script_with_context(
+            &input.script_sig,
+            output.script_pubkey.as_ref(),
+            witness,
+            flags,
+            tx,
+            i,
+            &sighash_prevouts,
+            Some(MEMPOOL_POLICY_HEIGHT),
+            Network::Mainnet,
+        ) else {
+            return true;
+        };
+    }
+    false
+}
+
+pub(crate) fn money_sats(value: i64) -> Option<u64> {
+    if (0..=blvm_protocol::constants::MAX_MONEY).contains(&value) {
+        Some(value as u64)
+    } else {
+        None
+    }
+}
+
+/// Running sum of money. `None` once the total passes `MAX_MONEY`.
+pub(crate) fn add_money(total: u64, sats: u64) -> Option<u64> {
+    let max = blvm_protocol::constants::MAX_MONEY as u64;
+    total.checked_add(sats).filter(|sum| *sum <= max)
+}
+
+/// Sum of output values in range. `None` when any output is outside the money range.
+pub(crate) fn output_sum_sats(tx: &Transaction) -> Option<u64> {
+    let mut total = 0u64;
+    for output in &tx.outputs {
+        let sats = money_sats(output.value)?;
+        total = add_money(total, sats)?;
+    }
+    Some(total)
 }
 
 impl MempoolManager {
@@ -113,6 +311,8 @@ impl MempoolManager {
             tx_descendants: RwLock::new(HashMap::new()),
             utxo_set_hash: RwLock::new(None),
             event_publisher: RwLock::new(None),
+            storage: RwLock::new(None),
+            chain_tip: RwLock::new(None),
         }
     }
 
@@ -139,6 +339,8 @@ impl MempoolManager {
             tx_descendants: RwLock::new(HashMap::new()),
             utxo_set_hash: RwLock::new(None),
             event_publisher: RwLock::new(None),
+            storage: RwLock::new(None),
+            chain_tip: RwLock::new(None),
         }
     }
 
@@ -146,6 +348,185 @@ impl MempoolManager {
     /// Call this once after constructing MempoolManager and before the first transaction.
     pub fn set_utxo_set_arc(&self, utxo_set: Arc<tokio::sync::Mutex<UtxoSet>>) {
         *self.utxo_set_arc.write().unwrap_or_else(|e| e.into_inner()) = Some(utxo_set);
+    }
+
+    /// Wire chain storage so locktime checks use the current tip.
+    pub fn set_storage(&self, storage: Arc<crate::storage::Storage>) {
+        *self.storage.write().unwrap_or_else(|e| e.into_inner()) = Some(storage);
+    }
+
+    /// Next-block height and median time-past, for tests that have no chain storage.
+    pub fn set_chain_tip(&self, next_height: u64, median_time_past: u64) {
+        *self.chain_tip.write().unwrap_or_else(|e| e.into_inner()) =
+            Some((next_height, median_time_past));
+    }
+
+    fn finality_context(&self) -> Option<(u64, u64)> {
+        if let Some(storage) = self
+            .storage
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            return Some(next_block_finality(storage).unwrap_or((0, 0)));
+        }
+        *self.chain_tip.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn chain_network(&self) -> blvm_protocol::types::Network {
+        self.storage
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|storage| storage.chain().consensus_network())
+            .unwrap_or(blvm_protocol::types::Network::Mainnet)
+    }
+
+    /// Median time of the block before `coin_height`.
+    fn prior_median_time(&self, coin_height: u64) -> Option<i64> {
+        let storage = self
+            .storage
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        let headers = storage
+            .blocks()
+            .headers_before_height_for_mtp(coin_height)
+            .ok()?;
+        if headers.is_empty() {
+            return None;
+        }
+        i64::try_from(blvm_protocol::bip113::get_median_time_past(&headers)).ok()
+    }
+
+    /// Script and value for each input. The snapshot wins. Otherwise use the
+    /// output a transaction already in the pool created.
+    fn script_prevouts(
+        &self,
+        tx: &Transaction,
+        utxo_set: &UtxoSet,
+    ) -> Vec<Option<TransactionOutput>> {
+        let pool = self.pool_lock();
+        tx.inputs
+            .iter()
+            .map(|input| {
+                if let Some(utxo) = utxo_set.get(&input.prevout) {
+                    Some(TransactionOutput {
+                        value: utxo.value,
+                        script_pubkey: utxo.script_pubkey.as_ref().to_vec(),
+                    })
+                } else {
+                    pool.transactions
+                        .get(&input.prevout.hash)
+                        .and_then(|parent| parent.outputs.get(input.prevout.index as usize))
+                        .cloned()
+                }
+            })
+            .collect()
+    }
+
+    fn mempool_creates(&self, prevout: &OutPoint) -> bool {
+        let pool = self.pool_lock();
+        pool.transactions
+            .get(&prevout.hash)
+            .and_then(|parent| parent.outputs.get(prevout.index as usize))
+            .is_some()
+    }
+
+    fn relative_lock_rejects(&self, tx: &Transaction, utxo_set: &UtxoSet) -> bool {
+        use blvm_protocol::locktime::{extract_sequence_type_flag, is_sequence_disabled};
+
+        let Some((block_height, block_mtp)) = self.finality_context() else {
+            return tx.version >= 2
+                && tx.inputs.iter().any(|input| {
+                    let seq = input.sequence as u32;
+                    !is_sequence_disabled(seq)
+                });
+        };
+        let block_mtp_i = i64::try_from(block_mtp).unwrap_or(-1);
+        let mut prev_mtps = Vec::with_capacity(tx.inputs.len());
+        for input in &tx.inputs {
+            let seq = input.sequence as u32;
+            if is_sequence_disabled(seq) || !extract_sequence_type_flag(seq) {
+                prev_mtps.push(-1);
+                continue;
+            }
+            if let Some(utxo) = utxo_set.get(&input.prevout) {
+                let Some(mtp) = self.prior_median_time(utxo.height) else {
+                    return true;
+                };
+                prev_mtps.push(mtp);
+            } else if self.mempool_creates(&input.prevout) && block_mtp_i >= 0 {
+                prev_mtps.push(block_mtp_i);
+            } else {
+                return true;
+            }
+        }
+        match blvm_protocol::mempool::relative_lock_unsatisfied(
+            tx,
+            utxo_set,
+            block_height,
+            block_mtp,
+            Some(&prev_mtps),
+            self.chain_network(),
+        ) {
+            Ok(unsatisfied) => unsatisfied,
+            Err(_) => true,
+        }
+    }
+
+    fn prevout_value_out_of_range(&self, tx: &Transaction, utxo_set: &UtxoSet) -> bool {
+        tx.inputs.iter().any(|input| {
+            utxo_set
+                .get(&input.prevout)
+                .is_some_and(|utxo| money_sats(utxo.value).is_none())
+        })
+    }
+
+    /// Each prevout may sit on `MAX_MONEY`. The running sum may not.
+    fn prevout_sum_exceeds_money(&self, tx: &Transaction, utxo_set: &UtxoSet) -> bool {
+        let mut total = 0u64;
+        for input in &tx.inputs {
+            let sats = if let Some(utxo) = utxo_set.get(&input.prevout) {
+                let Some(sats) = money_sats(utxo.value) else {
+                    return true;
+                };
+                sats
+            } else if let Some(sats) = self.mempool_input_value(&input.prevout) {
+                sats
+            } else {
+                continue;
+            };
+            let Some(sum) = add_money(total, sats) else {
+                return true;
+            };
+            total = sum;
+        }
+        false
+    }
+
+    fn unknown_prevout(&self, tx: &Transaction, utxo_set: &UtxoSet, utxo_wired: bool) -> bool {
+        if !utxo_wired {
+            return false;
+        }
+        tx.inputs.iter().any(|input| {
+            utxo_set.get(&input.prevout).is_none() && !self.mempool_creates(&input.prevout)
+        })
+    }
+
+    fn immature_coinbase_spend(&self, tx: &Transaction, utxo_set: &UtxoSet) -> bool {
+        let Some((height, _)) = self.finality_context() else {
+            return false;
+        };
+        tx.inputs.iter().any(|input| {
+            utxo_set.get(&input.prevout).is_some_and(|utxo| {
+                !blvm_protocol::transaction::check_coinbase_maturity(
+                    height,
+                    utxo.height,
+                    utxo.is_coinbase,
+                )
+            })
+        })
     }
 
     /// Set event publisher for mempool events
@@ -827,7 +1208,7 @@ impl MempoolManager {
         parent
             .outputs
             .get(prevout.index as usize)
-            .map(|output| output.value as u64)
+            .and_then(|output| money_sats(output.value))
     }
 
     /// Check if a transaction can replace an existing one (RBF)
@@ -1316,19 +1697,79 @@ impl MempoolManager {
 
         // Min-relay-fee gate: reject transactions whose fee rate is below the
         // configured floor.  We need the UTXO set to compute fees; if it hasn't
-        // been wired in yet we skip this check (startup path) rather than
-        // accepting zero-fee junk unconditionally.
-        // try_lock is non-blocking so add_transaction stays synchronous; if the
-        // tokio mutex is momentarily held we fall back to skipping the check.
-        let utxo_snapshot: UtxoSet = self
-            .utxo_set_arc
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .and_then(|arc| arc.try_lock().ok().map(|g| g.clone()))
-            .unwrap_or_default();
+        // been wired in yet we skip this check (startup path).
+        // try_lock stays non-blocking. A wired set that is busy is not an empty
+        // set: admitting against that would skip script, prevout, and fee checks.
+        let (utxo_snapshot, utxo_wired) = {
+            let utxo_slot = self.utxo_set_arc.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(arc) = utxo_slot.as_ref() {
+                match arc.try_lock() {
+                    Ok(guard) => (guard.clone(), true),
+                    Err(_) => {
+                        warn!(
+                            "Transaction {} rejected: UTXO set is locked",
+                            hex::encode(tx_hash)
+                        );
+                        return Ok(false);
+                    }
+                }
+            } else {
+                (UtxoSet::default(), false)
+            }
+        };
 
         let witness_ref = witnesses.as_deref();
+        if let Some((height, median_time_past)) = self.finality_context() {
+            if !blvm_protocol::mempool::is_final_tx(&tx, height, median_time_past) {
+                warn!(
+                    "Transaction {} rejected: locktime is not final",
+                    hex::encode(tx_hash)
+                );
+                return Ok(false);
+            }
+        }
+        if self.relative_lock_rejects(&tx, &utxo_snapshot) {
+            warn!(
+                "Transaction {} rejected: relative locktime is not final",
+                hex::encode(tx_hash)
+            );
+            return Ok(false);
+        }
+        if self.immature_coinbase_spend(&tx, &utxo_snapshot) {
+            warn!(
+                "Transaction {} rejected: coinbase output is immature",
+                hex::encode(tx_hash)
+            );
+            return Ok(false);
+        }
+        if self.unknown_prevout(&tx, &utxo_snapshot, utxo_wired) {
+            warn!(
+                "Transaction {} rejected: input prevout is not available",
+                hex::encode(tx_hash)
+            );
+            return Ok(false);
+        }
+        if self.prevout_value_out_of_range(&tx, &utxo_snapshot) {
+            warn!(
+                "Transaction {} rejected: prevout value is outside the money range",
+                hex::encode(tx_hash)
+            );
+            return Ok(false);
+        }
+        if self.prevout_sum_exceeds_money(&tx, &utxo_snapshot) {
+            warn!(
+                "Transaction {} rejected: prevout sum exceeds MAX_MONEY",
+                hex::encode(tx_hash)
+            );
+            return Ok(false);
+        }
+        if consensus_checks_reject(&tx, witness_ref, &self.script_prevouts(&tx, &utxo_snapshot)) {
+            warn!(
+                "Transaction {} rejected: failed consensus checks",
+                hex::encode(tx_hash)
+            );
+            return Ok(false);
+        }
         let (candidate_vsize, sigop_cost) = self.admit_vsize(&tx, witness_ref, &utxo_snapshot);
         if sigop_cost > blvm_protocol::mempool::MAX_STANDARD_TX_SIGOPS_COST {
             warn!(
@@ -1341,7 +1782,7 @@ impl MempoolManager {
         }
 
         let mut fee_rate_sat_vb = 0u64;
-        if !utxo_snapshot.is_empty() {
+        if utxo_wired {
             let fee = self.calculate_transaction_fee(&tx, &utxo_snapshot);
             let tx_size = candidate_vsize;
             fee_rate_sat_vb = if tx_size > 0 { fee / tx_size } else { 0 };
@@ -1538,6 +1979,7 @@ impl MempoolManager {
             .entry(Reverse(fee_rate))
             .or_default()
             .push(tx_hash);
+        self.invalidate_fee_ranking();
 
         // Publish mempool transaction added event
         if let Some(ref event_pub) = *self
@@ -1585,6 +2027,50 @@ impl MempoolManager {
     /// Get stored SegWit witness stacks for a mempool transaction (one per input).
     pub fn get_transaction_witnesses(&self, hash: &Hash) -> Option<Vec<Witness>> {
         self.pool_lock().tx_witnesses.get(hash).cloned()
+    }
+
+    /// Satoshis per virtual byte recorded when the transaction was accepted.
+    pub fn cached_fee_rate(&self, hash: &Hash) -> Option<u64> {
+        self.fee_cache
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(hash)
+            .copied()
+    }
+
+    /// Unix time when the transaction entered the pool.
+    pub fn accepted_at(&self, hash: &Hash) -> u64 {
+        self.tx_timestamps
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(hash)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// In-pool parents this transaction spends.
+    pub fn dependency_hashes(&self, hash: &Hash) -> Vec<Hash> {
+        self.tx_dependencies
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(hash)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// In-pool children that spend this transaction.
+    pub fn descendant_hashes(&self, hash: &Hash) -> Vec<Hash> {
+        self.tx_descendants
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(hash)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// True when a pool transaction spends this outpoint.
+    pub fn spends_outpoint(&self, outpoint: &OutPoint) -> bool {
+        self.pool_lock().spent_outputs.contains(outpoint)
     }
 
     /// Cumulative mining priority fee delta (satoshis) from `prioritisetransaction`.
@@ -1666,11 +2152,17 @@ impl MempoolManager {
             let entry = deltas.entry(*hash).or_insert(0);
             *entry = entry.saturating_add(fee_delta);
         }
+        self.invalidate_fee_ranking();
+        true
+    }
+
+    /// The fee index is keyed only by the chain UTXO set. Pool changes must drop
+    /// that key so the next ranking rebuilds rates from the transactions now stored.
+    fn invalidate_fee_ranking(&self) {
         *self
             .utxo_set_hash
             .write()
             .unwrap_or_else(|e| e.into_inner()) = None;
-        true
     }
 
     /// Calculate a simple hash of the UTXO set for change detection
@@ -1748,22 +2240,49 @@ impl MempoolManager {
             .collect();
 
         let mut utxo_cache: HashMap<&OutPoint, u64> = HashMap::with_capacity(all_prevouts.len());
+        let parents: HashMap<&Hash, &Transaction> =
+            txs_snapshot.iter().map(|(hash, tx)| (hash, tx)).collect();
         for (_, prevout) in &all_prevouts {
             if let Some(utxo) = utxo_set.get(prevout) {
-                utxo_cache.insert(prevout, utxo.value as u64);
+                if let Some(sats) = money_sats(utxo.value) {
+                    utxo_cache.insert(prevout, sats);
+                }
+                continue;
+            }
+            let Some(parent) = parents.get(&prevout.hash) else {
+                continue;
+            };
+            let Some(output) = parent.outputs.get(prevout.index as usize) else {
+                continue;
+            };
+            if let Some(sats) = money_sats(output.value) {
+                utxo_cache.insert(prevout, sats);
             }
         }
 
         for (tx_hash, tx) in &txs_snapshot {
             let mut input_total = 0u64;
+            let mut within_money = true;
             for input in &tx.inputs {
                 if let Some(&value) = utxo_cache.get(&input.prevout) {
-                    input_total += value;
+                    match add_money(input_total, value) {
+                        Some(sum) => input_total = sum,
+                        None => {
+                            within_money = false;
+                            break;
+                        }
+                    }
                 }
             }
 
-            let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
-            let fee = input_total.saturating_sub(output_total);
+            let fee = if within_money {
+                match output_sum_sats(tx) {
+                    Some(output_total) => input_total.saturating_sub(output_total),
+                    None => 0,
+                }
+            } else {
+                0
+            };
             let size = self.pooled_vsize(tx_hash, tx, utxo_set) as usize;
             let delta = self
                 .fee_deltas
@@ -1816,22 +2335,27 @@ impl MempoolManager {
         // Batch UTXO lookup (single pass through HashMap)
         let mut input_total = 0u64;
         for prevout in prevouts {
-            if let Some(utxo) = utxo_set.get(prevout) {
-                input_total += utxo.value as u64;
-            } else if let Some(value) = self.mempool_input_value(prevout) {
-                input_total += value;
+            let sats = if let Some(utxo) = utxo_set.get(prevout) {
+                money_sats(utxo.value)
+            } else {
+                self.mempool_input_value(prevout)
+            };
+            if let Some(sats) = sats {
+                let Some(sum) = add_money(input_total, sats) else {
+                    return 0;
+                };
+                input_total = sum;
             }
         }
 
-        // Sum output values
-        let output_total: u64 = tx.outputs.iter().map(|out| out.value as u64).sum();
+        // An output outside the money range is not a fee. Casting it would wrap.
+        let Some(output_total) = output_sum_sats(tx) else {
+            return 0;
+        };
 
-        // Fee is difference (inputs - outputs)
         input_total.saturating_sub(output_total)
     }
 
-    /// Sigop-adjusted virtual size and sigop cost for a transaction being admitted.
-    ///
     /// Legacy sigops count without prevouts. P2SH and witness sigops use chain UTXOs,
     /// and for a parent that exists only in this pool, that parent's `script_pubkey`.
     /// The spending witness is `witnesses`, not the parent's witness.
@@ -1994,6 +2518,87 @@ impl MempoolManager {
         }
     }
 
+    /// Apply a chain reorg to the pool.
+    ///
+    /// Transactions confirmed or conflicted by `connected` are removed. Non-coinbase
+    /// transactions from `disconnected` are admitted again against `utxo_set`, oldest
+    /// block first, so a child can spend a parent that was just restored.
+    /// `disconnected_witnesses` is one list of input stacks per transaction in those
+    /// blocks, including the coinbase slot.
+    pub fn apply_reorg(
+        &self,
+        disconnected: &[Block],
+        disconnected_witnesses: &[Vec<Vec<Witness>>],
+        connected: &[Block],
+        utxo_set: &UtxoSet,
+    ) {
+        use blvm_protocol::transaction::is_coinbase;
+
+        self.install_utxo_snapshot(utxo_set);
+        for block in connected {
+            self.remove_for_connected_block(&block.transactions);
+        }
+        for (block_index, block) in disconnected.iter().enumerate() {
+            let block_witnesses = disconnected_witnesses.get(block_index);
+            for (tx_index, tx) in block.transactions.iter().enumerate() {
+                if is_coinbase(tx) {
+                    continue;
+                }
+                let witnesses = block_witnesses
+                    .and_then(|stacks| stacks.get(tx_index))
+                    .cloned();
+                let _ = self.add_transaction_with_witness(tx.clone(), witnesses);
+            }
+        }
+    }
+
+    fn install_utxo_snapshot(&self, utxo_set: &UtxoSet) {
+        let slot = self.utxo_set_arc.read().unwrap_or_else(|e| e.into_inner());
+        let Some(arc) = slot.as_ref() else {
+            return;
+        };
+        if let Ok(mut guard) = arc.try_lock() {
+            *guard = utxo_set.clone();
+        }
+    }
+
+    /// Drop transactions a newly connected block confirmed or conflicted with.
+    ///
+    /// A transaction included in the block is removed. A different transaction
+    /// that spends an output the block already spent is removed, along with its
+    /// descendants. A child that spends an output the block just created stays.
+    pub fn remove_for_connected_block(&self, transactions: &[Transaction]) {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::transaction::is_coinbase;
+
+        let mut confirmed = HashSet::new();
+        let mut spent = HashSet::new();
+        for tx in transactions {
+            if is_coinbase(tx) {
+                continue;
+            }
+            confirmed.insert(calculate_tx_id(tx));
+            for input in &tx.inputs {
+                spent.insert(input.prevout);
+            }
+        }
+
+        let mut remove_ids = confirmed.clone();
+        for tx in self.get_transactions() {
+            let id = calculate_tx_id(&tx);
+            if tx.inputs.iter().any(|input| spent.contains(&input.prevout)) {
+                remove_ids.insert(id);
+            }
+        }
+        let conflicts: Vec<Hash> = remove_ids.difference(&confirmed).copied().collect();
+        for id in conflicts {
+            remove_ids.extend(self.replacement_package(&id));
+        }
+        for id in &remove_ids {
+            self.remove_transaction(id);
+        }
+    }
+
     /// Remove transaction from mempool
     pub fn remove_transaction(&self, hash: &Hash) -> bool {
         let tx = {
@@ -2091,6 +2696,7 @@ impl MempoolManager {
             });
         }
 
+        self.invalidate_fee_ranking();
         true
     }
 
@@ -2127,6 +2733,7 @@ impl MempoolManager {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        self.invalidate_fee_ranking();
 
         // Publish mempool cleared event
         if let Some(ref event_pub) = *self
@@ -2267,6 +2874,1138 @@ mod tests {
         }
     }
 
+    fn funded_at(script_pubkey: Vec<u8>, value: i64, height: u64) -> blvm_protocol::UtxoSet {
+        use std::sync::Arc;
+        let tx = legacy_empty_script();
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            tx.inputs[0].prevout,
+            Arc::new(blvm_protocol::UTXO {
+                value,
+                script_pubkey: script_pubkey.into(),
+                height,
+                is_coinbase: false,
+            }),
+        );
+        utxo_set
+    }
+
+    fn funded(script_pubkey: Vec<u8>, value: i64) -> blvm_protocol::UtxoSet {
+        funded_at(script_pubkey, value, 0)
+    }
+
+    fn funded_coinbase(height: u64, is_coinbase: bool) -> blvm_protocol::UtxoSet {
+        use std::sync::Arc;
+        let tx = legacy_empty_script();
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            tx.inputs[0].prevout,
+            Arc::new(blvm_protocol::UTXO {
+                value: 2_000,
+                script_pubkey: vec![blvm_protocol::opcodes::OP_1].into(),
+                height,
+                is_coinbase,
+            }),
+        );
+        utxo_set
+    }
+
+    #[test]
+    fn mempool_rejects_consensus_invalid_transactions() {
+        use blvm_protocol::opcodes::{OP_0, OP_1};
+
+        let mempool = MempoolManager::new();
+        let mut negative = legacy_empty_script();
+        negative.outputs[0].value = -1;
+        assert!(!mempool.add_transaction(negative).unwrap());
+
+        let mempool = MempoolManager::new();
+        let mut coinbase = legacy_empty_script();
+        coinbase.inputs[0].prevout.hash = [0u8; 32];
+        coinbase.inputs[0].prevout.index = 0xffff_ffff;
+        coinbase.inputs[0]
+            .script_sig
+            .extend_from_slice(&[OP_1, OP_1]);
+        assert!(!mempool.add_transaction(coinbase).unwrap());
+
+        let mempool = MempoolManager::new();
+        let tx = legacy_empty_script();
+        assert!(
+            !mempool
+                .add_transaction_with_witness(tx, Some(Vec::new()))
+                .unwrap()
+        );
+
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+            vec![OP_0],
+            2_000,
+        ))));
+        assert!(!mempool.add_transaction(legacy_empty_script()).unwrap());
+
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+            vec![OP_1],
+            2_000,
+        ))));
+        assert!(mempool.add_transaction(legacy_empty_script()).unwrap());
+    }
+
+    #[test]
+    fn mempool_rejects_a_prevout_value_outside_money_range() {
+        use blvm_protocol::constants::MAX_MONEY;
+        use blvm_protocol::opcodes::OP_1;
+
+        let tx = legacy_empty_script();
+
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+            vec![OP_1],
+            -1,
+        ))));
+        assert!(!mempool.add_transaction(tx.clone()).unwrap());
+
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+            vec![OP_1],
+            MAX_MONEY + 1,
+        ))));
+        assert!(!mempool.add_transaction(tx.clone()).unwrap());
+
+        let mut at_cap = tx;
+        at_cap.outputs[0].value = MAX_MONEY - 1_000;
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+            vec![OP_1],
+            MAX_MONEY,
+        ))));
+        assert!(mempool.add_transaction(at_cap).unwrap());
+    }
+
+    #[test]
+    fn mempool_rejects_a_prevout_sum_above_max_money() {
+        use std::sync::Arc;
+
+        use blvm_protocol::UTXO;
+        use blvm_protocol::constants::MAX_MONEY;
+        use blvm_protocol::opcodes::OP_1;
+
+        let mut policy = crate::config::MempoolPolicyConfig::default();
+        policy.min_relay_fee_rate = 0;
+        policy.min_tx_fee = 0;
+
+        let mut over = legacy_empty_script();
+        over.inputs.push(TransactionInput {
+            prevout: OutPoint {
+                hash: [2u8; 32],
+                index: 0,
+            },
+            script_sig: Vec::new(),
+            sequence: 0xffffffff,
+        });
+        over.outputs[0].value = 1_000;
+        let mut utxo_set = funded(vec![OP_1], MAX_MONEY);
+        utxo_set.insert(
+            over.inputs[1].prevout,
+            Arc::new(UTXO {
+                value: MAX_MONEY,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        let mempool = MempoolManager::new();
+        mempool.set_policy_config(Some(policy.clone()));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set)));
+        assert!(!mempool.add_transaction(over).unwrap());
+
+        let mut at_cap = legacy_empty_script();
+        at_cap.inputs.push(TransactionInput {
+            prevout: OutPoint {
+                hash: [3u8; 32],
+                index: 0,
+            },
+            script_sig: Vec::new(),
+            sequence: 0xffffffff,
+        });
+        at_cap.outputs[0].value = 1_000;
+        let mut utxo_set = funded(vec![OP_1], MAX_MONEY / 2);
+        utxo_set.insert(
+            at_cap.inputs[1].prevout,
+            Arc::new(UTXO {
+                value: MAX_MONEY - (MAX_MONEY / 2),
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        let mempool = MempoolManager::new();
+        mempool.set_policy_config(Some(policy.clone()));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set)));
+        assert!(mempool.add_transaction(at_cap).unwrap());
+
+        let mempool = MempoolManager::new();
+        mempool.set_policy_config(Some(policy));
+        let mut utxo_set = funded(vec![OP_1], 60_000);
+        utxo_set.insert(
+            OutPoint {
+                hash: [4u8; 32],
+                index: 0,
+            },
+            Arc::new(UTXO {
+                value: MAX_MONEY,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set)));
+        let mut parent = legacy_empty_script();
+        parent.outputs[0].value = 50_000;
+        parent.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(parent.clone()).unwrap());
+
+        let mut child = legacy_empty_script();
+        child.inputs[0].prevout = OutPoint {
+            hash: blvm_protocol::block::calculate_tx_id(&parent),
+            index: 0,
+        };
+        child.inputs.push(TransactionInput {
+            prevout: OutPoint {
+                hash: [4u8; 32],
+                index: 0,
+            },
+            script_sig: Vec::new(),
+            sequence: 0xffffffff,
+        });
+        child.outputs[0].value = 1_000;
+        assert!(!mempool.add_transaction(child).unwrap());
+    }
+
+    #[test]
+    fn selector_includes_a_child_that_spends_a_mempool_parent() {
+        use std::sync::Arc;
+
+        use crate::node::miner::{MempoolProvider, TransactionSelector};
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+
+        let utxo_set = funded(vec![OP_1], 200_000);
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set.clone())));
+
+        let mut parent = legacy_empty_script();
+        parent.outputs[0].value = 190_000;
+        parent.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(parent.clone()).unwrap());
+
+        let mut child = legacy_empty_script();
+        child.inputs[0].prevout = OutPoint {
+            hash: calculate_tx_id(&parent),
+            index: 0,
+        };
+        child.outputs[0].value = 100_000;
+        assert!(mempool.add_transaction(child.clone()).unwrap());
+
+        let rates = mempool.fee_rates_sat_vb(&utxo_set);
+        assert!(rates.len() >= 2);
+        assert!(rates.iter().all(|rate| *rate >= 1));
+
+        let ordered = mempool.get_prioritized_transactions(2, &utxo_set);
+        assert_eq!(calculate_tx_id(&ordered[0]), calculate_tx_id(&child));
+
+        let parent_id = calculate_tx_id(&parent);
+        let child_id = calculate_tx_id(&child);
+        let selected = TransactionSelector::new().select_transactions(&mempool, &utxo_set);
+        let selected_ids: Vec<_> = selected.iter().map(calculate_tx_id).collect();
+        let parent_at = selected_ids.iter().position(|id| *id == parent_id).unwrap();
+        let child_at = selected_ids.iter().position(|id| *id == child_id).unwrap();
+        assert!(parent_at < child_at);
+    }
+
+    #[test]
+    fn selector_includes_a_parent_paid_for_by_its_child() {
+        use std::sync::Arc;
+
+        use crate::config::MempoolPolicyConfig;
+        use crate::node::miner::{MempoolProvider, TransactionSelector};
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+
+        let mut policy = MempoolPolicyConfig::default();
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+
+        let utxo_set = funded(vec![OP_1], 60_000);
+        let mempool = MempoolManager::new();
+        mempool.set_policy_config(Some(policy));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set.clone())));
+
+        let mut parent = legacy_empty_script();
+        parent.outputs[0].value = 59_999;
+        parent.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(parent.clone()).unwrap());
+
+        let selector = TransactionSelector::with_params(1_000_000, 4_000_000, 5);
+        let alone = selector.select_transactions(&mempool, &utxo_set);
+        assert!(alone.is_empty());
+
+        let mut child = legacy_empty_script();
+        child.inputs[0].prevout = OutPoint {
+            hash: calculate_tx_id(&parent),
+            index: 0,
+        };
+        child.outputs[0].value = 10_000;
+        child.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(child.clone()).unwrap());
+
+        let parent_id = calculate_tx_id(&parent);
+        let child_id = calculate_tx_id(&child);
+        let selected = selector.select_transactions(&mempool, &utxo_set);
+        let selected_ids: Vec<_> = selected.iter().map(calculate_tx_id).collect();
+        let parent_at = selected_ids.iter().position(|id| *id == parent_id).unwrap();
+        let child_at = selected_ids.iter().position(|id| *id == child_id).unwrap();
+        assert!(parent_at < child_at);
+    }
+
+    #[test]
+    fn selector_includes_two_parents_paid_for_by_their_child() {
+        use std::sync::Arc;
+
+        use crate::config::MempoolPolicyConfig;
+        use crate::node::miner::{MempoolProvider, TransactionSelector};
+        use blvm_protocol::TransactionInput;
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::constants::SEQUENCE_FINAL;
+        use blvm_protocol::opcodes::OP_1;
+
+        let mut policy = MempoolPolicyConfig::default();
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+
+        let mut utxo_set = funded(vec![OP_1], 30_000);
+        utxo_set.insert(
+            OutPoint {
+                hash: [2u8; 32],
+                index: 0,
+            },
+            Arc::new(blvm_protocol::UTXO {
+                value: 30_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        let mempool = MempoolManager::new();
+        mempool.set_policy_config(Some(policy));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set.clone())));
+
+        let mut parent_a = legacy_empty_script();
+        parent_a.outputs[0].value = 29_999;
+        parent_a.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(parent_a.clone()).unwrap());
+
+        let mut parent_b = legacy_empty_script();
+        parent_b.inputs[0].prevout.hash = [2u8; 32];
+        parent_b.outputs[0].value = 29_999;
+        parent_b.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(parent_b.clone()).unwrap());
+
+        let selector = TransactionSelector::with_params(1_000_000, 4_000_000, 5);
+        assert!(selector.select_transactions(&mempool, &utxo_set).is_empty());
+
+        let parent_a_id = calculate_tx_id(&parent_a);
+        let parent_b_id = calculate_tx_id(&parent_b);
+        let mut child = legacy_empty_script();
+        child.inputs[0].prevout = OutPoint {
+            hash: parent_a_id,
+            index: 0,
+        };
+        child.inputs.push(TransactionInput {
+            prevout: OutPoint {
+                hash: parent_b_id,
+                index: 0,
+            },
+            script_sig: Vec::new(),
+            sequence: SEQUENCE_FINAL as u64,
+        });
+        child.outputs[0].value = 10_000;
+        child.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(child.clone()).unwrap());
+
+        let child_id = calculate_tx_id(&child);
+        let selected = selector.select_transactions(&mempool, &utxo_set);
+        let selected_ids: Vec<_> = selected.iter().map(calculate_tx_id).collect();
+        let parent_a_at = selected_ids
+            .iter()
+            .position(|id| *id == parent_a_id)
+            .unwrap();
+        let parent_b_at = selected_ids
+            .iter()
+            .position(|id| *id == parent_b_id)
+            .unwrap();
+        let child_at = selected_ids.iter().position(|id| *id == child_id).unwrap();
+        assert!(parent_a_at < child_at);
+        assert!(parent_b_at < child_at);
+        assert_eq!(selected.len(), 3);
+    }
+
+    #[test]
+    fn selector_includes_a_grandparent_paid_for_by_its_grandchild() {
+        use std::sync::Arc;
+
+        use crate::config::MempoolPolicyConfig;
+        use crate::node::miner::{MempoolProvider, TransactionSelector};
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+
+        let mut policy = MempoolPolicyConfig::default();
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+
+        let utxo_set = funded(vec![OP_1], 40_000);
+        let mempool = MempoolManager::new();
+        mempool.set_policy_config(Some(policy));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set.clone())));
+
+        let mut grandparent = legacy_empty_script();
+        grandparent.outputs[0].value = 39_999;
+        grandparent.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(grandparent.clone()).unwrap());
+
+        let mut middle = legacy_empty_script();
+        middle.inputs[0].prevout = OutPoint {
+            hash: calculate_tx_id(&grandparent),
+            index: 0,
+        };
+        middle.outputs[0].value = 39_998;
+        middle.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(middle.clone()).unwrap());
+
+        let selector = TransactionSelector::with_params(1_000_000, 4_000_000, 5);
+        assert!(selector.select_transactions(&mempool, &utxo_set).is_empty());
+
+        let mut grandchild = legacy_empty_script();
+        grandchild.inputs[0].prevout = OutPoint {
+            hash: calculate_tx_id(&middle),
+            index: 0,
+        };
+        grandchild.outputs[0].value = 10_000;
+        grandchild.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(grandchild.clone()).unwrap());
+
+        let grandparent_id = calculate_tx_id(&grandparent);
+        let middle_id = calculate_tx_id(&middle);
+        let grandchild_id = calculate_tx_id(&grandchild);
+        let selected = selector.select_transactions(&mempool, &utxo_set);
+        let selected_ids: Vec<_> = selected.iter().map(calculate_tx_id).collect();
+        let grandparent_at = selected_ids
+            .iter()
+            .position(|id| *id == grandparent_id)
+            .unwrap();
+        let middle_at = selected_ids.iter().position(|id| *id == middle_id).unwrap();
+        let grandchild_at = selected_ids
+            .iter()
+            .position(|id| *id == grandchild_id)
+            .unwrap();
+        assert!(grandparent_at < middle_at);
+        assert!(middle_at < grandchild_at);
+        assert_eq!(selected.len(), 3);
+    }
+
+    #[test]
+    fn ranking_recomputes_a_tx_admitted_while_the_utxo_lock_is_held() {
+        use std::sync::Arc;
+
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+
+        let mut utxo_set = funded(vec![OP_1], 50_000);
+        utxo_set.insert(
+            OutPoint {
+                hash: [2u8; 32],
+                index: 0,
+            },
+            Arc::new(blvm_protocol::UTXO {
+                value: 80_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        let utxo_arc = Arc::new(tokio::sync::Mutex::new(utxo_set.clone()));
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::clone(&utxo_arc));
+
+        let mut low_fee = legacy_empty_script();
+        low_fee.outputs[0].value = 40_000;
+        assert!(mempool.add_transaction(low_fee).unwrap());
+        assert_eq!(mempool.get_prioritized_transactions(10, &utxo_set).len(), 1);
+
+        let mut high_fee = legacy_empty_script();
+        high_fee.inputs[0].prevout = OutPoint {
+            hash: [2u8; 32],
+            index: 0,
+        };
+        high_fee.outputs[0].value = 10_000;
+        let _held = utxo_arc.blocking_lock();
+        assert!(!mempool.add_transaction(high_fee.clone()).unwrap());
+        drop(_held);
+        assert!(mempool.add_transaction(high_fee.clone()).unwrap());
+
+        let ranked = mempool.get_prioritized_transactions(1, &utxo_set);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(calculate_tx_id(&ranked[0]), calculate_tx_id(&high_fee));
+    }
+
+    #[test]
+    fn mempool_rejects_admission_while_the_utxo_lock_is_held() {
+        use std::sync::Arc;
+
+        use blvm_protocol::opcodes::{OP_0, OP_1};
+
+        let mut utxo_set = funded(vec![OP_1], 50_000);
+        utxo_set.insert(
+            OutPoint {
+                hash: [2u8; 32],
+                index: 0,
+            },
+            Arc::new(blvm_protocol::UTXO {
+                value: 50_000,
+                script_pubkey: vec![OP_0].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        let utxo_arc = Arc::new(tokio::sync::Mutex::new(utxo_set));
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::clone(&utxo_arc));
+
+        let valid = legacy_empty_script();
+        let mut unspendable = legacy_empty_script();
+        unspendable.inputs[0].prevout = OutPoint {
+            hash: [2u8; 32],
+            index: 0,
+        };
+        let _held = utxo_arc.blocking_lock();
+        assert!(!mempool.add_transaction(valid.clone()).unwrap());
+        assert!(!mempool.add_transaction(unspendable.clone()).unwrap());
+        drop(_held);
+        assert_eq!(mempool.size(), 0);
+
+        assert!(!mempool.add_transaction(unspendable).unwrap());
+        assert!(mempool.add_transaction(valid).unwrap());
+        assert_eq!(mempool.size(), 1);
+    }
+
+    #[test]
+    fn mempool_rejects_a_spend_when_the_wired_utxo_set_is_empty() {
+        use std::sync::Arc;
+
+        use blvm_protocol::opcodes::OP_1;
+
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(
+            blvm_protocol::UtxoSet::default(),
+        )));
+        let tx = legacy_empty_script();
+        assert!(!mempool.add_transaction(tx.clone()).unwrap());
+        assert_eq!(mempool.size(), 0);
+
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded(
+            vec![OP_1],
+            50_000,
+        ))));
+        assert!(mempool.add_transaction(tx).unwrap());
+    }
+
+    #[test]
+    fn connected_block_removes_confirmed_and_conflicting_spends() {
+        use std::sync::Arc;
+
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+
+        let mut utxo_set = funded(vec![OP_1], 100_000);
+        utxo_set.insert(
+            OutPoint {
+                hash: [3u8; 32],
+                index: 0,
+            },
+            Arc::new(blvm_protocol::UTXO {
+                value: 50_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set)));
+
+        let mut confirmed = legacy_empty_script();
+        confirmed.outputs[0].value = 80_000;
+        confirmed.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(confirmed.clone()).unwrap());
+
+        let mut child = legacy_empty_script();
+        child.inputs[0].prevout = OutPoint {
+            hash: calculate_tx_id(&confirmed),
+            index: 0,
+        };
+        child.outputs[0].value = 60_000;
+        assert!(mempool.add_transaction(child.clone()).unwrap());
+
+        let mut unrelated = legacy_empty_script();
+        unrelated.inputs[0].prevout = OutPoint {
+            hash: [3u8; 32],
+            index: 0,
+        };
+        unrelated.outputs[0].value = 40_000;
+        assert!(mempool.add_transaction(unrelated.clone()).unwrap());
+
+        mempool.remove_for_connected_block(&[confirmed.clone()]);
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&confirmed))
+                .is_none()
+        );
+        assert!(mempool.get_transaction(&calculate_tx_id(&child)).is_some());
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&unrelated))
+                .is_some()
+        );
+
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded(
+            vec![OP_1],
+            100_000,
+        ))));
+        let mut conflict = legacy_empty_script();
+        conflict.outputs[0].value = 80_000;
+        conflict.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(conflict.clone()).unwrap());
+        let mut conflict_child = legacy_empty_script();
+        conflict_child.inputs[0].prevout = OutPoint {
+            hash: calculate_tx_id(&conflict),
+            index: 0,
+        };
+        conflict_child.outputs[0].value = 60_000;
+        assert!(mempool.add_transaction(conflict_child.clone()).unwrap());
+
+        let mut in_block = conflict.clone();
+        in_block.outputs[0].value = 70_000;
+        mempool.remove_for_connected_block(&[in_block]);
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&conflict))
+                .is_none()
+        );
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&conflict_child))
+                .is_none()
+        );
+        assert_eq!(mempool.size(), 0);
+    }
+
+    #[test]
+    fn reorg_restores_disconnected_spends_and_drops_conflicts() {
+        use std::sync::Arc;
+
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::{Block, BlockHeader};
+
+        fn block_with(txs: Vec<Transaction>) -> Block {
+            Block {
+                header: BlockHeader {
+                    version: 1,
+                    prev_block_hash: [0u8; 32],
+                    merkle_root: [0u8; 32],
+                    timestamp: 0,
+                    bits: 0,
+                    nonce: 0,
+                },
+                transactions: txs.into_boxed_slice(),
+            }
+        }
+
+        let mut before = funded(vec![OP_1], 100_000);
+        before.insert(
+            OutPoint {
+                hash: [2u8; 32],
+                index: 0,
+            },
+            Arc::new(blvm_protocol::UTXO {
+                value: 100_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(before)));
+
+        let mut conflict = legacy_empty_script();
+        conflict.inputs[0].prevout.hash = [2u8; 32];
+        conflict.outputs[0].value = 80_000;
+        conflict.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(conflict.clone()).unwrap());
+        let mut conflict_child = legacy_empty_script();
+        conflict_child.inputs[0].prevout = OutPoint {
+            hash: calculate_tx_id(&conflict),
+            index: 0,
+        };
+        conflict_child.outputs[0].value = 60_000;
+        assert!(mempool.add_transaction(conflict_child.clone()).unwrap());
+
+        let mut coinbase = legacy_empty_script();
+        coinbase.inputs[0].prevout.hash = [0u8; 32];
+        coinbase.inputs[0].prevout.index = 0xffff_ffff;
+        coinbase.inputs[0].script_sig = vec![OP_1, OP_1];
+        coinbase.outputs[0].value = 50_000;
+
+        let mut resurrected = legacy_empty_script();
+        resurrected.outputs[0].value = 80_000;
+        resurrected.outputs[0].script_pubkey = vec![OP_1];
+        let mut resurrected_child = legacy_empty_script();
+        resurrected_child.inputs[0].prevout = OutPoint {
+            hash: calculate_tx_id(&resurrected),
+            index: 0,
+        };
+        resurrected_child.outputs[0].value = 60_000;
+
+        let mut connected_spend = legacy_empty_script();
+        connected_spend.inputs[0].prevout.hash = [2u8; 32];
+        connected_spend.outputs[0].value = 70_000;
+
+        let after = funded(vec![OP_1], 100_000);
+        mempool.apply_reorg(
+            &[block_with(vec![
+                coinbase,
+                resurrected.clone(),
+                resurrected_child.clone(),
+            ])],
+            &[],
+            &[block_with(vec![connected_spend])],
+            &after,
+        );
+
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&conflict))
+                .is_none()
+        );
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&conflict_child))
+                .is_none()
+        );
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&resurrected))
+                .is_some()
+        );
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&resurrected_child))
+                .is_some()
+        );
+        assert_eq!(mempool.size(), 2);
+    }
+
+    #[test]
+    fn reorg_restores_a_segwit_spend_with_its_witness() {
+        use std::sync::Arc;
+
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::{OP_0, OP_1, PUSH_32_BYTES};
+        use blvm_protocol::segwit::Witness;
+        use blvm_protocol::{Block, BlockHeader};
+        use sha2::{Digest, Sha256};
+
+        fn block_with(txs: Vec<Transaction>) -> Block {
+            Block {
+                header: BlockHeader {
+                    version: 1,
+                    prev_block_hash: [0u8; 32],
+                    merkle_root: [0u8; 32],
+                    timestamp: 0,
+                    bits: 0,
+                    nonce: 0,
+                },
+                transactions: txs.into_boxed_slice(),
+            }
+        }
+
+        let witness_script = vec![OP_1];
+        let script_hash = Sha256::digest(&witness_script);
+        let mut script_pubkey = vec![OP_0, PUSH_32_BYTES];
+        script_pubkey.extend_from_slice(&script_hash);
+
+        let utxo = funded(script_pubkey, 100_000);
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo.clone())));
+
+        let mut spend = legacy_empty_script();
+        spend.outputs[0].value = 80_000;
+        spend.outputs[0].script_pubkey = vec![OP_1];
+        let witness: Vec<Witness> = vec![vec![witness_script]];
+
+        let mut coinbase = legacy_empty_script();
+        coinbase.inputs[0].prevout.hash = [0u8; 32];
+        coinbase.inputs[0].prevout.index = 0xffff_ffff;
+        coinbase.inputs[0].script_sig = vec![OP_1, OP_1];
+        coinbase.outputs[0].value = 50_000;
+
+        mempool.apply_reorg(
+            &[block_with(vec![coinbase, spend.clone()])],
+            &[vec![Vec::new(), witness.clone()]],
+            &[],
+            &utxo,
+        );
+
+        let txid = calculate_tx_id(&spend);
+        assert!(mempool.get_transaction(&txid).is_some());
+        assert_eq!(mempool.get_transaction_witnesses(&txid), Some(witness));
+        assert_eq!(mempool.size(), 1);
+    }
+
+    #[test]
+    fn mempool_rejects_a_witness_program_spend_without_a_witness() {
+        use std::sync::Arc;
+
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::{OP_0, OP_1, PUSH_32_BYTES};
+        use blvm_protocol::segwit::Witness;
+        use sha2::{Digest, Sha256};
+
+        let witness_script = vec![OP_1];
+        let script_hash = Sha256::digest(&witness_script);
+        let mut script_pubkey = vec![OP_0, PUSH_32_BYTES];
+        script_pubkey.extend_from_slice(&script_hash);
+
+        let mut utxo = funded(script_pubkey, 100_000);
+        utxo.insert(
+            OutPoint {
+                hash: [2u8; 32],
+                index: 0,
+            },
+            Arc::new(blvm_protocol::UTXO {
+                value: 50_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo)));
+
+        let mut legacy = legacy_empty_script();
+        legacy.inputs[0].prevout.hash = [2u8; 32];
+        legacy.outputs[0].value = 40_000;
+        legacy.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(legacy).unwrap());
+
+        let mut spend = legacy_empty_script();
+        spend.outputs[0].value = 80_000;
+        spend.outputs[0].script_pubkey = vec![OP_1];
+        assert!(!mempool.add_transaction(spend.clone()).unwrap());
+
+        let witness: Vec<Witness> = vec![vec![witness_script]];
+        assert!(
+            mempool
+                .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
+                .unwrap()
+        );
+        assert_eq!(
+            mempool.get_transaction_witnesses(&calculate_tx_id(&spend)),
+            Some(witness)
+        );
+        assert_eq!(mempool.size(), 2);
+    }
+
+    #[test]
+    fn mempool_rejects_a_p2sh_witness_redeem_without_a_witness() {
+        use std::sync::Arc;
+
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::{
+            OP_0, OP_1, OP_EQUAL, OP_HASH160, PUSH_20_BYTES, PUSH_32_BYTES,
+        };
+        use blvm_protocol::segwit::Witness;
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        fn hash160(data: &[u8]) -> [u8; 20] {
+            let sha = Sha256::digest(data);
+            Ripemd160::digest(sha).into()
+        }
+
+        fn p2sh_script(redeem: &[u8]) -> Vec<u8> {
+            let hash = hash160(redeem);
+            let mut script = vec![OP_HASH160, PUSH_20_BYTES];
+            script.extend_from_slice(&hash);
+            script.push(OP_EQUAL);
+            script
+        }
+
+        fn push_data(data: &[u8]) -> Vec<u8> {
+            let mut script = Vec::with_capacity(data.len() + 1);
+            script.push(data.len() as u8);
+            script.extend_from_slice(data);
+            script
+        }
+
+        let witness_script = vec![OP_1];
+        let program = Sha256::digest(&witness_script);
+        let mut redeem = vec![OP_0, PUSH_32_BYTES];
+        redeem.extend_from_slice(&program);
+
+        let plain_redeem = vec![OP_1];
+        let mut utxo = funded(p2sh_script(&redeem), 100_000);
+        utxo.insert(
+            OutPoint {
+                hash: [2u8; 32],
+                index: 0,
+            },
+            Arc::new(blvm_protocol::UTXO {
+                value: 50_000,
+                script_pubkey: p2sh_script(&plain_redeem).into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo)));
+
+        let mut plain = legacy_empty_script();
+        plain.inputs[0].prevout.hash = [2u8; 32];
+        plain.inputs[0].script_sig = push_data(&plain_redeem);
+        plain.outputs[0].value = 40_000;
+        plain.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(plain).unwrap());
+
+        let mut spend = legacy_empty_script();
+        spend.inputs[0].script_sig = push_data(&redeem);
+        spend.outputs[0].value = 80_000;
+        spend.outputs[0].script_pubkey = vec![OP_1];
+        assert!(!mempool.add_transaction(spend.clone()).unwrap());
+
+        let witness: Vec<Witness> = vec![vec![witness_script]];
+        assert!(
+            mempool
+                .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
+                .unwrap()
+        );
+        assert_eq!(
+            mempool.get_transaction_witnesses(&calculate_tx_id(&spend)),
+            Some(witness)
+        );
+        assert_eq!(mempool.size(), 2);
+    }
+
+    #[test]
+    fn mempool_rejects_a_witness_spend_of_a_mempool_parent_without_a_witness() {
+        use std::sync::Arc;
+
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::{OP_0, OP_1, PUSH_32_BYTES};
+        use blvm_protocol::segwit::Witness;
+        use sha2::{Digest, Sha256};
+
+        let witness_script = vec![OP_1];
+        let program = Sha256::digest(&witness_script);
+        let mut parent_script = vec![OP_0, PUSH_32_BYTES];
+        parent_script.extend_from_slice(&program);
+
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded(
+            vec![OP_1],
+            100_000,
+        ))));
+
+        let mut parent = legacy_empty_script();
+        parent.outputs[0].value = 80_000;
+        parent.outputs[0].script_pubkey = parent_script;
+        assert!(mempool.add_transaction(parent.clone()).unwrap());
+
+        let mut child = legacy_empty_script();
+        child.inputs[0].prevout = OutPoint {
+            hash: calculate_tx_id(&parent),
+            index: 0,
+        };
+        child.outputs[0].value = 60_000;
+        child.outputs[0].script_pubkey = vec![OP_1];
+        assert!(!mempool.add_transaction(child.clone()).unwrap());
+
+        let witness: Vec<Witness> = vec![vec![witness_script]];
+        assert!(
+            mempool
+                .add_transaction_with_witness(child.clone(), Some(witness.clone()))
+                .unwrap()
+        );
+        assert_eq!(
+            mempool.get_transaction_witnesses(&calculate_tx_id(&child)),
+            Some(witness)
+        );
+        assert_eq!(mempool.size(), 2);
+    }
+
+    #[test]
+    fn mempool_rejects_an_unknown_prevout() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+            vec![OP_1],
+            5_000,
+        ))));
+
+        let mut mixed = legacy_empty_script();
+        mixed.inputs.push(TransactionInput {
+            prevout: OutPoint {
+                hash: [9u8; 32],
+                index: 0,
+            },
+            script_sig: Vec::new(),
+            sequence: 0xffffffff,
+        });
+        assert!(!mempool.add_transaction(mixed).unwrap());
+
+        let mut parent = legacy_empty_script();
+        parent.outputs[0].value = 3_000;
+        parent.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(parent.clone()).unwrap());
+
+        let mut child = legacy_empty_script();
+        child.inputs[0].prevout = OutPoint {
+            hash: calculate_tx_id(&parent),
+            index: 0,
+        };
+        child.outputs[0].value = 1_000;
+        assert!(mempool.add_transaction(child).unwrap());
+    }
+
+    #[test]
+    fn mempool_rejects_an_immature_coinbase_spend() {
+        use blvm_protocol::constants::COINBASE_MATURITY;
+
+        let created = 1_000u64;
+        let immature = created + COINBASE_MATURITY - 1;
+        let mature = created + COINBASE_MATURITY;
+        let tx = legacy_empty_script();
+
+        let mempool = MempoolManager::new();
+        mempool.set_chain_tip(immature, 0);
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(
+            funded_coinbase(created, true),
+        )));
+        assert!(!mempool.add_transaction(tx.clone()).unwrap());
+
+        let mempool = MempoolManager::new();
+        mempool.set_chain_tip(mature, 0);
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(
+            funded_coinbase(created, true),
+        )));
+        assert!(mempool.add_transaction(tx.clone()).unwrap());
+
+        let mempool = MempoolManager::new();
+        mempool.set_chain_tip(immature, 0);
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(
+            funded_coinbase(created, false),
+        )));
+        assert!(mempool.add_transaction(tx).unwrap());
+    }
+
+    #[test]
+    fn mempool_rejects_a_relative_locktime() {
+        use blvm_protocol::opcodes::OP_1;
+
+        let next_height = 500_000;
+        let mut young = legacy_empty_script();
+        young.version = 2;
+        young.inputs[0].sequence = 10;
+        let mempool = MempoolManager::new();
+        mempool.set_chain_tip(next_height, 1_700_000_000);
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded_at(
+            vec![OP_1],
+            2_000,
+            499_995,
+        ))));
+        assert!(!mempool.add_transaction(young.clone()).unwrap());
+
+        let mempool = MempoolManager::new();
+        mempool.set_chain_tip(next_height, 1_700_000_000);
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded_at(
+            vec![OP_1],
+            2_000,
+            499_000,
+        ))));
+        assert!(mempool.add_transaction(young.clone()).unwrap());
+
+        young.version = 1;
+        let mempool = MempoolManager::new();
+        mempool.set_chain_tip(next_height, 1_700_000_000);
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded_at(
+            vec![OP_1],
+            2_000,
+            499_995,
+        ))));
+        assert!(mempool.add_transaction(young).unwrap());
+
+        let mut time_locked = legacy_empty_script();
+        time_locked.version = 2;
+        time_locked.inputs[0].sequence = (1 << 22) | 1;
+        let mempool = MempoolManager::new();
+        mempool.set_chain_tip(next_height, 1_700_000_000);
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded_at(
+            vec![OP_1],
+            2_000,
+            499_000,
+        ))));
+        assert!(!mempool.add_transaction(time_locked).unwrap());
+    }
+
+    #[test]
+    fn mempool_rejects_a_non_final_locktime() {
+        use blvm_protocol::constants::{LOCKTIME_THRESHOLD, SEQUENCE_FINAL};
+
+        let not_final = (SEQUENCE_FINAL as u64).saturating_sub(1);
+        let mut locked = legacy_empty_script();
+        locked.lock_time = 200;
+        locked.inputs[0].sequence = not_final;
+
+        let mempool = MempoolManager::new();
+        mempool.set_chain_tip(100, 0);
+        assert!(!mempool.add_transaction(locked.clone()).unwrap());
+
+        let mempool = MempoolManager::new();
+        mempool.set_chain_tip(100, 0);
+        locked.inputs[0].sequence = SEQUENCE_FINAL as u64;
+        assert!(mempool.add_transaction(locked).unwrap());
+
+        let mempool = MempoolManager::new();
+        mempool.set_chain_tip(100, 0);
+        let mut height_final = legacy_empty_script();
+        height_final.lock_time = 50;
+        height_final.inputs[0].sequence = not_final;
+        assert!(mempool.add_transaction(height_final).unwrap());
+
+        let mempool = MempoolManager::new();
+        mempool.set_chain_tip(100, 0);
+        let mut time_locked = legacy_empty_script();
+        time_locked.lock_time = LOCKTIME_THRESHOLD as u64;
+        time_locked.inputs[0].sequence = not_final;
+        assert!(!mempool.add_transaction(time_locked.clone()).unwrap());
+
+        let mempool = MempoolManager::new();
+        mempool.set_chain_tip(100, (LOCKTIME_THRESHOLD as u64).saturating_add(1));
+        assert!(mempool.add_transaction(time_locked).unwrap());
+    }
+
     #[test]
     fn empty_witness_stacks_use_stripped_weight() {
         let mempool = MempoolManager::new();
@@ -2277,5 +4016,84 @@ mod tests {
             stripped
         );
         assert!(mempool.estimate_transaction_weight(&tx) > stripped);
+    }
+
+    #[test]
+    fn fee_index_ignores_a_negative_output() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::constants::SEQUENCE_FINAL;
+        use blvm_protocol::opcodes::OP_1;
+        use std::sync::Arc;
+
+        let mempool = MempoolManager::new();
+        let funding = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        let negative_prevout = OutPoint {
+            hash: [2u8; 32],
+            index: 0,
+        };
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        for prevout in [funding, negative_prevout] {
+            utxo_set.insert(
+                prevout,
+                Arc::new(blvm_protocol::UTXO {
+                    value: 50_000,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 0,
+                    is_coinbase: false,
+                }),
+            );
+        }
+
+        let positive = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: funding,
+                script_sig: Vec::new(),
+                sequence: SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 40_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        assert!(mempool.add_transaction(positive.clone()).unwrap());
+
+        let negative = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: negative_prevout,
+                script_sig: Vec::new(),
+                sequence: SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![
+                TransactionOutput {
+                    value: 1_000,
+                    script_pubkey: vec![OP_1],
+                },
+                TransactionOutput {
+                    value: -1,
+                    script_pubkey: vec![OP_1],
+                },
+            ]
+            .into(),
+            lock_time: 0,
+        };
+        let negative_id = calculate_tx_id(&negative);
+        mempool
+            .pool_lock()
+            .transactions
+            .insert(negative_id, negative);
+
+        mempool.fee_rates_sat_vb(&utxo_set);
+        let rates = mempool.fee_cache.read().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(rates.get(&negative_id).copied(), Some(0));
+        assert!(rates.get(&calculate_tx_id(&positive)).copied().unwrap() > 0);
     }
 }
