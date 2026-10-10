@@ -245,7 +245,7 @@ mod tests {
             nm.ban_list()
                 .read()
                 .await
-                .contains_key(&"203.0.113.1:8333".parse::<SocketAddr>().unwrap())
+                .contains_key(&"203.0.113.1:0".parse::<SocketAddr>().unwrap())
         );
     }
 }
