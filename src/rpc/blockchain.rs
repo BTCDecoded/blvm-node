@@ -125,7 +125,13 @@ fn filter_index_synced(storage: &Storage, tip_height: u64) -> bool {
         let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height) else {
             return false;
         };
-        if storage.blocks().get_filter_header(&hash).ok().flatten().is_none() {
+        if storage
+            .blocks()
+            .get_filter_header(&hash)
+            .ok()
+            .flatten()
+            .is_none()
+        {
             return false;
         }
     }
@@ -134,7 +140,7 @@ fn filter_index_synced(storage: &Storage, tip_height: u64) -> bool {
 
 fn in_money_range(value: i64) -> bool {
     const MAX_MONEY: i64 = 21_000_000 * 100_000_000;
-    value >= 0 && value <= MAX_MONEY
+    (0..=MAX_MONEY).contains(&value)
 }
 
 /// Blockchain RPC methods
@@ -2015,7 +2021,7 @@ impl BlockchainRpc {
                 "indexed_value_buckets": index_stats.indexed_value_buckets,
             },
             "basic block filter index": {
-                "synced": filter_index_synced(&storage, best_block_height),
+                "synced": filter_index_synced(storage, best_block_height),
                 "best_block_height": best_block_height
             }
         }))
@@ -2273,7 +2279,6 @@ impl BlockchainRpc {
             let mut balance: i64 = 0;
             let mut utxo_count = 0;
             let mut received: i64 = 0;
-            let sent: i64;
 
             for tx in &transactions {
                 use blvm_protocol::block::calculate_tx_id;
@@ -2295,7 +2300,7 @@ impl BlockchainRpc {
                     }
                 }
             }
-            sent = storage
+            let sent = storage
                 .transactions()
                 .spent_value_for_script(&script_pubkey)
                 .unwrap_or(0);
@@ -2589,8 +2594,8 @@ mod block_stats_tests {
     #[tokio::test]
     async fn invalidate_tip_moves_to_the_parent_and_drops_the_coinbase() {
         use blvm_consensus::reorganization::{BlockUndoLog, UndoEntry};
-        use blvm_protocol::block::calculate_tx_id;
         use blvm_protocol::UTXO;
+        use blvm_protocol::block::calculate_tx_id;
         use std::sync::Arc as StdArc;
 
         let temp = tempfile::TempDir::new().unwrap();
@@ -2605,7 +2610,10 @@ mod block_stats_tests {
         };
         storage.chain().initialize(&parent).unwrap();
         let parent_hash = storage.chain().get_tip_hash().unwrap().unwrap();
-        storage.blocks().store_header(&parent_hash, &parent).unwrap();
+        storage
+            .blocks()
+            .store_header(&parent_hash, &parent)
+            .unwrap();
 
         let coinbase = tx_with_output(50_000);
         let coinbase_id = calculate_tx_id(&coinbase);
@@ -2622,7 +2630,10 @@ mod block_stats_tests {
         };
         let child_hash = storage.blocks().get_block_hash(&child);
         storage.blocks().store_block(&child).unwrap();
-        storage.blocks().store_header(&child_hash, &child.header).unwrap();
+        storage
+            .blocks()
+            .store_header(&child_hash, &child.header)
+            .unwrap();
         storage.blocks().store_height(1, &child_hash).unwrap();
         let outpoint = OutPoint {
             hash: coinbase_id,
@@ -2648,11 +2659,16 @@ mod block_stats_tests {
             .unwrap();
 
         BlockchainRpc::with_dependencies(Arc::clone(&storage))
-            .invalidate_block(&json!([crate::storage::hashing::hash_to_rpc_hex(&child_hash)]))
+            .invalidate_block(&json!([crate::storage::hashing::hash_to_rpc_hex(
+                &child_hash
+            )]))
             .await
             .unwrap();
 
-        assert_eq!(storage.chain().get_tip_hash().unwrap().unwrap(), parent_hash);
+        assert_eq!(
+            storage.chain().get_tip_hash().unwrap().unwrap(),
+            parent_hash
+        );
         assert!(storage.utxos().get_utxo(&outpoint).unwrap().is_none());
         let tips = BlockchainRpc::with_dependencies(storage)
             .get_chain_tips()
@@ -2662,7 +2678,10 @@ mod block_stats_tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|tip| tip["hash"].as_str() == Some(crate::storage::hashing::hash_to_rpc_hex(&child_hash).as_str()))
+            .find(|tip| {
+                tip["hash"].as_str()
+                    == Some(crate::storage::hashing::hash_to_rpc_hex(&child_hash).as_str())
+            })
             .unwrap();
         assert_eq!(old_tip["status"], "invalid");
     }

@@ -462,17 +462,15 @@ impl MempoolManager {
                 return true;
             }
         }
-        match blvm_protocol::mempool::relative_lock_unsatisfied(
+        blvm_protocol::mempool::relative_lock_unsatisfied(
             tx,
             utxo_set,
             block_height,
             block_mtp,
             Some(&prev_mtps),
             self.chain_network(),
-        ) {
-            Ok(unsatisfied) => unsatisfied,
-            Err(_) => true,
-        }
+        )
+        .unwrap_or(true)
     }
 
     fn prevout_value_out_of_range(&self, tx: &Transaction, utxo_set: &UtxoSet) -> bool {

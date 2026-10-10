@@ -103,7 +103,10 @@ pub(crate) async fn start_tcp_listener(nm: &NetworkManager, listen_addr: SocketA
                             let ban_duration = dos_protection.ban_duration_seconds();
                             let unban_timestamp = crate::utils::current_timestamp() + ban_duration;
                             let mut ban_list_guard = ban_list.write().await;
-                            ban_list_guard.insert(std::net::SocketAddr::new(socket_addr.ip(), 0), unban_timestamp);
+                            ban_list_guard.insert(
+                                std::net::SocketAddr::new(socket_addr.ip(), 0),
+                                unban_timestamp,
+                            );
                         }
                         drop(stream);
                         continue;
@@ -215,7 +218,10 @@ pub(crate) async fn start_quinn_listener(
                                     let ban_duration = dos_protection.ban_duration_seconds();
                                     let unban_timestamp = current_timestamp() + ban_duration;
                                     let mut ban_list_guard = ban_list.write().await;
-                                    ban_list_guard.insert(std::net::SocketAddr::new(socket_addr.ip(), 0), unban_timestamp);
+                                    ban_list_guard.insert(
+                                        std::net::SocketAddr::new(socket_addr.ip(), 0),
+                                        unban_timestamp,
+                                    );
                                 }
                                 drop(conn);
                                 continue;

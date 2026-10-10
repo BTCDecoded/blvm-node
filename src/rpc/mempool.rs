@@ -145,23 +145,19 @@ impl MempoolRpc {
                     } else {
                         0.0
                     };
-                    let ancestors = follow_pool_edges(
-                        mempool,
-                        mempool.dependency_hashes(&txid),
-                        false,
-                    );
-                    let descendants = follow_pool_edges(
-                        mempool,
-                        mempool.descendant_hashes(&txid),
-                        true,
-                    );
+                    let ancestors =
+                        follow_pool_edges(mempool, mempool.dependency_hashes(&txid), false);
+                    let descendants =
+                        follow_pool_edges(mempool, mempool.descendant_hashes(&txid), true);
                     let fee_sats = |hash: &blvm_protocol::Hash| -> f64 {
                         let Some(ref set) = utxo_set else {
                             return 0.0;
                         };
                         mempool
                             .get_transaction(hash)
-                            .map(|tx| mempool.calculate_transaction_fee(&tx, set) as f64 / 100_000_000.0)
+                            .map(|tx| {
+                                mempool.calculate_transaction_fee(&tx, set) as f64 / 100_000_000.0
+                            })
                             .unwrap_or(0.0)
                     };
                     let size_of = |hash: &blvm_protocol::Hash| -> usize {
@@ -182,29 +178,32 @@ impl MempoolRpc {
                         .iter()
                         .map(crate::storage::hashing::hash_to_rpc_hex)
                         .collect();
-                    result.insert(txid_hex, json!({
-                        "size": size,
-                        "fee": fee_btc,
-                        "modifiedfee": fee_btc,
-                        "time": mempool.accepted_at(&txid),
-                        "height": -1,
-                        "descendantcount": 1 + descendants.len(),
-                        "descendantsize": descendant_size,
-                        "descendantfees": descendant_fees,
-                        "ancestorcount": 1 + ancestors.len(),
-                        "ancestorsize": ancestor_size,
-                        "ancestorfees": ancestor_fees,
-                        "wtxid": wtxid,
-                        "fees": {
-                            "base": fee_btc,
-                            "modified": fee_btc,
-                            "ancestor": ancestor_fees,
-                            "descendant": descendant_fees
-                        },
-                        "depends": depends,
-                        "spentby": spentby,
-                        "bip125-replaceable": blvm_protocol::mempool::signals_rbf(&tx)
-                    }));
+                    result.insert(
+                        txid_hex,
+                        json!({
+                            "size": size,
+                            "fee": fee_btc,
+                            "modifiedfee": fee_btc,
+                            "time": mempool.accepted_at(&txid),
+                            "height": -1,
+                            "descendantcount": 1 + descendants.len(),
+                            "descendantsize": descendant_size,
+                            "descendantfees": descendant_fees,
+                            "ancestorcount": 1 + ancestors.len(),
+                            "ancestorsize": ancestor_size,
+                            "ancestorfees": ancestor_fees,
+                            "wtxid": wtxid,
+                            "fees": {
+                                "base": fee_btc,
+                                "modified": fee_btc,
+                                "ancestor": ancestor_fees,
+                                "descendant": descendant_fees
+                            },
+                            "depends": depends,
+                            "spentby": spentby,
+                            "bip125-replaceable": blvm_protocol::mempool::signals_rbf(&tx)
+                        }),
+                    );
                 }
                 Ok(json!(result))
             } else {

@@ -750,7 +750,12 @@ impl RawTxRpc {
         for (i, input) in tx.inputs.iter().enumerate() {
             let txinwitness: Vec<String> = witnesses
                 .get(i)
-                .map(|stack| stack.iter().map(|item| hex::encode(item.as_slice())).collect())
+                .map(|stack| {
+                    stack
+                        .iter()
+                        .map(|item| hex::encode(item.as_slice()))
+                        .collect()
+                })
                 .unwrap_or_default();
             vin.push(json!({
                 "txid": Self::rpc_txid(&input.prevout.hash),
@@ -1761,7 +1766,7 @@ pub(crate) fn script_pubkey_type(script: &[u8]) -> &'static str {
 
 #[cfg(test)]
 mod createraw_locks {
-    use super::{script_pubkey_type, RawTxRpc};
+    use super::{RawTxRpc, script_pubkey_type};
     use blvm_protocol::opcodes::{OP_PUSHDATA1, OP_RETURN};
     use serde_json::json;
 
@@ -1800,10 +1805,9 @@ mod createraw_locks {
             .await
             .unwrap();
         for hex_tx in [object.as_str().unwrap(), array.as_str().unwrap()] {
-            let (tx, _) = RawTxRpc::deserialize_transaction_with_witness(
-                &hex::decode(hex_tx).unwrap(),
-            )
-            .unwrap();
+            let (tx, _) =
+                RawTxRpc::deserialize_transaction_with_witness(&hex::decode(hex_tx).unwrap())
+                    .unwrap();
             assert!(tx.outputs.iter().any(|output| output.value == 3));
             let data = tx
                 .outputs
@@ -1829,7 +1833,9 @@ mod createraw_locks {
         use crate::node::mempool::MempoolManager;
         use crate::storage::Storage;
         use blvm_protocol::opcodes::OP_1;
-        use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet};
+        use blvm_protocol::{
+            OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet,
+        };
         use std::sync::Arc;
 
         let temp = tempfile::TempDir::new().unwrap();
@@ -1888,10 +1894,7 @@ mod createraw_locks {
         };
         let child_hex = RawTxRpc::serialize_transaction_with_witness(&child, None);
         let rpc = RawTxRpc::with_dependencies(storage, Arc::clone(&mempool), None, None);
-        let admitted = rpc
-            .sendrawtransaction(&json!([child_hex]))
-            .await
-            .unwrap();
+        let admitted = rpc.sendrawtransaction(&json!([child_hex])).await.unwrap();
         assert_eq!(admitted.as_str().unwrap().len(), 64);
         assert!(
             mempool
@@ -1927,7 +1930,9 @@ mod createraw_locks {
         use crate::storage::Storage;
         use crate::storage::hashing::hash_to_rpc_hex;
         use blvm_protocol::opcodes::OP_1;
-        use blvm_protocol::{BlockHeader, OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet};
+        use blvm_protocol::{
+            BlockHeader, OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet,
+        };
         use std::sync::Arc;
 
         let temp = tempfile::TempDir::new().unwrap();
@@ -1960,7 +1965,8 @@ mod createraw_locks {
             )
             .unwrap();
         let mempool = Arc::new(MempoolManager::new());
-        let rpc = RawTxRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool), None, None);
+        let rpc =
+            RawTxRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool), None, None);
         let shown = rpc
             .gettxout(&json!([hash_to_rpc_hex(&created.hash), 0, false]))
             .await
@@ -2023,13 +2029,16 @@ mod createraw_locks {
         use crate::storage::Storage;
         use crate::storage::hashing::hash_to_rpc_hex;
         use blvm_protocol::opcodes::OP_1;
-        use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet};
+        use blvm_protocol::{
+            OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet,
+        };
         use std::sync::Arc;
 
         let temp = tempfile::TempDir::new().unwrap();
         let storage = Arc::new(Storage::new(temp.path()).unwrap());
         let mempool = Arc::new(MempoolManager::new());
-        let rpc = RawTxRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool), None, None);
+        let rpc =
+            RawTxRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool), None, None);
         assert!(
             rpc.getrawtransaction(&json!([hash_to_rpc_hex(&[9u8; 32])]))
                 .await

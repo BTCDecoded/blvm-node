@@ -705,7 +705,7 @@ impl TxIndex {
         if !self.enable_address_index {
             return Ok(());
         }
-        if value < 0 || value > 21_000_000 * 100_000_000 {
+        if !(0..=21_000_000 * 100_000_000).contains(&value) {
             return Ok(());
         }
         let address_hash = sha256(script_pubkey);
@@ -734,9 +734,7 @@ impl TxIndex {
         let spends = self.spend_entries(&address_hash)?;
         Ok(spends
             .into_iter()
-            .filter(|(_, value)| {
-                *value >= 0 && *value <= 21_000_000 * 100_000_000
-            })
+            .filter(|(_, value)| *value >= 0 && *value <= 21_000_000 * 100_000_000)
             .map(|(_, value)| value)
             .fold(0i64, i64::saturating_add))
     }

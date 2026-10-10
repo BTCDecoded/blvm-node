@@ -296,19 +296,16 @@ pub fn apply_blocktxn(
 /// Transactions and witness stacks in block order, after every slot is filled.
 pub fn completed_compact_block(
     assembly: &CompactAssembly,
-) -> Result<(
-    Block,
-    Vec<Vec<blvm_protocol::segwit::Witness>>,
-)> {
+) -> Result<(Block, Vec<Vec<blvm_protocol::segwit::Witness>>)> {
     let mut transactions = Vec::with_capacity(assembly.slots.len());
     let mut witnesses = Vec::with_capacity(assembly.slots.len());
     for (index, slot) in assembly.slots.iter().enumerate() {
         let Some((tx, witness)) = slot else {
             anyhow::bail!("compact block position {index} is still missing");
         };
-        let stacks = witness.clone().unwrap_or_else(|| {
-            tx.inputs.iter().map(|_| Vec::new()).collect()
-        });
+        let stacks = witness
+            .clone()
+            .unwrap_or_else(|| tx.inputs.iter().map(|_| Vec::new()).collect());
         witnesses.push(stacks);
         transactions.push(tx.clone());
     }
@@ -864,6 +861,9 @@ mod tests {
         apply_blocktxn(&mut assembly, &[tx(2)], Some(&[witness.clone()])).unwrap();
         let (reconstructed, witnesses) = completed_compact_block(&assembly).unwrap();
         assert_eq!(witnesses[1], witness);
-        assert_eq!(reconstructed.transactions[1].outputs[0].script_pubkey, vec![OP_1]);
+        assert_eq!(
+            reconstructed.transactions[1].outputs[0].script_pubkey,
+            vec![OP_1]
+        );
     }
 }

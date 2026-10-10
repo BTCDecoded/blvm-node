@@ -439,7 +439,9 @@ impl NetworkManager {
                     }
                     {
                         let ban_list_guard = ban_list.read().await;
-                        if let Some(unban_timestamp) = ban_list_guard.get(&std::net::SocketAddr::new(addr.ip(), 0)) {
+                        if let Some(unban_timestamp) =
+                            ban_list_guard.get(&std::net::SocketAddr::new(addr.ip(), 0))
+                        {
                             if *unban_timestamp != u64::MAX && now < *unban_timestamp {
                                 continue;
                             }

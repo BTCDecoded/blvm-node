@@ -129,7 +129,8 @@ pub fn store_block_with_context_and_index(
             for tx in block.transactions.iter() {
                 let tx_hash = blvm_protocol::block::calculate_tx_id(tx);
                 for input in tx.inputs.iter() {
-                    let Some(entry) = undo.entries.iter().find(|e| e.outpoint == input.prevout) else {
+                    let Some(entry) = undo.entries.iter().find(|e| e.outpoint == input.prevout)
+                    else {
                         continue;
                     };
                     let Some(prev) = &entry.previous_utxo else {

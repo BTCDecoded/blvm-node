@@ -100,9 +100,7 @@ impl Peer {
     }
 
     /// Same peer as [`Self::new_for_testing`], plus the channel `send_to_peer` writes.
-    pub(crate) fn pair_for_testing(
-        addr: SocketAddr,
-    ) -> (Self, mpsc::UnboundedReceiver<Vec<u8>>) {
+    pub(crate) fn pair_for_testing(addr: SocketAddr) -> (Self, mpsc::UnboundedReceiver<Vec<u8>>) {
         let (message_tx, _) = mpsc::unbounded_channel();
         let (send_tx, send_rx) = mpsc::unbounded_channel();
         let transport_addr = super::transport::TransportAddr::Tcp(addr);

@@ -18,9 +18,7 @@ fn parse_ban_ip(subnet: &str) -> RpcResult<IpAddr> {
         return Ok(sock.ip());
     }
     subnet.parse::<IpAddr>().map_err(|_| {
-        RpcError::invalid_params(format!(
-            "setban: {subnet} is not an IP address or IP:port"
-        ))
+        RpcError::invalid_params(format!("setban: {subnet} is not an IP address or IP:port"))
     })
 }
 
@@ -626,9 +624,9 @@ impl Default for NetworkRpc {
 #[cfg(test)]
 mod info_locks {
     use super::*;
+    use crate::network::NetworkManager;
     use crate::network::peer::Peer;
     use crate::network::transport::TransportAddr;
-    use crate::network::NetworkManager;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn networkactive_follows_setnetworkactive() {
@@ -647,9 +645,7 @@ mod info_locks {
         peer.set_services(8);
         {
             let mut peers = nm.peer_manager().await;
-            peers
-                .add_peer(TransportAddr::Tcp(sock), peer)
-                .unwrap();
+            peers.add_peer(TransportAddr::Tcp(sock), peer).unwrap();
         }
         let info = NetworkRpc::with_dependencies(nm)
             .get_peer_info()

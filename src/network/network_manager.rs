@@ -183,11 +183,8 @@ pub struct NetworkManager {
     /// Separate from main message channel to avoid draining other messages
     pending_blocks: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
     /// Compact blocks waiting on `blocktxn` for the positions `getblocktxn` asked for.
-    pub(crate) pending_compact: Arc<
-        std::sync::Mutex<
-            HashMap<[u8; 32], crate::network::compact_blocks::CompactAssembly>,
-        >,
-    >,
+    pub(crate) pending_compact:
+        Arc<std::sync::Mutex<HashMap<[u8; 32], crate::network::compact_blocks::CompactAssembly>>>,
     /// Network statistics
     /// Optimization: Use AtomicU64 for lock-free updates
     bytes_sent: Arc<AtomicU64>,

@@ -3426,8 +3426,5 @@ fn first_block_of_a_height_one_loop_past_two_hours_is_rejected() {
             None,
         )
         .unwrap_err();
-    assert!(
-        err.to_string().contains("Invalid block header"),
-        "{err}"
-    );
+    assert!(err.to_string().contains("Invalid block header"), "{err}");
 }

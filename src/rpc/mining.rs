@@ -1056,7 +1056,9 @@ impl MiningRpc {
         }
 
         let storage = self.storage.as_ref().ok_or_else(|| {
-            RpcError::internal_error("submitblock: storage is required to connect the block".to_string())
+            RpcError::internal_error(
+                "submitblock: storage is required to connect the block".to_string(),
+            )
         })?;
         let protocol = self.protocol_engine.as_ref().ok_or_else(|| {
             RpcError::internal_error(
@@ -1460,12 +1462,15 @@ mod tests {
 
     #[tokio::test]
     async fn empty_pool_is_coinbase_only_and_the_hash_matches_get_block() {
-        use blvm_protocol::block::calculate_tx_id;
         use crate::rpc::blockchain::BlockchainRpc;
         use crate::storage::hashing::hash_to_rpc_hex;
+        use blvm_protocol::block::calculate_tx_id;
 
         let (_dir, storage, _mempool, mining) = regtest_mining();
-        let mined = mining.generate_to_address(&one_block_params()).await.unwrap();
+        let mined = mining
+            .generate_to_address(&one_block_params())
+            .await
+            .unwrap();
         let block_hash = mined[0].as_str().unwrap().to_string();
         let tip = storage.chain().get_tip_hash().unwrap().unwrap();
         let block = storage.blocks().get_block(&tip).unwrap().unwrap();
@@ -1506,7 +1511,10 @@ mod tests {
         let tx = spend(funding, 40_000);
         assert!(mempool.add_transaction(tx.clone()).unwrap());
 
-        mining.generate_to_address(&one_block_params()).await.unwrap();
+        mining
+            .generate_to_address(&one_block_params())
+            .await
+            .unwrap();
         let tip = storage.chain().get_tip_hash().unwrap().unwrap();
         let block = storage.blocks().get_block(&tip).unwrap().unwrap();
         assert!(
@@ -1519,7 +1527,10 @@ mod tests {
     #[tokio::test]
     async fn pruned_body_keeps_the_template_at_the_next_height() {
         let (_dir, storage, _mempool, mining) = regtest_mining();
-        mining.generate_to_address(&one_block_params()).await.unwrap();
+        mining
+            .generate_to_address(&one_block_params())
+            .await
+            .unwrap();
         let tip = storage.chain().get_tip_hash().unwrap().unwrap();
         let height = storage.chain().get_height().unwrap().unwrap();
         storage.blocks().remove_block_body(&tip).unwrap();
@@ -1539,7 +1550,10 @@ mod tests {
         use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 
         let (_dir, storage, _mempool, mining) = regtest_mining();
-        mining.generate_to_address(&one_block_params()).await.unwrap();
+        mining
+            .generate_to_address(&one_block_params())
+            .await
+            .unwrap();
         let tip = storage.chain().get_tip_hash().unwrap().unwrap();
         let block = storage.blocks().get_block(&tip).unwrap().unwrap();
         let witnesses = storage
@@ -1560,10 +1574,7 @@ mod tests {
             .store_header(&genesis_hash, &genesis)
             .unwrap();
         fresh.blocks().store_height(0, &genesis_hash).unwrap();
-        fresh
-            .blocks()
-            .store_recent_header(0, &genesis)
-            .unwrap();
+        fresh.blocks().store_recent_header(0, &genesis).unwrap();
         let events = Arc::new(EventManager::new());
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         events
@@ -1571,12 +1582,10 @@ mod tests {
             .await
             .unwrap();
         let publisher = Arc::new(EventPublisher::new(Arc::clone(&events)));
-        let submit = MiningRpc::with_dependencies(
-            Arc::clone(&fresh),
-            Arc::new(MempoolManager::new()),
-        )
-            .with_protocol_engine(protocol)
-            .with_event_publisher(Some(publisher));
+        let submit =
+            MiningRpc::with_dependencies(Arc::clone(&fresh), Arc::new(MempoolManager::new()))
+                .with_protocol_engine(protocol)
+                .with_event_publisher(Some(publisher));
         let result = submit
             .submit_block(&serde_json::json!([hex::encode(&bytes)]))
             .await

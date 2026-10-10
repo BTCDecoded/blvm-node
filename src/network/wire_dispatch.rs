@@ -217,11 +217,8 @@ impl NetworkManager {
     ) -> Result<()> {
         use crate::network::compact_blocks::completed_compact_block;
         let (block, witnesses) = completed_compact_block(assembly)?;
-        let bytes = blvm_protocol::serialization::serialize_block_with_witnesses(
-            &block,
-            &witnesses,
-            true,
-        );
+        let bytes =
+            blvm_protocol::serialization::serialize_block_with_witnesses(&block, &witnesses, true);
         self.queue_block(bytes);
         Ok(())
     }
@@ -296,12 +293,7 @@ impl NetworkManager {
         let Some(storage) = self.storage() else {
             return Ok(());
         };
-        let Some(block) = storage
-            .blocks()
-            .get_block(&msg.block_hash)
-            .ok()
-            .flatten()
-        else {
+        let Some(block) = storage.blocks().get_block(&msg.block_hash).ok().flatten() else {
             return Ok(());
         };
         if msg
@@ -658,9 +650,10 @@ impl NetworkManager {
                     }
                 }
                 if !wanted.is_empty() {
-                    let getdata = ProtocolMessage::GetData(
-                        crate::network::protocol::GetDataMessage { inventory: wanted },
-                    );
+                    let getdata =
+                        ProtocolMessage::GetData(crate::network::protocol::GetDataMessage {
+                            inventory: wanted,
+                        });
                     if let Ok(wire) = ProtocolParser::serialize_message(&getdata) {
                         let _ = self.send_to_peer(peer_addr, wire).await;
                     }
@@ -1033,8 +1026,7 @@ mod plan_wire_locks {
         let dir = tempfile::TempDir::new().unwrap();
         let storage = Arc::new(Storage::new(dir.path()).unwrap());
         let mempool = Arc::new(MempoolManager::new());
-        let protocol =
-            Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
+        let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
         let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let manager = NetworkManager::new(listen).with_dependencies(
             protocol,

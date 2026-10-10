@@ -192,13 +192,11 @@ impl TransactionSelector {
             let mut package_fee = self.transaction_fee(&child, utxo_set, mempool);
             let mut package_vsize = self.tx_vsize(&child, mempool);
             for parent_tx in &parents {
-                package_fee = package_fee
-                    .saturating_add(self.transaction_fee(parent_tx, utxo_set, mempool));
+                package_fee =
+                    package_fee.saturating_add(self.transaction_fee(parent_tx, utxo_set, mempool));
                 package_vsize = package_vsize.saturating_add(self.tx_vsize(parent_tx, mempool));
             }
-            if package_vsize == 0
-                || package_fee / (package_vsize as u64) < self.min_fee_rate
-            {
+            if package_vsize == 0 || package_fee / (package_vsize as u64) < self.min_fee_rate {
                 continue;
             }
             for parent_tx in &parents {
@@ -1599,8 +1597,10 @@ mod tests {
         );
         let selected = selector.select_transactions(&mempool, &utxo_set);
         assert!(
-            selected.iter().any(|tx| tx.version == parent.version
-                && tx.outputs[0].value == parent.outputs[0].value),
+            selected
+                .iter()
+                .any(|tx| tx.version == parent.version
+                    && tx.outputs[0].value == parent.outputs[0].value),
             "parent outside the window was left out"
         );
         assert!(selected.iter().any(|tx| tx.version == child.version));

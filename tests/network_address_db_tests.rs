@@ -3,6 +3,7 @@
 use blvm_node::network::address_db::{AddressDatabase, AddressEntry};
 use blvm_node::network::protocol::NetworkAddress;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 
 fn create_test_network_address(ip: [u8; 16], port: u16) -> NetworkAddress {
     NetworkAddress {
