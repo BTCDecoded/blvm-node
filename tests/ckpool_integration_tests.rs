@@ -243,10 +243,8 @@ async fn regtest_getblocktemplate_after_generatetoaddress() {
 
 #[tokio::test]
 async fn ckpool_submitblock_validates_mined_regtest_block() {
-    use blvm_protocol::mining::MiningResult;
-    use blvm_protocol::segwit::Witness;
     use blvm_protocol::serialization::serialize_block_with_witnesses;
-    use blvm_protocol::{BitcoinProtocolEngine, ConsensusProof, ProtocolVersion, UtxoSet};
+    use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 
     let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
     let genesis_header = protocol.get_network_params().genesis_block.header.clone();
@@ -280,56 +278,77 @@ async fn ckpool_submitblock_validates_mined_regtest_block() {
         .unwrap()
         .to_string();
 
-    let consensus = ConsensusProof::new();
-    let prev_header = storage.chain().get_tip_header().unwrap().expect("tip");
-    let prev_headers = vec![prev_header.clone(), prev_header.clone()];
-    let next_height = storage
-        .chain()
-        .get_height()
-        .unwrap()
-        .expect("height")
-        .saturating_add(1);
-    let coinbase_script = blvm_protocol::bip_validation::encode_bip34_coinbase_script(next_height);
-    let coinbase_address = vec![0x51u8];
-    let mut block = consensus
-        .create_new_block(
-            &UtxoSet::default(),
-            &[],
-            next_height,
-            &prev_header,
-            &prev_headers,
-            &coinbase_script,
-            &coinbase_address,
-        )
-        .expect("create block");
-    block.header.version = 4;
-
-    let (mined, result) = consensus.mine_block(block, 2_000_000).expect("mine_block");
-    assert!(matches!(result, MiningResult::Success));
-
     let tip_internal = storage.chain().get_tip_hash().unwrap().expect("tip hash");
     assert_eq!(
         blvm_node::storage::hashing::hash_to_rpc_hex(&tip_internal),
         prev_rpc
     );
-    assert_eq!(mined.header.prev_block_hash, tip_internal);
 
-    let witnesses: Vec<Vec<Witness>> = mined
-        .transactions
-        .iter()
-        .map(|tx| tx.inputs.iter().map(|_| Witness::default()).collect())
-        .collect();
+    // submitblock connects the block. Mine one block on a genesis chain, then
+    // submit those bytes onto another chain that is still at genesis.
+    let built_dir = TempDir::new().unwrap();
+    let built = Arc::new(Storage::new(built_dir.path()).unwrap());
+    built.chain().initialize(&genesis_header).unwrap();
+    let genesis_hash = built.chain().get_tip_hash().unwrap().expect("genesis");
+    built
+        .blocks()
+        .store_header(&genesis_hash, &genesis_header)
+        .unwrap();
+    built.blocks().store_height(0, &genesis_hash).unwrap();
+    built
+        .blocks()
+        .store_recent_header(0, &genesis_header)
+        .unwrap();
+    let builder = MiningRpc::with_dependencies(Arc::clone(&built), Arc::new(MempoolManager::new()))
+        .with_protocol_engine(Arc::clone(&protocol));
+    builder
+        .generate_to_address(&json!([
+            1u64,
+            "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+            2_000_000u64
+        ]))
+        .await
+        .expect("mine one block");
+    let mined_hash = built.chain().get_tip_hash().unwrap().expect("mined");
+    let mined = built
+        .blocks()
+        .get_block(&mined_hash)
+        .unwrap()
+        .expect("body");
+    let witnesses = built
+        .blocks()
+        .get_witness(&mined_hash)
+        .unwrap()
+        .unwrap_or_else(|| vec![vec![]; mined.transactions.len()]);
     let wire = serialize_block_with_witnesses(&mined, &witnesses, true);
     let hex_block = hex::encode(&wire);
 
-    let submit = mining
+    let fresh_dir = TempDir::new().unwrap();
+    let fresh = Arc::new(Storage::new(fresh_dir.path()).unwrap());
+    fresh.chain().initialize(&genesis_header).unwrap();
+    fresh
+        .blocks()
+        .store_header(&genesis_hash, &genesis_header)
+        .unwrap();
+    fresh.blocks().store_height(0, &genesis_hash).unwrap();
+    fresh
+        .blocks()
+        .store_recent_header(0, &genesis_header)
+        .unwrap();
+    assert_eq!(mined.header.prev_block_hash, genesis_hash);
+    let submitter = MiningRpc::with_dependencies(fresh.clone(), Arc::new(MempoolManager::new()))
+        .with_protocol_engine(Arc::clone(&protocol));
+    let submit = submitter
         .submit_block(&json!([hex_block]))
         .await
         .expect("submitblock validates mined block");
 
     assert!(submit.is_null(), "accepted block returns null");
-    assert_eq!(storage.blocks().as_ref().get_block_hash(&mined).len(), 32);
-    assert_eq!(mined.header.prev_block_hash, tip_internal);
+    assert_eq!(fresh.blocks().as_ref().get_block_hash(&mined).len(), 32);
+    assert_eq!(
+        fresh.chain().get_tip_hash().unwrap().expect("new tip"),
+        mined_hash
+    );
 }
 
 #[tokio::test]
