@@ -283,8 +283,12 @@ async fn ckpool_submitblock_validates_mined_regtest_block() {
     let consensus = ConsensusProof::new();
     let prev_header = storage.chain().get_tip_header().unwrap().expect("tip");
     let prev_headers = vec![prev_header.clone(), prev_header.clone()];
-    // submitblock's headless check uses the current chain height.
-    let next_height = storage.chain().get_height().unwrap().expect("height");
+    let next_height = storage
+        .chain()
+        .get_height()
+        .unwrap()
+        .expect("height")
+        .saturating_add(1);
     let coinbase_script = blvm_protocol::bip_validation::encode_bip34_coinbase_script(next_height);
     let coinbase_address = vec![0x51u8];
     let mut block = consensus

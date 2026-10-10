@@ -1060,11 +1060,6 @@ impl MiningRpc {
                 "submitblock: storage is required to connect the block".to_string(),
             )
         })?;
-        let protocol = self.protocol_engine.as_ref().ok_or_else(|| {
-            RpcError::internal_error(
-                "submitblock: protocol engine is required to connect the block".to_string(),
-            )
-        })?;
         let tip = storage
             .chain()
             .get_tip_hash()
@@ -1082,6 +1077,11 @@ impl MiningRpc {
                 "submitblock: prev_block_hash does not match current chain tip".to_string(),
             ));
         }
+        let protocol = self.protocol_engine.as_ref().ok_or_else(|| {
+            RpcError::internal_error(
+                "submitblock: protocol engine is required to connect the block".to_string(),
+            )
+        })?;
         let tip_height = self.get_current_height()?.unwrap_or(0);
         let connect_height = tip_height.saturating_add(1);
         let mut utxo = self.get_utxo_set()?;
