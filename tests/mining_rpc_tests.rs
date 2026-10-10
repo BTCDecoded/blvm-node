@@ -445,7 +445,7 @@ async fn test_getblocktemplate_includes_segwit_mempool_tx_on_regtest() {
     );
 
     let raw = RawTxRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool), None, None);
-    let txid_hex = hex::encode(txid);
+    let txid_hex = blvm_node::storage::hashing::hash_to_rpc_hex(&txid);
     let verbose = raw
         .getrawtransaction(&serde_json::json!([txid_hex, true]))
         .await
