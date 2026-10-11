@@ -4,7 +4,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use crate::utils::{log_error, with_custom_timeout, HANDSHAKE_POLL_SLEEP};
+use crate::utils::{HANDSHAKE_POLL_SLEEP, log_error, with_custom_timeout};
 
 /// The node is still downloading while the connected chain is behind the best header.
 ///

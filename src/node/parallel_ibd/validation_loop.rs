@@ -9,30 +9,30 @@ use super::feeder::FeederState;
 use super::latch_env;
 use super::memory::{self, MemoryGuard, PressureLevel};
 use super::types::PrefetchedUtxoMap;
+use crate::storage::Storage;
 use crate::storage::blockstore::BlockStore;
 use crate::storage::disk_utxo::{
-    block_input_keys_batch_into_arc, block_input_keys_into_filtered,
-    block_input_keys_into_filtered_with_tx_ids, key_to_outpoint, outpoint_to_key, OutPointKey,
+    OutPointKey, block_input_keys_batch_into_arc, block_input_keys_into_filtered,
+    block_input_keys_into_filtered_with_tx_ids, key_to_outpoint, outpoint_to_key,
 };
 use crate::storage::ibd_engine::{
-    hotpath_timer_sample, session_fill_utxo_set, PartialSpendSession, SpendSession, UtxoDatabase,
+    PartialSpendSession, SpendSession, UtxoDatabase, hotpath_timer_sample, session_fill_utxo_set,
 };
 use crate::storage::ibd_utxo_store::{IbdUtxoStore, PendingFlushPackage};
-use crate::storage::Storage;
 use crate::utils::time::current_timestamp;
 use anyhow::Result;
 use blvm_consensus::utxo_overlay::build_block_output_utxo_cache;
 use blvm_protocol::bip_validation::Bip30Index;
 use blvm_protocol::{
-    segwit::Witness, BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet, UTXO,
+    BitcoinProtocolEngine, Block, BlockHeader, Hash, UTXO, UtxoSet, segwit::Witness,
 };
 use parking_lot::Mutex;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};

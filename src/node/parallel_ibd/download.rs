@@ -12,13 +12,13 @@ use super::local_block::{
     try_persist_gap_block_for_local_inject_with_wire, try_repair_missing_witness,
 };
 use super::types::{SharedBlock, SharedWitnesses};
+use crate::network::NetworkManager;
 use crate::network::inventory::{MSG_BLOCK, MSG_WITNESS_BLOCK};
 use crate::network::protocol::{GetDataMessage, InventoryVector, ProtocolMessage, ProtocolParser};
-use crate::network::NetworkManager;
 use crate::storage::blockstore::BlockStore;
 use anyhow::{Context, Result};
 use blvm_protocol::types::ARC_BLOCK_CREATED;
-use blvm_protocol::{segwit::Witness, Block, Hash, ProtocolVersion};
+use blvm_protocol::{Block, Hash, ProtocolVersion, segwit::Witness};
 use futures::stream::{FuturesUnordered, StreamExt};
 use hex;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -26,13 +26,13 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
-use tokio::sync::broadcast;
 use tokio::sync::Semaphore;
-use tokio::time::{timeout, Duration};
+use tokio::sync::broadcast;
+use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
-use super::latch_env;
 use super::ParallelIBDConfig;
+use super::latch_env;
 
 /// Synthetic peer id for zero-peer local replay (`BLVM_IBD_ALLOW_ZERO_PEERS`).
 /// Workers use `try_load_local_ibd_block` only — never GetData / connect.

@@ -2,11 +2,11 @@
 
 use crate::node::chain_selector::should_activate_over_active_tip;
 use crate::node::event_publisher::EventPublisher;
-use crate::storage::blockstore::BlockStore;
 use crate::storage::Storage;
+use crate::storage::blockstore::BlockStore;
 use crate::utils::current_timestamp;
 use anyhow::{Context, Result};
-use blvm_consensus::reorganization::{reorganize_chain_with_witnesses, BlockUndoLog};
+use blvm_consensus::reorganization::{BlockUndoLog, reorganize_chain_with_witnesses};
 use blvm_consensus::types::Network;
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::{BitcoinProtocolEngine, Block, Hash, UtxoSet};

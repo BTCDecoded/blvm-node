@@ -5,11 +5,11 @@
 //! `data` stays the wire bytes. A transaction with no witness uses the
 //! non-witness serialization, so `hash` equals `txid`.
 
+use blvm_protocol::Transaction;
 use blvm_protocol::block::calculate_tx_id;
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::serialization::serialize_transaction;
 use blvm_protocol::serialization::serialize_transaction_with_witness;
-use blvm_protocol::Transaction;
 use sha2::{Digest, Sha256};
 
 use crate::storage::hashing::hash_to_rpc_hex;

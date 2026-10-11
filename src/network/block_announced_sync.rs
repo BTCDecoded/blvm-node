@@ -14,7 +14,7 @@ use crate::network::transport::TransportAddr;
 use anyhow::Result;
 use blvm_protocol::Hash;
 use std::net::SocketAddr;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
 /// Maximum block `getdata` items per `inv`. A larger block inventory is a historical range.

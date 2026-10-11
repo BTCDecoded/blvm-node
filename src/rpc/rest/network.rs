@@ -16,7 +16,7 @@
 
 use crate::rpc::network::NetworkRpc;
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Get network information
 pub async fn get_network_info(network: &NetworkRpc) -> Result<Value> {

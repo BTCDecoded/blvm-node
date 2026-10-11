@@ -193,14 +193,16 @@ mod tests {
     fn getdata_lock_pending_clears_when_the_peer_disconnects() {
         let mut mgr = InventoryManager::new();
         let hash = [0xcd; 32];
-        mgr.request_data(hash, MSG_BLOCK, "203.0.113.5:8333").unwrap();
+        mgr.request_data(hash, MSG_BLOCK, "203.0.113.5:8333")
+            .unwrap();
         assert!(mgr.has_pending_request(&hash));
         mgr.remove_peer("203.0.113.5:8333");
         assert!(
             !mgr.has_pending_request(&hash),
             "a later inv can request the hash again"
         );
-        mgr.request_data(hash, MSG_BLOCK, "203.0.113.9:8333").unwrap();
+        mgr.request_data(hash, MSG_BLOCK, "203.0.113.9:8333")
+            .unwrap();
         assert!(mgr.has_pending_request(&hash));
     }
 }

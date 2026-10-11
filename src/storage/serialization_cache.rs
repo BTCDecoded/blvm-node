@@ -6,8 +6,8 @@
 use blvm_protocol::types::Hash;
 use lru::LruCache;
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 const HEADER_CACHE_SHARDS: usize = 16;

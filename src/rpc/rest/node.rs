@@ -10,7 +10,7 @@
 
 use crate::rpc::control::ControlRpc;
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Get node uptime
 pub async fn get_uptime(control: &ControlRpc) -> Result<Value> {

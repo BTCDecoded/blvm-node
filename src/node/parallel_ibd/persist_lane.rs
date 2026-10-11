@@ -14,7 +14,7 @@
 //! Off switch: `BLVM_IBD_PERSIST_LANE=0` → inline (R-347 behaviour).
 
 use super::latch_env;
-use super::local_block::{gap_persist_gate, gap_persist_write_one, GapPersistGate};
+use super::local_block::{GapPersistGate, gap_persist_gate, gap_persist_write_one};
 use super::types::{SharedBlock, SharedWitnesses};
 use crate::storage::blockstore::BlockStore;
 use blvm_protocol::{Hash, ProtocolVersion};

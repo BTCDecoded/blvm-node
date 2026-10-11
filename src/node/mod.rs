@@ -28,15 +28,15 @@ use std::net::SocketAddr;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{NodeConfig, RpcAuthConfig};
-use crate::module::api::events::EventManager;
 use crate::module::ModuleManager;
+use crate::module::api::events::EventManager;
 use crate::network::NetworkManager;
 use crate::node::event_publisher::EventPublisher;
 use crate::node::metrics::MetricsCollector;
 use crate::node::performance::PerformanceProfiler;
 use crate::rpc::RpcManager;
 use crate::storage::Storage;
-use crate::utils::{log_error_async, HANDSHAKE_POLL_SLEEP, MESSAGE_PROCESSOR_POLL_SLEEP};
+use crate::utils::{HANDSHAKE_POLL_SLEEP, MESSAGE_PROCESSOR_POLL_SLEEP, log_error_async};
 use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -714,7 +714,7 @@ impl Node {
         if current_height == 0 {
             if let Some(block_hash) = self.config_sub(|c| c.assumeutxo_blockhash.as_ref()) {
                 use crate::storage::assumeutxo::{
-                    height_for_blockhash, write_base_blockhash_marker, AssumeUtxoManager,
+                    AssumeUtxoManager, height_for_blockhash, write_base_blockhash_marker,
                 };
                 let network = self
                     .config

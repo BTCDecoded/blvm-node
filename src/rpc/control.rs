@@ -19,7 +19,7 @@ use crate::rpc::errors::{RpcError, RpcResult};
 use crate::rpc::params::param_str;
 use crate::storage::Storage;
 use crate::utils::{CACHE_REFRESH_MEMORY, CACHE_REFRESH_UPTIME};
-use serde_json::{json, Number, Value};
+use serde_json::{Number, Value, json};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;

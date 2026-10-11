@@ -56,8 +56,8 @@ pub fn heavier_than_active_tip(storage: &Storage, candidate_tip: &Hash) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::block_index::BlockIndexStatus;
     use crate::storage::Storage;
+    use crate::storage::block_index::BlockIndexStatus;
     use blvm_protocol::BlockHeader;
     use tempfile::TempDir;
 

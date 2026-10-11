@@ -6,7 +6,7 @@ use crate::config::{MempoolPolicyConfig, RbfConfig};
 use crate::node::event_publisher::EventPublisher;
 use anyhow::Result;
 use blvm_protocol::mempool::{
-    has_conflict_with_tx, replacement_checks_with_witness, signals_rbf, Mempool,
+    Mempool, has_conflict_with_tx, replacement_checks_with_witness, signals_rbf,
 };
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::{Block, Hash, OutPoint, Transaction, TransactionOutput, UtxoSet};
@@ -118,7 +118,7 @@ fn is_p2sh_script(script: &[u8]) -> bool {
 /// Last push in a push-only script, which is the redeem script of a P2SH spend.
 fn last_script_push(script: &[u8]) -> Option<Vec<u8>> {
     use blvm_protocol::opcodes::{
-        OP_0, OP_1, OP_16, OP_1NEGATE, OP_PUSHDATA1, OP_PUSHDATA2, OP_PUSHDATA4,
+        OP_0, OP_1, OP_1NEGATE, OP_16, OP_PUSHDATA1, OP_PUSHDATA2, OP_PUSHDATA4,
     };
     let mut i = 0;
     let mut last = None;
@@ -191,11 +191,11 @@ fn consensus_checks_reject(
     witnesses: Option<&[Witness]>,
     prevouts: &[Option<TransactionOutput>],
 ) -> bool {
+    use blvm_protocol::ValidationResult;
     use blvm_protocol::block::calculate_script_flags_for_block_network;
     use blvm_protocol::script::verify_script_with_context;
     use blvm_protocol::transaction::{check_transaction, is_coinbase};
     use blvm_protocol::types::Network;
-    use blvm_protocol::ValidationResult;
 
     const MEMPOOL_POLICY_HEIGHT: u64 = 1_000_000;
 
@@ -2169,10 +2169,10 @@ impl MempoolManager {
         witnesses: Option<&[Witness]>,
         utxo_set: &UtxoSet,
     ) -> (u64, u64) {
-        use blvm_protocol::mempool::{sigop_adjusted_vsize, DEFAULT_BYTES_PER_SIGOP};
+        use blvm_protocol::UTXO;
+        use blvm_protocol::mempool::{DEFAULT_BYTES_PER_SIGOP, sigop_adjusted_vsize};
         use blvm_protocol::script::flags::SEGWIT_STANDARD_FLAGS;
         use blvm_protocol::sigop::get_transaction_sigop_cost_with_utxos;
-        use blvm_protocol::UTXO;
 
         let (bytes_per_sigop, count_sigops) = {
             let policy = self.policy_config.read().unwrap_or_else(|e| e.into_inner());
@@ -2756,9 +2756,11 @@ mod tests {
 
         let mempool = MempoolManager::new();
         let tx = legacy_empty_script();
-        assert!(!mempool
-            .add_transaction_with_witness(tx, Some(Vec::new()))
-            .unwrap());
+        assert!(
+            !mempool
+                .add_transaction_with_witness(tx, Some(Vec::new()))
+                .unwrap()
+        );
 
         let mempool = MempoolManager::new();
         mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
@@ -2810,9 +2812,9 @@ mod tests {
     fn mempool_rejects_a_prevout_sum_above_max_money() {
         use std::sync::Arc;
 
+        use blvm_protocol::UTXO;
         use blvm_protocol::constants::MAX_MONEY;
         use blvm_protocol::opcodes::OP_1;
-        use blvm_protocol::UTXO;
 
         let mut policy = crate::config::MempoolPolicyConfig::default();
         policy.min_relay_fee_rate = 0;
@@ -2998,10 +3000,10 @@ mod tests {
 
         use crate::config::MempoolPolicyConfig;
         use crate::node::miner::{MempoolProvider, TransactionSelector};
+        use blvm_protocol::TransactionInput;
         use blvm_protocol::block::calculate_tx_id;
         use blvm_protocol::constants::SEQUENCE_FINAL;
         use blvm_protocol::opcodes::OP_1;
-        use blvm_protocol::TransactionInput;
 
         let mut policy = MempoolPolicyConfig::default();
         policy.min_tx_fee = 0;
@@ -3288,13 +3290,17 @@ mod tests {
         assert!(mempool.add_transaction(unrelated.clone()).unwrap());
 
         mempool.remove_for_connected_block(&[confirmed.clone()]);
-        assert!(mempool
-            .get_transaction(&calculate_tx_id(&confirmed))
-            .is_none());
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&confirmed))
+                .is_none()
+        );
         assert!(mempool.get_transaction(&calculate_tx_id(&child)).is_some());
-        assert!(mempool
-            .get_transaction(&calculate_tx_id(&unrelated))
-            .is_some());
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&unrelated))
+                .is_some()
+        );
 
         let mempool = MempoolManager::new();
         mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded(
@@ -3316,12 +3322,16 @@ mod tests {
         let mut in_block = conflict.clone();
         in_block.outputs[0].value = 70_000;
         mempool.remove_for_connected_block(&[in_block]);
-        assert!(mempool
-            .get_transaction(&calculate_tx_id(&conflict))
-            .is_none());
-        assert!(mempool
-            .get_transaction(&calculate_tx_id(&conflict_child))
-            .is_none());
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&conflict))
+                .is_none()
+        );
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&conflict_child))
+                .is_none()
+        );
         assert_eq!(mempool.size(), 0);
     }
 
@@ -3408,18 +3418,26 @@ mod tests {
             &after,
         );
 
-        assert!(mempool
-            .get_transaction(&calculate_tx_id(&conflict))
-            .is_none());
-        assert!(mempool
-            .get_transaction(&calculate_tx_id(&conflict_child))
-            .is_none());
-        assert!(mempool
-            .get_transaction(&calculate_tx_id(&resurrected))
-            .is_some());
-        assert!(mempool
-            .get_transaction(&calculate_tx_id(&resurrected_child))
-            .is_some());
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&conflict))
+                .is_none()
+        );
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&conflict_child))
+                .is_none()
+        );
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&resurrected))
+                .is_some()
+        );
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&resurrected_child))
+                .is_some()
+        );
         assert_eq!(mempool.size(), 2);
     }
 
@@ -3522,9 +3540,11 @@ mod tests {
         assert!(!mempool.add_transaction(spend.clone()).unwrap());
 
         let witness: Vec<Witness> = vec![vec![witness_script]];
-        assert!(mempool
-            .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
-            .unwrap());
+        assert!(
+            mempool
+                .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
+                .unwrap()
+        );
         assert_eq!(
             mempool.get_transaction_witnesses(&calculate_tx_id(&spend)),
             Some(witness)
@@ -3600,9 +3620,11 @@ mod tests {
         assert!(!mempool.add_transaction(spend.clone()).unwrap());
 
         let witness: Vec<Witness> = vec![vec![witness_script]];
-        assert!(mempool
-            .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
-            .unwrap());
+        assert!(
+            mempool
+                .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
+                .unwrap()
+        );
         assert_eq!(
             mempool.get_transaction_witnesses(&calculate_tx_id(&spend)),
             Some(witness)
@@ -3645,9 +3667,11 @@ mod tests {
         assert!(!mempool.add_transaction(child.clone()).unwrap());
 
         let witness: Vec<Witness> = vec![vec![witness_script]];
-        assert!(mempool
-            .add_transaction_with_witness(child.clone(), Some(witness.clone()))
-            .unwrap());
+        assert!(
+            mempool
+                .add_transaction_with_witness(child.clone(), Some(witness.clone()))
+                .unwrap()
+        );
         assert_eq!(
             mempool.get_transaction_witnesses(&calculate_tx_id(&child)),
             Some(witness)

@@ -16,7 +16,7 @@ use crate::storage::Storage;
 use crate::utils::current_timestamp;
 use crate::{Hash, Transaction};
 use blvm_protocol::payment::PaymentOutput;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, error};
 

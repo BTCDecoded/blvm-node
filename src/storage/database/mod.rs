@@ -1537,12 +1537,12 @@ pub mod rocksdb_impl {
     use super::{BatchWriter, Database, Tree};
     use anyhow::Result;
     use rocksdb::{
-        BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, IngestExternalFileOptions,
-        Options, ReadOptions, SstFileWriter, WriteOptions, DB,
+        BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, DB,
+        IngestExternalFileOptions, Options, ReadOptions, SstFileWriter, WriteOptions,
     };
     use std::path::Path;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     pub struct RocksDBDatabase {
         cache: std::sync::Mutex<Option<Cache>>,

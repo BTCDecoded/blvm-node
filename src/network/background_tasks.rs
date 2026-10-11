@@ -3,11 +3,11 @@
 //! Periodic tasks: request cleanup, DoS protection, ban cleanup, chain sync timeout,
 //! peer eviction, ping, ping timeout, peer reconnection.
 
+use crate::network::NetworkMessage;
 use crate::network::network_manager::NetworkManager;
 use crate::network::peer::Peer;
 use crate::network::transport::TransportAddr;
-use crate::network::NetworkMessage;
-use crate::utils::{current_timestamp, BACKGROUND_TASK_BACKOFF_SLEEP};
+use crate::utils::{BACKGROUND_TASK_BACKOFF_SLEEP, current_timestamp};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;

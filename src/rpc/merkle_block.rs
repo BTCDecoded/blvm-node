@@ -4,9 +4,9 @@
 //! `gettxoutproof` / `verifytxoutproof`.
 
 use crate::storage::hashing::double_sha256;
+use blvm_protocol::BlockHeader;
 use blvm_protocol::serialization::serialize_block_header;
 use blvm_protocol::serialization::varint::{decode_varint, encode_varint};
-use blvm_protocol::BlockHeader;
 
 #[derive(Debug, Clone)]
 pub struct PartialMerkleTree {

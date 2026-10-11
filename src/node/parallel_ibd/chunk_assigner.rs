@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use super::ParallelIBDConfig;
 use super::latch_env;
 use super::types::{ChunkWorkItem, NoprogComplete, RetryEntry, RetryTrack};
-use super::ParallelIBDConfig;
 
 /// Tracks sticky WAN tenure for A6m/A6n measured-BPS rotation.
 #[derive(Debug, Clone)]

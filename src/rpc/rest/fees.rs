@@ -4,7 +4,7 @@
 
 use crate::rpc::mining::MiningRpc;
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Get fee estimate
 pub async fn get_fee_estimate(mining: &MiningRpc, blocks: Option<u64>) -> Result<Value> {

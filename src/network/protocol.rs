@@ -1201,7 +1201,9 @@ impl ProtocolParser {
                 payload,
             )?)),
             // Block Filtering (BIP157)
-            cmd::GETCFILTERS => Ok(ProtocolMessage::GetCfilters(decode_filter_request(payload)?)),
+            cmd::GETCFILTERS => Ok(ProtocolMessage::GetCfilters(decode_filter_request(
+                payload,
+            )?)),
             cmd::CFILTER => Ok(ProtocolMessage::Cfilter(decode_cfilter(payload)?)),
             cmd::GETCFHEADERS => {
                 let req = decode_filter_request(payload)?;
@@ -1212,9 +1214,7 @@ impl ProtocolParser {
                 }))
             }
             cmd::CFHEADERS => Ok(ProtocolMessage::Cfheaders(decode_cfheaders(payload)?)),
-            cmd::GETCFCHECKPT => {
-                Ok(ProtocolMessage::GetCfcheckpt(decode_getcfcheckpt(payload)?))
-            }
+            cmd::GETCFCHECKPT => Ok(ProtocolMessage::GetCfcheckpt(decode_getcfcheckpt(payload)?)),
             cmd::CFCHECKPT => Ok(ProtocolMessage::Cfcheckpt(decode_cfcheckpt(payload)?)),
             // Payment Protocol (BIP70) - P2P variant
             cmd::GETPAYMENTREQUEST => Ok(ProtocolMessage::GetPaymentRequest(bincode::deserialize(
@@ -1710,8 +1710,8 @@ fn decode_cfheaders(payload: &[u8]) -> anyhow::Result<CfheadersMessage> {
     let mut filter_hash = [0u8; 32];
     filter_hash.copy_from_slice(&payload[33..65]);
     let mut cursor = std::io::Cursor::new(&payload[65..]);
-    let count = blvm_protocol::varint::read_varint(&mut cursor).map_err(|e| anyhow::anyhow!("{e}"))?
-        as usize;
+    let count = blvm_protocol::varint::read_varint(&mut cursor)
+        .map_err(|e| anyhow::anyhow!("{e}"))? as usize;
     if count > 2000 {
         anyhow::bail!("cfheaders count {count}");
     }
@@ -1776,8 +1776,8 @@ fn decode_cfcheckpt(payload: &[u8]) -> anyhow::Result<CfcheckptMessage> {
     let mut stop_hash = [0u8; 32];
     stop_hash.copy_from_slice(&payload[1..33]);
     let mut cursor = std::io::Cursor::new(&payload[33..]);
-    let count = blvm_protocol::varint::read_varint(&mut cursor).map_err(|e| anyhow::anyhow!("{e}"))?
-        as usize;
+    let count = blvm_protocol::varint::read_varint(&mut cursor)
+        .map_err(|e| anyhow::anyhow!("{e}"))? as usize;
     if count > 2000 {
         anyhow::bail!("cfcheckpt count {count}");
     }
@@ -1816,9 +1816,8 @@ fn decode_getblocks(payload: &[u8]) -> anyhow::Result<GetBlocksMessage> {
     let mut version_bytes = [0u8; 4];
     std::io::Read::read_exact(&mut cursor, &mut version_bytes)?;
     let version = i32::from_le_bytes(version_bytes);
-    let hash_count =
-        blvm_protocol::varint::read_varint(&mut cursor).map_err(|e| anyhow::anyhow!("{e}"))?
-            as usize;
+    let hash_count = blvm_protocol::varint::read_varint(&mut cursor)
+        .map_err(|e| anyhow::anyhow!("{e}"))? as usize;
     if hash_count > 2000 {
         anyhow::bail!("getblocks locator count {hash_count}");
     }
@@ -1911,8 +1910,8 @@ mod tests {
             start_height: 0x0102_0304,
             stop_hash: stop,
         };
-        let framed = ProtocolParser::serialize_message(&ProtocolMessage::GetCfilters(request))
-            .unwrap();
+        let framed =
+            ProtocolParser::serialize_message(&ProtocolMessage::GetCfilters(request)).unwrap();
         let payload = &framed[24..];
         assert_eq!(payload.len(), 37);
         match ProtocolParser::parse_message(&framed).unwrap() {

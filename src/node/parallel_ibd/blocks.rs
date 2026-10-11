@@ -4,11 +4,11 @@ use crate::node::block_processor::{
     prepare_block_validation_context, store_block_with_context_and_index,
     validate_block_with_context,
 };
-use crate::storage::blockstore::BlockStore;
 use crate::storage::Storage;
+use crate::storage::blockstore::BlockStore;
 use anyhow::Result;
 use blvm_protocol::{
-    segwit::Witness, BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet, ValidationResult,
+    BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet, ValidationResult, segwit::Witness,
 };
 use std::sync::Arc;
 use tracing::debug;

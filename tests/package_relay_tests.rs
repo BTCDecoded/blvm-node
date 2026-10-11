@@ -147,7 +147,7 @@ fn test_package_fee_rate() {
 
 #[test]
 fn test_transaction_package_weight_includes_witness_bip141() {
-    use blvm_consensus::segwit::{calculate_transaction_weight, Witness};
+    use blvm_consensus::segwit::{Witness, calculate_transaction_weight};
 
     let tx = create_minimal_tx();
     let base_package = TransactionPackage::new(vec![tx.clone()]).unwrap();

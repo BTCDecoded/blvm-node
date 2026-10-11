@@ -251,8 +251,9 @@ fn test_rbf_package_replacement_uses_descendant_fees() {
         "package replacement should require fees covering displaced descendants"
     );
 
-    // 21k fee covers the 20k package with aggressive min bump.
-    let sufficient = create_rbf_tx(100_000, 79_000);
+    // The absolute bump is the larger of the aggressive 500 sat setting and the
+    // 1,000 sat incremental relay fee, and the comparison is strict. 22k clears it.
+    let sufficient = create_rbf_tx(100_000, 78_000);
     let result2 = mempool.check_rbf_replacement(&sufficient, &parent, &utxo_set, None);
     assert!(result2.is_ok());
     assert!(result2.unwrap());

@@ -29,8 +29,8 @@ use crate::storage::blockstore::{decode_wire_body_blob, is_wire_body_blob};
 use anyhow::Result;
 use blvm_protocol::ProtocolVersion;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{info, warn};
 
 fn inventory_requests_tx(inv_type: u32) -> bool {
@@ -424,10 +424,10 @@ fn build_tx_wire(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::NetworkManager;
     use crate::network::inventory::{
         MSG_BLOCK, MSG_TX, MSG_WITNESS_BLOCK, MSG_WITNESS_FLAG, MSG_WITNESS_TX,
     };
-    use crate::network::NetworkManager;
     use crate::node::mempool::MempoolManager;
     use crate::storage::Storage;
     use blvm_protocol::block::calculate_tx_id;
@@ -600,15 +600,17 @@ mod tests {
         assert!(from_index.is_some());
         let mempool = Arc::new(MempoolManager::new());
         let unknown = [0x66u8; 32];
-        assert!(build_tx_wire(
-            storage.transactions().as_ref(),
-            storage.blocks().as_ref(),
-            Some(&mempool),
-            &unknown,
-            true,
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            build_tx_wire(
+                storage.transactions().as_ref(),
+                storage.blocks().as_ref(),
+                Some(&mempool),
+                &unknown,
+                true,
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[test]

@@ -2,10 +2,10 @@
 //!
 //! Extracted from network_manager.rs to reduce file size.
 
+use crate::network::NetworkMessage;
 use crate::network::network_manager::NetworkManager;
 use crate::network::peer;
 use crate::network::transport::{Transport, TransportAddr, TransportType};
-use crate::network::NetworkMessage;
 use crate::utils::current_timestamp;
 use anyhow::Result;
 use std::net::SocketAddr;
@@ -818,10 +818,11 @@ mod tests {
         nm.clear_ibd_evicted_ips();
         Arc::clone(&nm).spawn_outbound_reconnect_attempt(addr);
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        assert!(nm
-            .peer_reconnection_queue()
-            .lock()
-            .await
-            .contains_key(&addr));
+        assert!(
+            nm.peer_reconnection_queue()
+                .lock()
+                .await
+                .contains_key(&addr)
+        );
     }
 }

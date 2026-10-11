@@ -18,8 +18,8 @@
 use libmimalloc_sys;
 #[cfg(target_os = "linux")]
 use std::io::Read;
-use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -1123,11 +1123,7 @@ fn proc_anon_rss_mb_from_status(s: &str) -> u64 {
             anon_mb = proc_field_kb_to_mb(line);
         }
     }
-    if anon_mb > 0 {
-        anon_mb
-    } else {
-        rss_mb
-    }
+    if anon_mb > 0 { anon_mb } else { rss_mb }
 }
 
 #[cfg(target_os = "linux")]
@@ -1371,11 +1367,7 @@ impl MemoryGuard {
                 // 200 blocks × ~300 KB = ~60 MB per transaction → ~10–15 s per flush.
                 // Same join frequency, 4× shorter stalls, 4× less channel backpressure.
                 // Override via BLVM_IBD_STORAGE_FLUSH_INTERVAL.
-                if total_gb >= 16 {
-                    200
-                } else {
-                    100
-                }
+                if total_gb >= 16 { 200 } else { 100 }
             }
             DatabaseBackend::RocksDB | DatabaseBackend::TidesDB => {
                 if total_gb >= 32 {
@@ -2530,12 +2522,12 @@ impl MemoryGuard {
             let crit_rss = self.crit_rss_threshold_mb; // default = t*22/100
             let rss_elev = (t * 30 / 100).max(2000); // e.g. 4776 MB on 16 GiB
             let rss_emerg = (t * 50 / 100).max(4000); // e.g. 8192 MB on 16 GiB
-                                                      // Hysteresis on avail thresholds: enter at A_up, require A_up + 512 MB to deactivate
-                                                      // the swap_X flag (and thus permit downward transitions). The 512 MB gap absorbs the
-                                                      // observed sys_avail swing (3015–3555 MB at h=315k = 540 MB swing under steady IBD
-                                                      // load). Without this gap, sys_avail oscillating ±300 MB around the entry boundary
-                                                      // caused 24+ Elevated↔Critical transitions per minute, each one running
-                                                      // `adjust_max_ahead_live` and clobbering the prefetch lookahead.
+            // Hysteresis on avail thresholds: enter at A_up, require A_up + 512 MB to deactivate
+            // the swap_X flag (and thus permit downward transitions). The 512 MB gap absorbs the
+            // observed sys_avail swing (3015–3555 MB at h=315k = 540 MB swing under steady IBD
+            // load). Without this gap, sys_avail oscillating ±300 MB around the entry boundary
+            // caused 24+ Elevated↔Critical transitions per minute, each one running
+            // `adjust_max_ahead_live` and clobbering the prefetch lookahead.
             let swap_elev_up = swap_used >= t * 5 / 100 && a > 0 && a < 4096 && our_swap;
             let swap_crit_up = swap_used >= t * 12 / 100 && a > 0 && a < 3072 && our_swap;
             let swap_emerg_up = swap_used >= t * 20 / 100 && a > 0 && a < 2048 && our_swap;
@@ -3230,11 +3222,11 @@ pub(crate) fn c2_working_set_track_ok(verdict: MemReportAccountedVerdict) -> boo
 #[cfg(test)]
 mod memory_tier_tests {
     use super::{
-        c2_working_set_track_ok, classify_host_oom_backstop, classify_mem_report_accounted,
-        classify_node_pressure, emergency_entry_anon_mb, ibd_pressure_is_emergency,
-        ibd_pressure_level_snapshot, publish_ibd_pressure, reset_ibd_pressure_on_session_end,
-        stale_emergency_step_down_level, MemReportAccountedVerdict, MemoryGuard, MemorySnapshot,
-        PressureLevel, WorkloadClass, ROCKSDB_PIPELINE_RESERVE_MB,
+        MemReportAccountedVerdict, MemoryGuard, MemorySnapshot, PressureLevel,
+        ROCKSDB_PIPELINE_RESERVE_MB, WorkloadClass, c2_working_set_track_ok,
+        classify_host_oom_backstop, classify_mem_report_accounted, classify_node_pressure,
+        emergency_entry_anon_mb, ibd_pressure_is_emergency, ibd_pressure_level_snapshot,
+        publish_ibd_pressure, reset_ibd_pressure_on_session_end, stale_emergency_step_down_level,
     };
     use crate::storage::database::DatabaseBackend;
 

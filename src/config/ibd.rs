@@ -221,11 +221,7 @@ pub fn getdata_serve_pipe_depth() -> usize {
                 return n.clamp(1, 8);
             }
         }
-        if ibd_serve_only() {
-            4
-        } else {
-            1
-        }
+        if ibd_serve_only() { 4 } else { 1 }
     })
 }
 
