@@ -51,10 +51,14 @@ impl NetworkManager {
             pm.peer_socket_addresses()
         };
 
+        let max_addr = self.protocol_limits().max_addr_to_send;
         let addresses = {
             let db = self.address_database().write().await;
-            let fresh = db.get_fresh_addresses(2500);
+            let fresh = db.get_fresh_addresses(2500.max(max_addr));
             db.filter_addresses(fresh, &ban_list, &connected_peers)
+                .into_iter()
+                .take(max_addr)
+                .collect::<Vec<_>>()
         };
 
         let addr_msg = AddrMessage { addresses };

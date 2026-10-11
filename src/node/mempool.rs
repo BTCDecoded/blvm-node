@@ -2581,6 +2581,16 @@ impl MempoolManager {
         Ok(())
     }
 
+    /// Configured relay floor in satoshis per virtual byte. An unset policy uses the default of 1.
+    pub(crate) fn min_relay_fee_rate_sat_per_vb(&self) -> u64 {
+        self.policy_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_default()
+            .min_relay_fee_rate
+    }
+
     /// Path from `[mempool] mempool_persistence_path` when that section is set.
     pub fn configured_persistence_path(&self) -> Option<String> {
         self.policy_config

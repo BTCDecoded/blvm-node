@@ -17,6 +17,23 @@ use blvm_protocol::ProtocolVersion;
 use std::net::SocketAddr;
 use tracing::{debug, info, warn};
 
+/// Compact-block short ids, `getblocktxn` indexes, and `blocktxn` transactions share this ceiling.
+const MAX_COMPACT_RELAY_ITEMS: usize = 50_000;
+
+/// `fee_sat_per_vb` is satoshis per virtual byte. `min_sat_per_kvb` is the BIP133 rate.
+pub(crate) fn fee_rate_meets_filter(fee_sat_per_vb: u64, min_sat_per_kvb: u64) -> bool {
+    fee_sat_per_vb.saturating_mul(1000) >= min_sat_per_kvb
+}
+
+/// Split an inventory so each message stays within `max_len`.
+pub(crate) fn chunk_inventory<T: Clone>(items: Vec<T>, max_len: usize) -> Vec<Vec<T>> {
+    let max_len = max_len.max(1);
+    if items.is_empty() {
+        return vec![Vec::new()];
+    }
+    items.chunks(max_len).map(|chunk| chunk.to_vec()).collect()
+}
+
 fn block_hash_from_header(header: &BlockHeader) -> [u8; 32] {
     use crate::storage::hashing::double_sha256;
     let mut header_bytes = [0u8; 80];
@@ -193,6 +210,7 @@ impl NetworkManager {
                 .entry(peer_addr)
                 .or_insert_with(blvm_protocol::network::PeerState::new);
             state.version = version_msg.version as u32;
+            state.relay_tx = version_msg.relay;
         }
 
         if let Some(ref transport_addr) = transport_addr_for_verack {
@@ -456,7 +474,7 @@ impl NetworkManager {
                 // BIP133 feerate is satoshis per 1000 virtual bytes.
                 let mut states = self.peer_states().write().await;
                 if let Some(state) = states.get_mut(&peer_addr) {
-                    state.min_fee_rate = Some(fee_filter.feerate / 1000);
+                    state.min_fee_rate = Some(fee_filter.feerate);
                 }
                 return Ok(());
             }
@@ -782,7 +800,7 @@ impl NetworkManager {
                 return Ok(());
             }
             ProtocolMessage::CmpctBlock(cmpct_msg) => {
-                if cmpct_msg.compact_block.short_ids.len() > 10000 {
+                if cmpct_msg.compact_block.short_ids.len() > MAX_COMPACT_RELAY_ITEMS {
                     warn!(
                         "Invalid compact block: too many short IDs ({}) from {}",
                         cmpct_msg.compact_block.short_ids.len(),
@@ -800,7 +818,7 @@ impl NetworkManager {
                 return Ok(());
             }
             ProtocolMessage::GetBlockTxn(getblocktxn_msg) => {
-                if getblocktxn_msg.indices.len() > 10000 {
+                if getblocktxn_msg.indices.len() > MAX_COMPACT_RELAY_ITEMS {
                     warn!(
                         "GetBlockTxn with too many indices ({}) from {}",
                         getblocktxn_msg.indices.len(),
@@ -817,7 +835,7 @@ impl NetworkManager {
                 return Ok(());
             }
             ProtocolMessage::BlockTxn(blocktxn_msg) => {
-                if blocktxn_msg.transactions.len() > 10000 {
+                if blocktxn_msg.transactions.len() > MAX_COMPACT_RELAY_ITEMS {
                     warn!(
                         "BlockTxn with too many transactions ({}) from {}",
                         blocktxn_msg.transactions.len(),
@@ -865,28 +883,23 @@ impl NetworkManager {
                         &getblocks.hash_stop,
                         MAX_GETBLOCKS_INV,
                     ) {
-                        Ok(headers) if !headers.is_empty() => {
-                            let inventory: Vec<crate::network::protocol::InventoryVector> = headers
-                                .into_iter()
-                                .map(|header| crate::network::protocol::InventoryVector {
+                        Ok(headers) => {
+                            let mut inventory = Vec::new();
+                            for header in headers {
+                                let hash = block_header_hash(&header);
+                                if !storage.blocks().has_block_body(&hash).unwrap_or(false) {
+                                    break;
+                                }
+                                inventory.push(crate::network::protocol::InventoryVector {
                                     inv_type: MSG_BLOCK,
-                                    hash: block_header_hash(&header),
-                                })
-                                .collect();
+                                    hash,
+                                });
+                            }
                             let inv_msg =
                                 ProtocolMessage::Inv(crate::network::protocol::InvMessage {
                                     inventory,
                                 });
                             if let Ok(wire) = ProtocolParser::serialize_message(&inv_msg) {
-                                let _ = self.send_to_peer(peer_addr, wire).await;
-                            }
-                        }
-                        Ok(_) => {
-                            let empty_inv =
-                                ProtocolMessage::Inv(crate::network::protocol::InvMessage {
-                                    inventory: vec![],
-                                });
-                            if let Ok(wire) = ProtocolParser::serialize_message(&empty_inv) {
                                 let _ = self.send_to_peer(peer_addr, wire).await;
                             }
                         }
@@ -902,7 +915,7 @@ impl NetworkManager {
                 if let Some(mm) = self.mempool_manager() {
                     use crate::network::inventory::MSG_TX;
                     use blvm_protocol::block::calculate_tx_id;
-                    let min_sat_vb = {
+                    let min_sat_per_kvb = {
                         let states = self.peer_states().read().await;
                         states.get(&peer_addr).and_then(|state| state.min_fee_rate)
                     };
@@ -911,9 +924,11 @@ impl NetworkManager {
                         .iter()
                         .filter_map(|tx| {
                             let hash = calculate_tx_id(tx);
-                            if let Some(min) = min_sat_vb {
-                                if mm.cached_fee_rate(&hash).unwrap_or(u64::MAX) < min {
-                                    return None;
+                            if let Some(min) = min_sat_per_kvb {
+                                if let Some(fee) = mm.cached_fee_rate(&hash) {
+                                    if !fee_rate_meets_filter(fee, min) {
+                                        return None;
+                                    }
                                 }
                             }
                             Some(crate::network::protocol::InventoryVector {
@@ -922,10 +937,14 @@ impl NetworkManager {
                             })
                         })
                         .collect();
-                    let inv_msg =
-                        ProtocolMessage::Inv(crate::network::protocol::InvMessage { inventory });
-                    if let Ok(wire) = ProtocolParser::serialize_message(&inv_msg) {
-                        let _ = self.send_to_peer(peer_addr, wire).await;
+                    let max_inv = self.protocol_limits().max_inv_sz.max(1);
+                    for inventory in chunk_inventory(inventory, max_inv) {
+                        let inv_msg = ProtocolMessage::Inv(crate::network::protocol::InvMessage {
+                            inventory,
+                        });
+                        if let Ok(wire) = ProtocolParser::serialize_message(&inv_msg) {
+                            let _ = self.send_to_peer(peer_addr, wire).await;
+                        }
                     }
                 }
                 return Ok(());
@@ -937,6 +956,18 @@ impl NetworkManager {
                     state.handshake_complete = true;
                 }
                 drop(peer_states);
+
+                let fee_rate = self
+                    .mempool_manager()
+                    .map(|mm| mm.min_relay_fee_rate_sat_per_vb().saturating_mul(1000))
+                    .unwrap_or(1_000);
+                let fee_msg =
+                    ProtocolMessage::FeeFilter(crate::network::protocol::FeeFilterMessage {
+                        feerate: fee_rate,
+                    });
+                if let Ok(wire) = ProtocolParser::serialize_message(&fee_msg) {
+                    let _ = self.send_to_peer(peer_addr, wire).await;
+                }
 
                 // Send GetAddr immediately after handshake to populate the address DB
                 // with peers known to this node — including potentially full-history
@@ -1596,5 +1627,399 @@ mod plan_wire_locks {
             .unwrap()
             .expect("header with proof");
         assert_eq!(stored.merkle_root, good.merkle_root);
+    }
+
+    #[test]
+    fn fee_filter_keeps_the_remainder_below_one_sat() {
+        assert!(!fee_rate_meets_filter(1, 1_500));
+        assert!(fee_rate_meets_filter(1, 1_000));
+        assert!(fee_rate_meets_filter(1, 999));
+        assert!(!fee_rate_meets_filter(0, 999));
+    }
+
+    #[test]
+    fn mempool_inv_chunks_stay_within_fifty_thousand() {
+        let items: Vec<u32> = (0..50_001).collect();
+        let chunks = chunk_inventory(items.clone(), 50_000);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= 50_000));
+        assert_eq!(chunks.iter().map(Vec::len).sum::<usize>(), 50_001);
+        assert_eq!(chunks.into_iter().flatten().collect::<Vec<_>>(), items);
+    }
+
+    fn header() -> BlockHeader {
+        BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [1u8; 32],
+            timestamp: 1_700_000_000,
+            bits: 0x207f_ffff,
+            nonce: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_relay_accepts_twelve_thousand_and_rejects_past_fifty_thousand() {
+        use crate::network::protocol::{BlockTxnMessage, CompactBlockMessage, GetBlockTxnMessage};
+        let node = wired().await;
+        let compact = blvm_protocol::bip152::CompactBlock {
+            header: header(),
+            nonce: 1,
+            short_ids: vec![[7u8; 6]; 12_239],
+            prefilled_txs: Vec::new(),
+        };
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::CmpctBlock(CompactBlockMessage {
+                    compact_block: compact,
+                }),
+                Vec::new(),
+            )
+            .await
+            .expect("12239 short ids stay connected");
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::GetBlockTxn(GetBlockTxnMessage {
+                    block_hash: [3u8; 32],
+                    indices: vec![1u16; 12_239],
+                }),
+                Vec::new(),
+            )
+            .await
+            .expect("12239 indexes stay connected");
+        let tx = spend(
+            OutPoint {
+                hash: [4u8; 32],
+                index: 0,
+            },
+            1,
+        );
+        let transactions = vec![tx; 12_239];
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::BlockTxn(BlockTxnMessage {
+                    block_hash: [5u8; 32],
+                    transactions,
+                    witnesses: None,
+                }),
+                Vec::new(),
+            )
+            .await
+            .expect("12239 blocktxn transactions stay connected");
+
+        let too_many = blvm_protocol::bip152::CompactBlock {
+            header: header(),
+            nonce: 2,
+            short_ids: vec![[8u8; 6]; 50_001],
+            prefilled_txs: Vec::new(),
+        };
+        let err = node
+            .manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::CmpctBlock(CompactBlockMessage {
+                    compact_block: too_many,
+                }),
+                Vec::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("too many"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn fee_filter_rates_gate_the_one_sat_transaction() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::segwit::transaction_weight_from_stacks;
+
+        let mut node = wired().await;
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 1;
+        node.mempool.set_policy_config(Some(policy));
+        let prev = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        let mut tx = spend(prev, 50_000);
+        tx.inputs[0].script_sig = vec![OP_1];
+        let vsize = transaction_weight_from_stacks(&tx, None)
+            .unwrap()
+            .div_ceil(4)
+            .max(1) as i64;
+        tx.outputs[0].value = 50_000;
+        let mut set = UtxoSet::default();
+        set.insert(
+            prev,
+            Arc::new(UTXO {
+                value: 50_000 + vsize,
+                script_pubkey: vec![OP_1].into(),
+                height: 1,
+                is_coinbase: false,
+            }),
+        );
+        node.mempool
+            .set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set)));
+        assert!(node.mempool.add_transaction(tx.clone()).unwrap());
+        let txid = calculate_tx_id(&tx);
+        for (feerate, offered) in [(1_500u64, false), (1_000, true), (999, true)] {
+            node.manager
+                .dispatch_protocol_message(
+                    node.peer,
+                    &ProtocolMessage::FeeFilter(FeeFilterMessage { feerate }),
+                    Vec::new(),
+                )
+                .await
+                .unwrap();
+            node.manager
+                .dispatch_protocol_message(node.peer, &ProtocolMessage::MemPool, Vec::new())
+                .await
+                .unwrap();
+            let bytes = node.incoming.recv().await.unwrap();
+            let parsed = ProtocolParser::parse_message(&bytes).unwrap();
+            let ProtocolMessage::Inv(InvMessage { inventory }) = parsed else {
+                panic!("mempool reply was not an inv");
+            };
+            assert!(inventory.len() <= 50_000);
+            assert_eq!(inventory.iter().any(|item| item.hash == txid), offered);
+        }
+    }
+
+    #[tokio::test]
+    async fn getaddr_reply_stops_at_one_thousand() {
+        use crate::network::protocol::NetworkAddress;
+        let mut node = wired().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32;
+        {
+            let mut db = node.manager.address_database().write().await;
+            for i in 1u32..=2500 {
+                let mut ip = [0u8; 16];
+                ip[10] = 0xff;
+                ip[11] = 0xff;
+                ip[12] = 1;
+                ip[13] = 2;
+                ip[14] = (i >> 8) as u8;
+                ip[15] = i as u8;
+                db.add_address(
+                    NetworkAddress {
+                        services: 1,
+                        ip,
+                        port: 8333,
+                        time: now,
+                    },
+                    1,
+                );
+            }
+        }
+        node.manager
+            .dispatch_protocol_message(node.peer, &ProtocolMessage::GetAddr, Vec::new())
+            .await
+            .unwrap();
+        let bytes = node.incoming.recv().await.unwrap();
+        let parsed = ProtocolParser::parse_message(&bytes).unwrap();
+        let ProtocolMessage::Addr(msg) = parsed else {
+            panic!("getaddr reply was not addr");
+        };
+        assert_eq!(msg.addresses.len(), 1000);
+    }
+
+    #[tokio::test]
+    async fn getblocks_stops_at_the_first_header_without_a_body() {
+        use crate::network::protocol::GetBlocksMessage;
+        let mut node = wired().await;
+        let mut prev = [0u8; 32];
+        let mut indexed = Vec::new();
+        for height in 0u64..=6 {
+            let header = BlockHeader {
+                version: 1,
+                prev_block_hash: prev,
+                merkle_root: [height as u8; 32],
+                timestamp: 1_700_000_000 + height,
+                bits: 0x207f_ffff,
+                nonce: height,
+            };
+            let hash = blvm_consensus::block::block_header_hash(&header);
+            if height != 5 {
+                let block = blvm_protocol::Block {
+                    header: header.clone(),
+                    transactions: Vec::new().into(),
+                };
+                node.storage.blocks().store_block(&block).unwrap();
+            }
+            indexed.push((hash, header, height));
+            prev = hash;
+        }
+        node.storage.blocks().store_headers_batch(&indexed).unwrap();
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::GetBlocks(GetBlocksMessage {
+                    version: 70015,
+                    block_locator_hashes: Vec::new(),
+                    hash_stop: [0u8; 32],
+                }),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let bytes = node.incoming.recv().await.unwrap();
+        let parsed = ProtocolParser::parse_message(&bytes).unwrap();
+        let ProtocolMessage::Inv(InvMessage { inventory }) = parsed else {
+            panic!("getblocks reply was not an inv");
+        };
+        let hashes: Vec<[u8; 32]> = inventory.iter().map(|item| item.hash).collect();
+        assert!(hashes.contains(&indexed[4].0));
+        assert!(!hashes.contains(&indexed[5].0));
+        assert!(!hashes.contains(&indexed[6].0));
+    }
+
+    #[tokio::test]
+    async fn verack_sends_the_relay_fee_floor() {
+        let mut node = wired().await;
+        node.manager
+            .dispatch_protocol_message(node.peer, &ProtocolMessage::Verack, Vec::new())
+            .await
+            .unwrap();
+        let rate = next_feefilter(&mut node.incoming).await;
+        assert_eq!(rate, 1_000);
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.min_relay_fee_rate = 3;
+        node.mempool.set_policy_config(Some(policy));
+        node.manager
+            .dispatch_protocol_message(node.peer, &ProtocolMessage::Verack, Vec::new())
+            .await
+            .unwrap();
+        let rate = next_feefilter(&mut node.incoming).await;
+        assert_eq!(rate, 3_000);
+    }
+
+    async fn next_feefilter(incoming: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> u64 {
+        for _ in 0..4 {
+            let bytes = incoming.recv().await.expect("handshake reply");
+            if let Ok(ProtocolMessage::FeeFilter(msg)) = ProtocolParser::parse_message(&bytes) {
+                return msg.feerate;
+            }
+        }
+        panic!("no feefilter after verack");
+    }
+
+    fn version_message(relay: bool) -> crate::network::protocol::VersionMessage {
+        use crate::network::protocol::{NetworkAddress, VersionMessage};
+        let addr = NetworkAddress {
+            time: 0,
+            services: 0,
+            ip: [0u8; 16],
+            port: 0,
+        };
+        VersionMessage {
+            version: 70016,
+            services: 0,
+            timestamp: 0,
+            addr_recv: addr.clone(),
+            addr_from: addr,
+            nonce: 9,
+            user_agent: String::new(),
+            start_height: 0,
+            relay,
+        }
+    }
+
+    async fn announce_reaches(node: &mut Wired) -> bool {
+        while node.incoming.try_recv().is_ok() {}
+        node.manager
+            .announce_accepted_transaction([6u8; 32], Some(1))
+            .await;
+        loop {
+            match node.incoming.try_recv() {
+                Ok(bytes) => {
+                    if let Ok(ProtocolMessage::Inv(_)) = ProtocolParser::parse_message(&bytes) {
+                        return true;
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn version_relay_byte_gates_transaction_announcements() {
+        let mut silent = wired().await;
+        {
+            let mut states = silent.manager.peer_states().write().await;
+            states.get_mut(&silent.peer).unwrap().version = 0;
+        }
+        silent
+            .manager
+            .dispatch_protocol_message(
+                silent.peer,
+                &ProtocolMessage::Version(version_message(false)),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!announce_reaches(&mut silent).await);
+
+        let mut speaking = wired().await;
+        {
+            let mut states = speaking.manager.peer_states().write().await;
+            states.get_mut(&speaking.peer).unwrap().version = 0;
+        }
+        speaking
+            .manager
+            .dispatch_protocol_message(
+                speaking.peer,
+                &ProtocolMessage::Version(version_message(true)),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert!(announce_reaches(&mut speaking).await);
+
+        let mut omitted = wired().await;
+        {
+            let mut states = omitted.manager.peer_states().write().await;
+            states.get_mut(&omitted.peer).unwrap().version = 0;
+        }
+        let mut raw =
+            blvm_protocol::wire::serialize_version(&blvm_protocol::network::VersionMessage {
+                version: 70016,
+                services: 0,
+                timestamp: 0,
+                addr_recv: blvm_protocol::network::NetworkAddress {
+                    services: 0,
+                    ip: [0u8; 16],
+                    port: 0,
+                    time: 0,
+                },
+                addr_from: blvm_protocol::network::NetworkAddress {
+                    services: 0,
+                    ip: [0u8; 16],
+                    port: 0,
+                    time: 0,
+                },
+                nonce: 4,
+                user_agent: String::new(),
+                start_height: 0,
+                relay: false,
+            })
+            .unwrap();
+        raw.pop();
+        let parsed = blvm_protocol::wire::deserialize_version(&raw).unwrap();
+        assert!(parsed.relay);
+        omitted
+            .manager
+            .dispatch_protocol_message(
+                omitted.peer,
+                &ProtocolMessage::Version(version_message(parsed.relay)),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert!(announce_reaches(&mut omitted).await);
     }
 }

@@ -346,8 +346,15 @@ impl NetworkManager {
         for peer_addr in peers {
             let allowed = {
                 let states = self.peer_states().read().await;
-                match states.get(&peer_addr).and_then(|state| state.min_fee_rate) {
-                    Some(min) => fee_sat_per_vb.unwrap_or(0) >= min,
+                match states.get(&peer_addr) {
+                    Some(state) if !state.relay_tx => false,
+                    Some(state) => match state.min_fee_rate {
+                        Some(min) => super::wire_dispatch::fee_rate_meets_filter(
+                            fee_sat_per_vb.unwrap_or(0),
+                            min,
+                        ),
+                        None => true,
+                    },
                     None => true,
                 }
             };

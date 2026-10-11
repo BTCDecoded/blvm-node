@@ -3502,19 +3502,19 @@ impl NetworkManager {
         use blvm_protocol::bip157::NODE_COMPACT_FILTERS;
         use blvm_protocol::service_flags::standard;
 
-        // Start with standard Bitcoin flags that should always be set
-        // NODE_NETWORK (bit 0) - Always set for full nodes (even if pruned)
-        // NODE_WITNESS (bit 3) - Set for SegWit support (Commons supports SegWit)
-        let mut services_with_filters = standard::NODE_NETWORK | standard::NODE_WITNESS;
-
-        // NODE_NETWORK_LIMITED (bit 10) - Set if node is pruned (can only serve recent blocks)
-        // Check if storage has pruning enabled
-        if let Some(ref storage) = self.storage {
-            if let Some(pruning_manager) = storage.pruning() {
-                if pruning_manager.is_enabled() {
-                    services_with_filters |= standard::NODE_NETWORK_LIMITED;
-                }
-            }
+        // NODE_WITNESS stays set. A pruned node advertises NODE_NETWORK_LIMITED and
+        // leaves NODE_NETWORK clear. An archive node does the opposite.
+        let pruned = self
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.pruning())
+            .map(|pruning_manager| pruning_manager.is_enabled())
+            .unwrap_or(false);
+        let mut services_with_filters = standard::NODE_WITNESS;
+        if pruned {
+            services_with_filters |= standard::NODE_NETWORK_LIMITED;
+        } else {
+            services_with_filters |= standard::NODE_NETWORK;
         }
 
         // Add any additional services passed in (for future extensibility)
@@ -3551,6 +3551,14 @@ impl NetworkManager {
         // FIBRE - always enabled
         services_with_filters |= crate::network::protocol::NODE_FIBRE;
 
+        if pruned {
+            services_with_filters &= !standard::NODE_NETWORK;
+            services_with_filters |= standard::NODE_NETWORK_LIMITED;
+        } else {
+            services_with_filters &= !standard::NODE_NETWORK_LIMITED;
+            services_with_filters |= standard::NODE_NETWORK;
+        }
+
         crate::network::protocol::VersionMessage {
             version,
             services: services_with_filters,
@@ -3566,3 +3574,65 @@ impl NetworkManager {
 }
 
 // NetworkManager: internal state uses Arc<Mutex>/Arc<RwLock> and is Send + Sync when those hold Send types.
+
+#[cfg(test)]
+mod pruning_version_services {
+    use super::NetworkManager;
+    use crate::config::{PruningConfig, PruningMode};
+    use crate::node::mempool::MempoolManager;
+    use crate::storage::database::default_backend;
+    use crate::storage::Storage;
+    use blvm_protocol::service_flags::standard::{NODE_NETWORK, NODE_NETWORK_LIMITED};
+    use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    fn version_services(storage: Arc<Storage>) -> u64 {
+        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
+        let mempool = Arc::new(MempoolManager::new());
+        let manager = NetworkManager::new(listen).with_dependencies(protocol, storage, mempool);
+        let addr = crate::network::protocol::NetworkAddress {
+            time: 0,
+            services: 0,
+            ip: [0u8; 16],
+            port: 0,
+        };
+        manager
+            .create_version_message(
+                70015,
+                NODE_NETWORK,
+                0,
+                addr.clone(),
+                addr,
+                1,
+                String::new(),
+                0,
+                true,
+            )
+            .services
+    }
+
+    #[tokio::test]
+    async fn pruned_version_clears_node_network() {
+        let archive = tempfile::TempDir::new().unwrap();
+        let archive_storage = Arc::new(Storage::new(archive.path()).unwrap());
+        let archive_bits = version_services(archive_storage);
+        assert_ne!(archive_bits & NODE_NETWORK, 0);
+        assert_eq!(archive_bits & NODE_NETWORK_LIMITED, 0);
+
+        let pruned = tempfile::TempDir::new().unwrap();
+        let mut config = PruningConfig::default();
+        config.mode = PruningMode::Normal {
+            keep_from_height: 0,
+            min_recent_blocks: 288,
+        };
+        let pruned_storage = Arc::new(
+            Storage::with_backend_and_pruning(pruned.path(), default_backend(), Some(config))
+                .unwrap(),
+        );
+        let pruned_bits = version_services(pruned_storage);
+        assert_ne!(pruned_bits & NODE_NETWORK_LIMITED, 0);
+        assert_eq!(pruned_bits & NODE_NETWORK, 0);
+    }
+}
