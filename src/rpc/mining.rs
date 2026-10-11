@@ -492,8 +492,8 @@ impl MiningRpc {
             // Get UTXO set for fee calculation
             let utxo_set = self.get_utxo_set()?;
 
-            // Get prioritized transactions (limit to reasonable number for block template)
-            let limit = 1000;
+            // Fee-rate order. Selection stops when the block is full.
+            let limit = mempool.size();
             Ok(mempool.get_prioritized_transactions(limit, &utxo_set))
         } else {
             Ok(vec![])

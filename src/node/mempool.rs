@@ -287,6 +287,22 @@ pub(crate) fn output_sum_sats(tx: &Transaction) -> Option<u64> {
     Some(total)
 }
 
+/// Transitive children of `root` in the direct-child map. `root` itself is not included.
+fn descendant_closure(map: &HashMap<Hash, HashSet<Hash>>, root: &Hash) -> HashSet<Hash> {
+    let mut out = HashSet::new();
+    let mut stack = vec![*root];
+    while let Some(current) = stack.pop() {
+        if let Some(children) = map.get(&current) {
+            for child in children {
+                if out.insert(*child) {
+                    stack.push(*child);
+                }
+            }
+        }
+    }
+    out
+}
+
 impl MempoolManager {
     /// Create a new mempool manager
     pub fn new() -> Self {
@@ -1269,16 +1285,15 @@ impl MempoolManager {
             {
                 let pool = self.pool_lock();
                 if let Some(current_tx) = pool.transactions.get(&current_hash) {
-                    let parent_keys: Vec<Hash> = pool.transactions.keys().copied().collect();
-                    for input in &current_tx.inputs {
-                        for parent_hash in &parent_keys {
-                            if parent_hash == &input.prevout.hash {
-                                if !ancestors.contains(parent_hash) {
-                                    ancestors.insert(*parent_hash);
-                                    to_process.push(*parent_hash);
-                                }
-                                break;
-                            }
+                    let parents: Vec<Hash> = current_tx
+                        .inputs
+                        .iter()
+                        .map(|input| input.prevout.hash)
+                        .filter(|parent| pool.transactions.contains_key(parent))
+                        .collect();
+                    for parent_hash in parents {
+                        if ancestors.insert(parent_hash) {
+                            to_process.push(parent_hash);
                         }
                     }
                 }
@@ -1316,73 +1331,39 @@ impl MempoolManager {
             return Ok(false);
         }
 
-        // Find all descendants (transactions that depend on this tx)
-        // Optimization: Pre-allocate with estimated capacity (most txs have < 10 descendants)
-        let mut descendants = HashSet::with_capacity(10);
-        let mut to_process = Vec::with_capacity(10);
-        to_process.push(*tx_hash);
-        let mut processed = HashSet::with_capacity(10);
-
-        while let Some(current_hash) = to_process.pop() {
-            if processed.contains(&current_hash) {
-                continue;
+        // The candidate is not in the pool yet. Count it on each in-pool ancestor.
+        let descendants_map = self
+            .tx_descendants
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        for ancestor in &ancestors {
+            let existing = descendant_closure(&descendants_map, ancestor);
+            let descendant_count = existing.len() as u32;
+            if descendant_count + 1 > policy.max_descendant_count {
+                warn!(
+                    "Transaction {} exceeds max descendant count: {} > {}",
+                    hex::encode(tx_hash),
+                    descendant_count + 1,
+                    policy.max_descendant_count
+                );
+                return Ok(false);
             }
-            processed.insert(current_hash);
-
-            {
+            let descendant_size: u64 = {
                 let pool = self.pool_lock();
-                if let Some(current_tx) = pool.transactions.get(&current_hash) {
-                    let output_outpoints: Vec<_> = (0..current_tx.outputs.len())
-                        .map(|idx| OutPoint {
-                            hash: current_hash,
-                            index: idx as u32,
-                        })
-                        .collect();
-
-                    for (child_hash, child_tx) in &pool.transactions {
-                        for input in &child_tx.inputs {
-                            if output_outpoints.contains(&input.prevout) {
-                                if !descendants.contains(child_hash) {
-                                    descendants.insert(*child_hash);
-                                    to_process.push(*child_hash);
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
+                existing
+                    .iter()
+                    .map(|h| pool.adjusted_vsize.get(h).copied().unwrap_or(0))
+                    .sum()
+            };
+            if descendant_size + candidate_vsize > policy.max_descendant_size {
+                warn!(
+                    "Transaction {} exceeds max descendant size: {} > {}",
+                    hex::encode(tx_hash),
+                    descendant_size + candidate_vsize,
+                    policy.max_descendant_size
+                );
+                return Ok(false);
             }
-        }
-
-        // Calculate descendant count and size
-        let descendant_count = descendants.len() as u32;
-        let descendant_size: u64 = {
-            let pool = self.pool_lock();
-            descendants
-                .iter()
-                .map(|h| pool.adjusted_vsize.get(h).copied().unwrap_or(0))
-                .sum()
-        };
-
-        // Check descendant limits
-        if descendant_count + 1 > policy.max_descendant_count {
-            warn!(
-                "Transaction {} exceeds max descendant count: {} > {}",
-                hex::encode(tx_hash),
-                descendant_count + 1,
-                policy.max_descendant_count
-            );
-            return Ok(false);
-        }
-
-        if descendant_size + candidate_vsize > policy.max_descendant_size {
-            warn!(
-                "Transaction {} exceeds max descendant size: {} > {}",
-                hex::encode(tx_hash),
-                descendant_size + candidate_vsize,
-                policy.max_descendant_size
-            );
-            return Ok(false);
         }
 
         Ok(true)
@@ -1403,25 +1384,15 @@ impl MempoolManager {
         dependencies.entry(*tx_hash).or_default();
         descendants.entry(*tx_hash).or_default();
 
-        // Find parent transactions (ancestors) - transactions that created inputs
+        // The parent is the transaction id stored on the input.
         for input in &tx.inputs {
-            // Find transaction that created this output
-            for parent_hash in self.pool_lock().transactions.keys() {
-                if parent_hash == &input.prevout.hash {
-                    // This transaction depends on parent
-                    dependencies
-                        .entry(*tx_hash)
-                        .or_default()
-                        .insert(*parent_hash);
-
-                    // Parent has this as a descendant
-                    descendants
-                        .entry(*parent_hash)
-                        .or_default()
-                        .insert(*tx_hash);
-
-                    break;
-                }
+            let parent_hash = input.prevout.hash;
+            if self.pool_lock().transactions.contains_key(&parent_hash) {
+                dependencies
+                    .entry(*tx_hash)
+                    .or_default()
+                    .insert(parent_hash);
+                descendants.entry(parent_hash).or_default().insert(*tx_hash);
             }
         }
     }
@@ -1636,6 +1607,19 @@ impl MempoolManager {
                 displacement_set.extend(self.replacement_package(hash));
             }
             conflicting_tx_hashes = displacement_set.into_iter().collect();
+        }
+
+        // Every displaced transaction has to opt in. A child that did not signal
+        // stays in the pool, and the replacement is rejected.
+        if !conflicting_tx_hashes.is_empty() {
+            let pool = self.pool_lock();
+            for hash in &conflicting_tx_hashes {
+                if let Some(displaced) = pool.transactions.get(hash) {
+                    if !signals_rbf(displaced) {
+                        return Ok(false);
+                    }
+                }
+            }
         }
 
         // If there are conflicts, attempt RBF replacement.
@@ -2775,6 +2759,184 @@ mod tests {
             2_000,
         ))));
         assert!(mempool.add_transaction(legacy_empty_script()).unwrap());
+    }
+
+    fn child_of(parent: OutPoint, value: i64) -> Transaction {
+        Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: parent,
+                script_sig: Vec::new(),
+                sequence: 0xffffffff,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value,
+                script_pubkey: vec![blvm_protocol::opcodes::OP_1].into(),
+            }]
+            .into(),
+            lock_time: 0,
+        }
+    }
+
+    #[test]
+    fn twenty_five_children_are_admitted_and_the_twenty_sixth_is_not() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+        use std::sync::Arc;
+
+        let funding = OutPoint {
+            hash: [9u8; 32],
+            index: 0,
+        };
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            funding,
+            Arc::new(blvm_protocol::UTXO {
+                value: 2_000_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set)));
+
+        let parent = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: funding,
+                script_sig: Vec::new(),
+                sequence: 0xffffffff,
+            }]
+            .into(),
+            outputs: (0..26)
+                .map(|_| TransactionOutput {
+                    value: 3_000,
+                    script_pubkey: vec![OP_1].into(),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            lock_time: 0,
+        };
+        let parent_hash = calculate_tx_id(&parent);
+        assert!(mempool.add_transaction(parent).unwrap());
+
+        for index in 0..25 {
+            let child = child_of(
+                OutPoint {
+                    hash: parent_hash,
+                    index,
+                },
+                1_000,
+            );
+            assert!(
+                mempool.add_transaction(child).unwrap(),
+                "child {index} should be admitted"
+            );
+        }
+        let rejected = child_of(
+            OutPoint {
+                hash: parent_hash,
+                index: 25,
+            },
+            1_000,
+        );
+        assert!(!mempool.add_transaction(rejected).unwrap());
+        assert_eq!(mempool.size(), 26);
+    }
+
+    #[test]
+    fn child_is_rejected_when_parent_already_has_twenty_five_descendants() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+        use std::sync::Arc;
+
+        let funding = OutPoint {
+            hash: [8u8; 32],
+            index: 0,
+        };
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            funding,
+            Arc::new(blvm_protocol::UTXO {
+                value: 2_000_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set)));
+
+        let parent = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: funding,
+                script_sig: Vec::new(),
+                sequence: 0xffffffff,
+            }]
+            .into(),
+            outputs: (0..25)
+                .map(|_| TransactionOutput {
+                    value: 4_000,
+                    script_pubkey: vec![OP_1].into(),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            lock_time: 0,
+        };
+        let parent_hash = calculate_tx_id(&parent);
+        assert!(mempool.add_transaction(parent).unwrap());
+
+        let child_with_room = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: parent_hash,
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: 0xffffffff,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 3_000,
+                script_pubkey: vec![OP_1].into(),
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let child_hash = calculate_tx_id(&child_with_room);
+        assert!(mempool.add_transaction(child_with_room).unwrap());
+        let grandchild = child_of(
+            OutPoint {
+                hash: child_hash,
+                index: 0,
+            },
+            1_000,
+        );
+        assert!(mempool.add_transaction(grandchild).unwrap());
+
+        for index in 1..24 {
+            let child = child_of(
+                OutPoint {
+                    hash: parent_hash,
+                    index,
+                },
+                1_000,
+            );
+            assert!(mempool.add_transaction(child).unwrap(), "child {index}");
+        }
+        // 24 children and one grandchild: the parent already has 25 descendants.
+        let rejected = child_of(
+            OutPoint {
+                hash: parent_hash,
+                index: 24,
+            },
+            1_000,
+        );
+        assert!(!mempool.add_transaction(rejected).unwrap());
     }
 
     #[test]

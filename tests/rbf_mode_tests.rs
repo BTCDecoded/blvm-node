@@ -30,7 +30,7 @@ fn create_rbf_tx_spending(prevout: OutPoint, output_value: u64) -> Transaction {
         inputs: blvm_protocol::tx_inputs![TransactionInput {
             prevout,
             script_sig: vec![],
-            sequence: 0xfffffffe, // RBF enabled
+            sequence: 0xfffffffd, // BIP125: below 0xfffffffe
         }],
         outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: output_value as i64,
@@ -263,4 +263,49 @@ fn test_rbf_package_replacement_uses_descendant_fees() {
     assert_eq!(mempool.size(), 1);
     assert!(mempool.get_transaction(&parent_hash).is_none());
     assert!(mempool.get_transaction(&child_hash).is_none());
+}
+
+#[test]
+fn sequence_fffffffe_is_not_replaced() {
+    let mempool = MempoolManager::new();
+    let utxo_set = create_test_utxo_set();
+    mempool.set_utxo_set_arc(Arc::new(TokioMutex::new(utxo_set)));
+
+    let mut existing = create_rbf_tx(100_000, 90_000);
+    existing.inputs[0].sequence = 0xfffffffe;
+    let existing_hash = calculate_tx_id(&existing);
+    assert!(mempool.add_transaction(existing).unwrap());
+
+    let replacement = create_rbf_tx(100_000, 70_000);
+    assert!(!mempool.add_transaction(replacement).unwrap());
+    assert!(mempool.get_transaction(&existing_hash).is_some());
+    assert_eq!(mempool.size(), 1);
+}
+
+#[test]
+fn opted_in_parent_with_final_child_stays_in_the_pool() {
+    let mempool = MempoolManager::new();
+    let utxo_set = create_test_utxo_set();
+    mempool.set_utxo_set_arc(Arc::new(TokioMutex::new(utxo_set)));
+
+    let parent = create_rbf_tx(100_000, 85_000);
+    let parent_hash = calculate_tx_id(&parent);
+    assert!(mempool.add_transaction(parent).unwrap());
+
+    let mut child = create_rbf_tx_spending(
+        OutPoint {
+            hash: parent_hash,
+            index: 0,
+        },
+        80_000,
+    );
+    child.inputs[0].sequence = 0xffffffff;
+    let child_hash = calculate_tx_id(&child);
+    assert!(mempool.add_transaction(child).unwrap());
+
+    let replacement = create_rbf_tx(100_000, 70_000);
+    assert!(!mempool.add_transaction(replacement).unwrap());
+    assert!(mempool.get_transaction(&parent_hash).is_some());
+    assert!(mempool.get_transaction(&child_hash).is_some());
+    assert_eq!(mempool.size(), 2);
 }
