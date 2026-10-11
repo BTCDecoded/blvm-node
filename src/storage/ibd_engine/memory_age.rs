@@ -57,6 +57,19 @@ fn append_rate_window() -> &'static parking_lot::Mutex<AppendRateWindow> {
     W.get_or_init(|| parking_lot::Mutex::new(AppendRateWindow::new()))
 }
 
+/// Tests share these process-global counters. `cargo test` runs them in parallel, so a
+/// throttle assertion has to exclude every other append and every other throttle test.
+#[cfg(test)]
+fn append_diag_lock() -> &'static parking_lot::ReentrantMutex<()> {
+    static L: OnceLock<parking_lot::ReentrantMutex<()>> = OnceLock::new();
+    L.get_or_init(|| parking_lot::ReentrantMutex::new(()))
+}
+
+#[cfg(test)]
+pub(crate) fn lock_append_diagnostics_for_test() -> parking_lot::ReentrantMutexGuard<'static, ()> {
+    append_diag_lock().lock()
+}
+
 /// Diagnostic counters for index append paths (logged in `[MEM_REPORT]`).
 /// Returns `(in_place, slow_total, slow_contention)`.
 pub fn memory_age_append_stats() -> (u64, u64, u64) {
@@ -375,6 +388,8 @@ impl MemoryAge {
         run.append_and_rebuild(entries);
         drop(w);
         self.bump_index_epoch();
+        #[cfg(test)]
+        let _diag = append_diag_lock().lock();
         APPEND_IN_PLACE.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -424,6 +439,8 @@ impl MemoryAge {
     }
 
     fn append_slow_path(&self, entries: Vec<OutputKV>, miss: InPlaceMiss) {
+        #[cfg(test)]
+        let _diag = append_diag_lock().lock();
         APPEND_SLOW_PATH.fetch_add(1, Ordering::Relaxed);
         if miss == InPlaceMiss::Contention {
             APPEND_SLOW_CONTENTION.fetch_add(1, Ordering::Relaxed);
@@ -998,6 +1015,7 @@ mod tests {
 
     #[test]
     fn append_in_place_survives_outer_arc_snapshot() {
+        let _diag = lock_append_diagnostics_for_test();
         // Holding snapshot_runs() must not poison in-place append via Arc::make_mut
         // cloning every tip pointer (strong_count>1 → permanent slow path).
         reset_append_diagnostics_for_test();
@@ -1040,6 +1058,7 @@ mod tests {
 
     #[test]
     fn throttle_ignores_structural_freeze_slow_path() {
+        let _diag = lock_append_diagnostics_for_test();
         reset_append_diagnostics_for_test();
         // Mid-IBD shape: ~2/3 in-place, ~1/3 freeze-and-new, ~0 contention.
         bump_append_stats_detailed_for_test(70_000, 30_000, 0);
@@ -1052,6 +1071,7 @@ mod tests {
 
     #[test]
     fn throttle_slow_pct_prefers_recent_window_over_cumulative() {
+        let _diag = lock_append_diagnostics_for_test();
         reset_append_diagnostics_for_test();
         bump_append_stats_detailed_for_test(90_000, 140_600, 140_600);
         set_append_window_baseline_for_test(90_000, 140_600);

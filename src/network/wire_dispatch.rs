@@ -1369,10 +1369,26 @@ mod plan_wire_locks {
         node.storage
             .blocks()
             .store_headers_batch(&[
-                ([0x11; 32], header_zero, 0),
+                ([0x11; 32], header_zero.clone(), 0),
                 ([0x33; 32], header_one.clone(), 1),
             ])
             .unwrap();
+        // GetBlocks stops at the first header that has no body. This lock is the
+        // 69-byte locator, so both headers need a stored body.
+        for header in [header_zero, header_one.clone()] {
+            let block = blvm_protocol::Block {
+                header,
+                transactions: vec![spend(
+                    OutPoint {
+                        hash: [9u8; 32],
+                        index: 0,
+                    },
+                    1000,
+                )]
+                .into(),
+            };
+            node.storage.blocks().store_block(&block).unwrap();
+        }
         let mut payload = vec![0x80, 0x11, 0x01, 0x00, 0x01];
         payload.extend(std::iter::repeat(0x11).take(32));
         payload.extend(std::iter::repeat(0x22).take(32));
