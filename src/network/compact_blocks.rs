@@ -566,16 +566,22 @@ mod tests {
         };
         let block = Block {
             header: header.clone(),
-            transactions: vec![tx].into_boxed_slice(),
+            transactions: vec![tx.clone()].into_boxed_slice(),
         };
         let bare = create_compact_block_with_witnesses(&block, nonce, &HashSet::new(), &[]);
+        let stacks = vec![vec![vec![OP_1]]];
         let with_witness = create_compact_block_with_witnesses(
             &block,
             nonce,
             &HashSet::new(),
-            &[Some(vec![vec![vec![OP_1]]])],
+            &[Some(stacks.clone())],
         );
         assert_ne!(bare.short_ids, with_witness.short_ids);
+        let wtxid = crate::network::txhash::calculate_wtxid(&tx, Some(&stacks));
+        assert_eq!(
+            with_witness.short_ids,
+            vec![calculate_short_tx_id(&header, &wtxid, nonce)]
+        );
     }
 
     #[test]

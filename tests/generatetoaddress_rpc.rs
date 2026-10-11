@@ -157,3 +157,133 @@ async fn generatetoaddress_pays_commons_script() -> anyhow::Result<()> {
     assert_eq!(cb.outputs[0].script_pubkey, vec![0x51]);
     Ok(())
 }
+
+fn funded_spend(
+    prev_hash: [u8; 32],
+    input_value: i64,
+    output_value: i64,
+) -> blvm_protocol::Transaction {
+    use blvm_protocol::constants::SEQUENCE_FINAL;
+    use blvm_protocol::opcodes::OP_1;
+    use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput};
+
+    Transaction {
+        version: 1,
+        inputs: vec![TransactionInput {
+            prevout: OutPoint {
+                hash: prev_hash,
+                index: 0,
+            },
+            script_sig: Vec::new(),
+            sequence: SEQUENCE_FINAL as u64,
+        }]
+        .into(),
+        outputs: vec![TransactionOutput {
+            value: output_value,
+            script_pubkey: vec![OP_1],
+        }]
+        .into(),
+        lock_time: 0,
+    }
+}
+
+fn fund(
+    storage: &Storage,
+    mempool: &MempoolManager,
+    prev_hash: [u8; 32],
+    value: i64,
+    script: Vec<u8>,
+) {
+    use blvm_protocol::{OutPoint, UTXO, UtxoSet};
+
+    let outpoint = OutPoint {
+        hash: prev_hash,
+        index: 0,
+    };
+    let utxo = UTXO {
+        value,
+        script_pubkey: script.into(),
+        height: 0,
+        is_coinbase: false,
+    };
+    storage.utxos().add_utxo(&outpoint, &utxo).unwrap();
+    let mut set = UtxoSet::default();
+    set.insert(outpoint, Arc::new(utxo));
+    mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn generatetoaddress_adds_the_mempool_fee_and_connects_a_witness_spend() -> anyhow::Result<()>
+{
+    use blvm_protocol::block::calculate_tx_id;
+    use blvm_protocol::opcodes::OP_1;
+    use sha2::Digest;
+
+    let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest)?);
+    let genesis_header = protocol.get_network_params().genesis_block.header.clone();
+    let dir = TempDir::new()?;
+    let storage = Arc::new(Storage::new(dir.path())?);
+    storage.chain().initialize(&genesis_header)?;
+    let mempool = Arc::new(MempoolManager::new());
+    let mut policy = blvm_node::config::mempool::MempoolPolicyConfig::default();
+    policy.min_tx_fee = 0;
+    policy.min_relay_fee_rate = 0;
+    mempool.set_policy_config(Some(policy));
+
+    let prev = [0x11u8; 32];
+    fund(&storage, &mempool, prev, 50_000, vec![OP_1]);
+    let tx = funded_spend(prev, 50_000, 49_000);
+    assert!(mempool.add_transaction(tx.clone()).unwrap());
+
+    let mining = MiningRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool))
+        .with_protocol_engine(Arc::clone(&protocol));
+    mining.generate_to_address(&generate_params()).await?;
+    let tip = storage.chain().get_tip_hash()?.expect("tip");
+    let block = storage.blocks().get_block(&tip)?.expect("block");
+    let subsidy = blvm_consensus::economic::get_block_subsidy_for_network(
+        1,
+        blvm_consensus::types::Network::Regtest,
+    );
+    assert_eq!(block.transactions[0].outputs[0].value, subsidy + 1_000);
+    assert_eq!(
+        calculate_tx_id(&block.transactions[1]),
+        calculate_tx_id(&tx)
+    );
+
+    let dir = TempDir::new()?;
+    let storage = Arc::new(Storage::new(dir.path())?);
+    storage.chain().initialize(&genesis_header)?;
+    let mempool = Arc::new(MempoolManager::new());
+    let mut policy = blvm_node::config::mempool::MempoolPolicyConfig::default();
+    policy.min_tx_fee = 0;
+    policy.min_relay_fee_rate = 0;
+    mempool.set_policy_config(Some(policy));
+    let witness_script = vec![OP_1];
+    let digest = sha2::Sha256::digest(&witness_script);
+    let mut program = vec![0x00, 0x20];
+    program.extend_from_slice(&digest);
+    let prev = [0x22u8; 32];
+    fund(&storage, &mempool, prev, 41_000, program);
+    let spend = funded_spend(prev, 41_000, 40_000);
+    let stacks = vec![vec![witness_script]];
+    assert!(
+        mempool
+            .add_transaction_with_witness(spend.clone(), Some(stacks.clone()))
+            .unwrap()
+    );
+    let slot = CommonsGbtSlot::default();
+    slot.set(Arc::new(ScriptCommons));
+    let mining = MiningRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool))
+        .with_protocol_engine(protocol)
+        .with_commons_gbt(slot);
+    mining.generate_to_address(&generate_params()).await?;
+    let tip = storage.chain().get_tip_hash()?.expect("witness tip");
+    let block = storage.blocks().get_block(&tip)?.expect("witness block");
+    assert_eq!(
+        calculate_tx_id(&block.transactions[1]),
+        calculate_tx_id(&spend)
+    );
+    let stored = storage.blocks().get_witness(&tip)?.expect("witnesses");
+    assert_eq!(stored[1], stacks);
+    Ok(())
+}

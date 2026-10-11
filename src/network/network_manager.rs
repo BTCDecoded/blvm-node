@@ -2693,8 +2693,16 @@ impl NetworkManager {
             // Route through MempoolManager so policy (min-fee, spam filter,
             // ancestor limits, RBF) is enforced. add_transaction uses interior
             // mutability (&self) so this is safe from Arc context.
-            if let Err(e) = mempool_manager.add_transaction_with_witness(tx, witnesses) {
-                tracing::debug!("Transaction rejected by mempool: {}", e);
+            let txid = blvm_protocol::block::calculate_tx_id(&tx);
+            match mempool_manager.add_transaction_with_witness(tx, witnesses) {
+                Ok(true) => {
+                    let fee = mempool_manager.cached_fee_rate(&txid);
+                    self.announce_accepted_transaction(txid, fee).await;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::debug!("Transaction rejected by mempool: {}", e);
+                }
             }
         } else {
             // Fallback: no MempoolManager configured, accept via consensus layer.

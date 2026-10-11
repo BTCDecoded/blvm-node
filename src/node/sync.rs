@@ -452,6 +452,7 @@ impl SyncCoordinator {
                 &block,
                 witnesses_to_use,
                 current_height,
+                true,
             )?;
 
             // Update metrics
@@ -547,6 +548,7 @@ impl SyncCoordinator {
                 block,
                 witnesses,
                 connect_height,
+                true,
             )?;
 
             block_hash = blockstore.get_block_hash(block);
@@ -582,6 +584,7 @@ impl SyncCoordinator {
                 block,
                 witnesses,
                 connect_height,
+                false,
             )?;
 
             block_hash = blockstore.get_block_hash(block);

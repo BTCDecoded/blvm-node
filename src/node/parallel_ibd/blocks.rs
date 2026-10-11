@@ -83,7 +83,14 @@ pub(crate) fn validate_and_store_block(
     )?;
 
     if matches!(validation_result, ValidationResult::Valid) {
-        store_block_with_context_and_index(blockstore, storage, block, witnesses_to_use, height)?;
+        store_block_with_context_and_index(
+            blockstore,
+            storage,
+            block,
+            witnesses_to_use,
+            height,
+            true,
+        )?;
 
         debug!("Validated and stored block at height {}", height);
         Ok(())

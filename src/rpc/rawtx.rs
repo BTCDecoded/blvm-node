@@ -10,6 +10,7 @@
 //! - verifytxoutproof
 
 use crate::config::RequestTimeoutConfig;
+use crate::network::NetworkManager;
 use crate::node::mempool::MempoolManager;
 use crate::node::metrics::MetricsCollector;
 use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTimer};
@@ -147,6 +148,7 @@ pub struct RawTxRpc {
     profiler: Option<Arc<PerformanceProfiler>>,
     /// Request timeout config (storage/network/rpc timeouts)
     request_timeouts: Option<RequestTimeoutConfig>,
+    network: Option<Arc<NetworkManager>>,
 }
 
 impl RawTxRpc {
@@ -158,6 +160,7 @@ impl RawTxRpc {
             metrics: None,
             profiler: None,
             request_timeouts: None,
+            network: None,
         }
     }
 
@@ -174,7 +177,14 @@ impl RawTxRpc {
             metrics,
             profiler,
             request_timeouts: None,
+            network: None,
         }
+    }
+
+    /// Announce an accepted transaction when a network manager is wired.
+    pub fn with_network(mut self, network: Option<Arc<NetworkManager>>) -> Self {
+        self.network = network;
+        self
     }
 
     /// Set request timeout config (storage/network/rpc timeouts from config)
@@ -385,6 +395,10 @@ impl RawTxRpc {
                     match mempool.add_transaction_with_witness(tx.clone(), witness_arg) {
                         Ok(true) => {
                             debug!("Transaction {} accepted to mempool", txid_hex);
+                            if let Some(ref network) = self.network {
+                                let fee = mempool.cached_fee_rate(&txid);
+                                network.announce_accepted_transaction(txid, fee).await;
+                            }
                         }
                         Ok(false) => {
                             return Err(RpcError::tx_rejected_with_context(

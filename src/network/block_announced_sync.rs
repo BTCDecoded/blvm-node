@@ -92,27 +92,26 @@ impl NetworkManager {
             return Ok(());
         }
 
-        // A gap of more than one block is fetched from the first missing header.
-        // The headers from the probe are stored here. Parallel IBD is not started.
+        // Headers stored by the probe are fetched before the raw inv. That covers a
+        // same-height sibling as well as a gap of more than one block.
+        // Parallel IBD is not started.
         if let Ok((tip_hash, _)) = storage.chain().get_tip_hash_and_height() {
             if let Ok(Some(probed)) = self
                 .refresh_peer_tip_from(peer_addr, local_height, tip_hash)
                 .await
             {
-                if probed.peer_height > local_height.saturating_add(1) {
-                    if let Some(hash) = probed.first_missing_hash {
-                        info!(
-                            "[BLOCK_RELAY] Local {} peer tip ≈ {} — getdata for first missing block",
-                            local_height, probed.peer_height
-                        );
-                        let first = vec![InventoryVector {
-                            inv_type: MSG_WITNESS_BLOCK,
-                            hash,
-                        }];
-                        return self
-                            .send_block_getdata(peer_addr, &peer_key, first, local_height)
-                            .await;
-                    }
+                if let Some(hash) = probed.first_missing_hash {
+                    info!(
+                        "[BLOCK_RELAY] Local {} peer tip ≈ {} — getdata for first missing block",
+                        local_height, probed.peer_height
+                    );
+                    let first = vec![InventoryVector {
+                        inv_type: MSG_WITNESS_BLOCK,
+                        hash,
+                    }];
+                    return self
+                        .send_block_getdata(peer_addr, &peer_key, first, local_height)
+                        .await;
                 }
             }
         }
@@ -176,7 +175,7 @@ impl NetworkManager {
     ) -> Result<Option<HeadersTipProbe>> {
         let get_headers = GetHeadersMessage {
             version: 70015,
-            block_locator_hashes: vec![tip_hash],
+            block_locator_hashes: self.tip_follow_locator(local_height, tip_hash),
             hash_stop: [0; 32],
         };
         let wire = ProtocolParser::serialize_message(&ProtocolMessage::GetHeaders(get_headers))?;
@@ -198,18 +197,18 @@ impl NetworkManager {
         {
             Ok(Ok(headers)) if headers.is_empty() => {
                 debug!(
-                    "[CATCH_UP] getheaders from {}: empty (peer at our tip)",
+                    "[CATCH_UP] getheaders from {}: empty (no shared block after the locator)",
                     peer_addr
                 );
                 Ok(Some(HeadersTipProbe {
-                    peer_height: local_height,
+                    peer_height: 0,
                     first_missing_hash: None,
                 }))
             }
             Ok(Ok(headers)) => {
-                let (stored, first_missing_hash) =
+                let (stored, first_missing_hash, last_height) =
                     self.store_headers_linking_to_tip(tip_hash, local_height, &headers);
-                let peer_tip = local_height.saturating_add(stored as u64);
+                let peer_tip = last_height.unwrap_or(local_height);
                 if stored > 0 {
                     self.bump_peer_best_height(peer_addr, peer_tip).await;
                 }
@@ -244,23 +243,66 @@ impl NetworkManager {
         }
     }
 
-    /// Store the prefix of `headers` that connects to `tip_hash` and meets proof of work.
+    /// Locator hashes from the tip back to genesis, the same steps as header sync.
+    fn tip_follow_locator(&self, local_height: u64, tip_hash: Hash) -> Vec<Hash> {
+        use crate::node::parallel_ibd::ibd_header_locator_heights;
+        use blvm_protocol::GENESIS_BLOCK_HASH_INTERNAL;
+
+        let Some(storage) = self.storage().as_ref() else {
+            return vec![tip_hash];
+        };
+        let blocks = storage.blocks();
+        let mut hashes = Vec::new();
+        for height in ibd_header_locator_heights(local_height) {
+            if height == local_height {
+                hashes.push(tip_hash);
+                continue;
+            }
+            match blocks.get_hash_by_height(height) {
+                Ok(Some(stored)) => hashes.push(stored),
+                Ok(None) if height == 0 => hashes.push(GENESIS_BLOCK_HASH_INTERNAL),
+                _ => {}
+            }
+        }
+        if hashes.is_empty() {
+            hashes.push(tip_hash);
+        }
+        hashes
+    }
+
+    /// Store the prefix of `headers` that connects to the tip or to a known ancestor.
     ///
-    /// Returns the stored count and the first stored hash. A header that fails either
-    /// check ends the prefix.
+    /// Returns the stored count, the first stored hash, and the height of the last
+    /// stored header. A header that fails proof of work or breaks the chain ends the prefix.
+    /// A header whose height already names a different block is stored by hash and does
+    /// not replace the active height entry.
     fn store_headers_linking_to_tip(
         &self,
         tip_hash: Hash,
         local_height: u64,
         headers: &[blvm_protocol::BlockHeader],
-    ) -> (usize, Option<Hash>) {
+    ) -> (usize, Option<Hash>, Option<u64>) {
         let Some(storage) = self.storage().as_ref() else {
-            return (0, None);
+            return (0, None, None);
         };
-        let mut prev = tip_hash;
-        let mut height = local_height;
+        let mut anchor: Option<(usize, Hash, u64)> = None;
+        for (i, header) in headers.iter().enumerate() {
+            if header.prev_block_hash == tip_hash {
+                anchor = Some((i, tip_hash, local_height));
+                break;
+            }
+            if let Ok(Some(parent_height)) =
+                storage.blocks().get_height_by_hash(&header.prev_block_hash)
+            {
+                anchor = Some((i, header.prev_block_hash, parent_height));
+                break;
+            }
+        }
+        let Some((start, mut prev, mut height)) = anchor else {
+            return (0, None, None);
+        };
         let mut batch = Vec::new();
-        for header in headers {
+        for header in headers.iter().skip(start) {
             if header.version < 1
                 || header.timestamp == 0
                 || header.prev_block_hash != prev
@@ -275,14 +317,33 @@ impl NetworkManager {
         }
         let stored = batch.len();
         let first = batch.first().map(|(hash, _, _)| *hash);
+        let last_height = batch.last().map(|(_, _, height)| *height);
         if stored == 0 {
-            return (0, None);
+            return (0, None, None);
         }
-        if let Err(e) = storage.blocks().store_headers_batch(&batch) {
-            warn!("probe headers failed to store: {e}");
-            return (0, None);
+        let mut on_active = Vec::new();
+        for (hash, header, height) in &batch {
+            let occupied = storage.blocks().get_hash_by_height(*height).ok().flatten();
+            if occupied.is_some_and(|existing| existing != *hash) {
+                if let Err(e) = storage.blocks().store_header(hash, header) {
+                    warn!("probe headers failed to store: {e}");
+                    return (0, None, None);
+                }
+                if let Err(e) = storage.blocks().store_hash_height(*height, hash) {
+                    warn!("probe headers failed to store: {e}");
+                    return (0, None, None);
+                }
+            } else {
+                on_active.push((*hash, header.clone(), *height));
+            }
         }
-        (stored, first)
+        if !on_active.is_empty() {
+            if let Err(e) = storage.blocks().store_headers_batch(&on_active) {
+                warn!("probe headers failed to store: {e}");
+                return (0, None, None);
+            }
+        }
+        (stored, first, last_height)
     }
 
     pub(crate) async fn note_block_announcement(&self, peer_addr: SocketAddr) {
@@ -320,7 +381,7 @@ impl NetworkManager {
             } else {
                 ProtocolMessage::Inv(crate::network::protocol::InvMessage {
                     inventory: vec![InventoryVector {
-                        inv_type: MSG_BLOCK,
+                        inv_type: MSG_WITNESS_BLOCK,
                         hash,
                     }],
                 })
@@ -385,7 +446,7 @@ impl NetworkManager {
         for peer_addr in targets {
             let message = ProtocolMessage::Inv(crate::network::protocol::InvMessage {
                 inventory: vec![InventoryVector {
-                    inv_type: crate::network::inventory::MSG_TX,
+                    inv_type: crate::network::inventory::MSG_WITNESS_TX,
                     hash: txid,
                 }],
             });
@@ -704,6 +765,174 @@ mod tests {
             .unwrap();
         assert_eq!(probed.peer_height, 1);
         assert!(best_height(&nm, peer_addr).await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn empty_headers_reply_does_not_claim_the_local_height() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let tip_hash = [9u8; 32];
+        let tip_header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [1u8; 32],
+            timestamp: 1_700_000_000,
+            bits: 0x207fffff,
+            nonce: 0,
+        };
+        storage
+            .chain()
+            .update_tip(&tip_hash, &tip_header, 1)
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = listener.local_addr().unwrap();
+        let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
+        let nm = Arc::new(
+            NetworkManager::new("127.0.0.1:0".parse().unwrap()).with_dependencies(
+                protocol,
+                storage,
+                Arc::new(MempoolManager::new()),
+            ),
+        );
+        let nm_read = Arc::clone(&nm);
+        let reader = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let frame = read_frame(&mut sock).await;
+            match ProtocolParser::parse_message(&frame).unwrap() {
+                ProtocolMessage::GetHeaders(_) => {
+                    assert!(nm_read.complete_headers_request(peer_addr, Vec::new()));
+                }
+                other => panic!("expected getheaders, got {other:?}"),
+            }
+        });
+        nm.connect_to_peer(peer_addr).await.unwrap();
+        let probed = timeout(
+            Duration::from_secs(5),
+            nm.refresh_peer_tip_from(peer_addr, 1, tip_hash),
+        )
+        .await
+        .expect("probe")
+        .unwrap()
+        .expect("headers");
+        timeout(Duration::from_secs(5), reader)
+            .await
+            .expect("reader")
+            .unwrap();
+        assert_eq!(probed.peer_height, 0);
+        assert!(probed.first_missing_hash.is_none());
+        assert!(best_height(&nm, peer_addr).await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ancestor_header_is_stored_without_replacing_the_tip_height() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let parent = with_proof(BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [4u8; 32],
+            timestamp: 1_700_000_000,
+            bits: 0x207fffff,
+            nonce: 0,
+        });
+        let parent_hash = blvm_consensus::block::block_header_hash(&parent);
+        storage
+            .blocks()
+            .store_header(&parent_hash, &parent)
+            .unwrap();
+        storage.blocks().store_height(0, &parent_hash).unwrap();
+        let tip_hash = [9u8; 32];
+        let tip_header = BlockHeader {
+            version: 1,
+            prev_block_hash: parent_hash,
+            merkle_root: [1u8; 32],
+            timestamp: 1_700_000_001,
+            bits: 0x207fffff,
+            nonce: 1,
+        };
+        storage
+            .chain()
+            .update_tip(&tip_hash, &tip_header, 1)
+            .unwrap();
+        storage.blocks().store_height(1, &tip_hash).unwrap();
+        let sibling = with_proof(BlockHeader {
+            version: 1,
+            prev_block_hash: parent_hash,
+            merkle_root: [8u8; 32],
+            timestamp: 1_700_000_002,
+            bits: 0x207fffff,
+            nonce: 0,
+        });
+        let sibling_hash = blvm_consensus::block::block_header_hash(&sibling);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = listener.local_addr().unwrap();
+        let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
+        let nm = Arc::new(
+            NetworkManager::new("127.0.0.1:0".parse().unwrap()).with_dependencies(
+                protocol,
+                Arc::clone(&storage),
+                Arc::new(MempoolManager::new()),
+            ),
+        );
+        let nm_read = Arc::clone(&nm);
+        let sibling_reply = sibling.clone();
+        let reader = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut getdata = None;
+            for _ in 0..4 {
+                let frame = read_frame(&mut sock).await;
+                match ProtocolParser::parse_message(&frame).unwrap() {
+                    ProtocolMessage::GetHeaders(msg) => {
+                        assert!(msg.block_locator_hashes.contains(&parent_hash));
+                        assert!(msg.block_locator_hashes.contains(&tip_hash));
+                        assert!(
+                            nm_read
+                                .complete_headers_request(peer_addr, vec![sibling_reply.clone()])
+                        );
+                    }
+                    ProtocolMessage::GetData(msg) => {
+                        getdata = Some(msg);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            getdata.expect("getdata for the stored sibling")
+        });
+        nm.connect_to_peer(peer_addr).await.unwrap();
+        let announced = [0xcdu8; 32];
+        let inv = ProtocolMessage::Inv(crate::network::protocol::InvMessage {
+            inventory: vec![InventoryVector {
+                inv_type: MSG_BLOCK,
+                hash: announced,
+            }],
+        });
+        let inv_bytes = ProtocolParser::serialize_message(&inv).unwrap();
+        timeout(
+            Duration::from_secs(5),
+            nm.process_announced_block_inventory(&inv_bytes, peer_addr),
+        )
+        .await
+        .expect("inv")
+        .unwrap();
+        let getdata = timeout(Duration::from_secs(5), reader)
+            .await
+            .expect("reader")
+            .unwrap();
+        assert_eq!(getdata.inventory.len(), 1);
+        assert_eq!(getdata.inventory[0].hash, sibling_hash);
+        assert_ne!(getdata.inventory[0].hash, announced);
+        assert_eq!(
+            storage.blocks().get_hash_by_height(1).unwrap().unwrap(),
+            tip_hash
+        );
+        assert!(
+            storage
+                .blocks()
+                .get_header(&sibling_hash)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -989,6 +989,13 @@ impl BlockStore {
         Ok(())
     }
 
+    /// Record which height a block occupies without replacing the active chain's height entry.
+    pub fn store_hash_height(&self, height: u64, hash: &Hash) -> Result<()> {
+        let height_bytes = height.to_be_bytes();
+        self.hash_to_height.insert(hash.as_slice(), &height_bytes)?;
+        Ok(())
+    }
+
     /// Store multiple headers and heights in a single batch operation
     /// This is MUCH faster than individual inserts for IBD - uses atomic batch writes
     pub fn store_headers_batch(&self, entries: &[(Hash, BlockHeader, u64)]) -> Result<()> {

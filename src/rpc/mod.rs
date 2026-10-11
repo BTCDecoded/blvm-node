@@ -551,6 +551,7 @@ impl RpcManager {
                     self.metrics.clone(),
                     self.profiler.clone(),
                 )
+                .with_network(self.network_manager.clone())
                 .with_request_timeouts(self.request_timeouts.clone()),
             );
             let mining = Arc::new({
@@ -750,12 +751,15 @@ impl RpcManager {
                     Arc::clone(mempool),
                     Arc::clone(storage),
                 ));
-                let rawtx_rpc = Arc::new(rawtx::RawTxRpc::with_dependencies(
-                    Arc::clone(storage),
-                    Arc::clone(mempool),
-                    None,
-                    None,
-                ));
+                let rawtx_rpc = Arc::new(
+                    rawtx::RawTxRpc::with_dependencies(
+                        Arc::clone(storage),
+                        Arc::clone(mempool),
+                        None,
+                        None,
+                    )
+                    .with_network(self.network_manager.clone()),
+                );
                 let mining = Arc::new({
                     let mut m = mining::MiningRpc::with_dependencies(
                         Arc::clone(storage),

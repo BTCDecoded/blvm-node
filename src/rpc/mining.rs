@@ -868,51 +868,38 @@ impl MiningRpc {
             let coinbase_script =
                 blvm_protocol::bip_validation::encode_bip34_coinbase_script(connect_height);
             let pool_txs = self.get_mempool_transactions()?;
+            let mempool_witnesses =
+                mempool_witnesses_for_template(self.mempool.as_deref(), &utxo, &pool_txs)
+                    .map_err(|e| RpcError::internal_error(format!("generatetoaddress: {e}")))?;
 
-            let mut block = if let Some(outputs) = self.try_commons_gbt_outputs().await? {
-                let template = self
-                    .consensus
-                    .create_block_template_with_outputs(
-                        &utxo,
-                        &pool_txs,
-                        connect_height,
-                        &prev_header,
-                        &prev_headers,
-                        &coinbase_script,
-                        &outputs,
-                        ConsensusNetwork::Regtest,
-                        None,
-                    )
-                    .map_err(|e| {
-                        RpcError::internal_error(format!("generatetoaddress: template failed: {e}"))
-                    })?;
-                let mut txs = Vec::with_capacity(1 + template.transactions.len());
-                txs.push(template.coinbase_tx);
-                txs.extend(template.transactions);
-                let mut block = blvm_protocol::Block {
-                    header: template.header,
-                    transactions: txs.into_boxed_slice(),
-                };
-                block.header.timestamp = current_timestamp();
-                block
-            } else {
-                self.consensus
-                    .create_new_block_with_time(
-                        &utxo,
-                        &pool_txs,
-                        connect_height,
-                        &prev_header,
-                        &prev_headers,
-                        &coinbase_script,
-                        &coinbase_address,
-                        current_timestamp(),
-                        ConsensusNetwork::Regtest,
-                        None,
-                    )
-                    .map_err(|e| {
-                        RpcError::internal_error(format!("generatetoaddress: template failed: {e}"))
-                    })?
+            let outputs = match self.try_commons_gbt_outputs().await? {
+                Some(outputs) => outputs,
+                None => vec![(0, coinbase_address.clone())],
             };
+            let template = self
+                .consensus
+                .create_block_template_with_outputs(
+                    &utxo,
+                    &pool_txs,
+                    connect_height,
+                    &prev_header,
+                    &prev_headers,
+                    &coinbase_script,
+                    &outputs,
+                    ConsensusNetwork::Regtest,
+                    Some(&mempool_witnesses),
+                )
+                .map_err(|e| {
+                    RpcError::internal_error(format!("generatetoaddress: template failed: {e}"))
+                })?;
+            let mut txs = Vec::with_capacity(1 + template.transactions.len());
+            txs.push(template.coinbase_tx);
+            txs.extend(template.transactions);
+            let mut block = blvm_protocol::Block {
+                header: template.header,
+                transactions: txs.into_boxed_slice(),
+            };
+            block.header.timestamp = current_timestamp();
             // Connect checks this timestamp against the 11 headers before the
             // block, not the 2016-header template window.
             let mtp_headers = if connect_height > 0 {
@@ -942,6 +929,13 @@ impl MiningRpc {
                 )));
             }
 
+            let mut stacks_by_txid = std::collections::HashMap::new();
+            for (tx, stacks) in pool_txs.iter().zip(mempool_witnesses.iter()) {
+                if let Some(stacks) = stacks {
+                    stacks_by_txid
+                        .insert(blvm_protocol::block::calculate_tx_id(tx), stacks.clone());
+                }
+            }
             let witnesses: Vec<Vec<Witness>> = mined
                 .transactions
                 .iter()
@@ -957,6 +951,10 @@ impl MiningRpc {
                         });
                     if commitment {
                         tx.inputs.iter().map(|_| vec![vec![0u8; 32]]).collect()
+                    } else if let Some(stacks) =
+                        stacks_by_txid.get(&blvm_protocol::block::calculate_tx_id(tx))
+                    {
+                        stacks.clone()
                     } else {
                         tx.inputs.iter().map(|_| Witness::default()).collect()
                     }

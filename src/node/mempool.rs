@@ -182,6 +182,33 @@ fn p2sh_redeem_is_witness_program(script_pubkey: &[u8], script_sig: &[u8]) -> bo
     blvm_protocol::witness::extract_witness_version(&redeem).is_some()
 }
 
+/// Spendable outputs below `n_size * 3` satoshis are dust.
+///
+/// `n_size` is the output's wire size plus the bytes a spend of that output adds.
+/// An `OP_RETURN` output is unspendable and is not dust.
+fn output_is_dust(output: &blvm_protocol::TransactionOutput) -> bool {
+    if output.script_pubkey.first().copied() == Some(0x6a) {
+        return false;
+    }
+    let script_len = output.script_pubkey.len() as u64;
+    let compact = if script_len < 253 {
+        1
+    } else if script_len <= 0xffff {
+        3
+    } else {
+        5
+    };
+    let spend = if blvm_protocol::witness::extract_witness_version(&output.script_pubkey).is_some()
+    {
+        32 + 4 + 1 + (107 / 4) + 4
+    } else {
+        32 + 4 + 1 + 107 + 4
+    };
+    let n_size = 8 + compact + script_len + spend;
+    let threshold = n_size.saturating_mul(3000) / 1000;
+    output.value < threshold as i64
+}
+
 /// Structure, coinbase, witness-count, and script checks.
 ///
 /// `prevouts` is one entry per input. A missing entry was not in the snapshot and
@@ -225,12 +252,14 @@ fn consensus_checks_reject(
             })
     });
     let has_witness = needs_witness_flags || witnesses.is_some_and(|stacks| !stacks.is_empty());
+    // Policy only. Block connect keeps the consensus flag mask.
+    const SCRIPT_VERIFY_MINIMALDATA: u32 = 1 << 6;
     let flags = calculate_script_flags_for_block_network(
         tx,
         has_witness,
         MEMPOOL_POLICY_HEIGHT,
         Network::Mainnet,
-    );
+    ) | SCRIPT_VERIFY_MINIMALDATA;
     let sighash_prevouts: Vec<TransactionOutput> = prevouts
         .iter()
         .map(|output| {
@@ -1506,6 +1535,13 @@ impl MempoolManager {
         if self.relative_lock_rejects(&tx, &utxo_snapshot) {
             warn!(
                 "Transaction {} rejected: relative locktime is not final",
+                hex::encode(tx_hash)
+            );
+            return Ok(false);
+        }
+        if tx.outputs.iter().any(output_is_dust) {
+            warn!(
+                "Transaction {} rejected: output value is below the dust floor",
                 hex::encode(tx_hash)
             );
             return Ok(false);
@@ -2968,6 +3004,59 @@ mod tests {
             MAX_MONEY,
         ))));
         assert!(mempool.add_transaction(at_cap).unwrap());
+    }
+
+    #[test]
+    fn dust_floor_and_minimal_push_reject_at_admission() {
+        const OP_0: u8 = 0x00;
+        const OP_1: u8 = 0x51;
+        const OP_DROP: u8 = 0x75;
+        const OP_RETURN: u8 = 0x6a;
+
+        let mut policy = crate::config::MempoolPolicyConfig::default();
+        policy.min_relay_fee_rate = 0;
+        policy.min_tx_fee = 0;
+        policy.reject_spam_in_mempool = false;
+
+        let mut program = vec![OP_0, 20];
+        program.extend_from_slice(&[0u8; 20]);
+
+        let spend_to = |value: i64, script: Vec<u8>, script_sig: Vec<u8>| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = value;
+            tx.outputs[0].script_pubkey = script;
+            tx
+        };
+        let admit = |tx: Transaction, prevout_script: Vec<u8>| {
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(policy.clone()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout_script,
+                100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+
+        assert!(!admit(
+            spend_to(293, program.clone(), Vec::new()),
+            vec![OP_1]
+        ));
+        assert!(admit(spend_to(294, program, Vec::new()), vec![OP_1]));
+        assert!(admit(
+            spend_to(1, vec![OP_RETURN, 0x01, 0x00], Vec::new()),
+            vec![OP_1]
+        ));
+
+        let drop_true = vec![OP_DROP, OP_1];
+        assert!(!admit(
+            spend_to(1_000, vec![OP_1], vec![0x4c, 0x01, 0x51]),
+            drop_true.clone()
+        ));
+        assert!(admit(
+            spend_to(1_000, vec![OP_1], vec![0x01, 0x51]),
+            drop_true
+        ));
     }
 
     #[test]

@@ -913,7 +913,7 @@ impl NetworkManager {
             ProtocolMessage::MemPool => {
                 // BIP35: respond with an Inv listing all txids currently in our mempool.
                 if let Some(mm) = self.mempool_manager() {
-                    use crate::network::inventory::MSG_TX;
+                    use crate::network::inventory::MSG_WITNESS_TX;
                     use blvm_protocol::block::calculate_tx_id;
                     let min_sat_per_kvb = {
                         let states = self.peer_states().read().await;
@@ -932,7 +932,7 @@ impl NetworkManager {
                                 }
                             }
                             Some(crate::network::protocol::InventoryVector {
-                                inv_type: MSG_TX,
+                                inv_type: MSG_WITNESS_TX,
                                 hash,
                             })
                         })
@@ -980,6 +980,16 @@ impl NetworkManager {
                     }
                     Err(e) => {
                         tracing::debug!("Failed to serialize GetAddr: {}", e);
+                    }
+                }
+                match ProtocolParser::serialize_message(&ProtocolMessage::SendHeaders) {
+                    Ok(wire) => {
+                        if let Err(e) = self.send_to_peer(peer_addr, wire).await {
+                            tracing::debug!("SendHeaders to {} failed: {}", peer_addr, e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("Failed to serialize SendHeaders: {}", e);
                     }
                 }
 
@@ -1169,7 +1179,11 @@ mod plan_wire_locks {
         };
         let cheap_id = calculate_tx_id(&cheap);
         let rich_id = calculate_tx_id(&rich);
-        assert!(inventory.iter().any(|item| item.hash == rich_id));
+        assert!(
+            inventory
+                .iter()
+                .any(|item| { item.hash == rich_id && item.inv_type == MSG_WITNESS_TX })
+        );
         assert!(inventory.iter().all(|item| item.hash != cheap_id));
     }
 
@@ -1422,7 +1436,7 @@ mod plan_wire_locks {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn announce_lock_block_and_tx_leave_as_inv() {
-        use crate::network::inventory::{MSG_BLOCK, MSG_TX};
+        use crate::network::inventory::{MSG_WITNESS_BLOCK, MSG_WITNESS_TX};
         let mut node = wired().await;
         let header = BlockHeader {
             version: 1,
@@ -1440,9 +1454,9 @@ mod plan_wire_locks {
         match ProtocolParser::parse_message(&bytes).unwrap() {
             ProtocolMessage::Inv(InvMessage { inventory }) => {
                 assert!(
-                    inventory
-                        .iter()
-                        .any(|item| { item.inv_type == MSG_BLOCK && item.hash == block_hash })
+                    inventory.iter().any(|item| {
+                        item.inv_type == MSG_WITNESS_BLOCK && item.hash == block_hash
+                    })
                 );
             }
             other => panic!("expected block inv, got {other:?}"),
@@ -1455,7 +1469,7 @@ mod plan_wire_locks {
                 assert!(
                     inventory
                         .iter()
-                        .any(|item| item.inv_type == MSG_TX && item.hash == txid)
+                        .any(|item| item.inv_type == MSG_WITNESS_TX && item.hash == txid)
                 );
             }
             other => panic!("expected tx inv, got {other:?}"),
@@ -1900,6 +1914,162 @@ mod plan_wire_locks {
         assert!(hashes.contains(&indexed[4].0));
         assert!(!hashes.contains(&indexed[5].0));
         assert!(!hashes.contains(&indexed[6].0));
+    }
+
+    #[tokio::test]
+    async fn verack_asks_the_peer_for_headers() {
+        let mut node = wired().await;
+        node.manager
+            .dispatch_protocol_message(node.peer, &ProtocolMessage::Verack, Vec::new())
+            .await
+            .unwrap();
+        let mut saw_headers = false;
+        for _ in 0..4 {
+            let bytes =
+                tokio::time::timeout(std::time::Duration::from_secs(2), node.incoming.recv())
+                    .await
+                    .expect("handshake reply")
+                    .expect("message");
+            if matches!(
+                ProtocolParser::parse_message(&bytes),
+                Ok(ProtocolMessage::SendHeaders)
+            ) {
+                saw_headers = true;
+                break;
+            }
+        }
+        assert!(saw_headers, "verack sends sendheaders");
+    }
+
+    #[tokio::test]
+    async fn accepted_tx_is_announced_and_a_rejected_tx_is_not() {
+        use blvm_protocol::block::calculate_tx_id;
+
+        let mut node = wired().await;
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        node.mempool.set_policy_config(Some(policy));
+        let prev = OutPoint {
+            hash: [7u8; 32],
+            index: 0,
+        };
+        let mut set = UtxoSet::default();
+        set.insert(
+            prev,
+            Arc::new(UTXO {
+                value: 50_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        node.mempool
+            .set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set)));
+        let tx = spend(prev, 40_000);
+        node.manager
+            .submit_transaction_with_witness(tx.clone(), None)
+            .await
+            .unwrap();
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(2), node.incoming.recv())
+            .await
+            .expect("announcement")
+            .expect("inv");
+        match ProtocolParser::parse_message(&bytes).unwrap() {
+            ProtocolMessage::Inv(InvMessage { inventory }) => {
+                assert!(inventory.iter().any(|item| {
+                    item.inv_type == MSG_WITNESS_TX && item.hash == calculate_tx_id(&tx)
+                }));
+            }
+            other => panic!("expected inv, got {other:?}"),
+        }
+        let missing = spend(
+            OutPoint {
+                hash: [8u8; 32],
+                index: 0,
+            },
+            1_000,
+        );
+        node.manager
+            .submit_transaction_with_witness(missing, None)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), node.incoming.recv())
+                .await
+                .is_err(),
+            "a rejected transaction is not announced"
+        );
+    }
+
+    #[tokio::test]
+    async fn sendrawtransaction_announces_an_accepted_transaction() {
+        use blvm_protocol::block::calculate_tx_id;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(dir.path()).unwrap());
+        let mempool = Arc::new(MempoolManager::new());
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        mempool.set_policy_config(Some(policy));
+        let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
+        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let manager = Arc::new(NetworkManager::new(listen).with_dependencies(
+            protocol,
+            Arc::clone(&storage),
+            Arc::clone(&mempool),
+        ));
+        let peer: SocketAddr = "127.0.0.1:18445".parse().unwrap();
+        let (peer_conn, mut incoming) = Peer::pair_for_testing(peer);
+        manager
+            .peer_manager_mutex()
+            .lock()
+            .await
+            .add_peer(TransportAddr::Tcp(peer), peer_conn)
+            .unwrap();
+        let mut state = PeerState::new();
+        state.version = 70015;
+        manager.peer_states().write().await.insert(peer, state);
+
+        let prev = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 0,
+            is_coinbase: false,
+        };
+        storage.utxos().add_utxo(&prev, &utxo).unwrap();
+        let mut set = UtxoSet::default();
+        set.insert(prev, Arc::new(utxo));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set)));
+        let tx = spend(prev, 40_000);
+        let raw = blvm_protocol::serialization::serialize_transaction(&tx);
+        let rpc = crate::rpc::rawtx::RawTxRpc::with_dependencies(
+            Arc::clone(&storage),
+            mempool,
+            None,
+            None,
+        )
+        .with_network(Some(manager));
+        rpc.sendrawtransaction(&serde_json::json!([hex::encode(raw)]))
+            .await
+            .unwrap();
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(2), incoming.recv())
+            .await
+            .expect("announcement")
+            .expect("inv");
+        match ProtocolParser::parse_message(&bytes).unwrap() {
+            ProtocolMessage::Inv(InvMessage { inventory }) => {
+                assert!(inventory.iter().any(|item| {
+                    item.inv_type == MSG_WITNESS_TX && item.hash == calculate_tx_id(&tx)
+                }));
+            }
+            other => panic!("expected inv, got {other:?}"),
+        }
     }
 
     #[tokio::test]

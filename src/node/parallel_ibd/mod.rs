@@ -20,6 +20,7 @@ pub(crate) mod body_dup;
 mod feeder;
 mod feeder_miss;
 mod headers;
+pub(crate) use headers::ibd_header_locator_heights;
 #[cfg(feature = "production")]
 mod ibd_staging;
 pub(crate) mod late_body;
