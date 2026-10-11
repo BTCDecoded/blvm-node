@@ -1090,7 +1090,7 @@ impl BlockStore {
         };
 
         let fork_h: Option<u64> = if locator.is_empty() {
-            // Empty locator: peer wants chain from immediately after genesis.
+            // Empty locator: peer wants the chain from genesis.
             Some(0)
         } else {
             let mut found = None;
@@ -1109,7 +1109,13 @@ impl BlockStore {
             return Ok(Vec::new());
         };
 
-        let start = fork.saturating_add(1);
+        // An empty locator asks for the chain from genesis. A matched locator
+        // starts at the next header.
+        let start = if locator.is_empty() {
+            0
+        } else {
+            fork.saturating_add(1)
+        };
         if start > tip_h {
             return Ok(Vec::new());
         }

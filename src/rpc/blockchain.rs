@@ -6,18 +6,18 @@ use crate::config::RequestTimeoutConfig;
 use crate::node::block_processor::{prepare_block_validation_context, validate_block_with_context};
 use crate::node::event_publisher::EventPublisher;
 use crate::rpc::errors::{
-    BLOCK_HASH_PARAM_REQUIRED_MSG, BLOCK_NOT_FOUND_MSG, BlockNotFoundError,
-    HEIGHT_PARAM_REQUIRED_MSG, RpcError, STORAGE_NOT_AVAILABLE_MSG,
+    BlockNotFoundError, RpcError, BLOCK_HASH_PARAM_REQUIRED_MSG, BLOCK_NOT_FOUND_MSG,
+    HEIGHT_PARAM_REQUIRED_MSG, STORAGE_NOT_AVAILABLE_MSG,
 };
 use crate::rpc::params::{param_str_required, param_u64, param_u64_default};
-use crate::storage::Storage;
 use crate::storage::assumeutxo::AssumeUtxoManager;
+use crate::storage::Storage;
 use crate::utils::{
-    CACHE_REFRESH_TIP, POLL_INTERVAL_WAIT_FOR_BLOCK, storage_timeout_from_config,
-    with_custom_timeout,
+    storage_timeout_from_config, with_custom_timeout, CACHE_REFRESH_TIP,
+    POLL_INTERVAL_WAIT_FOR_BLOCK,
 };
 use anyhow::Result;
-use serde_json::{Number, Value, json};
+use serde_json::{json, Number, Value};
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, warn};
@@ -2594,8 +2594,8 @@ mod block_stats_tests {
     #[tokio::test]
     async fn invalidate_tip_moves_to_the_parent_and_drops_the_coinbase() {
         use blvm_consensus::reorganization::{BlockUndoLog, UndoEntry};
-        use blvm_protocol::UTXO;
         use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::UTXO;
         use std::sync::Arc as StdArc;
 
         let temp = tempfile::TempDir::new().unwrap();
@@ -2697,12 +2697,10 @@ mod block_stats_tests {
         };
         let temp = tempfile::TempDir::new().unwrap();
         let off = Arc::new(Storage::new(temp.path()).unwrap());
-        assert!(
-            BlockchainRpc::with_dependencies(off)
-                .get_address_info(&json!([hex::encode(&script)]))
-                .await
-                .is_err()
-        );
+        assert!(BlockchainRpc::with_dependencies(off)
+            .get_address_info(&json!([hex::encode(&script)]))
+            .await
+            .is_err());
 
         let temp_on = tempfile::TempDir::new().unwrap();
         let mut indexing = crate::config::IndexingConfig::default();

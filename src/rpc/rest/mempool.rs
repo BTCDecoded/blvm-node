@@ -11,7 +11,7 @@
 use crate::rpc::mempool::MempoolRpc;
 use crate::rpc::mining::MiningRpc;
 use anyhow::Result;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// Get mempool transactions
 pub async fn get_mempool(mempool: &MempoolRpc, verbose: bool) -> Result<Value> {

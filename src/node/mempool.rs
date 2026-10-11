@@ -6,7 +6,7 @@ use crate::config::{MempoolPolicyConfig, RbfConfig};
 use crate::node::event_publisher::EventPublisher;
 use anyhow::Result;
 use blvm_protocol::mempool::{
-    Mempool, has_conflict_with_tx, replacement_checks_with_witness, signals_rbf,
+    has_conflict_with_tx, replacement_checks_with_witness, signals_rbf, Mempool,
 };
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::{Block, Hash, OutPoint, Transaction, TransactionOutput, UtxoSet};
@@ -118,7 +118,7 @@ fn is_p2sh_script(script: &[u8]) -> bool {
 /// Last push in a push-only script, which is the redeem script of a P2SH spend.
 fn last_script_push(script: &[u8]) -> Option<Vec<u8>> {
     use blvm_protocol::opcodes::{
-        OP_0, OP_1, OP_1NEGATE, OP_16, OP_PUSHDATA1, OP_PUSHDATA2, OP_PUSHDATA4,
+        OP_0, OP_1, OP_16, OP_1NEGATE, OP_PUSHDATA1, OP_PUSHDATA2, OP_PUSHDATA4,
     };
     let mut i = 0;
     let mut last = None;
@@ -191,11 +191,11 @@ fn consensus_checks_reject(
     witnesses: Option<&[Witness]>,
     prevouts: &[Option<TransactionOutput>],
 ) -> bool {
-    use blvm_protocol::ValidationResult;
     use blvm_protocol::block::calculate_script_flags_for_block_network;
     use blvm_protocol::script::verify_script_with_context;
     use blvm_protocol::transaction::{check_transaction, is_coinbase};
     use blvm_protocol::types::Network;
+    use blvm_protocol::ValidationResult;
 
     const MEMPOOL_POLICY_HEIGHT: u64 = 1_000_000;
 
@@ -572,9 +572,17 @@ impl MempoolManager {
     }
 
     /// Run periodic mempool maintenance once (expiry cleanup; for tests and manual ticks).
-    pub async fn process_once(&mut self) -> Result<()> {
+    pub async fn process_once(&self) -> Result<()> {
         self.cleanup_old_transactions().await?;
         Ok(())
+    }
+
+    /// Backdate or refresh one entry. Expiry tests use this.
+    pub(crate) fn set_entry_time(&self, hash: &Hash, timestamp: u64) {
+        self.tx_timestamps
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(*hash, timestamp);
     }
 
     /// Initialize mempool
@@ -584,7 +592,7 @@ impl MempoolManager {
     }
 
     /// Clean up old transactions
-    async fn cleanup_old_transactions(&mut self) -> Result<()> {
+    async fn cleanup_old_transactions(&self) -> Result<()> {
         let policy = self
             .policy_config
             .read()
@@ -619,7 +627,7 @@ impl MempoolManager {
     }
 
     /// Enforce mempool size limits by evicting transactions if necessary
-    async fn enforce_mempool_limits(&mut self) -> Result<()> {
+    async fn enforce_mempool_limits(&self) -> Result<()> {
         let policy = self
             .policy_config
             .read()
@@ -628,12 +636,12 @@ impl MempoolManager {
             .unwrap_or_default();
 
         // Calculate current mempool size
-        let current_size_mb = self.calculate_mempool_size_mb();
+        let current_bytes = self.mempool_size_bytes();
         let current_tx_count = self.pool_lock().transactions.len();
+        let cap_bytes = policy.max_mempool_mb.saturating_mul(1_048_576);
 
         // Check if we need to evict
-        let needs_eviction =
-            current_size_mb > policy.max_mempool_mb || current_tx_count > policy.max_mempool_txs;
+        let needs_eviction = current_bytes > cap_bytes || current_tx_count > policy.max_mempool_txs;
 
         if !needs_eviction {
             return Ok(());
@@ -656,41 +664,40 @@ impl MempoolManager {
         }
 
         debug!(
-            "Mempool size limit exceeded: {} MB / {} MB, {} txs / {} txs. Evicting transactions...",
-            current_size_mb, policy.max_mempool_mb, current_tx_count, policy.max_mempool_txs
+            "Mempool size limit exceeded: {} bytes / {} bytes, {} txs / {} txs. Evicting transactions...",
+            current_bytes, cap_bytes, current_tx_count, policy.max_mempool_txs
         );
 
         // Capture min fee rate before eviction (for FeeRateChanged event)
         let old_min_fee_rate = self.get_min_fee_rate_sat_per_vb();
 
         // Evict transactions based on strategy
-        let target_size_mb = policy.max_mempool_mb;
+        let target_bytes = cap_bytes;
         let target_tx_count = policy.max_mempool_txs;
         let policy = &policy;
 
         match &policy.eviction_strategy {
             crate::config::EvictionStrategy::LowestFeeRate => {
-                self.evict_lowest_fee_rate(target_size_mb, target_tx_count)
+                self.evict_lowest_fee_rate(target_bytes, target_tx_count)
                     .await?;
             }
             crate::config::EvictionStrategy::OldestFirst => {
-                self.evict_oldest_first(target_size_mb, target_tx_count)
+                self.evict_oldest_first(target_bytes, target_tx_count)
                     .await?;
             }
             crate::config::EvictionStrategy::LargestFirst => {
-                self.evict_largest_first(target_size_mb, target_tx_count)
+                self.evict_largest_first(target_bytes, target_tx_count)
                     .await?;
             }
             crate::config::EvictionStrategy::NoDescendantsFirst => {
-                self.evict_no_descendants_first(target_size_mb, target_tx_count)
+                self.evict_no_descendants_first(target_bytes, target_tx_count)
                     .await?;
             }
             crate::config::EvictionStrategy::Hybrid => {
-                self.evict_hybrid(target_size_mb, target_tx_count).await?;
+                self.evict_hybrid(target_bytes, target_tx_count).await?;
             }
             crate::config::EvictionStrategy::SpamFirst => {
-                self.evict_spam_first(target_size_mb, target_tx_count)
-                    .await?;
+                self.evict_spam_first(target_bytes, target_tx_count).await?;
             }
         }
 
@@ -727,351 +734,204 @@ impl MempoolManager {
             .unwrap_or(0)
     }
 
-    /// Calculate current mempool size in MB
-    fn calculate_mempool_size_mb(&self) -> u64 {
+    /// Serialized size of every pooled transaction, in bytes.
+    fn mempool_size_bytes(&self) -> u64 {
         use blvm_protocol::serialization::transaction::serialize_transaction;
 
-        let total_bytes: usize = self
-            .pool_lock()
+        self.pool_lock()
             .transactions
             .values()
-            .map(|tx| serialize_transaction(tx).len())
-            .sum();
-
-        // Convert to MB (1 MB = 1,048,576 bytes)
-        (total_bytes as u64) / 1_048_576
+            .map(|tx| serialize_transaction(tx).len() as u64)
+            .sum()
     }
 
-    /// Evict transactions with lowest fee rate
-    async fn evict_lowest_fee_rate(
-        &mut self,
-        target_size_mb: u64,
-        target_tx_count: usize,
-    ) -> Result<()> {
+    /// Calculate current mempool size in MB
+    fn calculate_mempool_size_mb(&self) -> u64 {
+        self.mempool_size_bytes() / 1_048_576
+    }
+
+    /// Remove `hash` and its in-mempool descendants. Returns bytes and count removed.
+    fn evict_with_descendants(&self, hash: &Hash) -> (u64, usize) {
         use blvm_protocol::serialization::transaction::serialize_transaction;
 
-        // Get all transactions sorted by fee rate (ascending - lowest first)
-        let mut tx_fee_rates: Vec<(Hash, u64, usize)> = self
-            .pool_lock()
-            .transactions
-            .iter()
-            .map(|(hash, tx)| {
+        if !self.pool_lock().transactions.contains_key(hash) {
+            return (0, 0);
+        }
+        let package = self.replacement_package(hash);
+        let mut bytes = 0u64;
+        let mut count = 0usize;
+        for id in package {
+            let tx = self.pool_lock().transactions.get(&id).cloned();
+            let Some(tx) = tx else {
+                continue;
+            };
+            bytes += serialize_transaction(&tx).len() as u64;
+            if self.remove_transaction(&id) {
+                count += 1;
+            }
+        }
+        (bytes, count)
+    }
+
+    /// Evict `order` until both the byte cap and the count cap hold.
+    fn evict_ordered(&self, order: Vec<Hash>, target_bytes: u64, target_tx_count: usize) {
+        let mut current_bytes = self.mempool_size_bytes();
+        let mut current_tx_count = self.pool_lock().transactions.len();
+        for hash in order {
+            if current_bytes <= target_bytes && current_tx_count <= target_tx_count {
+                break;
+            }
+            let (bytes, count) = self.evict_with_descendants(&hash);
+            current_bytes = current_bytes.saturating_sub(bytes);
+            current_tx_count = current_tx_count.saturating_sub(count);
+        }
+    }
+
+    fn hashes_by_ascending_fee(&self) -> Vec<Hash> {
+        let hashes: Vec<Hash> = self.pool_lock().transactions.keys().copied().collect();
+        let mut rows: Vec<(Hash, u64)> = hashes
+            .into_iter()
+            .map(|hash| {
                 let fee_rate = self
                     .fee_cache
                     .read()
                     .unwrap_or_else(|e| e.into_inner())
-                    .get(hash)
+                    .get(&hash)
                     .copied()
                     .unwrap_or(0);
-                let size = serialize_transaction(tx).len();
-                (*hash, fee_rate, size)
+                (hash, fee_rate)
             })
             .collect();
+        rows.sort_by_key(|(_, fee_rate)| *fee_rate);
+        rows.into_iter().map(|(hash, _)| hash).collect()
+    }
 
-        // Sort by fee rate (ascending) - lowest fee rate first
-        tx_fee_rates.sort_by_key(|(_, fee_rate, _)| *fee_rate);
-
-        // Evict until we're under limits
-        let mut current_size_mb = self.calculate_mempool_size_mb();
-        let mut current_tx_count = self.pool_lock().transactions.len();
-
-        for (hash, _fee_rate, size) in tx_fee_rates {
-            if current_size_mb <= target_size_mb && current_tx_count <= target_tx_count {
-                break;
-            }
-
-            // Don't evict if it has descendants (would orphan them)
-            let has_descendants = {
-                let descendants = self
-                    .tx_descendants
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner());
-                descendants
-                    .get(&hash)
-                    .map(|d| !d.is_empty())
-                    .unwrap_or(false)
-            };
-
-            if !has_descendants {
-                debug!("Evicting low fee rate transaction {}", hex::encode(hash));
-                self.remove_transaction(&hash);
-                current_size_mb = current_size_mb.saturating_sub((size as u64) / 1_048_576);
-                current_tx_count -= 1;
-            }
-        }
-
+    /// Evict transactions with lowest fee rate
+    async fn evict_lowest_fee_rate(&self, target_bytes: u64, target_tx_count: usize) -> Result<()> {
+        self.evict_ordered(
+            self.hashes_by_ascending_fee(),
+            target_bytes,
+            target_tx_count,
+        );
         Ok(())
     }
 
     /// Evict oldest transactions first (FIFO)
-    async fn evict_oldest_first(
-        &mut self,
-        target_size_mb: u64,
-        target_tx_count: usize,
-    ) -> Result<()> {
-        use blvm_protocol::serialization::transaction::serialize_transaction;
-
-        // Get all transactions with timestamps, sorted by age (oldest first)
-        let mut tx_ages: Vec<(Hash, u64, usize)> = {
+    async fn evict_oldest_first(&self, target_bytes: u64, target_tx_count: usize) -> Result<()> {
+        let mut tx_ages: Vec<(Hash, u64)> = {
             let timestamps = self.tx_timestamps.read().unwrap_or_else(|e| e.into_inner());
             self.pool_lock()
                 .transactions
-                .iter()
-                .filter_map(|(hash, tx)| {
-                    timestamps.get(hash).map(|&timestamp| {
-                        let size = serialize_transaction(tx).len();
-                        (*hash, timestamp, size)
-                    })
-                })
+                .keys()
+                .filter_map(|hash| timestamps.get(hash).map(|&timestamp| (*hash, timestamp)))
                 .collect()
         };
-
-        // Sort by timestamp (ascending) - oldest first
-        tx_ages.sort_by_key(|(_, timestamp, _)| *timestamp);
-
-        // Evict until we're under limits
-        let mut current_size_mb = self.calculate_mempool_size_mb();
-        let mut current_tx_count = self.pool_lock().transactions.len();
-
-        for (hash, _timestamp, size) in tx_ages {
-            if current_size_mb <= target_size_mb && current_tx_count <= target_tx_count {
-                break;
-            }
-
-            // Don't evict if it has descendants
-            let has_descendants = {
-                let descendants = self
-                    .tx_descendants
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner());
-                descendants
-                    .get(&hash)
-                    .map(|d| !d.is_empty())
-                    .unwrap_or(false)
-            };
-
-            if !has_descendants {
-                debug!("Evicting old transaction {}", hex::encode(hash));
-                self.remove_transaction(&hash);
-                current_size_mb = current_size_mb.saturating_sub((size as u64) / 1_048_576);
-                current_tx_count -= 1;
-            }
-        }
-
+        tx_ages.sort_by_key(|(_, timestamp)| *timestamp);
+        let order = tx_ages.into_iter().map(|(hash, _)| hash).collect();
+        self.evict_ordered(order, target_bytes, target_tx_count);
         Ok(())
     }
 
     /// Evict largest transactions first
-    async fn evict_largest_first(
-        &mut self,
-        target_size_mb: u64,
-        target_tx_count: usize,
-    ) -> Result<()> {
+    async fn evict_largest_first(&self, target_bytes: u64, target_tx_count: usize) -> Result<()> {
         use blvm_protocol::serialization::transaction::serialize_transaction;
 
-        // Get all transactions sorted by size (descending - largest first)
         let mut tx_sizes: Vec<(Hash, usize)> = self
             .pool_lock()
             .transactions
             .iter()
-            .map(|(hash, tx)| {
-                let size = serialize_transaction(tx).len();
-                (*hash, size)
-            })
+            .map(|(hash, tx)| (*hash, serialize_transaction(tx).len()))
             .collect();
-
-        // Sort by size (descending) - largest first
         tx_sizes.sort_by_key(|(_, size)| std::cmp::Reverse(*size));
-
-        // Evict until we're under limits
-        let mut current_size_mb = self.calculate_mempool_size_mb();
-        let mut current_tx_count = self.pool_lock().transactions.len();
-
-        for (hash, size) in tx_sizes {
-            if current_size_mb <= target_size_mb && current_tx_count <= target_tx_count {
-                break;
-            }
-
-            // Don't evict if it has descendants
-            let has_descendants = {
-                let descendants = self
-                    .tx_descendants
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner());
-                descendants
-                    .get(&hash)
-                    .map(|d| !d.is_empty())
-                    .unwrap_or(false)
-            };
-
-            if !has_descendants {
-                debug!(
-                    "Evicting large transaction {} ({} bytes)",
-                    hex::encode(hash),
-                    size
-                );
-                self.remove_transaction(&hash);
-                current_size_mb = current_size_mb.saturating_sub((size as u64) / 1_048_576);
-                current_tx_count -= 1;
-            }
-        }
-
+        let order = tx_sizes.into_iter().map(|(hash, _)| hash).collect();
+        self.evict_ordered(order, target_bytes, target_tx_count);
         Ok(())
     }
 
-    /// Evict transactions with no descendants first (safest)
+    /// Evict transactions with no descendants first, then whole packages if still over the cap.
     async fn evict_no_descendants_first(
-        &mut self,
-        target_size_mb: u64,
+        &self,
+        target_bytes: u64,
         target_tx_count: usize,
     ) -> Result<()> {
-        use blvm_protocol::serialization::transaction::serialize_transaction;
-
-        // Get all transactions with no descendants, sorted by fee rate (lowest first)
-        let mut tx_no_descendants: Vec<(Hash, u64, usize)> = {
+        let mut childless: Vec<(Hash, u64)> = {
             let descendants = self
                 .tx_descendants
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
             let fee_cache = self.fee_cache.read().unwrap_or_else(|e| e.into_inner());
-
             self.pool_lock()
                 .transactions
-                .iter()
-                .filter_map(|(hash, tx)| {
+                .keys()
+                .filter_map(|hash| {
                     let has_descendants = descendants
                         .get(hash)
                         .map(|d| !d.is_empty())
                         .unwrap_or(false);
-
-                    if !has_descendants {
-                        let fee_rate = fee_cache.get(hash).copied().unwrap_or(0);
-                        let size = serialize_transaction(tx).len();
-                        Some((*hash, fee_rate, size))
-                    } else {
+                    if has_descendants {
                         None
+                    } else {
+                        Some((*hash, fee_cache.get(hash).copied().unwrap_or(0)))
                     }
                 })
                 .collect()
         };
-
-        // Sort by fee rate (ascending) - lowest fee rate first
-        tx_no_descendants.sort_by_key(|(_, fee_rate, _)| *fee_rate);
-
-        // Evict until we're under limits
-        let mut current_size_mb = self.calculate_mempool_size_mb();
-        let mut current_tx_count = self.pool_lock().transactions.len();
-
-        for (hash, _fee_rate, size) in tx_no_descendants {
-            if current_size_mb <= target_size_mb && current_tx_count <= target_tx_count {
-                break;
-            }
-
-            debug!(
-                "Evicting transaction with no descendants {}",
-                hex::encode(hash)
+        childless.sort_by_key(|(_, fee_rate)| *fee_rate);
+        self.evict_ordered(
+            childless.into_iter().map(|(hash, _)| hash).collect(),
+            target_bytes,
+            target_tx_count,
+        );
+        if self.mempool_size_bytes() > target_bytes
+            || self.pool_lock().transactions.len() > target_tx_count
+        {
+            self.evict_ordered(
+                self.hashes_by_ascending_fee(),
+                target_bytes,
+                target_tx_count,
             );
-            self.remove_transaction(&hash);
-            current_size_mb = current_size_mb.saturating_sub((size as u64) / 1_048_576);
-            current_tx_count -= 1;
         }
-
         Ok(())
     }
 
     /// Hybrid eviction: combine fee rate and age
-    async fn evict_hybrid(&mut self, target_size_mb: u64, target_tx_count: usize) -> Result<()> {
-        use blvm_protocol::serialization::transaction::serialize_transaction;
-
-        // Calculate score: lower fee rate + older age = higher eviction priority
+    async fn evict_hybrid(&self, target_bytes: u64, target_tx_count: usize) -> Result<()> {
         let current_time = Self::current_timestamp();
-        let mut tx_scores: Vec<(Hash, u64, usize)> = {
+        let mut tx_scores: Vec<(Hash, u64)> = {
             let timestamps = self.tx_timestamps.read().unwrap_or_else(|e| e.into_inner());
             let fee_cache = self.fee_cache.read().unwrap_or_else(|e| e.into_inner());
-
             self.pool_lock()
                 .transactions
-                .iter()
-                .map(|(hash, tx)| {
+                .keys()
+                .map(|hash| {
                     let fee_rate = fee_cache.get(hash).copied().unwrap_or(0);
                     let age = timestamps
                         .get(hash)
                         .map(|&t| current_time.saturating_sub(t))
                         .unwrap_or(0);
-
-                    // Score: normalize fee rate (lower = higher score) + age weight
-                    // Use inverse fee rate (higher for lower fees) + age in seconds
-                    // Normalize fee rate: use 1 / (fee_rate + 1) to avoid division by zero
                     let fee_score = if fee_rate > 0 {
-                        1_000_000 / (fee_rate + 1) // Higher score for lower fee
+                        1_000_000 / (fee_rate + 1)
                     } else {
-                        1_000_000 // Max score for zero fee
+                        1_000_000
                     };
-
-                    // Age weight: 1 point per hour old
                     let age_score = age / 3600;
-
-                    // Combined score (higher = evict first)
-                    let score = fee_score + age_score;
-
-                    let size = serialize_transaction(tx).len();
-                    (*hash, score, size)
+                    (*hash, fee_score + age_score)
                 })
                 .collect()
         };
-
-        // Sort by score (descending) - highest score (most evictable) first
-        tx_scores.sort_by_key(|(_, score, _)| std::cmp::Reverse(*score));
-
-        // Evict until we're under limits
-        let mut current_size_mb = self.calculate_mempool_size_mb();
-        let mut current_tx_count = self.pool_lock().transactions.len();
-
-        for (hash, _score, size) in tx_scores {
-            if current_size_mb <= target_size_mb && current_tx_count <= target_tx_count {
-                break;
-            }
-
-            // Don't evict if it has descendants
-            let has_descendants = {
-                let descendants = self
-                    .tx_descendants
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner());
-                descendants
-                    .get(&hash)
-                    .map(|d| !d.is_empty())
-                    .unwrap_or(false)
-            };
-
-            if !has_descendants {
-                debug!(
-                    "Evicting transaction (hybrid strategy) {}",
-                    hex::encode(hash)
-                );
-                self.remove_transaction(&hash);
-                current_size_mb = current_size_mb.saturating_sub((size as u64) / 1_048_576);
-                current_tx_count -= 1;
-            }
-        }
-
+        tx_scores.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
+        let order = tx_scores.into_iter().map(|(hash, _)| hash).collect();
+        self.evict_ordered(order, target_bytes, target_tx_count);
         Ok(())
     }
 
     /// Evict spam transactions first (when mempool is full)
-    async fn evict_spam_first(
-        &mut self,
-        target_size_mb: u64,
-        target_tx_count: usize,
-    ) -> Result<()> {
-        use blvm_protocol::serialization::transaction::serialize_transaction;
+    async fn evict_spam_first(&self, target_bytes: u64, target_tx_count: usize) -> Result<()> {
         use blvm_protocol::spam_filter::SpamFilter;
 
-        // Get all transactions, classify as spam or not
         let spam_filter = SpamFilter::new();
-        let mut spam_txs: Vec<(Hash, u64, usize)> = Vec::new();
-        let mut non_spam_txs: Vec<(Hash, u64, usize)> = Vec::new();
-
+        let mut spam_txs: Vec<(Hash, u64)> = Vec::new();
+        let mut non_spam_txs: Vec<(Hash, u64)> = Vec::new();
         let entries: Vec<(Hash, Transaction)> = {
             let pool = self.pool_lock();
             pool.transactions
@@ -1081,80 +941,19 @@ impl MempoolManager {
         };
         let fee_cache = self.fee_cache.read().unwrap_or_else(|e| e.into_inner());
         for (hash, tx) in &entries {
-            let size = serialize_transaction(tx).len();
             let fee_rate = fee_cache.get(hash).copied().unwrap_or(0);
-
-            let result = spam_filter.is_spam(tx);
-            if result.is_spam {
-                spam_txs.push((*hash, fee_rate, size));
+            if spam_filter.is_spam(tx).is_spam {
+                spam_txs.push((*hash, fee_rate));
             } else {
-                non_spam_txs.push((*hash, fee_rate, size));
+                non_spam_txs.push((*hash, fee_rate));
             }
         }
         drop(fee_cache);
-
-        // Sort spam transactions by fee rate (lowest first - evict first)
-        spam_txs.sort_by_key(|(_, fee_rate, _)| *fee_rate);
-
-        // Sort non-spam transactions by fee rate (lowest first - evict last)
-        non_spam_txs.sort_by_key(|(_, fee_rate, _)| *fee_rate);
-
-        // Evict spam transactions first, then non-spam if needed
-        let mut current_size_mb = self.calculate_mempool_size_mb();
-        let mut current_tx_count = self.pool_lock().transactions.len();
-
-        // First, evict spam transactions
-        for (hash, _fee_rate, size) in spam_txs {
-            if current_size_mb <= target_size_mb && current_tx_count <= target_tx_count {
-                break;
-            }
-
-            // Don't evict if it has descendants
-            let has_descendants = {
-                let descendants = self
-                    .tx_descendants
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner());
-                descendants
-                    .get(&hash)
-                    .map(|d| !d.is_empty())
-                    .unwrap_or(false)
-            };
-
-            if !has_descendants {
-                debug!("Evicting spam transaction {}", hex::encode(hash));
-                self.remove_transaction(&hash);
-                current_size_mb = current_size_mb.saturating_sub((size as u64) / 1_048_576);
-                current_tx_count -= 1;
-            }
-        }
-
-        // If still over limits, evict non-spam transactions (lowest fee rate first)
-        for (hash, _fee_rate, size) in non_spam_txs {
-            if current_size_mb <= target_size_mb && current_tx_count <= target_tx_count {
-                break;
-            }
-
-            // Don't evict if it has descendants
-            let has_descendants = {
-                let descendants = self
-                    .tx_descendants
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner());
-                descendants
-                    .get(&hash)
-                    .map(|d| !d.is_empty())
-                    .unwrap_or(false)
-            };
-
-            if !has_descendants {
-                debug!("Evicting non-spam transaction {}", hex::encode(hash));
-                self.remove_transaction(&hash);
-                current_size_mb = current_size_mb.saturating_sub((size as u64) / 1_048_576);
-                current_tx_count -= 1;
-            }
-        }
-
+        spam_txs.sort_by_key(|(_, fee_rate)| *fee_rate);
+        non_spam_txs.sort_by_key(|(_, fee_rate)| *fee_rate);
+        let mut order: Vec<Hash> = spam_txs.into_iter().map(|(hash, _)| hash).collect();
+        order.extend(non_spam_txs.into_iter().map(|(hash, _)| hash));
+        self.evict_ordered(order, target_bytes, target_tx_count);
         Ok(())
     }
 
@@ -1356,7 +1155,14 @@ impl MempoolManager {
         }
 
         // Check absolute fee bump
-        let min_fee_bump = rbf_config.min_fee_bump_satoshis as i64;
+        let incremental = self
+            .policy_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|policy| policy.incremental_relay_fee)
+            .unwrap_or(1000) as i64;
+        let min_fee_bump = (rbf_config.min_fee_bump_satoshis as i64).max(incremental);
         if new_fee <= existing_fee + min_fee_bump {
             warn!(
                 "RBF replacement rejected: absolute fee bump insufficient (required: {} sat, got: {} sat) for tx {}",
@@ -2363,18 +2169,18 @@ impl MempoolManager {
         witnesses: Option<&[Witness]>,
         utxo_set: &UtxoSet,
     ) -> (u64, u64) {
-        use blvm_protocol::UTXO;
-        use blvm_protocol::mempool::{DEFAULT_BYTES_PER_SIGOP, sigop_adjusted_vsize};
+        use blvm_protocol::mempool::{sigop_adjusted_vsize, DEFAULT_BYTES_PER_SIGOP};
         use blvm_protocol::script::flags::SEGWIT_STANDARD_FLAGS;
         use blvm_protocol::sigop::get_transaction_sigop_cost_with_utxos;
+        use blvm_protocol::UTXO;
 
-        let bytes_per_sigop = self
-            .policy_config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|p| p.bytes_per_sigop)
-            .unwrap_or(DEFAULT_BYTES_PER_SIGOP);
+        let (bytes_per_sigop, count_sigops) = {
+            let policy = self.policy_config.read().unwrap_or_else(|e| e.into_inner());
+            match policy.as_ref() {
+                Some(p) => (p.bytes_per_sigop, p.count_sigops),
+                None => (DEFAULT_BYTES_PER_SIGOP, true),
+            }
+        };
 
         // Empty chain snapshot: P2SH and witness terms stay zero. Legacy sigops still count.
         // Non-empty snapshot: chain UTXO, else the unconfirmed parent's script_pubkey.
@@ -2401,9 +2207,12 @@ impl MempoolManager {
                 .collect()
         };
         let refs: Vec<Option<&UTXO>> = owned_utxos.iter().map(|utxo| utxo.as_ref()).collect();
-        let sigop_cost =
+        let sigop_cost = if count_sigops {
             get_transaction_sigop_cost_with_utxos(tx, &refs, witnesses, SEGWIT_STANDARD_FLAGS)
-                .unwrap_or_else(|_| blvm_protocol::sigop::get_legacy_sigop_count(tx) as u64 * 4);
+                .unwrap_or_else(|_| blvm_protocol::sigop::get_legacy_sigop_count(tx) as u64 * 4)
+        } else {
+            0
+        };
 
         let weight = self.transaction_weight(tx, witnesses);
         (
@@ -2771,6 +2580,15 @@ impl MempoolManager {
         file.sync_all()?;
         Ok(())
     }
+
+    /// Path from `[mempool] mempool_persistence_path` when that section is set.
+    pub fn configured_persistence_path(&self) -> Option<String> {
+        self.policy_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|policy| policy.mempool_persistence_path.clone())
+    }
 }
 
 impl Default for MempoolManager {
@@ -2819,7 +2637,7 @@ impl crate::node::miner::MempoolProvider for MempoolManager {
 
 impl MempoolManager {
     /// Load mempool from disk
-    pub fn load_from_disk<P: AsRef<std::path::Path>>(&mut self, path: P) -> Result<()> {
+    pub fn load_from_disk<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
         use blvm_protocol::serialization::transaction::deserialize_transaction;
         use std::fs::File;
         use std::io::Read;
@@ -2928,11 +2746,9 @@ mod tests {
 
         let mempool = MempoolManager::new();
         let tx = legacy_empty_script();
-        assert!(
-            !mempool
-                .add_transaction_with_witness(tx, Some(Vec::new()))
-                .unwrap()
-        );
+        assert!(!mempool
+            .add_transaction_with_witness(tx, Some(Vec::new()))
+            .unwrap());
 
         let mempool = MempoolManager::new();
         mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
@@ -2984,9 +2800,9 @@ mod tests {
     fn mempool_rejects_a_prevout_sum_above_max_money() {
         use std::sync::Arc;
 
-        use blvm_protocol::UTXO;
         use blvm_protocol::constants::MAX_MONEY;
         use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::UTXO;
 
         let mut policy = crate::config::MempoolPolicyConfig::default();
         policy.min_relay_fee_rate = 0;
@@ -3172,10 +2988,10 @@ mod tests {
 
         use crate::config::MempoolPolicyConfig;
         use crate::node::miner::{MempoolProvider, TransactionSelector};
-        use blvm_protocol::TransactionInput;
         use blvm_protocol::block::calculate_tx_id;
         use blvm_protocol::constants::SEQUENCE_FINAL;
         use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::TransactionInput;
 
         let mut policy = MempoolPolicyConfig::default();
         policy.min_tx_fee = 0;
@@ -3462,17 +3278,13 @@ mod tests {
         assert!(mempool.add_transaction(unrelated.clone()).unwrap());
 
         mempool.remove_for_connected_block(&[confirmed.clone()]);
-        assert!(
-            mempool
-                .get_transaction(&calculate_tx_id(&confirmed))
-                .is_none()
-        );
+        assert!(mempool
+            .get_transaction(&calculate_tx_id(&confirmed))
+            .is_none());
         assert!(mempool.get_transaction(&calculate_tx_id(&child)).is_some());
-        assert!(
-            mempool
-                .get_transaction(&calculate_tx_id(&unrelated))
-                .is_some()
-        );
+        assert!(mempool
+            .get_transaction(&calculate_tx_id(&unrelated))
+            .is_some());
 
         let mempool = MempoolManager::new();
         mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded(
@@ -3494,16 +3306,12 @@ mod tests {
         let mut in_block = conflict.clone();
         in_block.outputs[0].value = 70_000;
         mempool.remove_for_connected_block(&[in_block]);
-        assert!(
-            mempool
-                .get_transaction(&calculate_tx_id(&conflict))
-                .is_none()
-        );
-        assert!(
-            mempool
-                .get_transaction(&calculate_tx_id(&conflict_child))
-                .is_none()
-        );
+        assert!(mempool
+            .get_transaction(&calculate_tx_id(&conflict))
+            .is_none());
+        assert!(mempool
+            .get_transaction(&calculate_tx_id(&conflict_child))
+            .is_none());
         assert_eq!(mempool.size(), 0);
     }
 
@@ -3590,26 +3398,18 @@ mod tests {
             &after,
         );
 
-        assert!(
-            mempool
-                .get_transaction(&calculate_tx_id(&conflict))
-                .is_none()
-        );
-        assert!(
-            mempool
-                .get_transaction(&calculate_tx_id(&conflict_child))
-                .is_none()
-        );
-        assert!(
-            mempool
-                .get_transaction(&calculate_tx_id(&resurrected))
-                .is_some()
-        );
-        assert!(
-            mempool
-                .get_transaction(&calculate_tx_id(&resurrected_child))
-                .is_some()
-        );
+        assert!(mempool
+            .get_transaction(&calculate_tx_id(&conflict))
+            .is_none());
+        assert!(mempool
+            .get_transaction(&calculate_tx_id(&conflict_child))
+            .is_none());
+        assert!(mempool
+            .get_transaction(&calculate_tx_id(&resurrected))
+            .is_some());
+        assert!(mempool
+            .get_transaction(&calculate_tx_id(&resurrected_child))
+            .is_some());
         assert_eq!(mempool.size(), 2);
     }
 
@@ -3712,11 +3512,9 @@ mod tests {
         assert!(!mempool.add_transaction(spend.clone()).unwrap());
 
         let witness: Vec<Witness> = vec![vec![witness_script]];
-        assert!(
-            mempool
-                .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
-                .unwrap()
-        );
+        assert!(mempool
+            .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
+            .unwrap());
         assert_eq!(
             mempool.get_transaction_witnesses(&calculate_tx_id(&spend)),
             Some(witness)
@@ -3792,11 +3590,9 @@ mod tests {
         assert!(!mempool.add_transaction(spend.clone()).unwrap());
 
         let witness: Vec<Witness> = vec![vec![witness_script]];
-        assert!(
-            mempool
-                .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
-                .unwrap()
-        );
+        assert!(mempool
+            .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
+            .unwrap());
         assert_eq!(
             mempool.get_transaction_witnesses(&calculate_tx_id(&spend)),
             Some(witness)
@@ -3839,11 +3635,9 @@ mod tests {
         assert!(!mempool.add_transaction(child.clone()).unwrap());
 
         let witness: Vec<Witness> = vec![vec![witness_script]];
-        assert!(
-            mempool
-                .add_transaction_with_witness(child.clone(), Some(witness.clone()))
-                .unwrap()
-        );
+        assert!(mempool
+            .add_transaction_with_witness(child.clone(), Some(witness.clone()))
+            .unwrap());
         assert_eq!(
             mempool.get_transaction_witnesses(&calculate_tx_id(&child)),
             Some(witness)
@@ -4093,5 +3887,136 @@ mod tests {
         let rates = mempool.fee_cache.read().unwrap_or_else(|e| e.into_inner());
         assert_eq!(rates.get(&negative_id).copied(), Some(0));
         assert!(rates.get(&calculate_tx_id(&positive)).copied().unwrap() > 0);
+    }
+
+    fn open_policy() -> crate::config::MempoolPolicyConfig {
+        let mut policy = crate::config::MempoolPolicyConfig::default();
+        policy.min_relay_fee_rate = 0;
+        policy.min_tx_fee = 0;
+        policy.reject_spam_in_mempool = false;
+        policy
+    }
+
+    fn bulky(index: u32, output_value: i64) -> Transaction {
+        use blvm_protocol::opcodes::OP_1;
+        let mut prev = [0u8; 32];
+        prev[..4].copy_from_slice(&index.to_le_bytes());
+        let mut tx = legacy_empty_script();
+        tx.inputs[0].prevout.hash = prev;
+        tx.outputs[0].value = output_value;
+        tx.outputs[0].script_pubkey = vec![OP_1];
+        tx.outputs[0].script_pubkey.extend(vec![0u8; 7_000]);
+        tx
+    }
+
+    #[tokio::test]
+    async fn mempool_byte_cap_removes_lowest_fee_transactions() {
+        use blvm_protocol::opcodes::OP_1;
+        let mut policy = open_policy();
+        policy.max_mempool_mb = 1;
+        let mempool = MempoolManager::new();
+        mempool.set_policy_config(Some(policy));
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        let cheap_value = 999_999i64;
+        let rich_value = 950_000i64;
+        for index in 0..200u32 {
+            let value = if index < 100 { cheap_value } else { rich_value };
+            let tx = bulky(index, value);
+            utxo_set.insert(
+                tx.inputs[0].prevout,
+                std::sync::Arc::new(blvm_protocol::UTXO {
+                    value: 1_000_000,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 1,
+                    is_coinbase: false,
+                }),
+            );
+        }
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(utxo_set)));
+        for index in 0..200u32 {
+            let value = if index < 100 { cheap_value } else { rich_value };
+            assert!(
+                mempool.add_transaction(bulky(index, value)).unwrap(),
+                "tx {index} admitted"
+            );
+        }
+        assert!(mempool.mempool_size_bytes() > 1_048_576);
+        mempool.process_once().await.unwrap();
+        let bytes = mempool.mempool_size_bytes();
+        assert!(bytes <= 1_048_576, "pool is {bytes} bytes");
+        let remaining = mempool.get_transactions();
+        assert!(remaining.len() < 200);
+        let cheap = remaining
+            .iter()
+            .filter(|tx| tx.outputs[0].value == cheap_value)
+            .count();
+        let rich = remaining
+            .iter()
+            .filter(|tx| tx.outputs[0].value == rich_value)
+            .count();
+        assert_eq!(cheap + rich, remaining.len());
+        assert!(cheap < 100);
+        if cheap > 0 {
+            assert_eq!(rich, 100);
+        }
+    }
+
+    #[tokio::test]
+    async fn mempool_evicts_parent_together_with_child() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+        let mut policy = open_policy();
+        policy.max_mempool_txs = 1;
+        let mempool = MempoolManager::new();
+        mempool.set_policy_config(Some(policy));
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+            vec![OP_1],
+            200_000,
+        ))));
+        let mut parent = legacy_empty_script();
+        parent.outputs[0].value = 190_000;
+        parent.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(parent.clone()).unwrap());
+        let mut child = legacy_empty_script();
+        child.inputs[0].prevout = OutPoint {
+            hash: calculate_tx_id(&parent),
+            index: 0,
+        };
+        child.outputs[0].value = 100_000;
+        child.outputs[0].script_pubkey = vec![OP_1];
+        assert!(mempool.add_transaction(child.clone()).unwrap());
+        mempool.process_once().await.unwrap();
+        assert!(mempool.get_transaction(&calculate_tx_id(&parent)).is_none());
+        assert!(mempool.get_transaction(&calculate_tx_id(&child)).is_none());
+    }
+
+    #[tokio::test]
+    async fn mempool_expiry_removes_a_backdated_transaction() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+        let mut policy = open_policy();
+        policy.mempool_expiry_hours = 1;
+        let mempool = MempoolManager::new();
+        mempool.set_policy_config(Some(policy));
+        let mut utxo_set = funded(vec![OP_1], 50_000);
+        let mut young = legacy_empty_script();
+        young.inputs[0].prevout.hash = [2u8; 32];
+        utxo_set.insert(
+            young.inputs[0].prevout,
+            std::sync::Arc::new(blvm_protocol::UTXO {
+                value: 50_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 1,
+                is_coinbase: false,
+            }),
+        );
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(utxo_set)));
+        let old = legacy_empty_script();
+        assert!(mempool.add_transaction(old.clone()).unwrap());
+        assert!(mempool.add_transaction(young.clone()).unwrap());
+        mempool.set_entry_time(&calculate_tx_id(&old), 0);
+        mempool.process_once().await.unwrap();
+        assert!(mempool.get_transaction(&calculate_tx_id(&old)).is_none());
+        assert!(mempool.get_transaction(&calculate_tx_id(&young)).is_some());
     }
 }

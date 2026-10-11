@@ -2,10 +2,10 @@
 //!
 //! Extracted from network_manager.rs to reduce file size.
 
-use crate::network::NetworkMessage;
 use crate::network::network_manager::NetworkManager;
 use crate::network::peer;
 use crate::network::transport::{Transport, TransportAddr, TransportType};
+use crate::network::NetworkMessage;
 use crate::utils::current_timestamp;
 use anyhow::Result;
 use std::net::SocketAddr;
@@ -234,6 +234,18 @@ impl NetworkManager {
             connected
         );
         Ok(connected)
+    }
+
+    /// Open connections when the peer set is empty.
+    ///
+    /// Catch-up calls this when no peer has reported a start height, so a node
+    /// whose outbound peers are gone still dials the address database.
+    pub(crate) async fn connect_outbound_when_no_peers(&self) -> Result<usize> {
+        if self.peer_count() > 0 {
+            return Ok(0);
+        }
+        let target = self.network_timing().effective_target_outbound_peers();
+        self.connect_peers_from_database(target).await
     }
 
     /// Connect to peers from address database when below target count
@@ -681,6 +693,7 @@ impl NetworkManager {
                     self.protocol_limits().max_protocol_message_length,
                 );
                 peer.set_is_outbound(true);
+                peer.set_ping_timeout_seconds(self.background_task_config().ping_timeout_secs);
                 Ok((peer, transport_addr))
             }
             #[cfg(feature = "quinn")]
@@ -764,5 +777,51 @@ mod tests {
         let nm = NetworkManager::new(listen);
         let dead: SocketAddr = "127.0.0.1:1".parse().unwrap();
         assert!(nm.connect_to_peer(dead).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ibd_evict_lock_keeps_node_network_and_redials_after_session() {
+        use crate::config::RequestTimeoutConfig;
+        use crate::network::transport::TransportPreference;
+        use blvm_protocol::service_flags::standard::NODE_NETWORK;
+
+        let mut cfg = NodeConfig::default();
+        let mut timeouts = RequestTimeoutConfig::default();
+        timeouts.connect_timeout_secs = 1;
+        cfg.request_timeouts = Some(timeouts);
+        let nm = Arc::new(NetworkManager::with_config(
+            "127.0.0.1:0".parse().unwrap(),
+            8,
+            TransportPreference::TCP_ONLY,
+            Some(&cfg),
+        ));
+        let addr: SocketAddr = "203.0.113.5:8333".parse().unwrap();
+        let mut ip = [0u8; 16];
+        ip[10] = 0xff;
+        ip[11] = 0xff;
+        ip[12] = 203;
+        ip[13] = 0;
+        ip[14] = 113;
+        ip[15] = 5;
+        nm.address_database().write().await.add_address(
+            crate::network::protocol::NetworkAddress {
+                time: current_timestamp() as u32,
+                services: NODE_NETWORK,
+                ip,
+                port: 8333,
+            },
+            NODE_NETWORK,
+        );
+        nm.evict_ibd_peer(addr);
+        let services = nm.address_database().read().await.services_for_socket(addr);
+        assert_ne!(services & NODE_NETWORK, 0);
+        nm.clear_ibd_evicted_ips();
+        Arc::clone(&nm).spawn_outbound_reconnect_attempt(addr);
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert!(nm
+            .peer_reconnection_queue()
+            .lock()
+            .await
+            .contains_key(&addr));
     }
 }

@@ -16098,14 +16098,12 @@ fn r355_window_local_completions_do_not_feed_timing_emas() {
     assigner.window_note_complete("p0", t0.0, t0.1, 0);
     assert_eq!(assigner.window_tile_ms_ema.load(Ordering::Relaxed), 0);
     assert_eq!(assigner.window_blk_ms_ema.load(Ordering::Relaxed), 0);
-    assert!(
-        assigner
-            .window_peer_blk_ms
-            .lock()
-            .unwrap()
-            .get("p0")
-            .is_none()
-    );
+    assert!(assigner
+        .window_peer_blk_ms
+        .lock()
+        .unwrap()
+        .get("p0")
+        .is_none());
     assert!(
         !assigner
             .window_started

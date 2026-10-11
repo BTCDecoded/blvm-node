@@ -43,6 +43,8 @@ pub struct TransactionPackage {
     pub combined_fee: u64,
     /// Combined weight (for fee rate calculation)
     pub combined_weight: usize,
+    /// `combined_fee` was priced from a UTXO set. A zero fee is then a real rate.
+    pub fee_known: bool,
 }
 
 /// Package state
@@ -100,7 +102,7 @@ impl Default for PackageValidator {
         Self {
             max_package_size: 25,
             max_package_weight: 404_000, // 404k WU = ~101k vB
-            min_fee_rate: 1000,          // 1 sat/vB minimum
+            min_fee_rate: 1,             // 1 sat/vB minimum
         }
     }
 }
@@ -191,6 +193,7 @@ impl TransactionPackage {
             package_id,
             combined_fee,
             combined_weight,
+            fee_known: utxo_set.is_some(),
         })
     }
 
@@ -271,12 +274,9 @@ impl PackageRelay {
             return Err(PackageRejectReason::WeightExceedsLimit);
         }
 
-        // Check fee rate (if fee calculated)
-        if package.combined_fee > 0 {
-            let fee_rate = package.fee_rate();
-            if fee_rate < self.validator.min_fee_rate as f64 {
-                return Err(PackageRejectReason::FeeRateTooLow);
-            }
+        // A priced package is held to the minimum even when the fee is zero.
+        if package.fee_known && package.fee_rate() < self.validator.min_fee_rate as f64 {
+            return Err(PackageRejectReason::FeeRateTooLow);
         }
 
         // Check for duplicates by txid
@@ -502,5 +502,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(package.combined_fee, 25_000);
+    }
+
+    #[test]
+    fn one_sat_per_vb_package_is_not_rejected_for_fee_rate() {
+        let prevout = OutPoint {
+            hash: [9u8; 32],
+            index: 0,
+        };
+        let mut tx = spend(prevout, 1);
+        let vsize = super::package_transaction_weight_wu(&tx, None)
+            .div_ceil(4)
+            .max(1) as i64;
+        let input_value = 50_000i64;
+        tx.outputs[0].value = input_value - vsize;
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            prevout,
+            Arc::new(UTXO {
+                value: input_value,
+                script_pubkey: vec![OP_1].into(),
+                height: 1,
+                is_coinbase: false,
+            }),
+        );
+        let package = TransactionPackage::new_with_utxo_set(vec![tx], Some(&utxo_set)).unwrap();
+        assert!(package.fee_known);
+        assert!(package.fee_rate() >= 1.0);
+        assert!(PackageRelay::new().validate_package(&package).is_ok());
+
+        let mut free = spend(prevout, input_value);
+        free.outputs[0].value = input_value;
+        let free_package =
+            TransactionPackage::new_with_utxo_set(vec![free], Some(&utxo_set)).unwrap();
+        assert!(matches!(
+            PackageRelay::new().validate_package(&free_package),
+            Err(PackageRejectReason::FeeRateTooLow)
+        ));
     }
 }

@@ -51,6 +51,10 @@ pub struct IbdProtectionConfig {
     #[serde(default = "default_ibd_reputation_ban_threshold")]
     pub reputation_ban_threshold: i32,
 
+    /// Reputation subtracted for each historical block-range download.
+    #[serde(default = "default_ibd_reputation_penalty")]
+    pub reputation_penalty_per_request: i32,
+
     #[serde(default = "crate::config::default_false")]
     pub enable_emergency_throttle: bool,
 
@@ -88,6 +92,9 @@ fn default_ibd_suspicious_reconnection_threshold() -> u32 {
 fn default_ibd_reputation_ban_threshold() -> i32 {
     -100
 }
+fn default_ibd_reputation_penalty() -> i32 {
+    10
+}
 fn default_ibd_emergency_throttle_percent() -> u8 {
     50
 }
@@ -105,6 +112,7 @@ impl Default for IbdProtectionConfig {
             ibd_request_cooldown_seconds: 3600,
             suspicious_reconnection_threshold: 3,
             reputation_ban_threshold: -100,
+            reputation_penalty_per_request: 10,
             enable_emergency_throttle: false,
             emergency_throttle_percent: 50,
         }
@@ -213,7 +221,11 @@ pub fn getdata_serve_pipe_depth() -> usize {
                 return n.clamp(1, 8);
             }
         }
-        if ibd_serve_only() { 4 } else { 1 }
+        if ibd_serve_only() {
+            4
+        } else {
+            1
+        }
     })
 }
 
@@ -476,6 +488,14 @@ pub struct BackgroundTaskConfig {
 
     #[serde(default = "default_bg_peer_reconnection_interval")]
     pub peer_reconnection_interval_secs: u64,
+
+    /// How long an unanswered ping may be outstanding before the peer is dropped.
+    #[serde(default = "default_bg_ping_timeout")]
+    pub ping_timeout_secs: u64,
+
+    /// How long a non-persistent reconnect-queue entry is kept.
+    #[serde(default = "default_bg_peer_reconnection_stale")]
+    pub peer_reconnection_stale_secs: u64,
 }
 
 fn default_bg_dos_cleanup_interval() -> u64 {
@@ -505,6 +525,12 @@ fn default_bg_ping_interval() -> u64 {
 fn default_bg_peer_reconnection_interval() -> u64 {
     10
 }
+fn default_bg_ping_timeout() -> u64 {
+    1200
+}
+fn default_bg_peer_reconnection_stale() -> u64 {
+    3600
+}
 
 impl Default for BackgroundTaskConfig {
     fn default() -> Self {
@@ -518,6 +544,8 @@ impl Default for BackgroundTaskConfig {
             ping_timeout_check_interval_secs: 30,
             ping_interval_secs: 120,
             peer_reconnection_interval_secs: 10,
+            ping_timeout_secs: 1200,
+            peer_reconnection_stale_secs: 3600,
         }
     }
 }

@@ -1,6 +1,6 @@
 //! Type definitions for parallel IBD (chunk work items, byte estimates, shared structs).
 
-use blvm_protocol::{Block, Hash, segwit::Witness};
+use blvm_protocol::{segwit::Witness, Block, Hash};
 use std::sync::Arc;
 
 /// Shared block + witnesses used throughout the IBD download→coordinator→prefetch→feeder pipeline.

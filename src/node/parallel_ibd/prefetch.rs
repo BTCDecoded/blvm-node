@@ -29,7 +29,7 @@ use crossbeam_channel::{Receiver, Sender};
 use rustc_hash::FxHashMap;
 
 #[cfg(feature = "production")]
-use crate::storage::disk_utxo::{OutPointKey, load_keys_from_disk};
+use crate::storage::disk_utxo::{load_keys_from_disk, OutPointKey};
 #[cfg(feature = "production")]
 use crate::storage::ibd_utxo_store::IbdUtxoStore;
 
@@ -1188,27 +1188,21 @@ mod tests {
         // must survive until the tip rewinds the cursor.
         bridge.coordinator_will_send_height(110);
         for h in 101..106 {
-            assert!(
-                bridge
-                    .try_emit_in_order_to_feeder(h, dummy_ready(h), &feeder, 99)
-                    .is_none()
-            );
+            assert!(bridge
+                .try_emit_in_order_to_feeder(h, dummy_ready(h), &feeder, 99)
+                .is_none());
             assert!(bridge.pending_contains(h), "parked {h}");
         }
         assert_eq!(bridge.next_expected(), Some(110));
         assert!(feeder.0.lock().0.get(101).is_none());
         // Already validated: still dropped.
-        assert!(
-            bridge
-                .try_emit_in_order_to_feeder(99, dummy_ready(99), &feeder, 99)
-                .is_none()
-        );
+        assert!(bridge
+            .try_emit_in_order_to_feeder(99, dummy_ready(99), &feeder, 99)
+            .is_none());
         assert!(!bridge.pending_contains(99));
-        assert!(
-            bridge
-                .try_emit_in_order_to_feeder(100, dummy_ready(100), &feeder, 99)
-                .is_none()
-        );
+        assert!(bridge
+            .try_emit_in_order_to_feeder(100, dummy_ready(100), &feeder, 99)
+            .is_none());
         let guard = feeder.0.lock();
         for h in 100..106 {
             assert!(guard.0.get(h).is_some(), "feeder has {h}");

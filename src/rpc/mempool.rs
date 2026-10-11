@@ -11,7 +11,7 @@ use crate::rpc::params::{param_bool_default, param_str, param_str_required};
 use crate::storage::Storage;
 use crate::utils::current_timestamp;
 use blvm_protocol::Hash;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::debug;
@@ -229,7 +229,10 @@ impl MempoolRpc {
         if let Some(mempool) = &self.mempool {
             use crate::utils::env_or_default;
             let data_dir = env_or_default("DATA_DIR", "data");
-            let mempool_path = std::path::Path::new(&data_dir).join("mempool.dat");
+            let mempool_path = mempool
+                .configured_persistence_path()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::Path::new(&data_dir).join("mempool.dat"));
 
             if let Some(parent) = mempool_path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| {

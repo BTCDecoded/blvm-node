@@ -647,7 +647,11 @@ pub(crate) fn note_pipe_w(ranges: u64) {
 pub(crate) fn take_pipe_w() -> f64 {
     let n = PIPE_W_N.swap(0, Ordering::Relaxed);
     let sum = PIPE_W_SUM.swap(0, Ordering::Relaxed);
-    if n > 0 { sum as f64 / n as f64 } else { 0.0 }
+    if n > 0 {
+        sum as f64 / n as f64
+    } else {
+        0.0
+    }
 }
 
 pub(crate) fn last_body_ia_ms() -> u64 {

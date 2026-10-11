@@ -1,6 +1,5 @@
 //! BIP157/158 block filter handlers (GetCfilters, GetCfheaders, GetCfcheckpt).
 
-use crate::network::NetworkMessage;
 use crate::network::bandwidth_protection::ServiceType;
 use crate::network::bip157_handler::{
     handle_getcfcheckpt, handle_getcfheaders, handle_getcfilters,
@@ -8,6 +7,7 @@ use crate::network::bip157_handler::{
 use crate::network::network_manager::NetworkManager;
 use crate::network::protocol::{ProtocolMessage, ProtocolParser};
 use crate::network::transport::TransportAddr;
+use crate::network::NetworkMessage;
 use anyhow::Result;
 use std::net::SocketAddr;
 use std::time::Instant;
@@ -20,6 +20,9 @@ impl NetworkManager {
         data: Vec<u8>,
         peer_addr: SocketAddr,
     ) -> Result<()> {
+        if !self.serve_compact_filters() {
+            return Ok(());
+        }
         match self
             .bandwidth_protection()
             .check_service_request(ServiceType::Filters, peer_addr)
@@ -110,6 +113,9 @@ impl NetworkManager {
         data: Vec<u8>,
         peer_addr: SocketAddr,
     ) -> Result<()> {
+        if !self.serve_compact_filters() {
+            return Ok(());
+        }
         let protocol_msg = ProtocolParser::parse_message(&data)?;
         let request = match protocol_msg {
             ProtocolMessage::GetCfheaders(msg) => msg,
@@ -129,6 +135,9 @@ impl NetworkManager {
         data: Vec<u8>,
         peer_addr: SocketAddr,
     ) -> Result<()> {
+        if !self.serve_compact_filters() {
+            return Ok(());
+        }
         let protocol_msg = ProtocolParser::parse_message(&data)?;
         let request = match protocol_msg {
             ProtocolMessage::GetCfcheckpt(msg) => msg,
@@ -154,16 +163,14 @@ mod tests {
         let peer: SocketAddr = "127.0.0.1:18477".parse().unwrap();
         let nm = NetworkManager::new(listen);
         let bad = vec![0xff, 0xfe];
-        assert!(
-            nm.handle_getcfilters_request(bad.clone(), peer)
-                .await
-                .is_err()
-        );
-        assert!(
-            nm.handle_getcfheaders_request(bad.clone(), peer)
-                .await
-                .is_err()
-        );
+        assert!(nm
+            .handle_getcfilters_request(bad.clone(), peer)
+            .await
+            .is_err());
+        assert!(nm
+            .handle_getcfheaders_request(bad.clone(), peer)
+            .await
+            .is_err());
         assert!(nm.handle_getcfcheckpt_request(bad, peer).await.is_err());
     }
 }

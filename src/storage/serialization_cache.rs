@@ -6,12 +6,40 @@
 use blvm_protocol::types::Hash;
 use lru::LruCache;
 use std::num::NonZeroUsize;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 
 const HEADER_CACHE_SHARDS: usize = 16;
 const TX_CACHE_SHARDS: usize = 64;
+/// Entries per shard when `[storage.cache]` is absent.
+const DEFAULT_HEADER_CACHE_ENTRIES: usize = 64;
+/// A serialized header is 80 bytes. `header_cache_mb` is turned into an entry cap.
+const SERIALIZED_HEADER_BYTES: usize = 80;
+
+static HEADER_CACHE_ENTRIES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(DEFAULT_HEADER_CACHE_ENTRIES);
+
+/// Entries stored in one shard for a header-cache budget in megabytes.
+///
+/// The budget is the whole cache. Each of the 16 shards receives an equal share.
+pub(crate) fn header_cache_entries_for_mb(header_cache_mb: usize) -> usize {
+    let bytes = header_cache_mb.saturating_mul(1024).saturating_mul(1024);
+    let total_entries = bytes / SERIALIZED_HEADER_BYTES;
+    (total_entries / HEADER_CACHE_SHARDS).max(1)
+}
+
+/// Size the header serialize cache before the first lookup.
+/// A later call is ignored once the cache has been created.
+pub fn set_header_serialize_cache_mb(header_cache_mb: usize) {
+    if HEADER_SERIALIZE_CACHE.get().is_some() || header_cache_mb == 0 {
+        return;
+    }
+    HEADER_CACHE_ENTRIES.store(
+        header_cache_entries_for_mb(header_cache_mb),
+        Ordering::Relaxed,
+    );
+}
 
 #[inline]
 fn header_shard(hash: &Hash) -> usize {
@@ -62,7 +90,8 @@ static HEADER_SERIALIZE_CACHE: OnceLock<
 
 fn header_caches() -> &'static [Mutex<LruCache<Hash, Arc<Vec<u8>>>>; HEADER_CACHE_SHARDS] {
     HEADER_SERIALIZE_CACHE.get_or_init(|| {
-        let cap = NonZeroUsize::new(64).expect("nonzero");
+        let entries = HEADER_CACHE_ENTRIES.load(Ordering::Relaxed).max(1);
+        let cap = NonZeroUsize::new(entries).expect("nonzero");
         std::array::from_fn(|_| Mutex::new(LruCache::new(cap)))
     })
 }
@@ -129,5 +158,18 @@ pub fn clear_all_caches() {
             let mut guard = m.lock().unwrap_or_else(|e| e.into_inner());
             guard.clear();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::header_cache_entries_for_mb;
+
+    #[test]
+    fn header_cache_entries_for_mb_divides_across_shards() {
+        assert_eq!(
+            header_cache_entries_for_mb(10),
+            (10 * 1024 * 1024 / 80) / 16
+        );
     }
 }

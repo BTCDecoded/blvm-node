@@ -28,15 +28,15 @@ use std::net::SocketAddr;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{NodeConfig, RpcAuthConfig};
-use crate::module::ModuleManager;
 use crate::module::api::events::EventManager;
+use crate::module::ModuleManager;
 use crate::network::NetworkManager;
 use crate::node::event_publisher::EventPublisher;
 use crate::node::metrics::MetricsCollector;
 use crate::node::performance::PerformanceProfiler;
 use crate::rpc::RpcManager;
 use crate::storage::Storage;
-use crate::utils::{HANDSHAKE_POLL_SLEEP, MESSAGE_PROCESSOR_POLL_SLEEP, log_error_async};
+use crate::utils::{log_error_async, HANDSHAKE_POLL_SLEEP, MESSAGE_PROCESSOR_POLL_SLEEP};
 use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -105,6 +105,14 @@ impl Node {
         storage_config: Option<&crate::config::StorageConfig>,
     ) -> Result<Self> {
         info!("Initializing node");
+
+        if let Some(header_mb) = storage_config
+            .and_then(|config| config.cache.as_ref())
+            .map(|cache| cache.header_cache_mb)
+            .filter(|&mb| mb > 0)
+        {
+            crate::storage::serialization_cache::set_header_serialize_cache_mb(header_mb);
+        }
 
         // Initialize components
         let protocol_version = protocol_version.unwrap_or(ProtocolVersion::Regtest);
@@ -264,6 +272,7 @@ impl Node {
                     if !gov_config.enabled {
                         if let Some(ref commons_url) = gov_config.commons_url {
                             let url = commons_url.clone();
+                            let api_key = gov_config.resolved_api_key();
                             handle.spawn(async move {
                                 // Check if governance server is reachable
                                 let client = reqwest::Client::builder()
@@ -272,7 +281,14 @@ impl Node {
 
                                 if let Ok(client) = client {
                                     let health_url = format!("{url}/internal/health");
-                                    if let Ok(response) = client.get(&health_url).send().await {
+                                    let mut request = client.get(&health_url);
+                                    if let Some(key) = api_key {
+                                        request = request.header(
+                                            reqwest::header::AUTHORIZATION,
+                                            format!("Bearer {key}"),
+                                        );
+                                    }
+                                    if let Ok(response) = request.send().await {
                                         if response.status().is_success() {
                                             info!("Governance server detected at {}, consider setting governance.enabled = true", url);
                                         }
@@ -334,6 +350,15 @@ impl Node {
         if let Some(ref mempool_policy) = config.mempool {
             self.mempool_manager
                 .set_policy_config(Some(mempool_policy.clone()));
+            if mempool_policy.persist_mempool {
+                let path = std::path::Path::new(&mempool_policy.mempool_persistence_path);
+                if path.exists() {
+                    match self.mempool_manager.load_from_disk(path) {
+                        Ok(()) => info!("Loaded mempool from {}", path.display()),
+                        Err(e) => warn!("Failed to load mempool from {}: {}", path.display(), e),
+                    }
+                }
+            }
             info!(
                 "Mempool policy configuration applied: max_mempool_mb={}, eviction_strategy={:?}, reject_spam_in_mempool={}",
                 mempool_policy.max_mempool_mb,
@@ -488,6 +513,8 @@ impl Node {
                 if rest_cfg.enabled {
                     let bind = rest_cfg.resolve_bind_addr(self.rpc.rpc_addr());
                     self.rpc.enable_rest_api(bind);
+                    self.rpc
+                        .set_payment_endpoints_enabled(rest_cfg.payment_endpoints_enabled);
                     info!("[START_COMPONENTS] REST API enabled on {}", bind);
                 }
             }
@@ -687,7 +714,7 @@ impl Node {
         if current_height == 0 {
             if let Some(block_hash) = self.config_sub(|c| c.assumeutxo_blockhash.as_ref()) {
                 use crate::storage::assumeutxo::{
-                    AssumeUtxoManager, height_for_blockhash, write_base_blockhash_marker,
+                    height_for_blockhash, write_base_blockhash_marker, AssumeUtxoManager,
                 };
                 let network = self
                     .config
@@ -1419,6 +1446,7 @@ impl Node {
                                     crate::payment::SettlementMonitor::new(Arc::clone(
                                         &state_machine_arc,
                                     ))
+                                    .with_confirmation_depth(payment_config.safe_confirmation_depth)
                                     .with_mempool_manager(Arc::clone(&self.mempool_manager))
                                     .with_storage(Arc::clone(&self.storage))
                                     .with_tx_cache(Arc::clone(&tx_cache)),
@@ -2112,6 +2140,12 @@ impl Node {
                     "[CATCH_UP] No peer start_height yet (synced_tip={})",
                     synced_tip
                 );
+                let net = Arc::clone(&self.network);
+                tokio::spawn(async move {
+                    if let Err(e) = net.connect_outbound_when_no_peers().await {
+                        debug!("[CATCH_UP] empty peer set connect failed: {e}");
+                    }
+                });
                 return Ok(());
             }
         };
@@ -2123,7 +2157,7 @@ impl Node {
                 .refresh_peer_tip_via_headers(synced_tip, tip_hash)
                 .await
             {
-                peer_height = peer_height.max(probed);
+                peer_height = peer_height.max(probed.peer_height);
             }
         }
 
@@ -2189,7 +2223,11 @@ impl Node {
             // from DNS and connect so the next `try_catch_up_ibd` call (in ~5 s) finds
             // enough peers to start IBD.
             let peer_count = peer_addresses.len();
-            let needed = min_peers.saturating_sub(peer_count).max(8);
+            let fill = self
+                .network
+                .network_timing()
+                .effective_target_outbound_peers();
+            let needed = min_peers.saturating_sub(peer_count).max(fill);
             debug!(
                 "[CATCH_UP] Behind peers (synced_tip={} < target={}) but only {} peers connected (need {}); triggering peer re-discovery (need {})",
                 synced_tip, target_height, peer_count, min_peers, needed
@@ -2523,6 +2561,20 @@ impl Node {
     /// Stop the node
     pub async fn stop(&mut self) -> Result<()> {
         info!("Stopping node");
+        if let Some(policy) = self.config.as_ref().and_then(|cfg| cfg.mempool.as_ref()) {
+            if policy.persist_mempool {
+                let path = std::path::Path::new(&policy.mempool_persistence_path);
+                if let Some(parent) = path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                }
+                match self.mempool_manager.save_to_disk(path) {
+                    Ok(()) => info!("Saved mempool to {}", path.display()),
+                    Err(e) => warn!("Failed to save mempool to {}: {}", path.display(), e),
+                }
+            }
+        }
 
         // Publish NodeShutdown event to modules (give them time to clean up)
         if let Some(event_publisher) = self

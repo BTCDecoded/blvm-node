@@ -10,7 +10,7 @@
 
 use crate::rpc::rawtx::RawTxRpc;
 use anyhow::Result;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// Get transaction by ID
 pub async fn get_transaction(rawtx: &RawTxRpc, txid: &str) -> Result<Value> {

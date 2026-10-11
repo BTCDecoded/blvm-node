@@ -153,6 +153,11 @@ pub struct MempoolPolicyConfig {
     #[serde(default = "default_bytes_per_sigop")]
     pub bytes_per_sigop: u64,
 
+    /// Count signature operations when sizing a transaction for relay and mining.
+    /// Default true. `--disable-sigop` turns this off for the running node.
+    #[serde(default = "default_count_sigops")]
+    pub count_sigops: bool,
+
     #[serde(default = "default_min_tx_fee")]
     pub min_tx_fee: u64,
 
@@ -277,6 +282,10 @@ fn default_reject_spam_in_mempool() -> bool {
     false
 }
 
+fn default_count_sigops() -> bool {
+    true
+}
+
 impl Default for MempoolPolicyConfig {
     fn default() -> Self {
         Self {
@@ -284,6 +293,7 @@ impl Default for MempoolPolicyConfig {
             max_mempool_txs: 100_000,
             min_relay_fee_rate: 1,
             bytes_per_sigop: 20,
+            count_sigops: true,
             min_tx_fee: 1000,
             incremental_relay_fee: 1000,
             max_ancestor_count: 25,

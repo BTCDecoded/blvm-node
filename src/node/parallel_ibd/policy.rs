@@ -85,7 +85,11 @@ fn test_bool(env: &str, default: bool, explicit_on: bool) -> bool {
         return default;
     }
     // Default-on: only explicit off disables.
-    if off { false } else { default }
+    if off {
+        false
+    } else {
+        default
+    }
 }
 
 #[cfg(test)]

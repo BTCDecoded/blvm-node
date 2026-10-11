@@ -4,7 +4,7 @@
 //! and a single writer at a time. `WithoutTls` read transactions are `Send` so IBD
 //! validation workers can load UTXOs in parallel.
 
-use super::{BatchWriter, Database, KNOWN_TREE_NAMES, Tree};
+use super::{BatchWriter, Database, Tree, KNOWN_TREE_NAMES};
 use anyhow::{Context, Result};
 use heed3::types::Bytes;
 use heed3::{
@@ -441,7 +441,11 @@ impl Heed3Database {
             #[cfg(all(target_os = "linux", feature = "libc"))]
             {
                 let p = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-                if p > 0 { p as usize } else { 4096usize }
+                if p > 0 {
+                    p as usize
+                } else {
+                    4096usize
+                }
             }
             #[cfg(not(all(target_os = "linux", feature = "libc")))]
             {

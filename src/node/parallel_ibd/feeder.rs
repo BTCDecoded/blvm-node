@@ -7,8 +7,8 @@
 //! thread spends less time in one global map; validation still consumes strict height order.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex};
@@ -16,7 +16,7 @@ use parking_lot::{Condvar, Mutex};
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 
 // Static buffer limits passed at startup; no dynamic recalculation needed.
-use super::types::{FeederBufferValue, ReadyItem, estimate_block_bytes};
+use super::types::{estimate_block_bytes, FeederBufferValue, ReadyItem};
 
 /// Height-partitioned pending blocks. With one shard this matches a single `BTreeMap`.
 pub(crate) struct FeederBuffer {

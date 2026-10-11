@@ -9,9 +9,9 @@ use crate::node::parallel_ibd::latch_env;
 use crate::storage::hashing::double_sha256;
 use dashmap::DashMap;
 use dashmap::DashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::info;
 
 struct Acc {

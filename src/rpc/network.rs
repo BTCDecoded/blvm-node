@@ -8,7 +8,7 @@ use crate::rpc::params::{
     param_bool, param_bool_default, param_str, param_str_required, param_u64_default,
 };
 use crate::utils::current_timestamp;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tracing::debug;
@@ -624,9 +624,9 @@ impl Default for NetworkRpc {
 #[cfg(test)]
 mod info_locks {
     use super::*;
-    use crate::network::NetworkManager;
     use crate::network::peer::Peer;
     use crate::network::transport::TransportAddr;
+    use crate::network::NetworkManager;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn networkactive_follows_setnetworkactive() {

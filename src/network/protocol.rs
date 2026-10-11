@@ -1115,7 +1115,7 @@ impl ProtocolParser {
                     headers: wire_msg.headers,
                 }))
             }
-            cmd::GETBLOCKS => Ok(ProtocolMessage::GetBlocks(bincode::deserialize(payload)?)),
+            cmd::GETBLOCKS => Ok(ProtocolMessage::GetBlocks(decode_getblocks(payload)?)),
             cmd::BLOCK => {
                 // Use consensus wire format (Bitcoin block + witness structure)
                 let (block, witnesses) =
@@ -1201,16 +1201,21 @@ impl ProtocolParser {
                 payload,
             )?)),
             // Block Filtering (BIP157)
-            cmd::GETCFILTERS => Ok(ProtocolMessage::GetCfilters(bincode::deserialize(payload)?)),
-            cmd::CFILTER => Ok(ProtocolMessage::Cfilter(bincode::deserialize(payload)?)),
-            cmd::GETCFHEADERS => Ok(ProtocolMessage::GetCfheaders(bincode::deserialize(
-                payload,
-            )?)),
-            cmd::CFHEADERS => Ok(ProtocolMessage::Cfheaders(bincode::deserialize(payload)?)),
-            cmd::GETCFCHECKPT => Ok(ProtocolMessage::GetCfcheckpt(bincode::deserialize(
-                payload,
-            )?)),
-            cmd::CFCHECKPT => Ok(ProtocolMessage::Cfcheckpt(bincode::deserialize(payload)?)),
+            cmd::GETCFILTERS => Ok(ProtocolMessage::GetCfilters(decode_filter_request(payload)?)),
+            cmd::CFILTER => Ok(ProtocolMessage::Cfilter(decode_cfilter(payload)?)),
+            cmd::GETCFHEADERS => {
+                let req = decode_filter_request(payload)?;
+                Ok(ProtocolMessage::GetCfheaders(GetCfheadersMessage {
+                    filter_type: req.filter_type,
+                    start_height: req.start_height,
+                    stop_hash: req.stop_hash,
+                }))
+            }
+            cmd::CFHEADERS => Ok(ProtocolMessage::Cfheaders(decode_cfheaders(payload)?)),
+            cmd::GETCFCHECKPT => {
+                Ok(ProtocolMessage::GetCfcheckpt(decode_getcfcheckpt(payload)?))
+            }
+            cmd::CFCHECKPT => Ok(ProtocolMessage::Cfcheckpt(decode_cfcheckpt(payload)?)),
             // Payment Protocol (BIP70) - P2P variant
             cmd::GETPAYMENTREQUEST => Ok(ProtocolMessage::GetPaymentRequest(bincode::deserialize(
                 payload,
@@ -1386,7 +1391,7 @@ impl ProtocolParser {
                         .map_err(|e| anyhow::anyhow!("{}", e))?,
                 )
             }
-            ProtocolMessage::GetBlocks(msg) => (cmd::GETBLOCKS, bincode::serialize(msg)?),
+            ProtocolMessage::GetBlocks(msg) => (cmd::GETBLOCKS, encode_getblocks(msg)?),
             ProtocolMessage::Block(msg) => {
                 // Must match `parse_message` cmd::BLOCK: consensus block+witness wire bytes, not bincode.
                 let payload = blvm_protocol::serialization::serialize_block_with_witnesses(
@@ -1466,12 +1471,19 @@ impl ProtocolParser {
             }
             ProtocolMessage::FilteredBlock(msg) => (cmd::FILTEREDBLOCK, bincode::serialize(msg)?),
             // Block Filtering (BIP157)
-            ProtocolMessage::GetCfilters(msg) => (cmd::GETCFILTERS, bincode::serialize(msg)?),
-            ProtocolMessage::Cfilter(msg) => (cmd::CFILTER, bincode::serialize(msg)?),
-            ProtocolMessage::GetCfheaders(msg) => (cmd::GETCFHEADERS, bincode::serialize(msg)?),
-            ProtocolMessage::Cfheaders(msg) => (cmd::CFHEADERS, bincode::serialize(msg)?),
-            ProtocolMessage::GetCfcheckpt(msg) => (cmd::GETCFCHECKPT, bincode::serialize(msg)?),
-            ProtocolMessage::Cfcheckpt(msg) => (cmd::CFCHECKPT, bincode::serialize(msg)?),
+            ProtocolMessage::GetCfilters(msg) => (cmd::GETCFILTERS, encode_filter_request(msg)),
+            ProtocolMessage::Cfilter(msg) => (cmd::CFILTER, encode_cfilter(msg)?),
+            ProtocolMessage::GetCfheaders(msg) => (
+                cmd::GETCFHEADERS,
+                encode_filter_request(&GetCfiltersMessage {
+                    filter_type: msg.filter_type,
+                    start_height: msg.start_height,
+                    stop_hash: msg.stop_hash,
+                }),
+            ),
+            ProtocolMessage::Cfheaders(msg) => (cmd::CFHEADERS, encode_cfheaders(msg)?),
+            ProtocolMessage::GetCfcheckpt(msg) => (cmd::GETCFCHECKPT, encode_getcfcheckpt(msg)),
+            ProtocolMessage::Cfcheckpt(msg) => (cmd::CFCHECKPT, encode_cfcheckpt(msg)?),
             // Payment Protocol (BIP70) - P2P variant
             ProtocolMessage::GetPaymentRequest(msg) => {
                 (cmd::GETPAYMENTREQUEST, bincode::serialize(msg)?)
@@ -1631,6 +1643,208 @@ pub struct AddrMessage {
     pub addresses: Vec<NetworkAddress>,
 }
 
+fn read_hash(cursor: &mut std::io::Cursor<&[u8]>) -> anyhow::Result<Hash> {
+    let mut hash = [0u8; 32];
+    std::io::Read::read_exact(cursor, &mut hash)?;
+    Ok(hash)
+}
+
+fn decode_filter_request(payload: &[u8]) -> anyhow::Result<GetCfiltersMessage> {
+    if payload.len() < 37 {
+        anyhow::bail!("filter request too short");
+    }
+    let mut stop_hash = [0u8; 32];
+    stop_hash.copy_from_slice(&payload[5..37]);
+    Ok(GetCfiltersMessage {
+        filter_type: payload[0],
+        start_height: u32::from_le_bytes(payload[1..5].try_into().unwrap()),
+        stop_hash,
+    })
+}
+
+fn encode_filter_request(msg: &GetCfiltersMessage) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(37);
+    buf.push(msg.filter_type);
+    buf.extend_from_slice(&msg.start_height.to_le_bytes());
+    buf.extend_from_slice(&msg.stop_hash);
+    buf
+}
+
+fn decode_cfilter(payload: &[u8]) -> anyhow::Result<CfilterMessage> {
+    if payload.len() < 34 {
+        anyhow::bail!("cfilter too short");
+    }
+    let mut block_hash = [0u8; 32];
+    block_hash.copy_from_slice(&payload[1..33]);
+    let mut cursor = std::io::Cursor::new(&payload[33..]);
+    let len = blvm_protocol::varint::read_varint(&mut cursor).map_err(|e| anyhow::anyhow!("{e}"))?
+        as usize;
+    let start = 33 + cursor.position() as usize;
+    if payload.len() < start + len {
+        anyhow::bail!("cfilter truncated");
+    }
+    Ok(CfilterMessage {
+        filter_type: payload[0],
+        block_hash,
+        filter_data: payload[start..start + len].to_vec(),
+        num_elements: 0,
+    })
+}
+
+fn encode_cfilter(msg: &CfilterMessage) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    buf.push(msg.filter_type);
+    buf.extend_from_slice(&msg.block_hash);
+    blvm_protocol::varint::write_varint(&mut buf, msg.filter_data.len() as u64)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    buf.extend_from_slice(&msg.filter_data);
+    Ok(buf)
+}
+
+fn decode_cfheaders(payload: &[u8]) -> anyhow::Result<CfheadersMessage> {
+    if payload.len() < 66 {
+        anyhow::bail!("cfheaders too short");
+    }
+    let mut stop_hash = [0u8; 32];
+    stop_hash.copy_from_slice(&payload[1..33]);
+    let mut filter_hash = [0u8; 32];
+    filter_hash.copy_from_slice(&payload[33..65]);
+    let mut cursor = std::io::Cursor::new(&payload[65..]);
+    let count = blvm_protocol::varint::read_varint(&mut cursor).map_err(|e| anyhow::anyhow!("{e}"))?
+        as usize;
+    if count > 2000 {
+        anyhow::bail!("cfheaders count {count}");
+    }
+    let base = 65 + cursor.position() as usize;
+    if payload.len() < base + count * 32 {
+        anyhow::bail!("cfheaders truncated");
+    }
+    let mut filter_headers = Vec::with_capacity(count);
+    for index in 0..count {
+        let off = base + index * 32;
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&payload[off..off + 32]);
+        filter_headers.push(hash);
+    }
+    Ok(CfheadersMessage {
+        filter_type: payload[0],
+        stop_hash,
+        prev_header: FilterHeaderData {
+            filter_hash,
+            prev_header_hash: [0u8; 32],
+        },
+        filter_headers,
+    })
+}
+
+fn encode_cfheaders(msg: &CfheadersMessage) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    buf.push(msg.filter_type);
+    buf.extend_from_slice(&msg.stop_hash);
+    buf.extend_from_slice(&msg.prev_header.filter_hash);
+    blvm_protocol::varint::write_varint(&mut buf, msg.filter_headers.len() as u64)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    for hash in &msg.filter_headers {
+        buf.extend_from_slice(hash);
+    }
+    Ok(buf)
+}
+
+fn decode_getcfcheckpt(payload: &[u8]) -> anyhow::Result<GetCfcheckptMessage> {
+    if payload.len() < 33 {
+        anyhow::bail!("getcfcheckpt too short");
+    }
+    let mut stop_hash = [0u8; 32];
+    stop_hash.copy_from_slice(&payload[1..33]);
+    Ok(GetCfcheckptMessage {
+        filter_type: payload[0],
+        stop_hash,
+    })
+}
+
+fn encode_getcfcheckpt(msg: &GetCfcheckptMessage) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(33);
+    buf.push(msg.filter_type);
+    buf.extend_from_slice(&msg.stop_hash);
+    buf
+}
+
+fn decode_cfcheckpt(payload: &[u8]) -> anyhow::Result<CfcheckptMessage> {
+    if payload.len() < 34 {
+        anyhow::bail!("cfcheckpt too short");
+    }
+    let mut stop_hash = [0u8; 32];
+    stop_hash.copy_from_slice(&payload[1..33]);
+    let mut cursor = std::io::Cursor::new(&payload[33..]);
+    let count = blvm_protocol::varint::read_varint(&mut cursor).map_err(|e| anyhow::anyhow!("{e}"))?
+        as usize;
+    if count > 2000 {
+        anyhow::bail!("cfcheckpt count {count}");
+    }
+    let base = 33 + cursor.position() as usize;
+    if payload.len() < base + count * 32 {
+        anyhow::bail!("cfcheckpt truncated");
+    }
+    let mut filter_header_hashes = Vec::with_capacity(count);
+    for index in 0..count {
+        let off = base + index * 32;
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&payload[off..off + 32]);
+        filter_header_hashes.push(hash);
+    }
+    Ok(CfcheckptMessage {
+        filter_type: payload[0],
+        stop_hash,
+        filter_header_hashes,
+    })
+}
+
+fn encode_cfcheckpt(msg: &CfcheckptMessage) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    buf.push(msg.filter_type);
+    buf.extend_from_slice(&msg.stop_hash);
+    blvm_protocol::varint::write_varint(&mut buf, msg.filter_header_hashes.len() as u64)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    for hash in &msg.filter_header_hashes {
+        buf.extend_from_slice(hash);
+    }
+    Ok(buf)
+}
+
+fn decode_getblocks(payload: &[u8]) -> anyhow::Result<GetBlocksMessage> {
+    let mut cursor = std::io::Cursor::new(payload);
+    let mut version_bytes = [0u8; 4];
+    std::io::Read::read_exact(&mut cursor, &mut version_bytes)?;
+    let version = i32::from_le_bytes(version_bytes);
+    let hash_count =
+        blvm_protocol::varint::read_varint(&mut cursor).map_err(|e| anyhow::anyhow!("{e}"))?
+            as usize;
+    if hash_count > 2000 {
+        anyhow::bail!("getblocks locator count {hash_count}");
+    }
+    let mut block_locator_hashes = Vec::with_capacity(hash_count);
+    for _ in 0..hash_count {
+        block_locator_hashes.push(read_hash(&mut cursor)?);
+    }
+    Ok(GetBlocksMessage {
+        version,
+        block_locator_hashes,
+        hash_stop: read_hash(&mut cursor)?,
+    })
+}
+
+fn encode_getblocks(msg: &GetBlocksMessage) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&msg.version.to_le_bytes());
+    blvm_protocol::varint::write_varint(&mut buf, msg.block_locator_hashes.len() as u64)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    for hash in &msg.block_locator_hashes {
+        buf.extend_from_slice(hash);
+    }
+    buf.extend_from_slice(&msg.hash_stop);
+    Ok(buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ProtocolMessage, ProtocolParser, TxMessage};
@@ -1685,5 +1899,62 @@ mod tests {
             }
             other => panic!("expected a tx message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn filter_lock_getcfilters_and_cfilter_use_wire_bytes() {
+        use super::{CfilterMessage, GetCfiltersMessage, ProtocolMessage, ProtocolParser};
+
+        let stop = [0xab; 32];
+        let request = GetCfiltersMessage {
+            filter_type: 0,
+            start_height: 0x0102_0304,
+            stop_hash: stop,
+        };
+        let framed = ProtocolParser::serialize_message(&ProtocolMessage::GetCfilters(request))
+            .unwrap();
+        let payload = &framed[24..];
+        assert_eq!(payload.len(), 37);
+        match ProtocolParser::parse_message(&framed).unwrap() {
+            ProtocolMessage::GetCfilters(parsed) => {
+                assert_eq!(parsed.filter_type, 0);
+                assert_eq!(parsed.start_height, 0x0102_0304);
+                assert_eq!(parsed.stop_hash, stop);
+            }
+            other => panic!("expected getcfilters, got {other:?}"),
+        }
+
+        let reply = CfilterMessage {
+            filter_type: 0,
+            block_hash: stop,
+            filter_data: vec![0x09, 0x08, 0x07],
+            num_elements: 3,
+        };
+        let framed = ProtocolParser::serialize_message(&ProtocolMessage::Cfilter(reply)).unwrap();
+        let payload = &framed[24..];
+        assert_eq!(payload.len(), 37, "no trailing element count");
+        assert_eq!(payload[0], 0);
+        assert_eq!(&payload[1..33], &stop);
+        assert_eq!(payload[33], 3);
+        assert_eq!(&payload[34..], &[0x09, 0x08, 0x07]);
+        match ProtocolParser::parse_message(&framed).unwrap() {
+            ProtocolMessage::Cfilter(parsed) => {
+                assert_eq!(parsed.filter_data, vec![0x09, 0x08, 0x07]);
+                assert_eq!(parsed.block_hash, stop);
+            }
+            other => panic!("expected cfilter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn getblocks_lock_69_byte_request_decodes() {
+        let mut payload = vec![0x80, 0x11, 0x01, 0x00, 0x01];
+        payload.extend(std::iter::repeat(0x11).take(32));
+        payload.extend(std::iter::repeat(0x22).take(32));
+        assert_eq!(payload.len(), 69);
+        let msg = super::decode_getblocks(&payload).unwrap();
+        assert_eq!(msg.version, 70016);
+        assert_eq!(msg.block_locator_hashes, vec![[0x11; 32]]);
+        assert_eq!(msg.hash_stop, [0x22; 32]);
     }
 }

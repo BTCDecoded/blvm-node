@@ -4,7 +4,17 @@ use anyhow::Result;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use crate::utils::{HANDSHAKE_POLL_SLEEP, log_error, with_custom_timeout};
+use crate::utils::{log_error, with_custom_timeout, HANDSHAKE_POLL_SLEEP};
+
+/// The node is still downloading while the connected chain is behind the best header.
+///
+/// No stored header means header sync has not finished, so the window prune stays available.
+pub(crate) fn node_is_in_ibd(chain_height: u64, best_header_height: Option<u64>) -> bool {
+    match best_header_height {
+        Some(header_height) => chain_height < header_height,
+        None => true,
+    }
+}
 
 /// Main node run loop. Called from `Node::start()` after components are started.
 pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
@@ -141,6 +151,9 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                         if let Ok(Some(block)) = blocks_arc.get_block(&block_hash) {
                             node.mempool_manager
                                 .remove_for_connected_block(&block.transactions);
+                            node.network
+                                .announce_connected_block(block_hash, block.header.clone())
+                                .await;
                             if block.header.bits != prev_tip_header_bits {
                                 if let Some(ep) = node
                                     .module_subsystem
@@ -233,12 +246,14 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                         }
                     }
 
-                    // Check for incremental pruning during IBD
-                    // Consider IBD if we're still syncing (height < tip or no recent blocks)
-                    let is_ibd = current_height < 1000; // Simple heuristic: consider IBD if < 1000 blocks
+                    // IBD continues while the connected tip is behind the best stored header.
+                    // `current_height` is the next block (tip + 1).
+                    let chain_height = current_height.saturating_sub(1);
+                    let best_header = node.storage.blocks().highest_stored_height().ok().flatten();
+                    let is_ibd = node_is_in_ibd(chain_height, best_header);
                     if let Some(pruning_manager) = node.storage.pruning() {
                         if let Ok(Some(prune_stats)) =
-                            pruning_manager.incremental_prune_during_ibd(current_height, is_ibd)
+                            pruning_manager.incremental_prune_during_ibd(chain_height, is_ibd)
                         {
                             info!(
                                 "Incremental pruning during IBD: {} blocks pruned, {} bytes freed",
@@ -399,6 +414,9 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
 
         // Peers advance the tip while we idle; re-check every ~5s and resume parallel IBD when behind.
         if loop_counter % 50 == 0 {
+            if let Err(e) = node.mempool_manager.process_once().await {
+                warn!("Mempool maintenance failed: {}", e);
+            }
             if let Err(e) = node.try_catch_up_ibd(&mut utxo_set).await {
                 warn!("Catch-up sync check failed: {}", e);
             }
@@ -438,4 +456,17 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
     info!("Initiating graceful shutdown...");
     node.stop().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::node_is_in_ibd;
+
+    #[test]
+    fn node_is_in_ibd_follows_the_header_tip() {
+        assert!(node_is_in_ibd(5000, Some(5001)));
+        assert!(!node_is_in_ibd(5000, Some(5000)));
+        assert!(node_is_in_ibd(999, None));
+        assert!(!node_is_in_ibd(1000, Some(1000)));
+    }
 }

@@ -46,12 +46,24 @@ impl NetworkManager {
         };
 
         let mut relay = PackageRelay::new();
-        let mut response_bytes = 0u64;
-        if let Some(reject) = handle_pkgtxn(&mut relay, &request)? {
+        let reject = {
+            let utxo = self.utxo_set_arc();
+            let utxo_guard = utxo.lock().await;
+            let reject = handle_pkgtxn(&mut relay, &request, Some(&utxo_guard))?;
+            drop(utxo_guard);
+            reject
+        };
+        if let Some(reject) = reject {
             let response_wire =
                 ProtocolParser::serialize_message(&ProtocolMessage::PkgTxnReject(reject))?;
-            response_bytes = response_wire.len() as u64;
+            let response_bytes = response_wire.len() as u64;
             self.send_to_peer(peer_addr, response_wire).await?;
+            if response_bytes > 0 {
+                self.bandwidth_protection()
+                    .record_service_bandwidth(ServiceType::PackageRelay, peer_addr, response_bytes)
+                    .await;
+            }
+            return Ok(());
         }
 
         let mut txs: Vec<Transaction> = Vec::with_capacity(request.transactions.len());
@@ -61,12 +73,6 @@ impl NetworkManager {
             }
         }
         let _ = self.submit_transactions_to_mempool(&txs).await;
-
-        if response_bytes > 0 {
-            self.bandwidth_protection()
-                .record_service_bandwidth(ServiceType::PackageRelay, peer_addr, response_bytes)
-                .await;
-        }
         Ok(())
     }
 }
@@ -81,10 +87,9 @@ mod tests {
         let listen: SocketAddr = "127.0.0.1:18474".parse().unwrap();
         let peer: SocketAddr = "127.0.0.1:18475".parse().unwrap();
         let nm = NetworkManager::new(listen);
-        assert!(
-            nm.handle_pkgtxn_request(vec![0xff, 0xfe], peer)
-                .await
-                .is_err()
-        );
+        assert!(nm
+            .handle_pkgtxn_request(vec![0xff, 0xfe], peer)
+            .await
+            .is_err());
     }
 }

@@ -17,7 +17,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -33,7 +33,7 @@ use super::network as rest_network;
 use super::node as rest_node;
 use super::rbac;
 use super::transactions;
-use super::types::{ApiError, ApiResponse, read_json_body, rest_error_failed, rest_error_invalid};
+use super::types::{read_json_body, rest_error_failed, rest_error_invalid, ApiError, ApiResponse};
 use super::validation as rest_validation;
 use crate::rpc::control::ControlRpc;
 use crate::rpc::errors::HEIGHT_PARAM_REQUIRED_MSG;
@@ -59,6 +59,8 @@ pub struct RestApiServer {
     payment_state_machine: Option<Arc<crate::payment::state_machine::PaymentStateMachine>>,
     /// Connection rate limiter (per-IP per minute)
     connection_limiter: Option<Arc<tokio::sync::Mutex<ConnectionRateLimiter>>>,
+    /// `rest_api.payment_endpoints_enabled`. Default false.
+    payment_endpoints_enabled: bool,
 }
 
 impl RestApiServer {
@@ -86,6 +88,7 @@ impl RestApiServer {
             #[cfg(feature = "bip70-http")]
             payment_state_machine: None,
             connection_limiter: None,
+            payment_endpoints_enabled: false,
         }
     }
 
@@ -114,6 +117,7 @@ impl RestApiServer {
             #[cfg(feature = "bip70-http")]
             payment_state_machine: None,
             connection_limiter: None,
+            payment_endpoints_enabled: false,
         }
     }
 
@@ -129,6 +133,12 @@ impl RestApiServer {
     /// Set control RPC for `/api/v1/node/*` endpoints.
     pub fn with_control(mut self, control: Arc<ControlRpc>) -> Self {
         self.control = Some(control);
+        self
+    }
+
+    /// Serve `/api/v1/payments` when the config flag is set.
+    pub fn with_payment_endpoints(mut self, enabled: bool) -> Self {
+        self.payment_endpoints_enabled = enabled;
         self
     }
 
@@ -351,7 +361,7 @@ impl RestApiServer {
             Self::handle_mining_request(server, method, path, req, request_id).await
         } else if path.starts_with("/api/v1/fees") {
             Self::handle_fee_request(server, method, path, &uri, request_id).await
-        } else if path.starts_with("/api/v1/payments") {
+        } else if path.starts_with("/api/v1/payments") && server.payment_endpoints_enabled {
             // CTV payment endpoints (requires bip70-http feature)
             #[cfg(feature = "bip70-http")]
             {

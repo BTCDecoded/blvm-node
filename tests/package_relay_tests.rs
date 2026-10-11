@@ -52,7 +52,7 @@ fn test_package_validator_default() {
     let validator = PackageValidator::default();
     assert_eq!(validator.max_package_size, 25);
     assert_eq!(validator.max_package_weight, 404_000);
-    assert_eq!(validator.min_fee_rate, 1000);
+    assert_eq!(validator.min_fee_rate, 1);
 }
 
 #[test]
@@ -147,7 +147,7 @@ fn test_package_fee_rate() {
 
 #[test]
 fn test_transaction_package_weight_includes_witness_bip141() {
-    use blvm_consensus::segwit::{Witness, calculate_transaction_weight};
+    use blvm_consensus::segwit::{calculate_transaction_weight, Witness};
 
     let tx = create_minimal_tx();
     let base_package = TransactionPackage::new(vec![tx.clone()]).unwrap();
@@ -214,9 +214,8 @@ fn test_package_relay_validate_package_valid() {
     let package = TransactionPackage::new(vec![tx1, tx2]).unwrap();
     let result = relay.validate_package(&package);
 
-    // Should be valid (within size limits, no duplicates, proper ordering)
-    // Note: Fee rate check is skipped if combined_fee is 0 (no UTXO set provided)
-    // So validation should pass
+    // Should be valid (within size limits, no duplicates, proper ordering).
+    // Fee rate is skipped when the package was built without a UTXO set.
     if result.is_err() {
         // If it fails, it might be due to ordering validation
         // Let's check what the error is

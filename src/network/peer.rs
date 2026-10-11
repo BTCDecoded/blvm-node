@@ -581,6 +581,12 @@ impl Peer {
         self.conntime
     }
 
+    /// Chain-sync lock tests age a peer past the timeout without waiting.
+    #[cfg(test)]
+    pub(crate) fn set_conntime(&mut self, conntime: u64) {
+        self.conntime = conntime;
+    }
+
     /// Set service flags (called when version message received)
     pub fn set_services(&mut self, services: u64) {
         self.services = services;
@@ -644,11 +650,28 @@ impl Peer {
         self.is_outbound = is_outbound;
     }
 
-    /// Record that a ping was sent
+    /// Record that a ping was sent.
+    ///
+    /// The nonce tracks the latest ping so a pong can match it. The timeout
+    /// stamp stays at the first unanswered ping so a later send cannot move it
+    /// forward and hide a peer that never answers.
     pub fn record_ping_sent(&mut self, nonce: u64) {
         self.pending_ping_nonce = Some(nonce);
-        self.ping_sent_time = Some(current_timestamp());
         self.ping_sent_at = Some(std::time::Instant::now());
+        if self.ping_sent_time.is_none() {
+            self.ping_sent_time = Some(current_timestamp());
+        }
+    }
+
+    /// Unanswered-ping age comes from background-task config (default 1200s).
+    pub(crate) fn set_ping_timeout_seconds(&mut self, seconds: u64) {
+        self.ping_timeout_seconds = seconds;
+    }
+
+    /// Ping-timeout lock tests age the outstanding stamp without waiting.
+    #[cfg(test)]
+    pub(crate) fn set_ping_sent_time(&mut self, sent: u64) {
+        self.ping_sent_time = Some(sent);
     }
 
     /// Record that a pong was received (clears pending ping)

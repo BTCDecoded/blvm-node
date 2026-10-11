@@ -5,12 +5,12 @@
 #[cfg(feature = "protocol-verification")]
 use blvm_spec_lock::spec_locked;
 
-use crate::network::NetworkMessage;
 use crate::network::network_manager::NetworkManager;
 use crate::network::protocol::{
     BlockMessage, HeadersMessage, ProtocolMessage, ProtocolParser, VersionMessage,
 };
 use crate::network::transport::TransportAddr;
+use crate::network::NetworkMessage;
 use anyhow::Result;
 use blvm_protocol::BlockHeader;
 use blvm_protocol::ProtocolVersion;
@@ -27,6 +27,12 @@ fn block_hash_from_header(header: &BlockHeader) -> [u8; 32] {
     header_bytes[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());
     header_bytes[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());
     double_sha256(&header_bytes)
+}
+
+/// A short block `getdata` is a tip reply. Cooldown and the reputation step apply
+/// only when the inventory is a historical range (more than one tip-follow window).
+pub(crate) fn block_getdata_is_historical_download(block_count: usize) -> bool {
+    block_count > crate::network::block_announced_sync::MAX_BLOCK_REQUESTS_PER_INV
 }
 
 impl NetworkManager {
@@ -308,10 +314,21 @@ impl NetworkManager {
             .iter()
             .map(|index| block.transactions[*index as usize].clone())
             .collect();
+        let witnesses = storage
+            .blocks()
+            .get_witness(&msg.block_hash)
+            .ok()
+            .flatten()
+            .map(|all| {
+                msg.indices
+                    .iter()
+                    .map(|index| all.get(*index as usize).cloned().unwrap_or_default())
+                    .collect::<Vec<_>>()
+            });
         let reply = ProtocolMessage::BlockTxn(crate::network::protocol::BlockTxnMessage {
             block_hash: msg.block_hash,
             transactions,
-            witnesses: None,
+            witnesses,
         });
         if let Ok(wire) = ProtocolParser::serialize_message(&reply) {
             let _ = self.send_to_peer(peer_addr, wire).await;
@@ -360,6 +377,14 @@ impl NetworkManager {
                     return Ok(());
                 }
             }
+        }
+
+        if version_received && !self.allow_peer_message(peer_addr).await {
+            debug!(
+                "Peer {} exceeded the configured message rate limit",
+                peer_addr
+            );
+            return Ok(());
         }
 
         match parsed {
@@ -448,30 +473,6 @@ impl NetworkManager {
                 return Ok(());
             }
             ProtocolMessage::GetHeaders(getheaders) => {
-                let is_full_chain_request = getheaders.block_locator_hashes.is_empty();
-
-                if is_full_chain_request {
-                    match self.ibd_protection().can_serve_ibd(peer_addr).await {
-                        Ok(true) => {
-                            self.ibd_protection().start_ibd_serving(peer_addr).await;
-                            debug!(
-                                "IBD protection: Allowing full chain sync request from {}",
-                                peer_addr
-                            );
-                        }
-                        Ok(false) => {
-                            warn!(
-                                "IBD protection: Rejecting full chain sync request from {} (bandwidth limit exceeded or cooldown active)",
-                                peer_addr
-                            );
-                            return Ok(());
-                        }
-                        Err(e) => {
-                            warn!("IBD protection check failed for {}: {}", peer_addr, e);
-                        }
-                    }
-                }
-
                 if let Some(storage) = self.storage().as_ref() {
                     let max = self.protocol_limits().max_headers_results.max(1);
                     match storage.blocks().build_headers_response(
@@ -521,12 +522,13 @@ impl NetworkManager {
                 }
 
                 use crate::network::inventory::{MSG_BLOCK, MSG_WITNESS_BLOCK};
-                let has_block_requests = getdata
+                let block_count = getdata
                     .inventory
                     .iter()
-                    .any(|inv| inv.inv_type == MSG_BLOCK || inv.inv_type == MSG_WITNESS_BLOCK);
+                    .filter(|inv| inv.inv_type == MSG_BLOCK || inv.inv_type == MSG_WITNESS_BLOCK)
+                    .count();
 
-                if has_block_requests {
+                if block_getdata_is_historical_download(block_count) {
                     match self.ibd_protection().can_serve_ibd(peer_addr).await {
                         Ok(true) => {
                             self.ibd_protection().start_ibd_serving(peer_addr).await;
@@ -569,7 +571,7 @@ impl NetworkManager {
                 let serve_result = self
                     .serve_getdata_request(peer_addr, getdata, protocol_version)
                     .await;
-                if has_block_requests {
+                if block_getdata_is_historical_download(block_count) {
                     // Pair start_ibd_serving — without this, concurrent count leaks to the cap
                     // and Mode T / archive getdata is rejected mid-soak.
                     self.ibd_protection().stop_ibd_serving(peer_addr).await;
@@ -752,6 +754,7 @@ impl NetworkManager {
                             if header.version < 1
                                 || header.timestamp == 0
                                 || header.prev_block_hash != prev
+                                || !blvm_protocol::pow::check_proof_of_work(header).unwrap_or(false)
                             {
                                 break;
                             }
@@ -763,6 +766,8 @@ impl NetworkManager {
                         if !batch.is_empty() {
                             if let Err(e) = storage.blocks().store_headers_batch(&batch) {
                                 warn!("unsolicited headers from {}: {}", peer_addr, e);
+                            } else {
+                                self.note_block_announcement(peer_addr).await;
                             }
                         }
                     }
@@ -950,13 +955,13 @@ impl NetworkManager {
                 return Ok(());
             }
             ProtocolMessage::GetBanList(msg) => {
-                if self.ban_list_sharing_config.is_some() {
+                if self.ban_sharing_active() {
                     self.handle_get_ban_list(peer_addr, msg.clone()).await?;
                 }
                 return Ok(());
             }
             ProtocolMessage::BanList(msg) => {
-                if self.ban_list_sharing_config.is_some() {
+                if self.ban_sharing_active() {
                     self.handle_ban_list(peer_addr, msg.clone()).await?;
                 }
                 return Ok(());
@@ -1009,7 +1014,7 @@ mod plan_wire_locks {
     use blvm_protocol::opcodes::OP_1;
     use blvm_protocol::{
         BitcoinProtocolEngine, BlockHeader, OutPoint, ProtocolVersion, Transaction,
-        TransactionInput, TransactionOutput, UTXO, UtxoSet,
+        TransactionInput, TransactionOutput, UtxoSet, UTXO,
     };
     use std::sync::Arc;
 
@@ -1207,5 +1212,389 @@ mod plan_wire_locks {
             .unwrap();
         let states = node.manager.peer_states().read().await;
         assert!(states.get(&node.peer).unwrap().prefer_headers);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn getblocktxn_lock_reply_includes_the_stored_witness() {
+        use blvm_protocol::Block;
+        let mut node = wired().await;
+        let tx = spend(
+            OutPoint {
+                hash: [9u8; 32],
+                index: 0,
+            },
+            1000,
+        );
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [4u8; 32],
+                timestamp: 1_700_000_010,
+                bits: 0x207fffff,
+                nonce: 3,
+            },
+            transactions: vec![tx].into(),
+        };
+        let hash = node.storage.blocks().get_block_hash(&block);
+        node.storage.blocks().store_block(&block).unwrap();
+        let tx_witnesses = vec![vec![vec![0x09u8, 0x08, 0x07]]];
+        let stacks = vec![tx_witnesses];
+        node.storage.blocks().store_witness(&hash, &stacks).unwrap();
+        node.manager
+            .handle_getblocktxn(
+                node.peer,
+                &crate::network::protocol::GetBlockTxnMessage {
+                    block_hash: hash,
+                    indices: vec![0],
+                },
+            )
+            .await
+            .unwrap();
+        let bytes = node.incoming.recv().await.unwrap();
+        match ProtocolParser::parse_message(&bytes).unwrap() {
+            ProtocolMessage::BlockTxn(msg) => {
+                assert_eq!(msg.witnesses.as_ref(), Some(&stacks));
+            }
+            other => panic!("expected blocktxn, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tip_getdata_lock_serves_two_blocks_inside_the_hour() {
+        use crate::network::inventory::MSG_BLOCK;
+        use blvm_protocol::Block;
+        let mut node = wired().await;
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [5u8; 32],
+                timestamp: 1_700_000_011,
+                bits: 0x207fffff,
+                nonce: 4,
+            },
+            transactions: vec![spend(
+                OutPoint {
+                    hash: [8u8; 32],
+                    index: 0,
+                },
+                1000,
+            )]
+            .into(),
+        };
+        let hash = node.storage.blocks().get_block_hash(&block);
+        node.storage.blocks().store_block(&block).unwrap();
+        node.storage.blocks().store_height(0, &hash).unwrap();
+        node.storage.blocks().store_witness(&hash, &[]).unwrap();
+        let getdata = ProtocolMessage::GetData(GetDataMessage {
+            inventory: vec![InventoryVector {
+                inv_type: MSG_BLOCK,
+                hash,
+            }],
+        });
+        for _ in 0..2 {
+            node.manager
+                .dispatch_protocol_message(node.peer, &getdata, Vec::new())
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let bytes = node.incoming.recv().await.unwrap();
+            match ProtocolParser::parse_message(&bytes).unwrap() {
+                ProtocolMessage::Block(_) => {}
+                other => panic!("expected a block, got {other:?}"),
+            }
+        }
+        let reputation = node
+            .manager
+            .ibd_protection()
+            .get_peer_reputation(node.peer)
+            .await
+            .unwrap_or(0);
+        assert_eq!(reputation, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn getblocks_lock_69_byte_locator_returns_the_next_header() {
+        use crate::network::inventory::MSG_BLOCK;
+        use crate::network::protocol::GetBlocksMessage;
+        let mut node = wired().await;
+        let header_zero = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [6u8; 32],
+            timestamp: 1_700_000_012,
+            bits: 0x207fffff,
+            nonce: 5,
+        };
+        let header_one = BlockHeader {
+            version: 1,
+            prev_block_hash: [0x11; 32],
+            merkle_root: [7u8; 32],
+            timestamp: 1_700_000_013,
+            bits: 0x207fffff,
+            nonce: 6,
+        };
+        node.storage
+            .blocks()
+            .store_headers_batch(&[
+                ([0x11; 32], header_zero, 0),
+                ([0x33; 32], header_one.clone(), 1),
+            ])
+            .unwrap();
+        let mut payload = vec![0x80, 0x11, 0x01, 0x00, 0x01];
+        payload.extend(std::iter::repeat(0x11).take(32));
+        payload.extend(std::iter::repeat(0x22).take(32));
+        assert_eq!(payload.len(), 69);
+        let framed =
+            ProtocolParser::serialize_message(&ProtocolMessage::GetBlocks(GetBlocksMessage {
+                version: 70016,
+                block_locator_hashes: vec![[0x11; 32]],
+                hash_stop: [0x22; 32],
+            }))
+            .unwrap();
+        assert_eq!(&framed[24..], payload.as_slice());
+        let parsed = ProtocolParser::parse_message(&framed).unwrap();
+        node.manager
+            .dispatch_protocol_message(node.peer, &parsed, Vec::new())
+            .await
+            .unwrap();
+        let bytes = node.incoming.recv().await.unwrap();
+        let next_hash = blvm_consensus::block::block_header_hash(&header_one);
+        match ProtocolParser::parse_message(&bytes).unwrap() {
+            ProtocolMessage::Inv(InvMessage { inventory }) => {
+                assert!(inventory
+                    .iter()
+                    .any(|item| { item.inv_type == MSG_BLOCK && item.hash == next_hash }));
+            }
+            other => panic!("expected inv, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn announce_lock_block_and_tx_leave_as_inv() {
+        use crate::network::inventory::{MSG_BLOCK, MSG_TX};
+        let mut node = wired().await;
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [8u8; 32],
+            timestamp: 1_700_000_014,
+            bits: 0x207fffff,
+            nonce: 7,
+        };
+        let block_hash = [0x44; 32];
+        node.manager
+            .announce_connected_block(block_hash, header)
+            .await;
+        let bytes = node.incoming.recv().await.unwrap();
+        match ProtocolParser::parse_message(&bytes).unwrap() {
+            ProtocolMessage::Inv(InvMessage { inventory }) => {
+                assert!(inventory
+                    .iter()
+                    .any(|item| { item.inv_type == MSG_BLOCK && item.hash == block_hash }));
+            }
+            other => panic!("expected block inv, got {other:?}"),
+        }
+        let txid = [0x55; 32];
+        node.manager.announce_accepted_transaction(txid, None).await;
+        let bytes = node.incoming.recv().await.unwrap();
+        match ProtocolParser::parse_message(&bytes).unwrap() {
+            ProtocolMessage::Inv(InvMessage { inventory }) => {
+                assert!(inventory
+                    .iter()
+                    .any(|item| item.inv_type == MSG_TX && item.hash == txid));
+            }
+            other => panic!("expected tx inv, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_child_before_parent_does_not_enter_the_mempool() {
+        use crate::network::protocol::PkgTxnMessage;
+        use blvm_protocol::block::calculate_tx_id;
+
+        let node = wired().await;
+        let mut policy = crate::config::MempoolPolicyConfig::default();
+        policy.min_relay_fee_rate = 0;
+        policy.min_tx_fee = 0;
+        node.mempool.set_policy_config(Some(policy));
+        let prev = OutPoint {
+            hash: [7u8; 32],
+            index: 0,
+        };
+        let mut parent = spend(prev, 40_000);
+        parent.inputs[0].script_sig = vec![OP_1];
+        parent.outputs[0].script_pubkey = vec![OP_1];
+        let parent_id = calculate_tx_id(&parent);
+        let mut child = spend(
+            OutPoint {
+                hash: parent_id,
+                index: 0,
+            },
+            20_000,
+        );
+        child.inputs[0].script_sig = vec![OP_1];
+        let mut set = UtxoSet::default();
+        set.insert(
+            prev,
+            Arc::new(UTXO {
+                value: 50_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 1,
+                is_coinbase: false,
+            }),
+        );
+        node.mempool.set_utxo_set_arc(node.manager.utxo_set_arc());
+        node.manager.replace_utxo_snapshot(set).await;
+        let msg = PkgTxnMessage {
+            package_id: vec![1u8; 32],
+            transactions: vec![
+                bincode::serialize(&child).unwrap(),
+                bincode::serialize(&parent).unwrap(),
+            ],
+        };
+        let wire = ProtocolParser::serialize_message(&ProtocolMessage::PkgTxn(msg)).unwrap();
+        node.manager
+            .handle_pkgtxn_request(wire, node.peer)
+            .await
+            .unwrap();
+        assert!(node.mempool.get_transaction(&parent_id).is_none());
+        assert!(node.mempool.add_transaction(parent).unwrap());
+    }
+
+    #[tokio::test]
+    async fn empty_locator_getheaders_does_not_take_an_ibd_slot() {
+        use crate::network::protocol::{GetHeadersMessage, HeadersMessage};
+
+        let mut node = wired().await;
+        let genesis = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [1u8; 32],
+            timestamp: 1_700_000_000,
+            bits: 0x207fffff,
+            nonce: 1,
+        };
+        let genesis_hash = blvm_consensus::block::block_header_hash(&genesis);
+        let next = BlockHeader {
+            version: 1,
+            prev_block_hash: genesis_hash,
+            merkle_root: [2u8; 32],
+            timestamp: 1_700_000_001,
+            bits: 0x207fffff,
+            nonce: 2,
+        };
+        let next_hash = blvm_consensus::block::block_header_hash(&next);
+        node.storage
+            .blocks()
+            .store_headers_batch(&[(genesis_hash, genesis.clone(), 0), (next_hash, next, 1)])
+            .unwrap();
+        for _ in 0..3 {
+            let msg = ProtocolMessage::GetHeaders(GetHeadersMessage {
+                version: 70015,
+                block_locator_hashes: vec![],
+                hash_stop: [0u8; 32],
+            });
+            node.manager
+                .dispatch_protocol_message(node.peer, &msg, Vec::new())
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            node.manager
+                .ibd_protection()
+                .concurrent_ibd_serving_count()
+                .await,
+            0
+        );
+        assert_eq!(
+            node.manager
+                .ibd_protection()
+                .get_peer_reputation(node.peer)
+                .await
+                .unwrap_or(0),
+            0
+        );
+        assert!(node
+            .manager
+            .ibd_protection()
+            .can_serve_ibd(node.peer)
+            .await
+            .unwrap());
+        for _ in 0..3 {
+            let bytes = node.incoming.recv().await.unwrap();
+            match ProtocolParser::parse_message(&bytes).unwrap() {
+                ProtocolMessage::Headers(HeadersMessage { headers }) => {
+                    assert_eq!(headers.first(), Some(&genesis));
+                }
+                other => panic!("expected headers, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unsolicited_header_without_proof_is_not_stored() {
+        use crate::network::protocol::HeadersMessage;
+
+        let node = wired().await;
+        let tip_hash = [4u8; 32];
+        let tip = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [1u8; 32],
+            timestamp: 1_700_000_000,
+            bits: 0x207fffff,
+            nonce: 3,
+        };
+        node.storage.chain().update_tip(&tip_hash, &tip, 5).unwrap();
+        let bad = BlockHeader {
+            version: 1,
+            prev_block_hash: tip_hash,
+            merkle_root: [8u8; 32],
+            timestamp: 1_700_000_010,
+            bits: 1,
+            nonce: 0,
+        };
+        let msg = ProtocolMessage::Headers(HeadersMessage { headers: vec![bad] });
+        node.manager
+            .dispatch_protocol_message(node.peer, &msg, Vec::new())
+            .await
+            .unwrap();
+        assert!(node
+            .storage
+            .blocks()
+            .get_hash_by_height(6)
+            .unwrap()
+            .is_none());
+
+        let mut good = BlockHeader {
+            version: 1,
+            prev_block_hash: tip_hash,
+            merkle_root: [9u8; 32],
+            timestamp: 1_700_000_011,
+            bits: 0x207fffff,
+            nonce: 0,
+        };
+        for nonce in 0..200_000 {
+            good.nonce = nonce;
+            if blvm_protocol::pow::check_proof_of_work(&good).unwrap_or(false) {
+                break;
+            }
+        }
+        let msg = ProtocolMessage::Headers(HeadersMessage {
+            headers: vec![good.clone()],
+        });
+        node.manager
+            .dispatch_protocol_message(node.peer, &msg, Vec::new())
+            .await
+            .unwrap();
+        let stored = node
+            .storage
+            .blocks()
+            .get_header_at_height(6)
+            .unwrap()
+            .expect("header with proof");
+        assert_eq!(stored.merkle_root, good.merkle_root);
     }
 }

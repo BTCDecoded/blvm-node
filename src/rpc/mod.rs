@@ -55,6 +55,8 @@ pub struct RpcManager {
     quinn_addr: Option<SocketAddr>,
     #[cfg(feature = "rest-api")]
     rest_api_addr: Option<SocketAddr>,
+    #[cfg(feature = "rest-api")]
+    payment_endpoints_enabled: bool,
     blockchain_rpc: blockchain::BlockchainRpc,
     network_rpc: network::NetworkRpc,
     mining_rpc: mining::MiningRpc,
@@ -119,6 +121,8 @@ impl RpcManager {
             quinn_addr: None,
             #[cfg(feature = "rest-api")]
             rest_api_addr: None,
+            #[cfg(feature = "rest-api")]
+            payment_endpoints_enabled: false,
             blockchain_rpc: blockchain::BlockchainRpc::new(),
             network_rpc: network::NetworkRpc::new(),
             mining_rpc: mining::MiningRpc::new().with_commons_gbt(commons_gbt.clone()),
@@ -416,6 +420,8 @@ impl RpcManager {
             #[cfg(feature = "rest-api")]
             rest_api_addr: None,
             #[cfg(feature = "rest-api")]
+            payment_endpoints_enabled: false,
+            #[cfg(feature = "rest-api")]
             rest_api_shutdown_tx: None,
             blockchain_rpc: blockchain::BlockchainRpc::new(),
             network_rpc: network::NetworkRpc::new(),
@@ -459,6 +465,12 @@ impl RpcManager {
     #[cfg(feature = "rest-api")]
     pub fn enable_rest_api(&mut self, rest_api_addr: SocketAddr) {
         self.rest_api_addr = Some(rest_api_addr);
+    }
+
+    /// `/api/v1/payments` is served when this is true and the bip70-http feature is compiled.
+    #[cfg(feature = "rest-api")]
+    pub fn set_payment_endpoints_enabled(&mut self, enabled: bool) {
+        self.payment_endpoints_enabled = enabled;
     }
 
     /// Get the RPC server address
@@ -790,6 +802,7 @@ impl RpcManager {
                 };
                 rest_server = rest_server.with_connection_limiter(Arc::clone(&connection_limiter));
                 rest_server = rest_server.with_control(Arc::clone(&control_rpc));
+                rest_server = rest_server.with_payment_endpoints(self.payment_endpoints_enabled);
 
                 // Set payment processor if available
                 #[cfg(feature = "bip70-http")]

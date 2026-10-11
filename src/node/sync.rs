@@ -16,8 +16,8 @@ use crate::node::metrics::MetricsCollector;
 use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTimer};
 #[cfg(feature = "production")]
 use crate::node::reorg_executor::try_activate_heavier_fork;
-use crate::storage::Storage;
 use crate::storage::blockstore::BlockStore;
+use crate::storage::Storage;
 use anyhow::Result;
 use blvm_protocol::{BitcoinProtocolEngine, Block, BlockHeader, UtxoSet, ValidationResult};
 use std::collections::HashMap;

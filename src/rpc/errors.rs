@@ -2,7 +2,7 @@
 //!
 //! Standard-compatible JSON-RPC error codes and error handling
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::fmt;
 
 /// User-facing message when an RPC or operation requires storage and it is not initialized.

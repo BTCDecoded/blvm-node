@@ -1,11 +1,11 @@
 //! Address relay handlers (GetAddr, Addr).
 
-use crate::network::NetworkMessage;
 use crate::network::network_manager::NetworkManager;
 use crate::network::protocol::{
     AddrMessage, AddrV2Message, NetworkAddress, ProtocolMessage, ProtocolParser,
 };
 use crate::network::transport::TransportAddr;
+use crate::network::NetworkMessage;
 use crate::utils::current_timestamp;
 use anyhow::Result;
 use std::net::SocketAddr;
@@ -161,7 +161,7 @@ impl NetworkManager {
         addresses: &[NetworkAddress],
     ) -> Result<()> {
         let now = current_timestamp();
-        let min_interval = 2 * 60 * 60 + 24 * 60;
+        let min_interval = self.network_timing().addr_relay_min_interval_seconds;
 
         {
             let last_sent = *self.last_addr_sent().lock().await;
@@ -185,7 +185,10 @@ impl NetworkManager {
             return Ok(());
         }
 
-        let max_addr = self.protocol_limits().max_addr_to_send;
+        let max_addr = self
+            .network_timing()
+            .max_addresses_per_addr_message
+            .min(self.protocol_limits().max_addr_to_send);
         let addresses_to_relay: Vec<NetworkAddress> = filtered.into_iter().take(max_addr).collect();
 
         let addr_msg = AddrMessage {
@@ -217,8 +220,8 @@ impl NetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::NetworkManager;
     use crate::network::protocol::{AddrMessage, NetworkAddress};
+    use crate::network::NetworkManager;
     use std::net::SocketAddr;
 
     fn legacy_addr(port: u16) -> NetworkAddress {

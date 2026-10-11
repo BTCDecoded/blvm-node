@@ -24,6 +24,13 @@ impl NetworkManager {
             peer_addr, msg.request_full, msg.min_ban_duration
         );
 
+        let floor = self
+            .ban_list_sharing_config
+            .as_ref()
+            .map(|cfg| cfg.min_ban_duration_to_share)
+            .unwrap_or(0);
+        let min_duration = msg.min_ban_duration.max(floor);
+
         let ban_list = self.ban_list().read().await;
         let now = current_timestamp();
 
@@ -33,13 +40,13 @@ impl NetworkManager {
                 continue;
             }
 
-            if msg.min_ban_duration > 0 {
+            if min_duration > 0 {
                 let ban_duration = if unban_timestamp == u64::MAX {
                     u64::MAX
                 } else {
                     unban_timestamp.saturating_sub(now)
                 };
-                if ban_duration < msg.min_ban_duration {
+                if ban_duration < min_duration {
                     continue;
                 }
             }
@@ -181,12 +188,85 @@ impl NetworkManager {
     }
 }
 
+/// Send the current ban list to every connected peer.
+pub(crate) async fn broadcast_ban_list(
+    ban_list: &tokio::sync::RwLock<std::collections::HashMap<SocketAddr, u64>>,
+    peer_manager: &tokio::sync::Mutex<crate::network::peer_manager::PeerManager>,
+    min_duration: u64,
+) {
+    use crate::network::transport::TransportAddr;
+
+    let now = current_timestamp();
+    let entries = {
+        let guard = ban_list.read().await;
+        let mut ban_entries = Vec::new();
+        for (addr, &unban_timestamp) in guard.iter() {
+            if unban_timestamp != u64::MAX && now >= unban_timestamp {
+                continue;
+            }
+            if min_duration > 0 {
+                let ban_duration = if unban_timestamp == u64::MAX {
+                    u64::MAX
+                } else {
+                    unban_timestamp.saturating_sub(now)
+                };
+                if ban_duration < min_duration {
+                    continue;
+                }
+            }
+            let ip_bytes = match addr.ip() {
+                IpAddr::V4(ipv4) => {
+                    let mut bytes = [0u8; 16];
+                    bytes[12..16].copy_from_slice(&ipv4.octets());
+                    bytes
+                }
+                IpAddr::V6(ipv6) => ipv6.octets(),
+            };
+            ban_entries.push(BanEntry {
+                addr: NetworkAddress {
+                    time: 0,
+                    services: 0,
+                    ip: ip_bytes,
+                    port: addr.port(),
+                },
+                unban_timestamp,
+                reason: Some("DoS protection".to_string()),
+            });
+        }
+        ban_entries
+    };
+    let response = BanListMessage {
+        is_full: true,
+        ban_list_hash: calculate_ban_list_hash(&entries),
+        ban_entries: entries,
+        timestamp: now,
+    };
+    let Ok(wire) = ProtocolParser::serialize_message(&ProtocolMessage::BanList(response)) else {
+        return;
+    };
+    let peers = peer_manager.lock().await.peer_socket_addresses();
+    for addr in peers {
+        let sender = {
+            let pm = peer_manager.lock().await;
+            let transport = pm
+                .find_transport_addr_by_socket(addr)
+                .unwrap_or(TransportAddr::Tcp(addr));
+            pm.get_peer(&transport)
+                .filter(|peer| peer.is_connected())
+                .map(|peer| peer.send_tx.clone())
+        };
+        if let Some(sender) = sender {
+            let _ = sender.send(wire.clone());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::NetworkManager;
     use crate::network::ban_list_merging::calculate_ban_list_hash;
     use crate::network::protocol::{BanEntry, BanListMessage, NetworkAddress};
+    use crate::network::NetworkManager;
     use crate::utils::current_timestamp;
     use std::net::SocketAddr;
 
@@ -241,11 +321,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            nm.ban_list()
-                .read()
-                .await
-                .contains_key(&"203.0.113.1:0".parse::<SocketAddr>().unwrap())
-        );
+        assert!(nm
+            .ban_list()
+            .read()
+            .await
+            .contains_key(&"203.0.113.1:0".parse::<SocketAddr>().unwrap()));
     }
 }

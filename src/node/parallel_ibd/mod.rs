@@ -56,7 +56,7 @@ pub(crate) use memory::maybe_purge_jemalloc_retained;
 #[cfg(feature = "production")]
 pub(crate) use validation_loop::IbdRetireWork;
 
-use chunk_assigner::{ChunkAssigner, ChunkGuard, create_chunks as create_chunks_impl};
+use chunk_assigner::{create_chunks as create_chunks_impl, ChunkAssigner, ChunkGuard};
 
 pub use chunk_assigner::BlockChunk;
 use download::{download_chunk, is_snapshot_sourced_peer, local_disk_peer_ids};
@@ -71,21 +71,21 @@ use memory::{IbdTuningContext, MemoryGuard};
 use types::PrefetchWorkItemV2;
 use types::{ReadyItem, SharedBlock, SharedWitnesses};
 
-use crate::network::NetworkManager;
 use crate::network::peer_scoring::is_lan_peer;
-use crate::storage::Storage;
-use crate::storage::blockstore::{BlockMetadata, BlockStore, block_height_row_key};
+use crate::network::NetworkManager;
+use crate::storage::blockstore::{block_height_row_key, BlockMetadata, BlockStore};
 use crate::storage::database::IBD_UTXO_STORE_SUBDIR;
 use crate::storage::disk_utxo::{
-    OutPointKey, block_input_keys_and_tx_ids_filtered, compute_tx_ids_only,
+    block_input_keys_and_tx_ids_filtered, compute_tx_ids_only, OutPointKey,
 };
 #[cfg(feature = "production")]
 use crate::storage::ibd_utxo_store::IbdUtxoStore;
+use crate::storage::Storage;
 use crate::utils::{IBD_YIELD_SLEEP, MESSAGE_PROCESSOR_POLL_SLEEP};
 use anyhow::{Context, Result};
 use blvm_protocol::bip_validation::Bip30Index;
 use blvm_protocol::{
-    BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet, ValidationResult, segwit::Witness,
+    segwit::Witness, BitcoinProtocolEngine, Block, BlockHeader, Hash, UtxoSet, ValidationResult,
 };
 
 use crossbeam_channel;
@@ -509,8 +509,8 @@ static LIVE_ASSIGNER: std::sync::OnceLock<
     std::sync::Mutex<Option<std::sync::Weak<chunk_assigner::ChunkAssigner>>>,
 > = std::sync::OnceLock::new();
 
-fn live_assigner_slot()
--> &'static std::sync::Mutex<Option<std::sync::Weak<chunk_assigner::ChunkAssigner>>> {
+fn live_assigner_slot(
+) -> &'static std::sync::Mutex<Option<std::sync::Weak<chunk_assigner::ChunkAssigner>>> {
     LIVE_ASSIGNER.get_or_init(|| std::sync::Mutex::new(None))
 }
 
@@ -1213,12 +1213,17 @@ pub(crate) fn export_start_gate_allows_at(vh: i32, last_exported: i32, interval:
     true
 }
 
-struct ParallelIbdSessionGuard;
+struct ParallelIbdSessionGuard {
+    network: Option<Arc<NetworkManager>>,
+}
 
 impl Drop for ParallelIbdSessionGuard {
     fn drop(&mut self) {
         PARALLEL_IBD_SESSION_ACTIVE.store(false, Ordering::Release);
         memory::reset_ibd_pressure_on_session_end();
+        if let Some(network) = self.network.take() {
+            network.clear_ibd_evicted_ips();
+        }
     }
 }
 
@@ -1457,7 +1462,11 @@ pub(crate) fn top_peer_in_flight_cap() -> usize {
 /// Workers per peer under sole tip-priority. Matches sticky `max_in_flight` intent:
 /// TOP_PEER_IN_FLIGHT≥2 → 2 workers (tip+next overlap); else 1.
 pub(crate) fn sole_tip_workers_per_peer() -> usize {
-    if top_peer_in_flight_cap() >= 2 { 2 } else { 1 }
+    if top_peer_in_flight_cap() >= 2 {
+        2
+    } else {
+        1
+    }
 }
 
 /// Ahead cap during bulk catch-up past body tip. Env `BLVM_IBD_WAN_BULK_AHEAD` (default **2048**).
@@ -2470,12 +2479,12 @@ impl Drop for IbdNosyncGuard<'_> {
 use dashmap::DashMap;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use tokio::sync::Semaphore;
 use tokio::sync::broadcast;
-use tokio::time::{Duration, timeout};
+use tokio::sync::Semaphore;
+use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info, warn};
 
 /// Parallel IBD configuration
@@ -2936,7 +2945,7 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
     let max_ahead_live_clone = max_ahead_live;
     let validation_height_clone = validation_height;
     let start_height = ibd_start_height; // for bootstrap detection (start == start_height)
-    // R-348: batched off-worker persist (idempotent start).
+                                         // R-348: batched off-worker persist (idempotent start).
     persist_lane::start(
         Arc::clone(&blockstore_clone),
         Some(Arc::clone(&validation_height_clone)),
@@ -4738,7 +4747,7 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
         );
     }
     {
-        use types::{IbdPhaseCtx, derive_ibd_phase};
+        use types::{derive_ibd_phase, IbdPhaseCtx};
         let phase_ctx = IbdPhaseCtx {
             validation_h: start_height,
             start_height,
@@ -8321,7 +8330,9 @@ impl ParallelIBD {
                 });
             }
         }
-        let _ibd_session_guard = ParallelIbdSessionGuard;
+        let _ibd_session_guard = ParallelIbdSessionGuard {
+            network: network.clone(),
+        };
         let coord_session_id = PARALLEL_IBD_SESSION_ID.fetch_add(1, Ordering::AcqRel) + 1;
 
         // Enable write-optimised mode: skip per-commit fdatasync for all LMDB writes during IBD.
@@ -8666,7 +8677,11 @@ impl ParallelIBD {
             .iter()
             .map(|peer_id| {
                 if wan_multi_peer {
-                    if wan_dual { 2 } else { 1 }
+                    if wan_dual {
+                        2
+                    } else {
+                        1
+                    }
                 } else if sole_tip_pri {
                     // tc167 tip90≈54.4 with accidental spawn=clamp(2,6); spawn=1 (tc169)
                     // thinned tip90≈42. Keep tip-glue + max_in_flight=1 but allow the
@@ -9613,7 +9628,11 @@ impl ParallelIBD {
             // Synth bulk local-disk: single worker — dual workers raced the same tip span
             // (complete→clear→W28c reassign) and amplified the H6 DEDUP storm.
             let worker_count = if wan_multi_peer {
-                if sticky_dual_worker_enabled() { 2 } else { 1 }
+                if sticky_dual_worker_enabled() {
+                    2
+                } else {
+                    1
+                }
             } else if sole_tip_priority_enabled() {
                 // Match total_download_workers (tc167 tip90≈54.4 > tc169 spawn=1).
                 ((2.0 * priority) as usize).clamp(2, 6)
@@ -9900,7 +9919,7 @@ impl ParallelIBD {
         // Extract before `self` is moved into the coordinator async block.
         let download_timeout_secs_for_coord = self.config.download_timeout_secs;
         let chunk_size_for_ahead = self.config.chunk_size; // used by stall OOM throttle
-        // Clone the Arc before moving into the coordinator; the validation loop also needs it.
+                                                           // Clone the Arc before moving into the coordinator; the validation loop also needs it.
         let max_ahead_live_for_validation = Arc::clone(&max_ahead_live);
         let blockstore_for_coord = Arc::clone(&blockstore);
         let confirmed_body_height_for_coord = confirmed_body_height_at_start;
@@ -10089,7 +10108,11 @@ impl ParallelIBD {
             let cur = self
                 .bip54_activation_from_version_bits
                 .load(Ordering::Acquire);
-            if cur == u64::MAX { None } else { Some(cur) }
+            if cur == u64::MAX {
+                None
+            } else {
+                Some(cur)
+            }
         };
 
         let bip54_active = blvm_protocol::bip_validation::is_bip54_active_at(

@@ -6,7 +6,7 @@
 
 use crate::rpc::blockchain::BlockchainRpc;
 use anyhow::Result;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// Get address balance
 pub async fn get_address_balance(blockchain: &BlockchainRpc, address: &str) -> Result<Value> {

@@ -794,6 +794,11 @@ pub struct NodeConfig {
     /// Network relay configuration
     pub relay: Option<RelayConfig>,
 
+    /// Advertise `NODE_COMPACT_FILTERS` and answer filter requests.
+    /// `--disable-bip158` sets this false. Default true.
+    #[serde(default = "default_true")]
+    pub serve_compact_filters: bool,
+
     /// Address database configuration
     pub address_database: Option<AddressDatabaseConfig>,
 
@@ -908,6 +913,7 @@ impl Default for NodeConfig {
             ibd_protection: None,
             ibd: None,
             relay: None,
+            serve_compact_filters: true,
             address_database: None,
             #[cfg(feature = "dandelion")]
             dandelion: None,
@@ -966,6 +972,12 @@ impl NodeConfig {
             if let Some(ref d) = ibd.snapshot_dir {
                 ibd.snapshot_dir = Some(expand_tilde_path(d));
             }
+        }
+        if let Some(ref mut payment) = self.payment {
+            payment.payment_store_path = expand_tilde_path(&payment.payment_store_path);
+        }
+        if let Some(ref mut mempool) = self.mempool {
+            mempool.mempool_persistence_path = expand_tilde_path(&mempool.mempool_persistence_path);
         }
     }
 
@@ -1070,7 +1082,12 @@ impl NodeConfig {
                     let health_url = format!("{commons_url}/internal/health");
                     debug!("Auto-detecting governance server at {}", health_url);
 
-                    match client.get(&health_url).send().await {
+                    let mut request = client.get(&health_url);
+                    if let Some(key) = gov_config.resolved_api_key() {
+                        request =
+                            request.header(reqwest::header::AUTHORIZATION, format!("Bearer {key}"));
+                    }
+                    match request.send().await {
                         Ok(response) if response.status().is_success() => {
                             info!(
                                 "Governance server detected and responding at {}, auto-enabling governance",

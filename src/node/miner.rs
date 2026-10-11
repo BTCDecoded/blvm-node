@@ -1093,8 +1093,8 @@ impl MiningCoordinator {
         utxo_set: &blvm_protocol::UtxoSet,
         outputs: Vec<(i64, Vec<u8>)>,
     ) -> Result<Transaction> {
-        use blvm_protocol::ConsensusProof;
         use blvm_protocol::mining::{create_coinbase_with_outputs, fit_payouts_to_reward};
+        use blvm_protocol::ConsensusProof;
 
         let consensus = ConsensusProof::new();
         let subsidy = consensus.get_block_subsidy_for_network(height, self.consensus_network());
@@ -1896,11 +1896,9 @@ mod tests {
         assert_eq!(mempool.get_mempool_size(), 0);
         assert!(mempool.get_transactions().is_empty());
         let empty_utxo_set = blvm_protocol::UtxoSet::default();
-        assert!(
-            mempool
-                .get_prioritized_transactions(10, &empty_utxo_set)
-                .is_empty()
-        );
+        assert!(mempool
+            .get_prioritized_transactions(10, &empty_utxo_set)
+            .is_empty());
     }
 
     #[test]

@@ -16,18 +16,18 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::{
-    Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
 };
 use std::time::SystemTime;
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
-use super::NetworkMessage;
 use super::lan_discovery;
 use super::peer;
 use super::peer_manager::{PeerByteRateLimiter, PeerManager, PeerRateLimiter};
 use super::transport;
+use super::NetworkMessage;
 use hex;
 /// Get wire command string for ProtocolMessage (for MessageReceived event)
 fn protocol_message_type(msg: &ProtocolMessage) -> &'static str {
@@ -269,6 +269,18 @@ pub struct NetworkManager {
     protocol_limits: Arc<crate::config::ProtocolLimitsConfig>,
     /// Background task interval configuration
     background_task_config: Arc<crate::config::BackgroundTaskConfig>,
+    /// Relay section. Absent config uses the same defaults as `RelayPolicies::default`.
+    relay_policies: super::relay::RelayPolicies,
+    /// Running relay, including Dandelion stem parameters when that relay is enabled.
+    relay_manager: std::sync::Mutex<super::relay::RelayManager>,
+    /// Tip-follow `getheaders` wait. Taken from `ibd.headers_timeout_secs` (default 30).
+    headers_probe_timeout_secs: u64,
+    /// Outbound target, addr relay interval, and addr message size.
+    network_timing: Arc<crate::config::NetworkTimingConfig>,
+    /// Message token bucket `(burst, rate)` when `[peer_rate_limiting]` is set.
+    peer_message_rate: Option<(u32, u32)>,
+    /// Advertise and serve BIP157 compact filters.
+    serve_compact_filters: bool,
     /// Peer reconnection queue (exponential backoff)
     /// Maps SocketAddr to (attempts, last_attempt_timestamp, quality_score)
     peer_reconnection_queue: Arc<Mutex<HashMap<SocketAddr, (u32, u64, f64)>>>,
@@ -377,6 +389,8 @@ impl NetworkManager {
             ibd_protection_config.suspicious_reconnection_threshold =
                 ibd_config.suspicious_reconnection_threshold;
             ibd_protection_config.reputation_ban_threshold = ibd_config.reputation_ban_threshold;
+            ibd_protection_config.reputation_penalty_per_request =
+                ibd_config.reputation_penalty_per_request;
             ibd_protection_config.enable_emergency_throttle = ibd_config.enable_emergency_throttle;
             ibd_protection_config.emergency_throttle_percent =
                 ibd_config.emergency_throttle_percent;
@@ -429,6 +443,48 @@ impl NetworkManager {
             .and_then(|c| c.background_tasks.as_ref())
             .unwrap_or(&bg_config_default);
         let background_task_config = Arc::new(bg_config.clone());
+        let mut relay_policies = config
+            .and_then(|c| c.relay.as_ref())
+            .map(super::relay::RelayPolicies::from_relay_config)
+            .unwrap_or_default();
+        #[cfg(feature = "dandelion")]
+        if config.and_then(|c| c.dandelion.as_ref()).is_some()
+            && config
+                .and_then(|c| c.relay.as_ref())
+                .map(|relay| relay.enable_dandelion)
+                .unwrap_or(true)
+        {
+            // A `[dandelion]` section turns stem relay on unless `[relay] enable_dandelion`
+            // is explicitly false (including `--disable-dandelion`).
+            relay_policies.enable_dandelion = true;
+        }
+        #[cfg(feature = "dandelion")]
+        let dandelion_cfg = config.and_then(|c| c.dandelion.clone());
+        #[cfg(feature = "dandelion")]
+        let relay_manager =
+            std::sync::Mutex::new(super::relay::RelayManager::with_policies_and_dandelion(
+                relay_policies.clone(),
+                dandelion_cfg.as_ref(),
+            ));
+        #[cfg(not(feature = "dandelion"))]
+        let relay_manager = std::sync::Mutex::new(super::relay::RelayManager::with_policies(
+            relay_policies.clone(),
+        ));
+        let network_timing = Arc::new(
+            config
+                .and_then(|c| c.network_timing.clone())
+                .unwrap_or_default(),
+        );
+        let peer_message_rate = config.and_then(|c| {
+            c.peer_rate_limiting
+                .as_ref()
+                .map(|limits| (limits.default_burst, limits.default_rate))
+        });
+        let serve_compact_filters = config.map(|c| c.serve_compact_filters).unwrap_or(true);
+        let headers_probe_timeout_secs = config
+            .and_then(|c| c.ibd.as_ref())
+            .map(|ibd| ibd.headers_timeout_secs)
+            .unwrap_or(30);
 
         #[cfg(feature = "stratum-v2")]
         let p2p_stratum_demux_enabled = config
@@ -515,6 +571,12 @@ impl NetworkManager {
             request_timeout_config,
             protocol_limits,
             background_task_config,
+            relay_policies,
+            relay_manager,
+            headers_probe_timeout_secs,
+            network_timing,
+            peer_message_rate,
+            serve_compact_filters,
             peer_reconnection_queue: Arc::new(Mutex::new(HashMap::new())),
             block_serve_denylist: Arc::new(parking_lot::RwLock::new(HashSet::new())),
             tx_serve_denylist: Arc::new(parking_lot::RwLock::new(HashSet::new())),
@@ -943,6 +1005,7 @@ impl NetworkManager {
 
         // Start periodic ban cleanup task
         self.start_ban_cleanup_task();
+        self.start_ban_list_share_task();
 
         // Start pending request cleanup task
         self.start_request_cleanup_task();
@@ -1658,7 +1721,7 @@ impl NetworkManager {
         evicted.clear();
         if prev_count > 0 {
             info!(
-                "IBD: cleared {} evicted-IP entries for new session (they remain NODE_NETWORK_LIMITED in address DB)",
+                "IBD: cleared {} evicted-IP entries at session end",
                 prev_count
             );
         }
@@ -1693,13 +1756,8 @@ impl NetworkManager {
                     }
                     return;
                 }
-                // 1. Mark as NODE_NETWORK_LIMITED in the address database.
-                {
-                    let mut db = self.address_database().write().await;
-                    db.set_services_by_socket(peer_addr, NODE_NETWORK_LIMITED);
-                }
-                // 2. Record this IP in the eviction set so spawn_outbound_reconnect_attempt
-                //    does not reconnect to it for the remainder of this IBD session.
+                // Record this IP for the rest of the IBD session. Service flags stay as stored.
+                // spawn_outbound_reconnect_attempt skips the IP until the session guard clears the set.
                 {
                     let mut evicted = self.ibd_evicted_ips.write().unwrap();
                     evicted.insert(peer_addr.ip());
@@ -1709,7 +1767,7 @@ impl NetworkManager {
                     TransportAddr::Tcp(peer_addr),
                 ));
                 warn!(
-                    "IBD: evicted peer {} (marked NODE_NETWORK_LIMITED, slot freed for replacement)",
+                    "IBD: evicted peer {} for this download session (slot freed for replacement)",
                     peer_addr
                 );
                 // 3. Brief pause so the disconnect propagates before we count current peers.
@@ -2595,8 +2653,16 @@ impl NetworkManager {
     ) -> Result<()> {
         if let Some(ref mempool_manager) = self.mempool_manager {
             for tx in txs {
-                if let Err(e) = mempool_manager.add_transaction(tx.clone()) {
-                    tracing::debug!("Transaction rejected by mempool: {}", e);
+                match mempool_manager.add_transaction(tx.clone()) {
+                    Ok(true) => {
+                        let txid = blvm_protocol::block::calculate_tx_id(tx);
+                        let fee = mempool_manager.cached_fee_rate(&txid);
+                        self.announce_accepted_transaction(txid, fee).await;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::debug!("Transaction rejected by mempool: {}", e);
+                    }
                 }
             }
             return Ok(());
@@ -2803,6 +2869,18 @@ impl NetworkManager {
                 if let Some(ref ep) = *self.event_publisher.lock().await {
                     ep.publish_peer_banned(&addr.to_string(), "ban", ban_duration_secs)
                         .await;
+                }
+                if let Some(cfg) = self.ban_list_sharing_config.as_ref() {
+                    if cfg.shares()
+                        && matches!(cfg.share_mode, crate::config::BanShareMode::Immediate)
+                    {
+                        super::handlers::ban_list::broadcast_ban_list(
+                            self.ban_list().as_ref(),
+                            self.peer_manager_mutex().as_ref(),
+                            cfg.min_ban_duration_to_share,
+                        )
+                        .await;
+                    }
                 }
             })
         })
@@ -3256,6 +3334,44 @@ impl NetworkManager {
         &self.background_task_config
     }
 
+    pub(crate) fn relay_policies(&self) -> &super::relay::RelayPolicies {
+        &self.relay_policies
+    }
+
+    pub(crate) fn relay_manager(&self) -> &std::sync::Mutex<super::relay::RelayManager> {
+        &self.relay_manager
+    }
+
+    pub(crate) fn network_timing(&self) -> &Arc<crate::config::NetworkTimingConfig> {
+        &self.network_timing
+    }
+
+    pub(crate) fn serve_compact_filters(&self) -> bool {
+        self.serve_compact_filters
+    }
+
+    /// Consume one message token when `[peer_rate_limiting]` is set.
+    pub(crate) async fn allow_peer_message(&self, peer: SocketAddr) -> bool {
+        let Some((burst, rate)) = self.peer_message_rate else {
+            return true;
+        };
+        let mut rates = self.peer_message_rates().lock().await;
+        let limiter = rates
+            .entry(peer)
+            .or_insert_with(|| PeerRateLimiter::new(burst, rate));
+        limiter.check_and_consume()
+    }
+
+    pub(crate) fn ban_sharing_active(&self) -> bool {
+        self.ban_list_sharing_config
+            .as_ref()
+            .is_some_and(|cfg| cfg.shares())
+    }
+
+    pub(crate) fn headers_probe_timeout_secs(&self) -> u64 {
+        self.headers_probe_timeout_secs
+    }
+
     /// Pending requests (for utxo_commitments_client)
     pub(crate) fn pending_requests(&self) -> &Arc<Mutex<HashMap<u64, PendingRequest>>> {
         &self.pending_requests
@@ -3404,8 +3520,9 @@ impl NetworkManager {
         // Add any additional services passed in (for future extensibility)
         services_with_filters |= services;
 
-        // BIP157 Compact Block Filters (always enabled if filter service exists)
-        services_with_filters |= NODE_COMPACT_FILTERS;
+        if self.serve_compact_filters {
+            services_with_filters |= NODE_COMPACT_FILTERS;
+        }
 
         // UTXO Commitments (if feature enabled)
         #[cfg(feature = "utxo-commitments")]
@@ -3413,8 +3530,7 @@ impl NetworkManager {
             services_with_filters |= crate::network::protocol::NODE_UTXO_COMMITMENTS;
         }
 
-        // Ban List Sharing (if config enabled)
-        if self.ban_list_sharing_config.is_some() {
+        if self.ban_sharing_active() {
             services_with_filters |= crate::network::protocol::NODE_BAN_LIST_SHARING;
         }
 
@@ -3424,9 +3540,8 @@ impl NetworkManager {
             services_with_filters |= crate::network::protocol::NODE_GOVERNANCE;
         }
 
-        // Dandelion (if feature enabled)
         #[cfg(feature = "dandelion")]
-        {
+        if self.relay_policies.enable_dandelion {
             services_with_filters |= crate::network::protocol::NODE_DANDELION;
         }
 
