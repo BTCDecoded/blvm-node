@@ -172,6 +172,10 @@ fn last_script_push(script: &[u8]) -> Option<Vec<u8>> {
     last
 }
 
+fn script_needs_witness_verification(script: &[u8]) -> bool {
+    blvm_protocol::witness::is_any_witness_program(script)
+}
+
 fn p2sh_redeem_is_witness_program(script_pubkey: &[u8], script_sig: &[u8]) -> bool {
     if !is_p2sh_script(script_pubkey) {
         return false;
@@ -179,7 +183,7 @@ fn p2sh_redeem_is_witness_program(script_pubkey: &[u8], script_sig: &[u8]) -> bo
     let Some(redeem) = last_script_push(script_sig) else {
         return false;
     };
-    blvm_protocol::witness::extract_witness_version(&redeem).is_some()
+    script_needs_witness_verification(&redeem)
 }
 
 /// Spendable outputs below `n_size * 3` satoshis are dust.
@@ -238,16 +242,16 @@ fn consensus_checks_reject(
         }
     }
 
-    // A witness program, native or inside a P2SH redeem script, is still a
-    // witness spend when no stack was supplied. Flag selection otherwise
-    // looks only at supplied stacks and at the tx outputs.
+    // A witness program of any version, native or inside a P2SH redeem script,
+    // is still a witness spend when no stack was supplied.
+    // Flag selection otherwise looks only at supplied stacks and at the tx outputs.
     let needs_witness_flags = tx.inputs.iter().enumerate().any(|(i, input)| {
         prevouts
             .get(i)
             .and_then(|output| output.as_ref())
             .is_some_and(|output| {
                 let script = output.script_pubkey.as_slice();
-                blvm_protocol::witness::extract_witness_version(&script.to_vec()).is_some()
+                script_needs_witness_verification(script)
                     || p2sh_redeem_is_witness_program(script, &input.script_sig)
             })
     });
@@ -3057,6 +3061,34 @@ mod tests {
             spend_to(1_000, vec![OP_1], vec![0x01, 0x51]),
             drop_true
         ));
+    }
+
+    #[test]
+    fn future_witness_program_is_admitted_when_the_payload_is_true() {
+        const OP_1: u8 = 0x51;
+        const OP_2: u8 = 0x52;
+
+        let mut policy = crate::config::MempoolPolicyConfig::default();
+        policy.min_relay_fee_rate = 0;
+        policy.min_tx_fee = 0;
+        policy.reject_spam_in_mempool = false;
+
+        let admit = |prevout_script: Vec<u8>| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 50_000;
+            tx.outputs[0].script_pubkey = vec![OP_1];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(policy.clone()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout_script,
+                100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+
+        assert!(admit(vec![OP_2, 0x02, 0x00, 0x01]));
+        assert!(!admit(vec![OP_2, 0x02, 0x00, 0x00]));
     }
 
     #[test]
