@@ -125,29 +125,12 @@ impl UtxoStore {
                 .map(|(outpoint, utxo)| {
                     let key = self.outpoint_key(outpoint);
 
-                    // Check cache first
                     let cache = get_serialization_cache();
                     let cache_key = outpoint_cache_key(outpoint);
-
-                    // Try to get from cache
-                    let value = if let Ok(cached) = cache.read() {
-                        if let Some(serialized) = cached.peek(&cache_key) {
-                            serialized.clone() // Clone cached result
-                        } else {
-                            // Cache miss: must drop read guard before write or we deadlock (RwLock).
-                            drop(cached);
-                            let serialized = self.serialize_utxo(utxo.as_ref())?;
-
-                            if let Ok(mut w) = cache.write() {
-                                w.put(cache_key, serialized.clone());
-                            }
-
-                            serialized
-                        }
-                    } else {
-                        // Cache lock failed - serialize without caching
-                        self.serialize_utxo(utxo.as_ref())?
-                    };
+                    let value = self.serialize_utxo(utxo.as_ref())?;
+                    if let Ok(mut w) = cache.write() {
+                        w.put(cache_key, value.clone());
+                    }
 
                     Ok((key, value))
                 })
@@ -179,28 +162,13 @@ impl UtxoStore {
 
                 #[cfg(feature = "production")]
                 let value = {
-                    // Check cache first
                     let cache = get_serialization_cache();
                     let cache_key = outpoint_cache_key(outpoint);
-
-                    // Try to get from cache
-                    if let Ok(cached) = cache.read() {
-                        if let Some(serialized) = cached.peek(&cache_key) {
-                            serialized.clone() // Clone cached result
-                        } else {
-                            drop(cached);
-                            let serialized = self.serialize_utxo(utxo.as_ref())?;
-
-                            if let Ok(mut w) = cache.write() {
-                                w.put(cache_key, serialized.clone());
-                            }
-
-                            serialized
-                        }
-                    } else {
-                        // Cache lock failed - serialize without caching
-                        self.serialize_utxo(utxo.as_ref())?
+                    let serialized = self.serialize_utxo(utxo.as_ref())?;
+                    if let Ok(mut w) = cache.write() {
+                        w.put(cache_key, serialized.clone());
                     }
+                    serialized
                 };
 
                 #[cfg(not(feature = "production"))]
@@ -260,28 +228,15 @@ impl UtxoStore {
 
         #[cfg(feature = "production")]
         let value = {
-            // Check cache first
+            // The memo is keyed only by txid, so a hit can be another vout or an
+            // older value. Always serialize the UTXO being stored.
             let cache = get_serialization_cache();
             let cache_key = outpoint_cache_key(outpoint);
-
-            // Try to get from cache
-            if let Ok(cached) = cache.read() {
-                if let Some(serialized) = cached.peek(&cache_key) {
-                    serialized.clone() // Clone cached result
-                } else {
-                    drop(cached);
-                    let serialized = self.serialize_utxo(utxo)?;
-
-                    if let Ok(mut w) = cache.write() {
-                        w.put(cache_key, serialized.clone());
-                    }
-
-                    serialized
-                }
-            } else {
-                // Cache lock failed - serialize without caching
-                self.serialize_utxo(utxo)?
+            let serialized = self.serialize_utxo(utxo)?;
+            if let Ok(mut w) = cache.write() {
+                w.put(cache_key, serialized.clone());
             }
+            serialized
         };
 
         #[cfg(not(feature = "production"))]
@@ -670,5 +625,45 @@ mod tests {
             .unwrap();
         assert_eq!(utxos.utxo_count().unwrap(), 2);
         assert_eq!(utxos.total_value().unwrap(), 50_000);
+    }
+
+    #[test]
+    fn a_second_output_of_the_same_txid_keeps_its_own_value() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = crate::storage::Storage::new(temp.path()).unwrap();
+        let utxos = storage.utxos();
+        let hash = [4u8; 32];
+        let write = |index: u32, value: i64| {
+            utxos
+                .add_utxo(
+                    &OutPoint { hash, index },
+                    &UTXO {
+                        value,
+                        script_pubkey: vec![OP_1].into(),
+                        height: 0,
+                        is_coinbase: false,
+                    },
+                )
+                .unwrap();
+        };
+        write(0, 111);
+        write(1, 222);
+        write(0, 333);
+        assert_eq!(
+            utxos
+                .get_utxo(&OutPoint { hash, index: 0 })
+                .unwrap()
+                .unwrap()
+                .value,
+            333
+        );
+        assert_eq!(
+            utxos
+                .get_utxo(&OutPoint { hash, index: 1 })
+                .unwrap()
+                .unwrap()
+                .value,
+            222
+        );
     }
 }
