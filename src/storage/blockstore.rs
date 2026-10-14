@@ -989,6 +989,13 @@ impl BlockStore {
         Ok(())
     }
 
+    /// Record which height a block occupies without replacing the active chain's height entry.
+    pub fn store_hash_height(&self, height: u64, hash: &Hash) -> Result<()> {
+        let height_bytes = height.to_be_bytes();
+        self.hash_to_height.insert(hash.as_slice(), &height_bytes)?;
+        Ok(())
+    }
+
     /// Store multiple headers and heights in a single batch operation
     /// This is MUCH faster than individual inserts for IBD - uses atomic batch writes
     pub fn store_headers_batch(&self, entries: &[(Hash, BlockHeader, u64)]) -> Result<()> {
@@ -1090,7 +1097,7 @@ impl BlockStore {
         };
 
         let fork_h: Option<u64> = if locator.is_empty() {
-            // Empty locator: peer wants chain from immediately after genesis.
+            // Empty locator: peer wants the chain from genesis.
             Some(0)
         } else {
             let mut found = None;
@@ -1109,7 +1116,13 @@ impl BlockStore {
             return Ok(Vec::new());
         };
 
-        let start = fork.saturating_add(1);
+        // An empty locator asks for the chain from genesis. A matched locator
+        // starts at the next header.
+        let start = if locator.is_empty() {
+            0
+        } else {
+            fork.saturating_add(1)
+        };
         if start > tip_h {
             return Ok(Vec::new());
         }
@@ -1324,6 +1337,30 @@ impl BlockStore {
         }
         batch.commit_no_wal()?;
         Ok(())
+    }
+
+    /// Store the basic-filter header for `hash`.
+    pub fn store_filter_header(&self, hash: &Hash, header: &[u8; 32]) -> Result<()> {
+        let mut key = Vec::with_capacity(36);
+        key.extend_from_slice(b"cfh:");
+        key.extend_from_slice(hash);
+        self.block_metadata.insert(&key, header)?;
+        Ok(())
+    }
+
+    /// Load the basic-filter header for `hash`.
+    pub fn get_filter_header(&self, hash: &Hash) -> Result<Option<[u8; 32]>> {
+        let mut key = Vec::with_capacity(36);
+        key.extend_from_slice(b"cfh:");
+        key.extend_from_slice(hash);
+        match self.block_metadata.get(&key)? {
+            Some(data) if data.len() == 32 => {
+                let mut out = [0u8; 32];
+                out.copy_from_slice(&data);
+                Ok(Some(out))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Load connect undo for a block hash.

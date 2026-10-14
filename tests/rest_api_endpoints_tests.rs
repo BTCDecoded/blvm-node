@@ -103,7 +103,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_addresses_get_utxos() {
-        let blockchain = create_test_blockchain_rpc();
+        let temp_dir = TempDir::new().unwrap();
+        let mut indexing = blvm_node::config::IndexingConfig::default();
+        indexing.enable_address_index = true;
+        let storage = Arc::new(
+            Storage::with_backend_pruning_and_indexing(
+                temp_dir.path(),
+                blvm_node::storage::database::default_backend(),
+                None,
+                Some(indexing),
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let blockchain = Arc::new(BlockchainRpc::with_dependencies(storage));
         let address = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa";
 
         let utxos = addresses::get_address_utxos(&blockchain, address)

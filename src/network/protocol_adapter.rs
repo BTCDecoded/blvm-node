@@ -175,11 +175,13 @@ impl ProtocolAdapter {
                     services: v.services,
                     timestamp: v.timestamp,
                     addr_recv: NetworkAddress {
+                        time: 0,
                         services: v.addr_recv.services,
                         ip: v.addr_recv.ip,
                         port: v.addr_recv.port,
                     },
                     addr_from: NetworkAddress {
+                        time: 0,
                         services: v.addr_from.services,
                         ip: v.addr_from.ip,
                         port: v.addr_from.port,
@@ -308,11 +310,13 @@ impl ProtocolAdapter {
                     services: v.services,
                     timestamp: v.timestamp,
                     addr_recv: ProtoNetworkAddress {
+                        time: 0,
                         services: v.addr_recv.services,
                         ip: v.addr_recv.ip,
                         port: v.addr_recv.port,
                     },
                     addr_from: ProtoNetworkAddress {
+                        time: 0,
                         services: v.addr_from.services,
                         ip: v.addr_from.ip,
                         port: v.addr_from.port,
@@ -354,11 +358,13 @@ impl ProtocolAdapter {
                     services: v.services,
                     timestamp: v.timestamp,
                     addr_recv: ConsensusNetworkAddress {
+                        time: 0,
                         services: v.addr_recv.services,
                         ip: v.addr_recv.ip,
                         port: v.addr_recv.port,
                     },
                     addr_from: ConsensusNetworkAddress {
+                        time: 0,
                         services: v.addr_from.services,
                         ip: v.addr_from.ip,
                         port: v.addr_from.port,

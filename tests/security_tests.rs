@@ -136,7 +136,7 @@ async fn test_clear_bans() {
     let manager = NetworkManager::new(addr);
 
     let test_addr1: SocketAddr = "127.0.0.1:8333".parse().unwrap();
-    let test_addr2: SocketAddr = "127.0.0.1:8334".parse().unwrap();
+    let test_addr2: SocketAddr = "10.0.0.2:8334".parse().unwrap();
 
     // Add multiple bans
     manager.ban_peer(test_addr1, 0);

@@ -21,11 +21,13 @@ fn build_version_wire_message() -> Vec<u8> {
         services: 1,
         timestamp: 1_234_567_890,
         addr_recv: NetworkAddress {
+            time: 0,
             services: 1,
             ip: [0; 16],
             port: 8333,
         },
         addr_from: NetworkAddress {
+            time: 0,
             services: 1,
             ip: [0; 16],
             port: 8333,

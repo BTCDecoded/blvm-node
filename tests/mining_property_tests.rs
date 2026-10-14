@@ -147,9 +147,7 @@ proptest! {
     }
 }
 
-/// Property: getblocktemplate height is the blockstore count, not chain_info.height.
-///
-/// This setup stores no blocks, so the template stays at height 0 after update_tip.
+/// Property: getblocktemplate height is the chain tip plus one.
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(10))] // Limit cases due to expensive setup
     #[test]
@@ -193,7 +191,7 @@ proptest! {
         if result.is_ok() {
             let template = result.unwrap();
             let template_height = template.get("height").unwrap().as_u64().unwrap();
-            prop_assert_eq!(template_height, 0);
+            prop_assert_eq!(template_height, height + 1);
         }
     }
 }

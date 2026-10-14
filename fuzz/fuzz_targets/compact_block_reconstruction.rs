@@ -100,7 +100,7 @@ fuzz_target!(|data: &[u8]| {
             data.get(95).copied().unwrap_or(0),
         ]);
         let tx_hash = calculate_tx_hash(&block.transactions[0]);
-        let _short_id = calculate_short_tx_id(&tx_hash, nonce);
+        let _short_id = calculate_short_tx_id(&header, &tx_hash, nonce);
     }
 
     // Test transport-aware functions with different transport types

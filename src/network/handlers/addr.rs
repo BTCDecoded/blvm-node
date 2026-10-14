@@ -51,10 +51,14 @@ impl NetworkManager {
             pm.peer_socket_addresses()
         };
 
+        let max_addr = self.protocol_limits().max_addr_to_send;
         let addresses = {
             let db = self.address_database().write().await;
-            let fresh = db.get_fresh_addresses(2500);
+            let fresh = db.get_fresh_addresses(2500.max(max_addr));
             db.filter_addresses(fresh, &ban_list, &connected_peers)
+                .into_iter()
+                .take(max_addr)
+                .collect::<Vec<_>>()
         };
 
         let addr_msg = AddrMessage { addresses };
@@ -95,7 +99,14 @@ impl NetworkManager {
             }
         }
 
-        self.relay_addresses(peer_addr, &msg.addresses).await?;
+        let relayable: Vec<NetworkAddress> = msg
+            .addresses
+            .into_iter()
+            .filter(|addr| crate::network::address_db::address_within_relay_horizon(addr.time))
+            .collect();
+        if !relayable.is_empty() {
+            self.relay_addresses(peer_addr, &relayable).await?;
+        }
 
         Ok(())
     }
@@ -127,6 +138,7 @@ impl NetworkManager {
             .iter()
             .filter_map(|a| a.to_legacy())
             .map(|a| NetworkAddress {
+                time: a.time,
                 services: a.services,
                 ip: a.ip,
                 port: a.port,
@@ -153,7 +165,7 @@ impl NetworkManager {
         addresses: &[NetworkAddress],
     ) -> Result<()> {
         let now = current_timestamp();
-        let min_interval = 2 * 60 * 60 + 24 * 60;
+        let min_interval = self.network_timing().addr_relay_min_interval_seconds;
 
         {
             let last_sent = *self.last_addr_sent().lock().await;
@@ -177,7 +189,10 @@ impl NetworkManager {
             return Ok(());
         }
 
-        let max_addr = self.protocol_limits().max_addr_to_send;
+        let max_addr = self
+            .network_timing()
+            .max_addresses_per_addr_message
+            .min(self.protocol_limits().max_addr_to_send);
         let addresses_to_relay: Vec<NetworkAddress> = filtered.into_iter().take(max_addr).collect();
 
         let addr_msg = AddrMessage {
@@ -220,6 +235,7 @@ mod tests {
             services: 1,
             ip,
             port,
+            time: current_timestamp() as u32,
         }
     }
 

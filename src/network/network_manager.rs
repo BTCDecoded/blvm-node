@@ -182,6 +182,9 @@ pub struct NetworkManager {
     /// Pending blocks queue (blocks received via BlockReceived message)
     /// Separate from main message channel to avoid draining other messages
     pending_blocks: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
+    /// Compact blocks waiting on `blocktxn` for the positions `getblocktxn` asked for.
+    pub(crate) pending_compact:
+        Arc<std::sync::Mutex<HashMap<[u8; 32], crate::network::compact_blocks::CompactAssembly>>>,
     /// Network statistics
     /// Optimization: Use AtomicU64 for lock-free updates
     bytes_sent: Arc<AtomicU64>,
@@ -266,6 +269,18 @@ pub struct NetworkManager {
     protocol_limits: Arc<crate::config::ProtocolLimitsConfig>,
     /// Background task interval configuration
     background_task_config: Arc<crate::config::BackgroundTaskConfig>,
+    /// Relay section. Absent config uses the same defaults as `RelayPolicies::default`.
+    relay_policies: super::relay::RelayPolicies,
+    /// Running relay, including Dandelion stem parameters when that relay is enabled.
+    relay_manager: std::sync::Mutex<super::relay::RelayManager>,
+    /// Tip-follow `getheaders` wait. Taken from `ibd.headers_timeout_secs` (default 30).
+    headers_probe_timeout_secs: u64,
+    /// Outbound target, addr relay interval, and addr message size.
+    network_timing: Arc<crate::config::NetworkTimingConfig>,
+    /// Message token bucket `(burst, rate)` when `[peer_rate_limiting]` is set.
+    peer_message_rate: Option<(u32, u32)>,
+    /// Advertise and serve BIP157 compact filters.
+    serve_compact_filters: bool,
     /// Peer reconnection queue (exponential backoff)
     /// Maps SocketAddr to (attempts, last_attempt_timestamp, quality_score)
     peer_reconnection_queue: Arc<Mutex<HashMap<SocketAddr, (u32, u64, f64)>>>,
@@ -374,6 +389,8 @@ impl NetworkManager {
             ibd_protection_config.suspicious_reconnection_threshold =
                 ibd_config.suspicious_reconnection_threshold;
             ibd_protection_config.reputation_ban_threshold = ibd_config.reputation_ban_threshold;
+            ibd_protection_config.reputation_penalty_per_request =
+                ibd_config.reputation_penalty_per_request;
             ibd_protection_config.enable_emergency_throttle = ibd_config.enable_emergency_throttle;
             ibd_protection_config.emergency_throttle_percent =
                 ibd_config.emergency_throttle_percent;
@@ -426,6 +443,48 @@ impl NetworkManager {
             .and_then(|c| c.background_tasks.as_ref())
             .unwrap_or(&bg_config_default);
         let background_task_config = Arc::new(bg_config.clone());
+        let mut relay_policies = config
+            .and_then(|c| c.relay.as_ref())
+            .map(super::relay::RelayPolicies::from_relay_config)
+            .unwrap_or_default();
+        #[cfg(feature = "dandelion")]
+        if config.and_then(|c| c.dandelion.as_ref()).is_some()
+            && config
+                .and_then(|c| c.relay.as_ref())
+                .map(|relay| relay.enable_dandelion)
+                .unwrap_or(true)
+        {
+            // A `[dandelion]` section turns stem relay on unless `[relay] enable_dandelion`
+            // is explicitly false (including `--disable-dandelion`).
+            relay_policies.enable_dandelion = true;
+        }
+        #[cfg(feature = "dandelion")]
+        let dandelion_cfg = config.and_then(|c| c.dandelion.clone());
+        #[cfg(feature = "dandelion")]
+        let relay_manager =
+            std::sync::Mutex::new(super::relay::RelayManager::with_policies_and_dandelion(
+                relay_policies.clone(),
+                dandelion_cfg.as_ref(),
+            ));
+        #[cfg(not(feature = "dandelion"))]
+        let relay_manager = std::sync::Mutex::new(super::relay::RelayManager::with_policies(
+            relay_policies.clone(),
+        ));
+        let network_timing = Arc::new(
+            config
+                .and_then(|c| c.network_timing.clone())
+                .unwrap_or_default(),
+        );
+        let peer_message_rate = config.and_then(|c| {
+            c.peer_rate_limiting
+                .as_ref()
+                .map(|limits| (limits.default_burst, limits.default_rate))
+        });
+        let serve_compact_filters = config.map(|c| c.serve_compact_filters).unwrap_or(true);
+        let headers_probe_timeout_secs = config
+            .and_then(|c| c.ibd.as_ref())
+            .map(|ibd| ibd.headers_timeout_secs)
+            .unwrap_or(30);
 
         #[cfg(feature = "stratum-v2")]
         let p2p_stratum_demux_enabled = config
@@ -478,6 +537,7 @@ impl NetworkManager {
                 .map(|c| Arc::new(c.clone())),
             peer_spam_violations: Arc::new(Mutex::new(HashMap::new())),
             pending_blocks: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            pending_compact: Arc::new(std::sync::Mutex::new(HashMap::new())),
             bytes_sent: Arc::new(AtomicU64::new(0)),
             bytes_received: Arc::new(AtomicU64::new(0)),
             socket_to_transport: Arc::new(Mutex::new(HashMap::new())),
@@ -511,6 +571,12 @@ impl NetworkManager {
             request_timeout_config,
             protocol_limits,
             background_task_config,
+            relay_policies,
+            relay_manager,
+            headers_probe_timeout_secs,
+            network_timing,
+            peer_message_rate,
+            serve_compact_filters,
             peer_reconnection_queue: Arc::new(Mutex::new(HashMap::new())),
             block_serve_denylist: Arc::new(parking_lot::RwLock::new(HashSet::new())),
             tx_serve_denylist: Arc::new(parking_lot::RwLock::new(HashSet::new())),
@@ -714,7 +780,7 @@ impl NetworkManager {
             {
                 let ban_until = current_timestamp() + 24 * 60 * 60;
                 let mut ban_list = self.ban_list.write().await;
-                ban_list.insert(peer_addr, ban_until);
+                ban_list.insert(SocketAddr::new(peer_addr.ip(), 0), ban_until);
                 drop(ban_list);
             } else if ban_for_violation {
                 warn!(
@@ -939,6 +1005,7 @@ impl NetworkManager {
 
         // Start periodic ban cleanup task
         self.start_ban_cleanup_task();
+        self.start_ban_list_share_task();
 
         // Start pending request cleanup task
         self.start_request_cleanup_task();
@@ -1654,7 +1721,7 @@ impl NetworkManager {
         evicted.clear();
         if prev_count > 0 {
             info!(
-                "IBD: cleared {} evicted-IP entries for new session (they remain NODE_NETWORK_LIMITED in address DB)",
+                "IBD: cleared {} evicted-IP entries at session end",
                 prev_count
             );
         }
@@ -1689,13 +1756,8 @@ impl NetworkManager {
                     }
                     return;
                 }
-                // 1. Mark as NODE_NETWORK_LIMITED in the address database.
-                {
-                    let mut db = self.address_database().write().await;
-                    db.set_services_by_socket(peer_addr, NODE_NETWORK_LIMITED);
-                }
-                // 2. Record this IP in the eviction set so spawn_outbound_reconnect_attempt
-                //    does not reconnect to it for the remainder of this IBD session.
+                // Record this IP for the rest of the IBD session. Service flags stay as stored.
+                // spawn_outbound_reconnect_attempt skips the IP until the session guard clears the set.
                 {
                     let mut evicted = self.ibd_evicted_ips.write().unwrap();
                     evicted.insert(peer_addr.ip());
@@ -1705,7 +1767,7 @@ impl NetworkManager {
                     TransportAddr::Tcp(peer_addr),
                 ));
                 warn!(
-                    "IBD: evicted peer {} (marked NODE_NETWORK_LIMITED, slot freed for replacement)",
+                    "IBD: evicted peer {} for this download session (slot freed for replacement)",
                     peer_addr
                 );
                 // 3. Brief pause so the disconnect propagates before we count current peers.
@@ -2233,11 +2295,13 @@ impl NetworkManager {
                         std::net::IpAddr::V6(ip) => ip.octets(),
                     };
                     let addr_recv = crate::network::protocol::NetworkAddress {
+                        time: 0,
                         services: 0,
                         ip: peer_ip,
                         port: peer_socket.port(),
                     };
                     let addr_from = crate::network::protocol::NetworkAddress {
+                        time: 0,
                         services: 0,
                         ip: [0u8; 16],
                         port: 0,
@@ -2565,17 +2629,78 @@ impl NetworkManager {
             .await
     }
 
+    fn pool_finality(&self) -> (u64, Option<blvm_protocol::types::TimeContext>) {
+        let Some(storage) = self.storage.as_ref() else {
+            return (0, None);
+        };
+        let Some((height, median_time_past)) = crate::node::mempool::next_block_finality(storage)
+        else {
+            return (0, None);
+        };
+        (
+            height,
+            Some(blvm_protocol::types::TimeContext {
+                network_time: median_time_past,
+                median_time_past,
+            }),
+        )
+    }
+
     /// Submit validated transactions to the mempool
     pub(crate) async fn submit_transactions_to_mempool(
         &self,
         txs: &[blvm_protocol::Transaction],
     ) -> Result<()> {
         if let Some(ref mempool_manager) = self.mempool_manager {
+            for tx in txs {
+                match mempool_manager.add_transaction(tx.clone()) {
+                    Ok(true) => {
+                        let txid = blvm_protocol::block::calculate_tx_id(tx);
+                        let fee = mempool_manager.cached_fee_rate(&txid);
+                        self.announce_accepted_transaction(txid, fee).await;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::debug!("Transaction rejected by mempool: {}", e);
+                    }
+                }
+            }
+            return Ok(());
+        }
+        let utxo_lock = self.utxo_set.lock().await;
+        let mempool_lock = self.mempool.lock().await;
+        let (height, time_context) = self.pool_finality();
+        for tx in txs {
+            let _ = self.consensus.accept_to_memory_pool(
+                tx,
+                &utxo_lock,
+                &mempool_lock,
+                height,
+                time_context,
+                Network::Mainnet,
+            );
+        }
+        Ok(())
+    }
+
+    /// Submit one transaction, keeping its witness stacks when they were on the wire.
+    pub(crate) async fn submit_transaction_with_witness(
+        &self,
+        tx: blvm_protocol::Transaction,
+        witnesses: Option<Vec<blvm_protocol::segwit::Witness>>,
+    ) -> Result<()> {
+        if let Some(ref mempool_manager) = self.mempool_manager {
             // Route through MempoolManager so policy (min-fee, spam filter,
             // ancestor limits, RBF) is enforced. add_transaction uses interior
             // mutability (&self) so this is safe from Arc context.
-            for tx in txs {
-                if let Err(e) = mempool_manager.add_transaction(tx.clone()) {
+            let txid = blvm_protocol::block::calculate_tx_id(&tx);
+            match mempool_manager.add_transaction_with_witness(tx, witnesses) {
+                Ok(true) => {
+                    let fee = mempool_manager.cached_fee_rate(&txid);
+                    self.announce_accepted_transaction(txid, fee).await;
+                }
+                Ok(false) => {}
+                Err(e) => {
                     tracing::debug!("Transaction rejected by mempool: {}", e);
                 }
             }
@@ -2583,16 +2708,16 @@ impl NetworkManager {
             // Fallback: no MempoolManager configured, accept via consensus layer.
             let utxo_lock = self.utxo_set.lock().await;
             let mempool_lock = self.mempool.lock().await;
-            for tx in txs {
-                let _ = self.consensus.accept_to_memory_pool(
-                    tx,
-                    &utxo_lock,
-                    &mempool_lock,
-                    0,
-                    None,
-                    Network::Mainnet,
-                );
-            }
+            let (height, time_context) = self.pool_finality();
+            let _ = self.consensus.accept_to_memory_pool_with_witness(
+                &tx,
+                witnesses.as_deref(),
+                &utxo_lock,
+                &mempool_lock,
+                height,
+                time_context,
+                Network::Mainnet,
+            );
         }
         Ok(())
     }
@@ -2734,11 +2859,12 @@ impl NetworkManager {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut ban_list = self.ban_list.write().await;
+                let key = SocketAddr::new(addr.ip(), 0);
                 if unban_timestamp == 0 {
                     // Permanent ban (use max timestamp)
-                    ban_list.insert(addr, u64::MAX);
+                    ban_list.insert(key, u64::MAX);
                 } else {
-                    ban_list.insert(addr, unban_timestamp);
+                    ban_list.insert(key, unban_timestamp);
                 }
                 drop(ban_list);
 
@@ -2752,6 +2878,18 @@ impl NetworkManager {
                     ep.publish_peer_banned(&addr.to_string(), "ban", ban_duration_secs)
                         .await;
                 }
+                if let Some(cfg) = self.ban_list_sharing_config.as_ref() {
+                    if cfg.shares()
+                        && matches!(cfg.share_mode, crate::config::BanShareMode::Immediate)
+                    {
+                        super::handlers::ban_list::broadcast_ban_list(
+                            self.ban_list().as_ref(),
+                            self.peer_manager_mutex().as_ref(),
+                            cfg.min_ban_duration_to_share,
+                        )
+                        .await;
+                    }
+                }
             })
         })
     }
@@ -2762,7 +2900,7 @@ impl NetworkManager {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut ban_list = self.ban_list.write().await;
-                ban_list.remove(&addr);
+                ban_list.remove(&SocketAddr::new(addr.ip(), 0));
                 drop(ban_list);
 
                 // Publish PeerUnbanned event for module subscribers
@@ -2809,6 +2947,7 @@ impl NetworkManager {
         };
 
         let our_addr = NetworkAddress {
+            time: 0,
             services,
             ip: ip_bytes,
             port: listen_addr.port(),
@@ -2884,7 +3023,7 @@ impl NetworkManager {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let ban_list = self.ban_list.read().await;
-                if let Some(&unban_timestamp) = ban_list.get(&addr) {
+                if let Some(&unban_timestamp) = ban_list.get(&SocketAddr::new(addr.ip(), 0)) {
                     if unban_timestamp == u64::MAX {
                         return true; // Permanent ban
                     }
@@ -3203,6 +3342,44 @@ impl NetworkManager {
         &self.background_task_config
     }
 
+    pub(crate) fn relay_policies(&self) -> &super::relay::RelayPolicies {
+        &self.relay_policies
+    }
+
+    pub(crate) fn relay_manager(&self) -> &std::sync::Mutex<super::relay::RelayManager> {
+        &self.relay_manager
+    }
+
+    pub(crate) fn network_timing(&self) -> &Arc<crate::config::NetworkTimingConfig> {
+        &self.network_timing
+    }
+
+    pub(crate) fn serve_compact_filters(&self) -> bool {
+        self.serve_compact_filters
+    }
+
+    /// Consume one message token when `[peer_rate_limiting]` is set.
+    pub(crate) async fn allow_peer_message(&self, peer: SocketAddr) -> bool {
+        let Some((burst, rate)) = self.peer_message_rate else {
+            return true;
+        };
+        let mut rates = self.peer_message_rates().lock().await;
+        let limiter = rates
+            .entry(peer)
+            .or_insert_with(|| PeerRateLimiter::new(burst, rate));
+        limiter.check_and_consume()
+    }
+
+    pub(crate) fn ban_sharing_active(&self) -> bool {
+        self.ban_list_sharing_config
+            .as_ref()
+            .is_some_and(|cfg| cfg.shares())
+    }
+
+    pub(crate) fn headers_probe_timeout_secs(&self) -> u64 {
+        self.headers_probe_timeout_secs
+    }
+
     /// Pending requests (for utxo_commitments_client)
     pub(crate) fn pending_requests(&self) -> &Arc<Mutex<HashMap<u64, PendingRequest>>> {
         &self.pending_requests
@@ -3333,26 +3510,27 @@ impl NetworkManager {
         use blvm_protocol::bip157::NODE_COMPACT_FILTERS;
         use blvm_protocol::service_flags::standard;
 
-        // Start with standard Bitcoin flags that should always be set
-        // NODE_NETWORK (bit 0) - Always set for full nodes (even if pruned)
-        // NODE_WITNESS (bit 3) - Set for SegWit support (Commons supports SegWit)
-        let mut services_with_filters = standard::NODE_NETWORK | standard::NODE_WITNESS;
-
-        // NODE_NETWORK_LIMITED (bit 10) - Set if node is pruned (can only serve recent blocks)
-        // Check if storage has pruning enabled
-        if let Some(ref storage) = self.storage {
-            if let Some(pruning_manager) = storage.pruning() {
-                if pruning_manager.is_enabled() {
-                    services_with_filters |= standard::NODE_NETWORK_LIMITED;
-                }
-            }
+        // NODE_WITNESS stays set. A pruned node advertises NODE_NETWORK_LIMITED and
+        // leaves NODE_NETWORK clear. An archive node does the opposite.
+        let pruned = self
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.pruning())
+            .map(|pruning_manager| pruning_manager.is_enabled())
+            .unwrap_or(false);
+        let mut services_with_filters = standard::NODE_WITNESS;
+        if pruned {
+            services_with_filters |= standard::NODE_NETWORK_LIMITED;
+        } else {
+            services_with_filters |= standard::NODE_NETWORK;
         }
 
         // Add any additional services passed in (for future extensibility)
         services_with_filters |= services;
 
-        // BIP157 Compact Block Filters (always enabled if filter service exists)
-        services_with_filters |= NODE_COMPACT_FILTERS;
+        if self.serve_compact_filters {
+            services_with_filters |= NODE_COMPACT_FILTERS;
+        }
 
         // UTXO Commitments (if feature enabled)
         #[cfg(feature = "utxo-commitments")]
@@ -3360,8 +3538,7 @@ impl NetworkManager {
             services_with_filters |= crate::network::protocol::NODE_UTXO_COMMITMENTS;
         }
 
-        // Ban List Sharing (if config enabled)
-        if self.ban_list_sharing_config.is_some() {
+        if self.ban_sharing_active() {
             services_with_filters |= crate::network::protocol::NODE_BAN_LIST_SHARING;
         }
 
@@ -3371,9 +3548,8 @@ impl NetworkManager {
             services_with_filters |= crate::network::protocol::NODE_GOVERNANCE;
         }
 
-        // Dandelion (if feature enabled)
         #[cfg(feature = "dandelion")]
-        {
+        if self.relay_policies.enable_dandelion {
             services_with_filters |= crate::network::protocol::NODE_DANDELION;
         }
 
@@ -3382,6 +3558,14 @@ impl NetworkManager {
 
         // FIBRE - always enabled
         services_with_filters |= crate::network::protocol::NODE_FIBRE;
+
+        if pruned {
+            services_with_filters &= !standard::NODE_NETWORK;
+            services_with_filters |= standard::NODE_NETWORK_LIMITED;
+        } else {
+            services_with_filters &= !standard::NODE_NETWORK_LIMITED;
+            services_with_filters |= standard::NODE_NETWORK;
+        }
 
         crate::network::protocol::VersionMessage {
             version,
@@ -3398,3 +3582,65 @@ impl NetworkManager {
 }
 
 // NetworkManager: internal state uses Arc<Mutex>/Arc<RwLock> and is Send + Sync when those hold Send types.
+
+#[cfg(test)]
+mod pruning_version_services {
+    use super::NetworkManager;
+    use crate::config::{PruningConfig, PruningMode};
+    use crate::node::mempool::MempoolManager;
+    use crate::storage::Storage;
+    use crate::storage::database::default_backend;
+    use blvm_protocol::service_flags::standard::{NODE_NETWORK, NODE_NETWORK_LIMITED};
+    use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    fn version_services(storage: Arc<Storage>) -> u64 {
+        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
+        let mempool = Arc::new(MempoolManager::new());
+        let manager = NetworkManager::new(listen).with_dependencies(protocol, storage, mempool);
+        let addr = crate::network::protocol::NetworkAddress {
+            time: 0,
+            services: 0,
+            ip: [0u8; 16],
+            port: 0,
+        };
+        manager
+            .create_version_message(
+                70015,
+                NODE_NETWORK,
+                0,
+                addr.clone(),
+                addr,
+                1,
+                String::new(),
+                0,
+                true,
+            )
+            .services
+    }
+
+    #[tokio::test]
+    async fn pruned_version_clears_node_network() {
+        let archive = tempfile::TempDir::new().unwrap();
+        let archive_storage = Arc::new(Storage::new(archive.path()).unwrap());
+        let archive_bits = version_services(archive_storage);
+        assert_ne!(archive_bits & NODE_NETWORK, 0);
+        assert_eq!(archive_bits & NODE_NETWORK_LIMITED, 0);
+
+        let pruned = tempfile::TempDir::new().unwrap();
+        let mut config = PruningConfig::default();
+        config.mode = PruningMode::Normal {
+            keep_from_height: 0,
+            min_recent_blocks: 288,
+        };
+        let pruned_storage = Arc::new(
+            Storage::with_backend_and_pruning(pruned.path(), default_backend(), Some(config))
+                .unwrap(),
+        );
+        let pruned_bits = version_services(pruned_storage);
+        assert_ne!(pruned_bits & NODE_NETWORK_LIMITED, 0);
+        assert_eq!(pruned_bits & NODE_NETWORK, 0);
+    }
+}

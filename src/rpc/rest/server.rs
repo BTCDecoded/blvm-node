@@ -59,6 +59,8 @@ pub struct RestApiServer {
     payment_state_machine: Option<Arc<crate::payment::state_machine::PaymentStateMachine>>,
     /// Connection rate limiter (per-IP per minute)
     connection_limiter: Option<Arc<tokio::sync::Mutex<ConnectionRateLimiter>>>,
+    /// `rest_api.payment_endpoints_enabled`. Default false.
+    payment_endpoints_enabled: bool,
 }
 
 impl RestApiServer {
@@ -86,6 +88,7 @@ impl RestApiServer {
             #[cfg(feature = "bip70-http")]
             payment_state_machine: None,
             connection_limiter: None,
+            payment_endpoints_enabled: false,
         }
     }
 
@@ -114,6 +117,7 @@ impl RestApiServer {
             #[cfg(feature = "bip70-http")]
             payment_state_machine: None,
             connection_limiter: None,
+            payment_endpoints_enabled: false,
         }
     }
 
@@ -129,6 +133,12 @@ impl RestApiServer {
     /// Set control RPC for `/api/v1/node/*` endpoints.
     pub fn with_control(mut self, control: Arc<ControlRpc>) -> Self {
         self.control = Some(control);
+        self
+    }
+
+    /// Serve `/api/v1/payments` when the config flag is set.
+    pub fn with_payment_endpoints(mut self, enabled: bool) -> Self {
+        self.payment_endpoints_enabled = enabled;
         self
     }
 
@@ -351,7 +361,7 @@ impl RestApiServer {
             Self::handle_mining_request(server, method, path, req, request_id).await
         } else if path.starts_with("/api/v1/fees") {
             Self::handle_fee_request(server, method, path, &uri, request_id).await
-        } else if path.starts_with("/api/v1/payments") {
+        } else if path.starts_with("/api/v1/payments") && server.payment_endpoints_enabled {
             // CTV payment endpoints (requires bip70-http feature)
             #[cfg(feature = "bip70-http")]
             {

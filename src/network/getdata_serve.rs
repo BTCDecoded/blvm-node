@@ -16,7 +16,9 @@
 //!   fanout / dual-lane write already REVERT’d dens tip30.
 
 use crate::config::getdata_serve_pipe_depth;
-use crate::network::inventory::{MSG_BLOCK, MSG_TX, MSG_WITNESS_BLOCK};
+use crate::network::inventory::{
+    MSG_BLOCK, MSG_TX, MSG_WITNESS_BLOCK, MSG_WITNESS_FLAG, MSG_WITNESS_TX,
+};
 use crate::network::network_manager::NetworkManager;
 use crate::network::protocol::{
     BlockMessage, GetDataMessage, InventoryVector, NotFoundMessage, ProtocolMessage,
@@ -30,6 +32,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{info, warn};
+
+fn inventory_requests_tx(inv_type: u32) -> bool {
+    inv_type == MSG_TX || inv_type == MSG_WITNESS_TX
+}
 
 impl NetworkManager {
     /// Answer a peer `getdata` using chain/mempool storage.
@@ -79,8 +85,9 @@ impl NetworkManager {
                 {
                     let bs = Arc::clone(&blockstore);
                     let hash = item.hash;
+                    let include_witness = inventory_includes_witness(item.inv_type);
                     let join = tokio::task::spawn_blocking(move || {
-                        build_block_wire(&bs, &hash, protocol_version)
+                        build_block_wire(&bs, &hash, protocol_version, include_witness)
                     })
                     .await;
                     let res = match join {
@@ -110,11 +117,17 @@ impl NetworkManager {
                     }
                 }
                 MSG_BLOCK | MSG_WITNESS_BLOCK => missing.push(item.clone()),
-                MSG_TX => {
+                inv_type if inventory_requests_tx(inv_type) => {
                     let res = if self.is_tx_serve_denied(&item.hash) {
                         Ok(None)
                     } else {
-                        build_tx_wire(&txindex, mempool_mgr, &item.hash)
+                        build_tx_wire(
+                            &txindex,
+                            blockstore.as_ref(),
+                            mempool_mgr,
+                            &item.hash,
+                            inventory_includes_witness(inv_type),
+                        )
                     };
                     match res {
                         Ok(Some(wire)) => {
@@ -188,8 +201,9 @@ impl NetworkManager {
                 {
                     let bs = Arc::clone(&blockstore);
                     let hash = item.hash;
+                    let include_witness = inventory_includes_witness(item.inv_type);
                     jobs[j] = Some(tokio::task::spawn_blocking(move || {
-                        build_block_wire(&bs, &hash, protocol_version)
+                        build_block_wire(&bs, &hash, protocol_version, include_witness)
                     }));
                 }
             }
@@ -229,11 +243,17 @@ impl NetworkManager {
                     }
                 }
                 MSG_BLOCK | MSG_WITNESS_BLOCK => missing.push(item.clone()),
-                MSG_TX => {
+                inv_type if inventory_requests_tx(inv_type) => {
                     let res = if self.is_tx_serve_denied(&item.hash) {
                         Ok(None)
                     } else {
-                        build_tx_wire(&txindex, mempool_mgr, &item.hash)
+                        build_tx_wire(
+                            &txindex,
+                            blockstore.as_ref(),
+                            mempool_mgr,
+                            &item.hash,
+                            inventory_includes_witness(inv_type),
+                        )
                     };
                     match res {
                         Ok(Some(wire)) => {
@@ -278,10 +298,19 @@ impl NetworkManager {
     }
 }
 
+fn inventory_includes_witness(inv_type: u32) -> bool {
+    inv_type & MSG_WITNESS_FLAG != 0
+}
+
+fn block_payload_has_witness_marker(payload: &[u8]) -> bool {
+    payload.len() >= 82 && payload[80] == 0x00 && payload[81] == 0x01
+}
+
 fn build_block_wire(
     blockstore: &crate::storage::blockstore::BlockStore,
     hash: &blvm_protocol::Hash,
     protocol_version: ProtocolVersion,
+    include_witness: bool,
 ) -> Result<Option<Vec<u8>>> {
     let Some(data) = blockstore.load_block_blob(hash)? else {
         return Ok(None);
@@ -291,8 +320,18 @@ fn build_block_wire(
         let Some(payload) = decode_wire_body_blob(&data) else {
             return Ok(None);
         };
+        if include_witness || !block_payload_has_witness_marker(payload) {
+            return Ok(Some(ProtocolParser::serialize_command_payload(
+                "block", payload,
+            )?));
+        }
+        let Ok((block, _)) = blvm_protocol::wire::deserialize_block_with_witnesses_pair(payload)
+        else {
+            return Ok(None);
+        };
+        let stripped = blvm_protocol::wire::serialize_block_witnesses(&block, &[])?;
         return Ok(Some(ProtocolParser::serialize_command_payload(
-            "block", payload,
+            "block", &stripped,
         )?));
     }
 
@@ -303,14 +342,18 @@ fn build_block_wire(
     let ts = block.header.timestamp;
     let registry = cached_feature_registry(protocol_version);
     let segwit_on = registry.is_feature_active("segwit", n, ts);
-    let witnesses = match blockstore.get_witness(hash)? {
-        Some(w) => w,
-        None if !segwit_on => Vec::new(),
-        None => return Ok(None),
+    let witnesses = if include_witness {
+        match blockstore.get_witness(hash)? {
+            Some(w) => w,
+            None if !segwit_on => Vec::new(),
+            None => return Ok(None),
+        }
+    } else {
+        Vec::new()
     };
-    // Mirror IBD local load: commitment + empty stacks is a stale MSG_BLOCK blob.
+    // Mirror IBD local load: commitment + empty stacks is a stale witness block.
     // Serving it forces the peer through EMPTY_WITNESS reject/re-getdata loops.
-    if empty_witness_unacceptable(&block, &witnesses, segwit_on) {
+    if include_witness && empty_witness_unacceptable(&block, &witnesses, segwit_on) {
         return Ok(None);
     }
 
@@ -318,18 +361,60 @@ fn build_block_wire(
     Ok(Some(ProtocolParser::serialize_message(&msg)?))
 }
 
+fn witnesses_for_indexed_tx(
+    txindex: &crate::storage::txindex::TxIndex,
+    blockstore: &crate::storage::blockstore::BlockStore,
+    hash: &blvm_protocol::Hash,
+) -> Vec<blvm_protocol::segwit::Witness> {
+    let Ok(Some(meta)) = txindex.get_metadata(hash) else {
+        return Vec::new();
+    };
+    let Ok(Some(block_witnesses)) = blockstore.get_witness(&meta.block_hash) else {
+        return Vec::new();
+    };
+    block_witnesses
+        .get(meta.tx_index as usize)
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn build_tx_wire(
     txindex: &crate::storage::txindex::TxIndex,
+    blockstore: &crate::storage::blockstore::BlockStore,
     mempool_mgr: Option<&std::sync::Arc<crate::node::mempool::MempoolManager>>,
     hash: &blvm_protocol::Hash,
+    include_witness: bool,
 ) -> Result<Option<Vec<u8>>> {
     if let Ok(Some(tx)) = txindex.get_transaction(hash) {
-        let msg = ProtocolMessage::Tx(TxMessage { transaction: tx });
+        let mut witnesses = if include_witness {
+            witnesses_for_indexed_tx(txindex, blockstore, hash)
+        } else {
+            Vec::new()
+        };
+        if include_witness && witnesses.iter().all(|stack| stack.is_empty()) {
+            if let Some(from_pool) = mempool_mgr.and_then(|mm| mm.get_transaction_witnesses(hash)) {
+                if from_pool.iter().any(|stack| !stack.is_empty()) {
+                    witnesses = from_pool;
+                }
+            }
+        }
+        let msg = ProtocolMessage::Tx(TxMessage {
+            transaction: tx,
+            witnesses,
+        });
         return Ok(Some(ProtocolParser::serialize_message(&msg)?));
     }
     if let Some(mm) = mempool_mgr {
         if let Some(tx) = mm.get_transaction(hash) {
-            let msg = ProtocolMessage::Tx(TxMessage { transaction: tx });
+            let witnesses = if include_witness {
+                mm.get_transaction_witnesses(hash).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let msg = ProtocolMessage::Tx(TxMessage {
+                transaction: tx,
+                witnesses,
+            });
             return Ok(Some(ProtocolParser::serialize_message(&msg)?));
         }
     }
@@ -340,7 +425,9 @@ fn build_tx_wire(
 mod tests {
     use super::*;
     use crate::network::NetworkManager;
-    use crate::network::inventory::{MSG_BLOCK, MSG_TX};
+    use crate::network::inventory::{
+        MSG_BLOCK, MSG_TX, MSG_WITNESS_BLOCK, MSG_WITNESS_FLAG, MSG_WITNESS_TX,
+    };
     use crate::node::mempool::MempoolManager;
     use crate::storage::Storage;
     use blvm_protocol::block::calculate_tx_id;
@@ -377,8 +464,13 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let storage = Storage::new(temp.path()).unwrap();
         let hash = [0x44u8; 32];
-        let out =
-            build_block_wire(storage.blocks().as_ref(), &hash, ProtocolVersion::Regtest).unwrap();
+        let out = build_block_wire(
+            storage.blocks().as_ref(),
+            &hash,
+            ProtocolVersion::Regtest,
+            true,
+        )
+        .unwrap();
         assert!(out.is_none());
     }
 
@@ -401,9 +493,14 @@ mod tests {
         storage.blocks().store_block(&block).unwrap();
         storage.blocks().store_height(0, &hash).unwrap();
         let _ = storage.blocks().store_witness(&hash, &[]);
-        let wire = build_block_wire(storage.blocks().as_ref(), &hash, ProtocolVersion::Regtest)
-            .unwrap()
-            .expect("wire bytes");
+        let wire = build_block_wire(
+            storage.blocks().as_ref(),
+            &hash,
+            ProtocolVersion::Regtest,
+            true,
+        )
+        .unwrap()
+        .expect("wire bytes");
         assert!(wire.len() > 80);
     }
 
@@ -455,12 +552,26 @@ mod tests {
             .blocks()
             .store_block_with_witness(&block, &[], height)
             .unwrap();
-        let out =
-            build_block_wire(storage.blocks().as_ref(), &hash, ProtocolVersion::BitcoinV1).unwrap();
+        let out = build_block_wire(
+            storage.blocks().as_ref(),
+            &hash,
+            ProtocolVersion::BitcoinV1,
+            true,
+        )
+        .unwrap();
         assert!(
             out.is_none(),
             "commitment + empty witnesses must notfound (mirror IBD local load)"
         );
+    }
+
+    #[test]
+    fn witness_tx_getdata_is_a_transaction_request() {
+        assert_eq!(MSG_WITNESS_TX, MSG_TX | MSG_WITNESS_FLAG);
+        assert!(inventory_requests_tx(MSG_WITNESS_TX));
+        assert!(inventory_requests_tx(MSG_TX));
+        assert!(!inventory_requests_tx(MSG_WITNESS_BLOCK));
+        assert!(!inventory_requests_tx(MSG_BLOCK));
     }
 
     #[test]
@@ -478,15 +589,77 @@ mod tests {
             .transactions()
             .index_transaction(&tx, &[0x55; 32], 0, 0)
             .unwrap();
-        let from_index = build_tx_wire(storage.transactions().as_ref(), None, &hash).unwrap();
+        let from_index = build_tx_wire(
+            storage.transactions().as_ref(),
+            storage.blocks().as_ref(),
+            None,
+            &hash,
+            true,
+        )
+        .unwrap();
         assert!(from_index.is_some());
         let mempool = Arc::new(MempoolManager::new());
         let unknown = [0x66u8; 32];
         assert!(
-            build_tx_wire(storage.transactions().as_ref(), Some(&mempool), &unknown)
-                .unwrap()
-                .is_none()
+            build_tx_wire(
+                storage.transactions().as_ref(),
+                storage.blocks().as_ref(),
+                Some(&mempool),
+                &unknown,
+                true,
+            )
+            .unwrap()
+            .is_none()
         );
+    }
+
+    #[test]
+    fn confirmed_tx_wire_includes_its_block_witness() {
+        use blvm_protocol::{OutPoint, TransactionInput, TransactionOutput};
+        let temp = TempDir::new().unwrap();
+        let storage = Storage::new(temp.path()).unwrap();
+        let tx = Transaction {
+            version: 2,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [4u8; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: 0xfffffffe,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 1000,
+                script_pubkey: Vec::new(),
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let hash = calculate_tx_id(&tx);
+        let block_hash = [0x55u8; 32];
+        storage
+            .transactions()
+            .index_transaction(&tx, &block_hash, 7, 1)
+            .unwrap();
+        let spend = vec![vec![vec![1u8, 2, 3]]];
+        storage
+            .blocks()
+            .store_witness(&block_hash, &[Vec::new(), spend.clone()])
+            .unwrap();
+        let bytes = build_tx_wire(
+            storage.transactions().as_ref(),
+            storage.blocks().as_ref(),
+            None,
+            &hash,
+            true,
+        )
+        .unwrap()
+        .expect("indexed tx");
+        match ProtocolParser::parse_message(&bytes).unwrap() {
+            ProtocolMessage::Tx(msg) => assert_eq!(msg.witnesses, spend),
+            other => panic!("expected a tx message, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -594,5 +767,97 @@ mod tests {
             }
         }
         res.unwrap();
+    }
+
+    #[test]
+    fn plain_getdata_omits_the_witness_marker() {
+        use blvm_protocol::{OutPoint, TransactionInput, TransactionOutput};
+        let temp = TempDir::new().unwrap();
+        let storage = Storage::new(temp.path()).unwrap();
+        let tx = Transaction {
+            version: 2,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [9u8; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: 0xffff_ffff,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 1000,
+                script_pubkey: vec![0x51],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let block = Block {
+            header: BlockHeader {
+                version: 2,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [3u8; 32],
+                timestamp: 1_700_000_000,
+                bits: 0x207f_ffff,
+                nonce: 1,
+            },
+            transactions: vec![tx.clone()].into(),
+        };
+        let hash = storage.blocks().get_block_hash(&block);
+        storage.blocks().store_block(&block).unwrap();
+        storage.blocks().store_height(1, &hash).unwrap();
+        storage
+            .blocks()
+            .store_witness(&hash, &[vec![vec![vec![0xab]]]])
+            .unwrap();
+        let plain = build_block_wire(
+            storage.blocks().as_ref(),
+            &hash,
+            ProtocolVersion::Regtest,
+            false,
+        )
+        .unwrap()
+        .expect("plain block");
+        let with_witness = build_block_wire(
+            storage.blocks().as_ref(),
+            &hash,
+            ProtocolVersion::Regtest,
+            true,
+        )
+        .unwrap()
+        .expect("witness block");
+        // Message header, block header, tx-count varint, then the transaction version.
+        let marker_at = 24 + 80 + 1 + 4;
+        assert_eq!(plain[marker_at], 0x01, "MSG_BLOCK has no witness marker");
+        assert_eq!(with_witness[marker_at], 0x00);
+        assert_eq!(with_witness[marker_at + 1], 0x01);
+        assert!(with_witness.len() > plain.len());
+
+        let txid = calculate_tx_id(&tx);
+        storage
+            .transactions()
+            .index_transaction(&tx, &hash, 1, 0)
+            .unwrap();
+        let plain_tx = build_tx_wire(
+            storage.transactions().as_ref(),
+            storage.blocks().as_ref(),
+            None,
+            &txid,
+            false,
+        )
+        .unwrap()
+        .expect("plain tx");
+        let witness_tx = build_tx_wire(
+            storage.transactions().as_ref(),
+            storage.blocks().as_ref(),
+            None,
+            &txid,
+            true,
+        )
+        .unwrap()
+        .expect("witness tx");
+        assert_eq!(plain_tx[28], 0x01);
+        assert_eq!(witness_tx[28], 0x00);
+        assert_eq!(witness_tx[29], 0x01);
     }
 }

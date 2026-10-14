@@ -68,8 +68,8 @@ async fn test_ban_list_multiple_peers() {
     let manager = NetworkManager::new(addr);
 
     let addr1: SocketAddr = "127.0.0.1:8333".parse().unwrap();
-    let addr2: SocketAddr = "127.0.0.1:8334".parse().unwrap();
-    let addr3: SocketAddr = "127.0.0.1:8335".parse().unwrap();
+    let addr2: SocketAddr = "10.0.0.2:8334".parse().unwrap();
+    let addr3: SocketAddr = "10.0.0.3:8335".parse().unwrap();
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

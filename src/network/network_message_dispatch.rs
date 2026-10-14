@@ -54,9 +54,13 @@ pub(crate) async fn handle_network_message(
         }
         NetworkMessage::TransactionReceived(data) => {
             if let Ok(ProtocolMessage::Tx(tx_msg)) = ProtocolParser::parse_message(&data) {
-                let txs = [tx_msg.transaction.clone()];
                 ignore_error(
-                    || nm.submit_transactions_to_mempool(&txs),
+                    || {
+                        nm.submit_transaction_with_witness(
+                            tx_msg.transaction,
+                            Some(tx_msg.witnesses),
+                        )
+                    },
                     "Error processing transaction",
                 )
                 .await;
@@ -308,11 +312,13 @@ async fn handle_peer_connected(nm: &NetworkManager, addr: TransportAddr) {
             };
             (
                 NetworkAddress {
+                    time: 0,
                     services: 0,
                     ip: peer_ip,
                     port: peer_socket.port(),
                 },
                 NetworkAddress {
+                    time: 0,
                     services: 0,
                     ip: [0u8; 16],
                     port: 0,
@@ -323,11 +329,13 @@ async fn handle_peer_connected(nm: &NetworkManager, addr: TransportAddr) {
             // handshake still conveys protocol version and services.
             (
                 NetworkAddress {
+                    time: 0,
                     services: 0,
                     ip: [0u8; 16],
                     port: 0,
                 },
                 NetworkAddress {
+                    time: 0,
                     services: 0,
                     ip: [0u8; 16],
                     port: 0,

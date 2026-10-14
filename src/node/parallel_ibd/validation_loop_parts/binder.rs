@@ -1,3 +1,17 @@
+/// Parent headers for the median-time check. Height 0 has none. A shorter
+/// window than the chain height, up to 11, means a parent header is missing.
+fn mtp_parent_headers<H>(height: u64, headers: &[H]) -> Result<&[H]> {
+    let expected = if height == 0 {
+        0
+    } else {
+        (height as usize).min(blvm_protocol::bip113::MEDIAN_TIME_BLOCKS)
+    };
+    if headers.len() < expected {
+        anyhow::bail!("missing parent headers for median time at height {height}");
+    }
+    Ok(headers)
+}
+
 fn shared_empty_witness_stacks(n_tx: usize) -> Arc<Vec<Vec<Witness>>> {
     EMPTY_WITNESS_STACKS.with(|cell| {
         let mut g = cell.borrow_mut();
@@ -2127,13 +2141,11 @@ fn run_validation_worker_shared(
                 }
                 let view_build_ms = t_view.elapsed().as_millis() as u64;
 
-                let recent_opt: Option<&[Arc<BlockHeader>]> = if lj.recent_headers.is_empty() {
-                    None
-                } else {
-                    Some(lj.recent_headers.as_slice())
-                };
+                let recent_opt = mtp_parent_headers(lj.height, lj.recent_headers.as_slice());
                 let t_val = std::time::Instant::now();
-                let raw = parallel_ibd.validate_block_only(
+                let raw = match recent_opt {
+                    Err(e) => Err(e),
+                    Ok(headers) => parallel_ibd.validate_block_only(
                     &blockstore,
                     protocol.as_ref(),
                     &mut utxo_base,
@@ -2143,13 +2155,14 @@ fn run_validation_worker_shared(
                     lj.witnesses_storage.as_slice(),
                     Some(&lj.witnesses_storage),
                     lj.height,
-                    recent_opt,
+                    Some(headers),
                     lj.cached_network_time,
                     Some(&lj.tx_ids),
                     Some(lj.best_header_chainwork),
                     None,
                     lj.ibd_block_outputs.clone(),
-                );
+                ),
+                };
                 let elapsed = t_val.elapsed();
                 let (result, undo_log) = match raw {
                     Ok((_ids, delta, undo)) => (Ok(delta), undo),
@@ -2256,16 +2269,32 @@ fn run_validation_worker_shared(
                     );
                 }
 
-                let recent_opt: Option<&[Arc<BlockHeader>]> = if ej.recent_headers.is_empty() {
-                    None
-                } else {
-                    Some(ej.recent_headers.as_slice())
-                };
+                let recent_opt = mtp_parent_headers(ej.height, ej.recent_headers.as_slice());
                 let t_val = std::time::Instant::now();
                 let lookup = crate::storage::ibd_engine::SpendSessionLookup(&session);
-                let raw = if use_lookup {
-                    utxo_base.clear();
-                    parallel_ibd.validate_block_only(
+                let raw = match recent_opt {
+                    Err(e) => Err(e),
+                    Ok(headers) if use_lookup => {
+                        utxo_base.clear();
+                        parallel_ibd.validate_block_only(
+                            &blockstore,
+                            protocol.as_ref(),
+                            &mut utxo_base,
+                            Some(&mut ej.bip30_index),
+                            ej.block_arc.as_ref(),
+                            Some(Arc::clone(&ej.block_arc)),
+                            ej.witnesses_storage.as_slice(),
+                            Some(&ej.witnesses_storage),
+                            ej.height,
+                            Some(headers),
+                            ej.cached_network_time,
+                            Some(&ej.tx_ids),
+                            Some(ej.best_header_chainwork),
+                            Some(&lookup),
+                            ej.ibd_block_outputs.clone(),
+                        )
+                    }
+                    Ok(headers) => parallel_ibd.validate_block_only(
                         &blockstore,
                         protocol.as_ref(),
                         &mut utxo_base,
@@ -2275,31 +2304,13 @@ fn run_validation_worker_shared(
                         ej.witnesses_storage.as_slice(),
                         Some(&ej.witnesses_storage),
                         ej.height,
-                        recent_opt,
-                        ej.cached_network_time,
-                        Some(&ej.tx_ids),
-                        Some(ej.best_header_chainwork),
-                        Some(&lookup),
-                        ej.ibd_block_outputs.clone(),
-                    )
-                } else {
-                    parallel_ibd.validate_block_only(
-                        &blockstore,
-                        protocol.as_ref(),
-                        &mut utxo_base,
-                        Some(&mut ej.bip30_index),
-                        ej.block_arc.as_ref(),
-                        Some(Arc::clone(&ej.block_arc)),
-                        ej.witnesses_storage.as_slice(),
-                        Some(&ej.witnesses_storage),
-                        ej.height,
-                        recent_opt,
+                        Some(headers),
                         ej.cached_network_time,
                         Some(&ej.tx_ids),
                         Some(ej.best_header_chainwork),
                         None,
                         ej.ibd_block_outputs.clone(),
-                    )
+                    ),
                 };
                 let elapsed = t_val.elapsed();
                 let (result, undo_log) = match raw {

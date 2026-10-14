@@ -14,10 +14,12 @@ pub const MSG_TX: u32 = 1;
 pub const MSG_BLOCK: u32 = 2;
 pub const MSG_FILTERED_BLOCK: u32 = 3;
 pub const MSG_CMPCT_BLOCK: u32 = 4;
-/// Request block with full SegWit witness data (BIP144). Use instead of MSG_BLOCK for heights
-/// at or after SegWit activation (481824 mainnet) to ensure witness data is included in the
-/// peer's response. Peers that don't support SegWit respond with MSG_BLOCK format (harmless).
-pub const MSG_WITNESS_BLOCK: u32 = 0x40000002;
+/// High bit on an inventory type requests witness data.
+pub const MSG_WITNESS_FLAG: u32 = 1 << 30;
+/// Transaction inventory that includes witness stacks.
+pub const MSG_WITNESS_TX: u32 = MSG_TX | MSG_WITNESS_FLAG;
+/// Block inventory that includes witness stacks.
+pub const MSG_WITNESS_BLOCK: u32 = MSG_BLOCK | MSG_WITNESS_FLAG;
 
 /// Maximum entries in the global `known_inventory` set.
 /// Matches Bitcoin Core's `INVENTORY_BROADCAST_MAX` order-of-magnitude (5x headroom).
@@ -153,9 +155,11 @@ impl InventoryManager {
         self.peer_inventories.get(peer)
     }
 
-    /// Remove peer inventory
+    /// Remove peer inventory and any block download still charged to that peer.
     pub fn remove_peer(&mut self, peer: &str) {
         self.peer_inventories.remove(peer);
+        self.pending_requests
+            .retain(|_, request| request.peer != peer);
         info!("Removed inventory for peer {}", peer);
     }
 
@@ -183,5 +187,22 @@ mod tests {
         assert!(mgr.has_pending_request(&hash));
         mgr.mark_fulfilled(&hash);
         assert!(!mgr.has_pending_request(&hash));
+    }
+
+    #[test]
+    fn getdata_lock_pending_clears_when_the_peer_disconnects() {
+        let mut mgr = InventoryManager::new();
+        let hash = [0xcd; 32];
+        mgr.request_data(hash, MSG_BLOCK, "203.0.113.5:8333")
+            .unwrap();
+        assert!(mgr.has_pending_request(&hash));
+        mgr.remove_peer("203.0.113.5:8333");
+        assert!(
+            !mgr.has_pending_request(&hash),
+            "a later inv can request the hash again"
+        );
+        mgr.request_data(hash, MSG_BLOCK, "203.0.113.9:8333")
+            .unwrap();
+        assert!(mgr.has_pending_request(&hash));
     }
 }

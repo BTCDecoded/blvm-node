@@ -82,6 +82,7 @@ pub(crate) async fn start_tcp_listener(nm: &NetworkManager, listen_addr: SocketA
     let peer_manager_clone = Arc::clone(nm.peer_manager_mutex());
     let ban_list = Arc::clone(nm.ban_list());
     let max_message_length = nm.protocol_limits().max_protocol_message_length;
+    let ping_timeout_secs = nm.background_task_config().ping_timeout_secs;
 
     tokio::spawn(async move {
         loop {
@@ -103,7 +104,10 @@ pub(crate) async fn start_tcp_listener(nm: &NetworkManager, listen_addr: SocketA
                             let ban_duration = dos_protection.ban_duration_seconds();
                             let unban_timestamp = crate::utils::current_timestamp() + ban_duration;
                             let mut ban_list_guard = ban_list.write().await;
-                            ban_list_guard.insert(socket_addr, unban_timestamp);
+                            ban_list_guard.insert(
+                                std::net::SocketAddr::new(socket_addr.ip(), 0),
+                                unban_timestamp,
+                            );
                         }
                         drop(stream);
                         continue;
@@ -132,12 +136,13 @@ pub(crate) async fn start_tcp_listener(nm: &NetworkManager, listen_addr: SocketA
                     let peer_manager_for_peer = Arc::clone(&peer_manager_clone);
                     let transport_addr_for_peer = transport_addr_tcp;
                     tokio::spawn(async move {
-                        let peer = peer::Peer::from_tcp_stream_split(
+                        let mut peer = peer::Peer::from_tcp_stream_split(
                             stream,
                             socket_addr,
                             peer_tx_clone.clone(),
                             max_message_length,
                         );
+                        peer.set_ping_timeout_seconds(ping_timeout_secs);
 
                         let mut pm = peer_manager_for_peer.lock().await;
                         if let Err(e) = pm.add_peer(transport_addr_for_peer.clone(), peer) {
@@ -215,7 +220,10 @@ pub(crate) async fn start_quinn_listener(
                                     let ban_duration = dos_protection.ban_duration_seconds();
                                     let unban_timestamp = current_timestamp() + ban_duration;
                                     let mut ban_list_guard = ban_list.write().await;
-                                    ban_list_guard.insert(socket_addr, unban_timestamp);
+                                    ban_list_guard.insert(
+                                        std::net::SocketAddr::new(socket_addr.ip(), 0),
+                                        unban_timestamp,
+                                    );
                                 }
                                 drop(conn);
                                 continue;
