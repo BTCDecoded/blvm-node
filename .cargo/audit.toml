@@ -19,4 +19,11 @@ ignore = [
     "RUSTSEC-2026-0119",
     # fmt::Pointer on null Atomic/Shared only; rayon does not format null epoch pointers.
     "RUSTSEC-2026-0204",
+    # quinn-proto <0.11.17/18 (QUIC transport DoS class). Fixed quinn-proto pulls rand 0.10 -> chacha20 0.10 stable,
+    # which cannot co-resolve with iroh 0.95's pre-release crypto_box/chacha20 rc stack. Exit: iroh bump, then drop these.
+    "RUSTSEC-2026-0338",
+    "RUSTSEC-2026-0339",
+    "RUSTSEC-2026-0340",
+    "RUSTSEC-2026-0341",
+    "RUSTSEC-2026-0342",
 ]
