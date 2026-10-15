@@ -920,6 +920,7 @@ pub(crate) mod redb_impl {
     static BLOCK_METADATA_TABLE: TableDefinition<&[u8], &[u8]> =
         TableDefinition::new("block_metadata");
     static BLOCK_UNDO_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("block_undo");
+    static BLOCK_INDEX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("block_index");
     static CHAINWORK_CACHE_TABLE: TableDefinition<&[u8], &[u8]> =
         TableDefinition::new("chainwork_cache");
     static UTXO_STATS_CACHE_TABLE: TableDefinition<&[u8], &[u8]> =
@@ -1059,6 +1060,7 @@ pub(crate) mod redb_impl {
                             let _ = write_txn.open_table(CHAIN_TIPS_TABLE)?;
                             let _ = write_txn.open_table(BLOCK_METADATA_TABLE)?;
                             let _ = write_txn.open_table(BLOCK_UNDO_TABLE)?;
+                            let _ = write_txn.open_table(BLOCK_INDEX_TABLE)?;
                             let _ = write_txn.open_table(CHAINWORK_CACHE_TABLE)?;
                             let _ = write_txn.open_table(UTXO_STATS_CACHE_TABLE)?;
                             let _ = write_txn.open_table(NETWORK_HASHRATE_CACHE_TABLE)?;
@@ -1119,6 +1121,7 @@ pub(crate) mod redb_impl {
                 let _ = write_txn.open_table(CHAIN_TIPS_TABLE)?;
                 let _ = write_txn.open_table(BLOCK_METADATA_TABLE)?;
                 let _ = write_txn.open_table(BLOCK_UNDO_TABLE)?;
+                let _ = write_txn.open_table(BLOCK_INDEX_TABLE)?;
                 let _ = write_txn.open_table(CHAINWORK_CACHE_TABLE)?;
                 let _ = write_txn.open_table(UTXO_STATS_CACHE_TABLE)?;
                 let _ = write_txn.open_table(NETWORK_HASHRATE_CACHE_TABLE)?;
@@ -1164,6 +1167,7 @@ pub(crate) mod redb_impl {
                 "chain_tips" => Some(&CHAIN_TIPS_TABLE),
                 "block_metadata" => Some(&BLOCK_METADATA_TABLE),
                 "block_undo" => Some(&BLOCK_UNDO_TABLE),
+                "block_index" => Some(&BLOCK_INDEX_TABLE),
                 "chainwork_cache" => Some(&CHAINWORK_CACHE_TABLE),
                 "utxo_stats_cache" => Some(&UTXO_STATS_CACHE_TABLE),
                 "network_hashrate_cache" => Some(&NETWORK_HASHRATE_CACHE_TABLE),
