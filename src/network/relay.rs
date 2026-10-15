@@ -56,6 +56,19 @@ impl Default for RelayPolicies {
     }
 }
 
+impl RelayPolicies {
+    /// Policies from the node relay section. Absent section uses [`RelayPolicies::default`].
+    pub fn from_relay_config(cfg: &crate::config::RelayConfig) -> Self {
+        Self {
+            max_relay_age: cfg.max_relay_age,
+            max_tracked_items: cfg.max_tracked_items,
+            enable_block_relay: cfg.enable_block_relay,
+            enable_tx_relay: cfg.enable_tx_relay,
+            enable_dandelion: cfg.enable_dandelion,
+        }
+    }
+}
+
 impl Default for RelayManager {
     fn default() -> Self {
         Self::new()
@@ -112,15 +125,48 @@ impl RelayManager {
 
     /// Create a relay manager with custom policies
     pub fn with_policies(policies: RelayPolicies) -> Self {
+        #[cfg(feature = "dandelion")]
+        {
+            Self::with_policies_and_dandelion(policies, None)
+        }
+        #[cfg(not(feature = "dandelion"))]
+        {
+            Self::with_policies_and_dandelion(policies)
+        }
+    }
+
+    /// Policies plus the `[dandelion]` stem timeout, fluff probability, and hop cap.
+    #[cfg(feature = "dandelion")]
+    pub fn with_policies_and_dandelion(
+        policies: RelayPolicies,
+        dandelion: Option<&crate::config::DandelionConfig>,
+    ) -> Self {
+        let dandelion = if policies.enable_dandelion {
+            Some(match dandelion {
+                Some(cfg) => DandelionRelay::with_params(
+                    std::time::Duration::from_secs(cfg.stem_timeout_seconds),
+                    cfg.fluff_probability,
+                    cfg.max_stem_hops,
+                ),
+                None => DandelionRelay::new(),
+            })
+        } else {
+            None
+        };
         Self {
             recently_relayed_blocks: HashMap::new(),
             recently_relayed_txs: HashMap::new(),
-            #[cfg(feature = "dandelion")]
-            dandelion: if policies.enable_dandelion {
-                Some(DandelionRelay::new())
-            } else {
-                None
-            },
+            dandelion,
+            enable_dandelion: policies.enable_dandelion,
+            policies,
+        }
+    }
+
+    #[cfg(not(feature = "dandelion"))]
+    fn with_policies_and_dandelion(policies: RelayPolicies) -> Self {
+        Self {
+            recently_relayed_blocks: HashMap::new(),
+            recently_relayed_txs: HashMap::new(),
             enable_dandelion: policies.enable_dandelion,
             policies,
         }

@@ -20,6 +20,7 @@ pub(crate) mod body_dup;
 mod feeder;
 mod feeder_miss;
 mod headers;
+pub(crate) use headers::ibd_header_locator_heights;
 #[cfg(feature = "production")]
 mod ibd_staging;
 pub(crate) mod late_body;
@@ -1213,12 +1214,17 @@ pub(crate) fn export_start_gate_allows_at(vh: i32, last_exported: i32, interval:
     true
 }
 
-struct ParallelIbdSessionGuard;
+struct ParallelIbdSessionGuard {
+    network: Option<Arc<NetworkManager>>,
+}
 
 impl Drop for ParallelIbdSessionGuard {
     fn drop(&mut self) {
         PARALLEL_IBD_SESSION_ACTIVE.store(false, Ordering::Release);
         memory::reset_ibd_pressure_on_session_end();
+        if let Some(network) = self.network.take() {
+            network.clear_ibd_evicted_ips();
+        }
     }
 }
 
@@ -8321,7 +8327,9 @@ impl ParallelIBD {
                 });
             }
         }
-        let _ibd_session_guard = ParallelIbdSessionGuard;
+        let _ibd_session_guard = ParallelIbdSessionGuard {
+            network: network.clone(),
+        };
         let coord_session_id = PARALLEL_IBD_SESSION_ID.fetch_add(1, Ordering::AcqRel) + 1;
 
         // Enable write-optimised mode: skip per-commit fdatasync for all LMDB writes during IBD.

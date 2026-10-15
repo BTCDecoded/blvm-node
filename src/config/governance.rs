@@ -22,6 +22,21 @@ pub struct GovernanceConfig {
     pub api_key: Option<String>,
 }
 
+#[cfg(feature = "governance")]
+impl GovernanceConfig {
+    /// Configured key, or `COMMONS_API_KEY` when the config value is empty.
+    pub fn resolved_api_key(&self) -> Option<String> {
+        self.api_key
+            .clone()
+            .filter(|key| !key.is_empty())
+            .or_else(|| {
+                std::env::var("COMMONS_API_KEY")
+                    .ok()
+                    .filter(|key| !key.is_empty())
+            })
+    }
+}
+
 /// Ban list sharing configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BanListSharingConfig {
@@ -74,5 +89,12 @@ impl Default for BanListSharingConfig {
             periodic_interval_seconds: 300,
             min_ban_duration_to_share: 3600,
         }
+    }
+}
+
+impl BanListSharingConfig {
+    /// Sharing is on when the section is enabled and the mode is not `disabled`.
+    pub fn shares(&self) -> bool {
+        self.enabled && !matches!(self.share_mode, BanShareMode::Disabled)
     }
 }

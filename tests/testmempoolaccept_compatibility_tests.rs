@@ -126,7 +126,8 @@ async fn test_segwit_wtxid_calculation() {
     };
     let witnesses = vec![vec![vec![0u8; 72]]];
     let base_size = serialize_transaction(&tx).len();
-    let segwit_tx_hex = hex::encode(serialize_transaction_with_witness(&tx, &witnesses));
+    let segwit_tx_hex =
+        hex::encode(serialize_transaction_with_witness(&tx, &witnesses).expect("witness count"));
 
     let params = json!([segwit_tx_hex]);
     let result = rawtx.testmempoolaccept(&params).await.unwrap();
@@ -141,7 +142,9 @@ async fn test_segwit_wtxid_calculation() {
         64,
         "wtxid should be 64 hex characters (32 bytes)"
     );
-    let total_size = serialize_transaction_with_witness(&tx, &witnesses).len();
+    let total_size = serialize_transaction_with_witness(&tx, &witnesses)
+        .expect("witness count")
+        .len();
     assert_ne!(
         txid, wtxid,
         "wtxid should differ from txid when witness is present"

@@ -133,6 +133,7 @@ fn socket_addr_to_network_address(socket_addr: SocketAddr) -> NetworkAddress {
         services: 0, // Will be updated when we connect
         ip: ip_bytes,
         port: socket_addr.port(),
+        time: crate::utils::current_timestamp() as u32,
     }
 }
 

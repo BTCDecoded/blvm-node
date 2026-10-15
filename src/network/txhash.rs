@@ -22,45 +22,15 @@ pub fn calculate_wtxid(tx: &Transaction, witnesses: Option<&[Vec<Vec<u8>>]>) -> 
         return txid;
     }
     let witnesses = witnesses.expect("checked above");
-    // SegWit serialization: version + marker(0x00) + flag(0x01) + inputs + outputs + locktime + witness
-    let serialized = segwit_serialize_for_wtxid(tx, witnesses);
+    let Ok(serialized) =
+        blvm_protocol::serialization::serialize_transaction_with_witness(tx, witnesses)
+    else {
+        return txid;
+    };
     let first = Sha256::digest(&serialized);
     let second = Sha256::digest(first);
     let mut out = [0u8; 32];
     out.copy_from_slice(&second);
-    out
-}
-
-#[cfg(any(feature = "production", feature = "profile"))]
-fn segwit_serialize_for_wtxid(tx: &Transaction, witnesses: &[Vec<Vec<u8>>]) -> Vec<u8> {
-    use blvm_protocol::serialization::varint::encode_varint;
-
-    let mut out = Vec::new();
-    out.extend_from_slice(&(tx.version as u32).to_le_bytes());
-    out.push(0x00);
-    out.push(0x01);
-    out.extend_from_slice(&encode_varint(tx.inputs.len() as u64));
-    for input in &tx.inputs {
-        out.extend_from_slice(&input.prevout.hash);
-        out.extend_from_slice(&input.prevout.index.to_le_bytes());
-        out.extend_from_slice(&encode_varint(input.script_sig.len() as u64));
-        out.extend_from_slice(&input.script_sig);
-        out.extend_from_slice(&(input.sequence as u32).to_le_bytes());
-    }
-    out.extend_from_slice(&encode_varint(tx.outputs.len() as u64));
-    for output in &tx.outputs {
-        out.extend_from_slice(&(output.value as u64).to_le_bytes());
-        out.extend_from_slice(&encode_varint(output.script_pubkey.len() as u64));
-        out.extend_from_slice(&output.script_pubkey);
-    }
-    out.extend_from_slice(&(tx.lock_time as u32).to_le_bytes());
-    for stack in witnesses {
-        out.extend_from_slice(&encode_varint(stack.len() as u64));
-        for elem in stack {
-            out.extend_from_slice(&encode_varint(elem.len() as u64));
-            out.extend_from_slice(elem);
-        }
-    }
     out
 }
 
@@ -102,4 +72,53 @@ pub fn calculate_block_header_hash(header: &BlockHeader) -> Hash {
     let mut out = [0u8; 32];
     out.copy_from_slice(&final_bytes);
     out
+}
+
+#[cfg(all(test, any(feature = "production", feature = "profile")))]
+mod tests {
+    use super::calculate_wtxid;
+    use blvm_protocol::block::calculate_tx_id;
+    use blvm_protocol::serialization::serialize_transaction_with_witness;
+    use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput};
+    use sha2::{Digest, Sha256};
+
+    fn one_in_one_out() -> Transaction {
+        Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [1u8; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: 0xffffffff,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 50_000,
+                script_pubkey: vec![0x51],
+            }]
+            .into(),
+            lock_time: 7,
+        }
+    }
+
+    fn sha256d(bytes: &[u8]) -> [u8; 32] {
+        let first = Sha256::digest(bytes);
+        let second = Sha256::digest(first);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&second);
+        out
+    }
+
+    #[test]
+    fn wtxid_hashes_witness_before_locktime() {
+        let tx = one_in_one_out();
+        let stacks = vec![vec![vec![0x30, 0x01], vec![0x02]]];
+        let serialized = serialize_transaction_with_witness(&tx, &stacks).unwrap();
+        assert_eq!(calculate_wtxid(&tx, Some(&stacks)), sha256d(&serialized));
+        assert_ne!(calculate_wtxid(&tx, Some(&stacks)), calculate_tx_id(&tx));
+        let empty = vec![vec![]];
+        assert_eq!(calculate_wtxid(&tx, Some(&empty)), calculate_tx_id(&tx));
+    }
 }

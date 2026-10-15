@@ -21,10 +21,13 @@ pub fn handle_sendpkgtxn(_relay: &PackageRelay, msg: &SendPkgTxnMessage) -> Resu
     Ok(())
 }
 
-/// Handle pkgtxn: validate package and return optional rejection
+/// Handle pkgtxn: validate package and return optional rejection.
+///
+/// `utxo` prices the package. Without it the fee test is skipped.
 pub fn handle_pkgtxn(
     relay: &mut PackageRelay,
     msg: &PkgTxnMessage,
+    utxo: Option<&blvm_protocol::UtxoSet>,
 ) -> Result<Option<PkgTxnRejectMessage>> {
     // Deserialize transactions (they are bincode-serialized blvm_protocol::Transaction)
     let mut txs: Vec<Transaction> = Vec::with_capacity(msg.transactions.len());
@@ -42,7 +45,7 @@ pub fn handle_pkgtxn(
     }
 
     // Construct package
-    let pkg = match TransactionPackage::new(txs) {
+    let pkg = match TransactionPackage::new_with_utxo_set(txs, utxo) {
         Ok(p) => p,
         Err(_) => {
             return Ok(Some(PkgTxnRejectMessage {
@@ -111,7 +114,7 @@ mod tests {
             transactions: vec![vec![0xde, 0xad, 0xbe, 0xef]], // not a valid bincode Transaction
         };
 
-        let result = handle_pkgtxn(&mut relay, &msg).unwrap();
+        let result = handle_pkgtxn(&mut relay, &msg, None).unwrap();
         assert!(result.is_some());
         let rej = result.unwrap();
         assert_eq!(rej.package_id, msg.package_id);
@@ -128,7 +131,7 @@ mod tests {
             transactions: vec![raw],
         };
 
-        let result = handle_pkgtxn(&mut relay, &msg).unwrap();
+        let result = handle_pkgtxn(&mut relay, &msg, None).unwrap();
         assert!(result.is_none());
     }
 }

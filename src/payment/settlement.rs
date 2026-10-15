@@ -31,6 +31,8 @@ pub struct SettlementMonitor {
     monitored_payments: Arc<tokio::sync::RwLock<HashMap<String, Vec<PaymentOutput>>>>,
     /// Track expected transaction hashes (payment_id -> tx_hash)
     expected_transactions: Arc<tokio::sync::RwLock<HashMap<String, Hash>>>,
+    /// Confirmations required before a payment is marked settled.
+    safe_confirmation_depth: u32,
 }
 
 impl SettlementMonitor {
@@ -44,7 +46,14 @@ impl SettlementMonitor {
             tx_cache: None,
             monitored_payments: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             expected_transactions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            safe_confirmation_depth: 6,
         }
+    }
+
+    /// Confirmations required before `mark_settled`. Default 6.
+    pub fn with_confirmation_depth(mut self, depth: u32) -> Self {
+        self.safe_confirmation_depth = depth.max(1);
+        self
     }
 
     /// Set mempool manager for transaction monitoring
@@ -176,18 +185,19 @@ impl SettlementMonitor {
                     .check_blockchain(storage, payment_id, &expected_outputs, expected_tx_hash)
                     .await
                 {
-                    // Transaction confirmed
-                    let _ = self
-                        .state_machine
-                        .mark_settled(
-                            payment_id,
-                            tx_hash,
-                            block_hash,
-                            confirmations,
-                            Some(expected_outputs.to_vec()),
-                        )
-                        .await;
-                    break; // Stop monitoring once settled
+                    if confirmations >= self.safe_confirmation_depth {
+                        let _ = self
+                            .state_machine
+                            .mark_settled(
+                                payment_id,
+                                tx_hash,
+                                block_hash,
+                                confirmations,
+                                Some(expected_outputs.to_vec()),
+                            )
+                            .await;
+                        break;
+                    }
                 }
             }
 
@@ -420,6 +430,7 @@ impl SettlementMonitor {
             tx_cache: self.tx_cache.as_ref().map(Arc::clone),
             monitored_payments: Arc::clone(&self.monitored_payments),
             expected_transactions: Arc::clone(&self.expected_transactions),
+            safe_confirmation_depth: self.safe_confirmation_depth,
         }
     }
 }

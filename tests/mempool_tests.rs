@@ -147,7 +147,7 @@ async fn test_mempool_remove_transaction() {
     assert_eq!(mempool.size(), 0);
 }
 
-/// All outputs below dust threshold (546 sats) => `SpamType::Dust` with default filter.
+/// One-byte pay-to-pubkey output of 100 satoshis is below the dust floor.
 fn dust_spam_tx() -> Transaction {
     Transaction {
         version: 1,
@@ -183,12 +183,12 @@ async fn test_reject_spam_in_mempool_rejects_classified_spam() {
 }
 
 #[tokio::test]
-async fn test_reject_spam_in_mempool_disabled_accepts_same_tx() {
+async fn test_dust_output_is_rejected_when_the_spam_filter_is_off() {
     let mempool = MempoolManager::new();
     let added = mempool.add_transaction(dust_spam_tx()).unwrap();
     assert!(
-        added,
-        "default policy should still accept tx classified as spam by heuristics"
+        !added,
+        "an output below the dust floor is rejected with the spam filter off"
     );
-    assert_eq!(mempool.size(), 1);
+    assert_eq!(mempool.size(), 0);
 }

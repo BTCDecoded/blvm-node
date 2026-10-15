@@ -225,7 +225,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // Seed parents of `start_height` via height_index (not tip `recent_headers` window).
     // Live 2026-07-13: gap resume at 880001 with tip ~957k seeded only 4 stale window
     // entries then fell through to tip MTP → H05 "Invalid block header" death loop.
-    if start_height > 1 {
+    if start_height > 0 {
         match blockstore.headers_before_height_for_mtp(start_height) {
             Ok(stored) => {
                 for header in stored {

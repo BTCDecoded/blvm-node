@@ -111,11 +111,13 @@ async fn test_protocol_parser() {
         services: 1,
         timestamp: 1234567890,
         addr_recv: NetworkAddress {
+            time: 0,
             services: 1,
             ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             port: 8333,
         },
         addr_from: NetworkAddress {
+            time: 0,
             services: 1,
             ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             port: 8333,
@@ -209,11 +211,13 @@ async fn test_message_serialization() {
         services: 1,
         timestamp: 1234567890,
         addr_recv: NetworkAddress {
+            time: 0,
             services: 1,
             ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             port: 8333,
         },
         addr_from: NetworkAddress {
+            time: 0,
             services: 1,
             ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             port: 8333,
@@ -243,11 +247,13 @@ async fn test_message_deserialization() {
         services: 1,
         timestamp: 1234567890,
         addr_recv: NetworkAddress {
+            time: 0,
             services: 1,
             ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             port: 8333,
         },
         addr_from: NetworkAddress {
+            time: 0,
             services: 1,
             ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             port: 8333,
@@ -283,11 +289,13 @@ async fn test_checksum_validation() {
         services: 1,
         timestamp: 1234567890,
         addr_recv: NetworkAddress {
+            time: 0,
             services: 1,
             ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             port: 8333,
         },
         addr_from: NetworkAddress {
+            time: 0,
             services: 1,
             ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             port: 8333,
@@ -664,11 +672,13 @@ async fn test_protocol_message_parsing() {
         services: 1,
         timestamp: 1234567890,
         addr_recv: NetworkAddress {
+            time: 0,
             services: 1,
             ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             port: 8333,
         },
         addr_from: NetworkAddress {
+            time: 0,
             services: 1,
             ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             port: 8333,
@@ -913,7 +923,8 @@ async fn test_ban_list() {
     // Test getting banned peers
     let banned = manager.get_banned_peers();
     assert_eq!(banned.len(), 1);
-    assert_eq!(banned[0].0, banned_peer);
+    assert_eq!(banned[0].0.ip(), banned_peer.ip());
+    assert_eq!(banned[0].0.port(), 0);
 
     // Test unbanning
     manager.unban_peer(banned_peer);
@@ -933,6 +944,15 @@ async fn test_ban_list() {
     manager.clear_bans();
     assert!(!manager.is_banned(banned_peer));
     assert!(manager.get_banned_peers().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ban_by_ip_rejects_a_different_port() {
+    let manager = NetworkManager::new("127.0.0.1:0".parse().unwrap());
+    let banned: SocketAddr = "10.0.0.1:1111".parse().unwrap();
+    let later: SocketAddr = "10.0.0.1:2222".parse().unwrap();
+    manager.ban_peer(banned, 0);
+    assert!(manager.is_banned(later));
 }
 
 #[tokio::test(flavor = "multi_thread")]

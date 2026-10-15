@@ -89,6 +89,7 @@ fn test_store_block_with_context_and_index() {
         &block,
         &witnesses,
         0,
+        true,
     );
     assert!(result.is_ok());
 }
@@ -252,6 +253,65 @@ fn test_store_block_with_context_and_index_without_storage() {
     let witnesses = create_empty_witnesses();
 
     // Pass None for storage (should still work, just won't index)
-    let result = store_block_with_context_and_index(&storage.blocks(), None, &block, &witnesses, 0);
+    let result =
+        store_block_with_context_and_index(&storage.blocks(), None, &block, &witnesses, 0, true);
     assert!(result.is_ok());
+}
+
+#[test]
+fn side_block_does_not_replace_the_active_height() {
+    let (_temp_dir, storage) = create_test_storage();
+    let mut active = create_test_block();
+    active.header.nonce = 1;
+    let mut side = create_test_block();
+    side.header.nonce = 2;
+    let witnesses = create_empty_witnesses();
+    store_block_with_context_and_index(
+        &storage.blocks(),
+        Some(&storage),
+        &active,
+        &witnesses,
+        5,
+        true,
+    )
+    .unwrap();
+    let active_hash = storage.blocks().get_block_hash(&active);
+    store_block_with_context_and_index(
+        &storage.blocks(),
+        Some(&storage),
+        &side,
+        &witnesses,
+        5,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        storage.blocks().get_hash_by_height(5).unwrap().unwrap(),
+        active_hash
+    );
+    let side_hash = storage.blocks().get_block_hash(&side);
+    assert_eq!(
+        storage.blocks().get_height_by_hash(&side_hash).unwrap(),
+        Some(5)
+    );
+    let parent = storage
+        .blocks()
+        .get_header_at_height(5)
+        .unwrap()
+        .expect("active header");
+    assert_eq!(
+        blvm_consensus::block::block_header_hash(&parent),
+        active_hash
+    );
+    let mut child = create_test_block();
+    child.header.prev_block_hash = active_hash;
+    assert!(blvm_consensus::block::validate_prev_block_hash(
+        &child.header,
+        &parent
+    ));
+    storage.blocks().store_height(5, &side_hash).unwrap();
+    assert_eq!(
+        storage.blocks().get_hash_by_height(5).unwrap().unwrap(),
+        side_hash
+    );
 }

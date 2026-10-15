@@ -20,6 +20,9 @@ impl NetworkManager {
         data: Vec<u8>,
         peer_addr: SocketAddr,
     ) -> Result<()> {
+        if !self.serve_compact_filters() {
+            return Ok(());
+        }
         match self
             .bandwidth_protection()
             .check_service_request(ServiceType::Filters, peer_addr)
@@ -110,6 +113,9 @@ impl NetworkManager {
         data: Vec<u8>,
         peer_addr: SocketAddr,
     ) -> Result<()> {
+        if !self.serve_compact_filters() {
+            return Ok(());
+        }
         let protocol_msg = ProtocolParser::parse_message(&data)?;
         let request = match protocol_msg {
             ProtocolMessage::GetCfheaders(msg) => msg,
@@ -129,6 +135,9 @@ impl NetworkManager {
         data: Vec<u8>,
         peer_addr: SocketAddr,
     ) -> Result<()> {
+        if !self.serve_compact_filters() {
+            return Ok(());
+        }
         let protocol_msg = ProtocolParser::parse_message(&data)?;
         let request = match protocol_msg {
             ProtocolMessage::GetCfcheckpt(msg) => msg,

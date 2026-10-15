@@ -112,6 +112,7 @@ async fn network_manager_create_version_message_sets_services() {
 
     let nm = NetworkManager::new(localhost());
     let addr = NetworkAddress {
+        time: 0,
         services: 0,
         ip: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1],
         port: 8333,

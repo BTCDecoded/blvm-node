@@ -232,6 +232,10 @@ pub async fn store_decrypted_module(
     file.write_all(decrypted_binary)
         .await
         .map_err(|e| ModuleError::op_err("Failed to write decrypted binary", e))?;
+    // tokio::fs::File may still have the write in flight; flush before returning.
+    file.flush()
+        .await
+        .map_err(|e| ModuleError::op_err("Failed to flush decrypted binary", e))?;
 
     // Make binary executable (Unix)
     #[cfg(unix)]

@@ -30,11 +30,11 @@ fn create_rbf_tx_spending(prevout: OutPoint, output_value: u64) -> Transaction {
         inputs: blvm_protocol::tx_inputs![TransactionInput {
             prevout,
             script_sig: vec![],
-            sequence: 0xfffffffe, // RBF enabled
+            sequence: 0xfffffffd, // BIP125: below 0xfffffffe
         }],
         outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: output_value as i64,
-            script_pubkey: [0x76, 0xa9, 0x14, 0x00].repeat(20), // P2PKH
+            script_pubkey: vec![blvm_protocol::opcodes::OP_1],
         }],
         lock_time: 0,
     }
@@ -50,7 +50,7 @@ fn create_test_utxo_set() -> UtxoSet {
         },
         Arc::new(UTXO {
             value: 100_000,
-            script_pubkey: [0x76, 0xa9, 0x14, 0x00].repeat(20).into(),
+            script_pubkey: vec![blvm_protocol::opcodes::OP_1].into(),
             height: 0,
             is_coinbase: false,
         }),
@@ -251,8 +251,9 @@ fn test_rbf_package_replacement_uses_descendant_fees() {
         "package replacement should require fees covering displaced descendants"
     );
 
-    // 21k fee covers the 20k package with aggressive min bump.
-    let sufficient = create_rbf_tx(100_000, 79_000);
+    // The absolute bump is the larger of the aggressive 500 sat setting and the
+    // 1,000 sat incremental relay fee, and the comparison is strict. 22k clears it.
+    let sufficient = create_rbf_tx(100_000, 78_000);
     let result2 = mempool.check_rbf_replacement(&sufficient, &parent, &utxo_set, None);
     assert!(result2.is_ok());
     assert!(result2.unwrap());
@@ -262,4 +263,49 @@ fn test_rbf_package_replacement_uses_descendant_fees() {
     assert_eq!(mempool.size(), 1);
     assert!(mempool.get_transaction(&parent_hash).is_none());
     assert!(mempool.get_transaction(&child_hash).is_none());
+}
+
+#[test]
+fn sequence_fffffffe_is_not_replaced() {
+    let mempool = MempoolManager::new();
+    let utxo_set = create_test_utxo_set();
+    mempool.set_utxo_set_arc(Arc::new(TokioMutex::new(utxo_set)));
+
+    let mut existing = create_rbf_tx(100_000, 90_000);
+    existing.inputs[0].sequence = 0xfffffffe;
+    let existing_hash = calculate_tx_id(&existing);
+    assert!(mempool.add_transaction(existing).unwrap());
+
+    let replacement = create_rbf_tx(100_000, 70_000);
+    assert!(!mempool.add_transaction(replacement).unwrap());
+    assert!(mempool.get_transaction(&existing_hash).is_some());
+    assert_eq!(mempool.size(), 1);
+}
+
+#[test]
+fn opted_in_parent_with_final_child_stays_in_the_pool() {
+    let mempool = MempoolManager::new();
+    let utxo_set = create_test_utxo_set();
+    mempool.set_utxo_set_arc(Arc::new(TokioMutex::new(utxo_set)));
+
+    let parent = create_rbf_tx(100_000, 85_000);
+    let parent_hash = calculate_tx_id(&parent);
+    assert!(mempool.add_transaction(parent).unwrap());
+
+    let mut child = create_rbf_tx_spending(
+        OutPoint {
+            hash: parent_hash,
+            index: 0,
+        },
+        80_000,
+    );
+    child.inputs[0].sequence = 0xffffffff;
+    let child_hash = calculate_tx_id(&child);
+    assert!(mempool.add_transaction(child).unwrap());
+
+    let replacement = create_rbf_tx(100_000, 70_000);
+    assert!(!mempool.add_transaction(replacement).unwrap());
+    assert!(mempool.get_transaction(&parent_hash).is_some());
+    assert!(mempool.get_transaction(&child_hash).is_some());
+    assert_eq!(mempool.size(), 2);
 }

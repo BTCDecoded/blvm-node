@@ -93,11 +93,10 @@ impl PeerBandwidth {
     }
 
     /// Record an IBD request
-    fn record_ibd_request(&mut self) {
+    fn record_ibd_request(&mut self, penalty: i32) {
         self.ibd_requests += 1;
         self.last_ibd_request = Some(current_timestamp());
-        // Penalize reputation for each IBD request
-        self.reputation -= 10;
+        self.reputation -= penalty;
     }
 
     /// Check if peer can request IBD (cooldown period)
@@ -227,6 +226,8 @@ pub struct IbdProtectionConfig {
     pub suspicious_reconnection_threshold: u32,
     /// Peer reputation ban threshold (negative reputation to ban)
     pub reputation_ban_threshold: i32,
+    /// Reputation subtracted for each historical block-range download.
+    pub reputation_penalty_per_request: i32,
     /// Enable emergency throttle mode
     pub enable_emergency_throttle: bool,
     /// Emergency throttle percentage (0-100)
@@ -253,6 +254,7 @@ impl Default for IbdProtectionConfig {
             suspicious_reconnection_threshold: 3,
             // Default: Ban peer if reputation < -100
             reputation_ban_threshold: -100,
+            reputation_penalty_per_request: 10,
             // Default: Emergency throttle disabled
             enable_emergency_throttle: false,
             // Default: 50% throttle when enabled
@@ -440,6 +442,11 @@ impl IbdProtectionManager {
         Ok(true)
     }
 
+    /// Peers currently holding an IBD serving slot.
+    pub async fn concurrent_ibd_serving_count(&self) -> usize {
+        *self.concurrent_ibd_serving.lock().await
+    }
+
     /// Record that IBD serving has started for a peer
     pub async fn start_ibd_serving(&self, peer_addr: SocketAddr) {
         let ip = peer_addr.ip();
@@ -454,7 +461,7 @@ impl IbdProtectionManager {
         {
             let mut peer_bw = self.peer_bandwidth.lock().await;
             let peer = peer_bw.entry(peer_addr).or_insert_with(PeerBandwidth::new);
-            peer.record_ibd_request();
+            peer.record_ibd_request(self.config.reputation_penalty_per_request);
         }
 
         {

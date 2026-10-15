@@ -84,6 +84,50 @@ pub struct PaymentProcessor {
     config: PaymentConfig,
 }
 
+fn load_payment_store(path: &str) -> HashMap<String, PaymentRequest> {
+    let mut store = HashMap::new();
+    let dir = std::path::Path::new(path);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return store;
+    };
+    for entry in entries.flatten() {
+        let file_path = entry.path();
+        if file_path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&file_path) else {
+            continue;
+        };
+        let Ok(request) = serde_json::from_slice::<PaymentRequest>(&bytes) else {
+            continue;
+        };
+        let Some(id) = file_path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if !id.is_empty() {
+            store.insert(id.to_string(), request);
+        }
+    }
+    store
+}
+
+fn persist_payment_request(dir: &str, payment_id: &str, request: &PaymentRequest) {
+    let directory = std::path::Path::new(dir);
+    if let Err(e) = std::fs::create_dir_all(directory) {
+        warn!("Failed to create payment store {}: {}", dir, e);
+        return;
+    }
+    match serde_json::to_vec(request) {
+        Ok(bytes) => {
+            let path = directory.join(format!("{payment_id}.json"));
+            if let Err(e) = std::fs::write(path, bytes) {
+                warn!("Failed to write payment {}: {}", payment_id, e);
+            }
+        }
+        Err(e) => warn!("Failed to encode payment {}: {}", payment_id, e),
+    }
+}
+
 impl PaymentProcessor {
     /// Create a new payment processor
     pub fn new(config: PaymentConfig) -> Result<Self, PaymentError> {
@@ -113,8 +157,9 @@ impl PaymentProcessor {
             config.p2p_enabled, config.http_enabled
         );
 
+        let payment_store = load_payment_store(&config.payment_store_path);
         Ok(Self {
-            payment_store: Arc::new(Mutex::new(HashMap::new())),
+            payment_store: Arc::new(Mutex::new(payment_store)),
             module_registry: None,
             module_encryption: None,
             modules_dir: None,
@@ -189,6 +234,11 @@ impl PaymentProcessor {
             .lock()
             .unwrap()
             .insert(payment_id.clone(), payment_request.clone());
+        persist_payment_request(
+            &self.config.payment_store_path,
+            &payment_id,
+            &payment_request,
+        );
 
         debug!("Created payment request: {}", payment_id);
 
@@ -387,6 +437,12 @@ impl PaymentProcessor {
     ) -> Result<PaymentRequest, PaymentError> {
         use crate::module::security::signing::ModuleSigner;
         use blvm_protocol::address::BitcoinAddress;
+
+        if !self.config.module_payments_enabled {
+            return Err(PaymentError::ProcessingError(
+                "Module payments are disabled".to_string(),
+            ));
+        }
 
         // Extract payment configuration from manifest
         let payment = manifest.payment.as_ref().ok_or_else(|| {

@@ -1853,18 +1853,34 @@ pub mod rocksdb_impl {
                 total_ram_gb
             );
 
-            // Block cache: ENV > config (capped to RAM-tier) > RAM-tiered default.
-            let dbcache_mb: usize = std::env::var("BLVM_DBCACHE_MB")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_else(|| {
-                    let from_config = storage_config.map(|s| s.dbcache_mb).unwrap_or(0);
-                    if from_config > 0 {
-                        from_config.min(default_block_cache)
-                    } else {
-                        default_block_cache
-                    }
-                });
+            // Block cache: `[storage.cache] block_cache_mb` when that section is set,
+            // otherwise ENV > `dbcache_mb` (capped to the RAM tier) > RAM-tiered default.
+            if let Some(header_mb) = storage_config
+                .and_then(|s| s.cache.as_ref())
+                .map(|cache| cache.header_cache_mb)
+                .filter(|&n| n > 0)
+            {
+                crate::storage::serialization_cache::set_header_serialize_cache_mb(header_mb);
+            }
+            let configured_block_cache = storage_config
+                .and_then(|s| s.cache.as_ref())
+                .map(|cache| cache.block_cache_mb)
+                .filter(|&n| n > 0);
+            let dbcache_mb: usize = if let Some(mb) = configured_block_cache {
+                mb
+            } else {
+                std::env::var("BLVM_DBCACHE_MB")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(|| {
+                        let from_config = storage_config.map(|s| s.dbcache_mb).unwrap_or(0);
+                        if from_config > 0 {
+                            from_config.min(default_block_cache)
+                        } else {
+                            default_block_cache
+                        }
+                    })
+            };
             let dbcache_bytes = dbcache_mb.saturating_mul(1024).saturating_mul(1024);
             let cache = Cache::new_lru_cache(dbcache_bytes);
             let mut block_opts = BlockBasedOptions::default();
@@ -1915,27 +1931,35 @@ pub mod rocksdb_impl {
             // At h=270k the UTXO SST is several GB; the shared 32 MB cache has ~0% hit rate.
             // A 128 MB dedicated cache on 16 GB covers more of the recently-written UTXO SST
             // blocks, reducing multi_get SSD round-trips in the prefetch workers.
-            let utxo_block_cache_mb: usize = std::env::var("BLVM_ROCKSDB_UTXO_BLOCK_CACHE_MB")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .filter(|&n| n > 0 && n <= 16_384)
-                .unwrap_or({
-                    if total_ram_gb >= 64 {
-                        2048
-                    } else if total_ram_gb >= 32 {
-                        1536
-                    } else if total_ram_gb >= 24 {
-                        1024
-                    } else if total_ram_gb >= 16 {
-                        // 256 MB: on 16 GB hosts RSS at h=400k+ is already 8+ GB (79% of budget).
-                        // A larger block cache would increase RSS → adaptive cap shrinks the DashMap
-                        // → net negative effect. Keep at 256 MB until RSS headroom is confirmed large
-                        // enough (e.g. on 32 GB+ hosts or at early heights before UTXO buildup).
-                        256
-                    } else {
-                        64
-                    }
-                });
+            let configured_utxo_cache = storage_config
+                .and_then(|s| s.cache.as_ref())
+                .map(|cache| cache.utxo_cache_mb)
+                .filter(|&n| n > 0);
+            let utxo_block_cache_mb: usize = if let Some(mb) = configured_utxo_cache {
+                mb
+            } else {
+                std::env::var("BLVM_ROCKSDB_UTXO_BLOCK_CACHE_MB")
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .filter(|&n| n > 0 && n <= 16_384)
+                    .unwrap_or({
+                        if total_ram_gb >= 64 {
+                            2048
+                        } else if total_ram_gb >= 32 {
+                            1536
+                        } else if total_ram_gb >= 24 {
+                            1024
+                        } else if total_ram_gb >= 16 {
+                            // 256 MB: on 16 GB hosts RSS at h=400k+ is already 8+ GB (79% of budget).
+                            // A larger block cache would increase RSS → adaptive cap shrinks the DashMap
+                            // → net negative effect. Keep at 256 MB until RSS headroom is confirmed large
+                            // enough (e.g. on 32 GB+ hosts or at early heights before UTXO buildup).
+                            256
+                        } else {
+                            64
+                        }
+                    })
+            };
             let utxo_cache = Cache::new_lru_cache(utxo_block_cache_mb * 1024 * 1024);
             tracing::info!(
                 "[ROCKSDB] utxo_block_cache={}MB (dedicated, ram={}GB)",
