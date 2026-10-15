@@ -14518,6 +14518,9 @@ fn r313_no_farm_default_off() {
 }
 
 /// R-218 dump hole must not rotate. Fat slow sample rotates once.
+/// `test_reset_h_slow_gd` clears process-wide `LAST_H_SLOW_GD_MS`; keep it on
+/// the same `serial(ibd)` lane as the rotate-once tests that rely on that latch.
+#[serial_test::serial(ibd)]
 #[test]
 fn r219_h_slow_skips_dump_rotates_fat_once() {
     super::test_reset_h_slow_gd();
