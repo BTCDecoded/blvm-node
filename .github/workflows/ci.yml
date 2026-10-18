@@ -587,7 +587,7 @@ jobs:
           pkg-config --exists openssl 2>/dev/null || command -v openssl >/dev/null 2>&1 || { echo "❌ openssl not found; install it on the runner."; exit 1; }
           echo "✅ Z3 + clang + jq + openssl present."
 
-          cargo install blvm-spec-lock --version '>=0.1, <1' --locked --features z3
+          cargo install --force blvm-spec-lock --version '>=0.1, <1' --locked --features z3
 
           UA='BTCDecoded/blvm-node verify job (https://github.com/BTCDecoded/blvm-node)'
           CONS_VER=$(curl -fsSL --retry 3 --retry-delay 2 -A "$UA" \
