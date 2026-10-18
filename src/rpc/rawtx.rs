@@ -81,12 +81,16 @@ pub(crate) fn address_string_to_script_pubkey(address: &str) -> Result<Vec<u8>, 
     if let Ok(addr) = BitcoinAddress::decode(address) {
         match (addr.witness_version, addr.witness_program.len()) {
             (0, 20) | (0, 32) => {
-                let mut script = vec![0x00];
+                let mut script = Vec::with_capacity(2 + addr.witness_program.len());
+                script.push(0x00);
+                script.push(addr.witness_program.len() as u8);
                 script.extend_from_slice(&addr.witness_program);
                 Ok(script)
             }
             (1, 32) => {
-                let mut script = vec![blvm_protocol::opcodes::OP_1];
+                let mut script = Vec::with_capacity(2 + addr.witness_program.len());
+                script.push(blvm_protocol::opcodes::OP_1);
+                script.push(addr.witness_program.len() as u8);
                 script.extend_from_slice(&addr.witness_program);
                 Ok(script)
             }
@@ -1780,9 +1784,51 @@ pub(crate) fn script_pubkey_type(script: &[u8]) -> &'static str {
 
 #[cfg(test)]
 mod createraw_locks {
-    use super::{RawTxRpc, script_pubkey_type};
+    use super::{RawTxRpc, address_string_to_script_pubkey, script_pubkey_type};
     use blvm_protocol::opcodes::{OP_PUSHDATA1, OP_RETURN};
     use serde_json::json;
+
+    #[test]
+    fn witness_program_push_includes_its_length() {
+        use blvm_protocol::address::{BitcoinAddress, Network};
+        use blvm_protocol::opcodes::OP_1;
+
+        let p2wpkh =
+            address_string_to_script_pubkey("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4").unwrap();
+        assert_eq!(
+            p2wpkh,
+            hex::decode("0014751e76e8199196d454941c45d1b3a323f1433bd6").unwrap()
+        );
+
+        let program = hex::decode("751e76e8199196d454941c45d1b3a323f1433bd6").unwrap();
+        let regtest = BitcoinAddress::new(Network::Regtest, 0, program.clone())
+            .unwrap()
+            .encode()
+            .unwrap();
+        assert_eq!(address_string_to_script_pubkey(&regtest).unwrap(), p2wpkh);
+
+        let p2wsh_program = vec![0x11u8; 32];
+        let p2wsh = BitcoinAddress::new(Network::Regtest, 0, p2wsh_program.clone())
+            .unwrap()
+            .encode()
+            .unwrap();
+        let mut expected = vec![0x00, 0x20];
+        expected.extend_from_slice(&p2wsh_program);
+        let script = address_string_to_script_pubkey(&p2wsh).unwrap();
+        assert_eq!(script, expected);
+        assert_eq!(script_pubkey_type(&script), "witness_v0_scripthash");
+
+        let p2tr_program = vec![0x22u8; 32];
+        let p2tr = BitcoinAddress::new(Network::Regtest, 1, p2tr_program.clone())
+            .unwrap()
+            .encode()
+            .unwrap();
+        let mut expected = vec![OP_1, 0x20];
+        expected.extend_from_slice(&p2tr_program);
+        let script = address_string_to_script_pubkey(&p2tr).unwrap();
+        assert_eq!(script, expected);
+        assert_eq!(script_pubkey_type(&script), "witness_v1_taproot");
+    }
 
     #[test]
     fn three_satoshi_dust_and_eighty_byte_op_return() {
@@ -1822,7 +1868,17 @@ mod createraw_locks {
             let (tx, _) =
                 RawTxRpc::deserialize_transaction_with_witness(&hex::decode(hex_tx).unwrap())
                     .unwrap();
-            assert!(tx.outputs.iter().any(|output| output.value == 3));
+            let pay = tx.outputs.iter().find(|output| output.value == 3).unwrap();
+            assert_eq!(
+                pay.script_pubkey.as_slice(),
+                hex::decode("0014751e76e8199196d454941c45d1b3a323f1433bd6")
+                    .unwrap()
+                    .as_slice()
+            );
+            assert_eq!(
+                script_pubkey_type(pay.script_pubkey.as_slice()),
+                "witness_v0_keyhash"
+            );
             let data = tx
                 .outputs
                 .iter()
