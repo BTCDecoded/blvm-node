@@ -49,11 +49,9 @@ fn test_message_bridge_from_transport_tcp() {
     let wire = MessageBridge::to_transport_message(&msg, TransportType::Tcp).unwrap();
     assert!(!wire.is_empty());
 
-    // Deserialize may fail due to protocol validation (magic number, etc.)
-    // This is expected - the test verifies serialization works
-    let result = MessageBridge::from_transport_message(&wire, TransportType::Tcp);
-    // Result may be Ok or Err depending on protocol validation
-    assert!(result.is_ok() || result.is_err());
+    let decoded = MessageBridge::from_transport_message(&wire, TransportType::Tcp)
+        .expect("version round trip");
+    assert_eq!(decoded, msg);
 }
 
 #[test]
@@ -64,17 +62,9 @@ fn test_message_bridge_roundtrip() {
     let wire = MessageBridge::to_transport_message(&original, TransportType::Tcp).unwrap();
     assert!(!wire.is_empty());
 
-    // Convert back (may fail due to protocol validation)
-    let converted = MessageBridge::from_transport_message(&wire, TransportType::Tcp);
-    if let Ok(converted) = converted {
-        match (original, converted) {
-            (NetworkMessage::Version(v1), NetworkMessage::Version(v2)) => {
-                assert_eq!(v1.version, v2.version);
-                assert_eq!(v1.nonce, v2.nonce);
-            }
-            _ => {} // Other message types are acceptable
-        }
-    }
+    let converted = MessageBridge::from_transport_message(&wire, TransportType::Tcp)
+        .expect("version round trip");
+    assert_eq!(converted, original);
 }
 
 #[test]

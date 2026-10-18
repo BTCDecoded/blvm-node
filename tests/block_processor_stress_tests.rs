@@ -74,7 +74,7 @@ async fn test_concurrent_block_processing() {
     assert_eq!(results.len(), 10);
     // Verify all tasks completed (results may be Ok or Err, but tasks should complete)
     for result in results {
-        let _ = result;
+        assert!(result.is_ok(), "task panicked: {result:?}");
     }
 }
 
@@ -95,10 +95,8 @@ async fn test_block_processing_with_invalid_sequence() {
     let result1 = store_block_with_context(&blockstore, &block1, &witnesses, 1);
     let result2 = store_block_with_context(&blockstore, &block0, &witnesses, 0);
 
-    // Both should succeed (storage doesn't enforce ordering)
-    // Validation will catch invalid sequences
-    let _ = result1;
-    let _ = result2;
+    assert!(result1.is_ok(), "store block 1: {result1:?}");
+    assert!(result2.is_ok(), "store block 0: {result2:?}");
 
     // Validation should handle invalid sequences gracefully
     let validation_result = validate_block_with_context(
@@ -110,8 +108,11 @@ async fn test_block_processing_with_invalid_sequence() {
         1,
     );
 
-    // May fail validation due to missing parent, which is expected
-    let _ = validation_result;
+    let validation = validation_result.expect("validate");
+    assert!(
+        matches!(validation, blvm_protocol::ValidationResult::Invalid(_)),
+        "{validation:?}"
+    );
 }
 
 #[tokio::test]

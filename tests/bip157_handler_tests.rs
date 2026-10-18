@@ -51,11 +51,9 @@ fn test_handle_getcfilters_valid_filter_type() {
         stop_hash: [0u8; 32],
     };
 
-    // Should not error on filter type validation
-    // (May error on storage/block lookup, but that's expected with empty storage)
     let result = handle_getcfilters(&request, &filter_service, Some(&storage));
-    // Result may be Ok with empty vec or Err on storage lookup - both are valid
-    assert!(result.is_ok() || result.is_err());
+    let responses = result.expect("empty chain has no filters");
+    assert!(responses.is_empty());
 }
 
 #[test]
@@ -104,11 +102,12 @@ fn test_handle_getcfheaders_valid_filter_type() {
         stop_hash: [0u8; 32],
     };
 
-    // Should not error on filter type validation
-    // (May error on filter service lookup, but that's expected with empty service)
     let result = handle_getcfheaders(&request, &filter_service);
-    // Result may be Ok or Err - both are valid depending on filter service state
-    assert!(result.is_ok() || result.is_err());
+    let message = result.expect_err("stop hash is not indexed").to_string();
+    assert!(
+        message.contains("Stop hash not found"),
+        "unexpected error: {message}"
+    );
 }
 
 #[test]
@@ -139,11 +138,12 @@ fn test_handle_getcfcheckpt_valid_filter_type() {
         stop_hash: [0u8; 32],
     };
 
-    // Should not error on filter type validation
-    // (May error on filter service lookup, but that's expected with empty service)
     let result = handle_getcfcheckpt(&request, &filter_service);
-    // Result may be Ok or Err - both are valid depending on filter service state
-    assert!(result.is_ok() || result.is_err());
+    let message = result.expect_err("stop hash is not indexed").to_string();
+    assert!(
+        message.contains("Stop hash not found"),
+        "unexpected error: {message}"
+    );
 }
 
 #[test]

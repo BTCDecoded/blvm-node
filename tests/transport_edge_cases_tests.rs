@@ -104,8 +104,10 @@ async fn test_tcp_transport_partial_read_write() {
 
     // Test partial receive
     let recv_result = timeout(Duration::from_millis(100), client_conn.recv()).await;
-    // May succeed or timeout depending on timing
-    assert!(recv_result.is_ok() || recv_result.is_err());
+    assert!(
+        recv_result.is_err(),
+        "recv waits for a 24-byte header, got {recv_result:?}"
+    );
 }
 
 #[cfg(feature = "quinn")]

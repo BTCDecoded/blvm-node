@@ -60,7 +60,7 @@ mod tests {
         let result =
             tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept()).await;
 
-        // May succeed or timeout depending on cert verification
-        assert!(result.is_ok() || result.is_err());
+        let accepted = result.expect("accept within 5s");
+        accepted.expect("handshake");
     }
 }

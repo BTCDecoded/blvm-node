@@ -155,8 +155,7 @@ async fn test_rpc_batch_invalid_json() {
     let invalid_json = "[{ invalid json }]";
 
     let result = process_batch_request(&server, invalid_json).await;
-    // Should handle gracefully
-    assert!(result.is_ok() || result.is_err()); // Either is acceptable
+    assert!(result.is_err(), "invalid JSON was accepted: {result:?}");
 }
 
 #[tokio::test]

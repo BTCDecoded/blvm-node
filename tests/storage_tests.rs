@@ -590,15 +590,18 @@ fn test_transaction_index_metadata() {
 
     let tx = valid_transaction();
     let block_hash = random_hash();
-    let tx_hash = random_hash();
+    let tx_hash = blvm_protocol::block::calculate_tx_id(&tx);
 
-    // Index transaction
     txindex.index_transaction(&tx, &block_hash, 0, 0).unwrap();
 
-    // Get metadata
-    let metadata = txindex.get_metadata(&tx_hash);
-    // Note: May be None due to simplified hashing, but structure is correct
-    assert!(metadata.is_ok() || metadata.is_err());
+    let metadata = txindex
+        .get_metadata(&tx_hash)
+        .expect("metadata")
+        .expect("indexed transaction");
+    assert_eq!(metadata.tx_hash, tx_hash);
+    assert_eq!(metadata.block_hash, block_hash);
+    assert_eq!(metadata.block_height, 0);
+    assert_eq!(metadata.tx_index, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]

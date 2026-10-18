@@ -35,9 +35,11 @@ async fn test_get_block_template() {
     let params = json!([]);
     let template = mining_rpc.get_block_template(&params).await;
 
-    // Should either succeed or fail gracefully
-    // (may fail if chain not initialized, which is expected)
-    assert!(template.is_ok() || template.is_err());
+    let message = template.expect_err("empty chain has no tip").to_string();
+    assert!(
+        message.contains("No chain tip"),
+        "unexpected error: {message}"
+    );
 }
 
 #[tokio::test]

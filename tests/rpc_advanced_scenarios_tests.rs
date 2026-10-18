@@ -74,8 +74,10 @@ async fn test_rpc_timeout_handling() {
     // Test that RPC calls respect timeouts
     let result = timeout(Duration::from_millis(100), blockchain.get_blockchain_info()).await;
 
-    // Should either succeed quickly or timeout
-    assert!(result.is_ok() || result.is_err());
+    let info = result.expect("getblockchaininfo").expect("info");
+    assert_eq!(info["blocks"], 0);
+    assert_eq!(info["initialblockdownload"], true);
+    assert_eq!(info["verificationprogress"], 0.0);
 }
 
 #[tokio::test]
@@ -92,8 +94,11 @@ async fn test_rpc_error_recovery_after_failure() {
 
     // Another call should work
     let result3 = blockchain.get_block_hash(0).await;
-    // May succeed or fail depending on storage
-    let _ = result3;
+    let message = result3.expect_err("no storage").to_string();
+    assert!(
+        message.contains("Storage not available"),
+        "unexpected error: {message}"
+    );
 }
 
 #[tokio::test]

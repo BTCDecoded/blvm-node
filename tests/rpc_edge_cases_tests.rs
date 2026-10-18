@@ -26,9 +26,9 @@ async fn test_rpc_concurrent_calls() {
     // All should succeed
     assert_eq!(results.len(), 10);
     for result in results {
-        assert!(result.is_ok());
-        // The inner result may be Ok or Err depending on implementation
-        let _ = result.unwrap();
+        let info = result.expect("task").expect("info");
+        assert_eq!(info["blocks"], 0);
+        assert_eq!(info["initialblockdownload"], true);
     }
 }
 
@@ -44,13 +44,11 @@ async fn test_rpc_invalid_parameters() {
     // Test with invalid height (negative - but get_block_hash takes i64, so -1 is valid)
     // Instead test with a very large height that might cause issues
     let result = blockchain.get_block_hash(1_000_000_000).await;
-    // May succeed or fail depending on implementation
-    let _ = result;
-
-    // Test with very large height
-    let result = blockchain.get_block_hash(1_000_000_000).await;
-    // May succeed or fail depending on implementation
-    let _ = result;
+    let message = result.expect_err("no storage").to_string();
+    assert!(
+        message.contains("Storage not available"),
+        "unexpected error: {message}"
+    );
 }
 
 #[tokio::test]
@@ -63,9 +61,9 @@ async fn test_rpc_large_result_sets() {
     assert!(result.is_ok());
 
     // gettxoutsetinfo might return large UTXO sets
-    let result = blockchain.get_txoutset_info().await;
-    // May fail without storage, but should handle gracefully
-    let _ = result;
+    let info = blockchain.get_txoutset_info().await.expect("txoutset");
+    assert_eq!(info["height"], 0);
+    assert_eq!(info["txouts"], 0);
 }
 
 #[tokio::test]
@@ -93,13 +91,19 @@ async fn test_rpc_mining_edge_cases() {
     // Test getblocktemplate with various parameters
     let params_empty = json!([]);
     let result1 = mining.get_block_template(&params_empty).await;
-    let _ = result1;
+    let message = result1.expect_err("no storage").to_string();
+    assert!(
+        message.contains("getblocktemplate requires storage"),
+        "unexpected error: {message}"
+    );
 
-    // Test with invalid parameters
     let params_invalid = json!([{"invalid": "params"}]);
     let result2 = mining.get_block_template(&params_invalid).await;
-    // Should handle invalid params gracefully
-    let _ = result2;
+    let message = result2.expect_err("no storage").to_string();
+    assert!(
+        message.contains("getblocktemplate requires storage"),
+        "unexpected error: {message}"
+    );
 }
 
 #[tokio::test]
@@ -120,8 +124,7 @@ async fn test_rpc_rawtx_edge_cases() {
     let large_hex = "00".repeat(1000000); // 1MB hex string
     let params_large = json!([large_hex]);
     let result = rawtx.sendrawtransaction(&params_large).await;
-    // Should handle large transactions gracefully (may fail validation)
-    let _ = result;
+    assert!(result.is_err(), "zero-filled hex was accepted: {result:?}");
 }
 
 #[tokio::test]
@@ -131,14 +134,16 @@ async fn test_rpc_control_edge_cases() {
     // Test help with invalid command
     let params_invalid = json!(["nonexistent_command"]);
     let result = control.help(&params_invalid).await;
-    // Should return help text or error gracefully
-    let _ = result;
+    let message = result.expect_err("unknown command").to_string();
+    assert!(
+        message.contains("Unknown command"),
+        "unexpected error: {message}"
+    );
 
-    // Test logging with invalid parameters
     let params_invalid = json!([{"invalid": "params"}]);
-    let result = control.logging(&params_invalid).await;
-    // Should handle invalid params gracefully
-    let _ = result;
+    let logging = control.logging(&params_invalid).await.expect("logging");
+    assert_eq!(logging["active"], true);
+    assert!(logging["current_filter"].is_string());
 }
 
 #[tokio::test]

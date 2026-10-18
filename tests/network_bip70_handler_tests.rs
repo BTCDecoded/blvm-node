@@ -125,11 +125,12 @@ async fn test_validate_payment_request_message_no_signature() {
         covenant_proof: None,
     };
 
-    // Should fail validation (no signature)
     let result = validate_payment_request_message(&msg);
-    // Note: This may succeed if validation is lenient, or fail if strict
-    // The actual behavior depends on PaymentProtocolClient::validate_payment_request
-    assert!(result.is_ok() || result.is_err());
+    let message = result.expect_err("unsigned request").to_string();
+    assert!(
+        message.contains("No merchant public key"),
+        "unexpected error: {message}"
+    );
 }
 
 #[test]
@@ -149,9 +150,18 @@ fn test_validate_payment_ack_message() {
         merchant_signature: vec![],
     };
 
-    // Validation may succeed or fail depending on implementation
-    let result = validate_payment_ack_message(&msg, &[]);
-    assert!(result.is_ok() || result.is_err());
+    assert!(validate_payment_ack_message(&msg, &[]).is_ok());
+
+    let bad = PaymentACKMessage {
+        payment_ack,
+        payment_id: vec![],
+        merchant_signature: vec![1, 2, 3],
+    };
+    let bad_result = validate_payment_ack_message(&bad, &[0x02; 33]);
+    assert!(
+        bad_result.is_err(),
+        "garbage signature accepted: {bad_result:?}"
+    );
 }
 
 #[test]

@@ -6,9 +6,10 @@
 mod stub_node_api;
 
 use blvm_node::module::api::hub::ModuleApiHub;
-use blvm_node::module::ipc::protocol::{MessageType, RequestMessage, RequestPayload};
+use blvm_node::module::ipc::protocol::{
+    MessageType, RequestMessage, RequestPayload, ResponsePayload,
+};
 use blvm_node::module::security::permissions::{Permission, PermissionSet};
-use blvm_node::module::traits::ModuleError;
 use std::sync::Arc;
 
 use stub_node_api::MockNodeAPI;
@@ -45,8 +46,14 @@ async fn test_concurrent_requests() {
         .map(|r| r.unwrap())
         .collect();
 
-    // All requests should complete
     assert_eq!(results.len(), 10);
+    for result in results {
+        let response = result.expect("handshake");
+        assert!(matches!(
+            response.payload,
+            Some(ResponsePayload::HandshakeAck { .. })
+        ));
+    }
 }
 
 #[tokio::test]
@@ -69,9 +76,14 @@ async fn test_permission_edge_cases() {
         },
     };
 
-    let result = hub.handle_request("test_module", request).await;
-    // Should handle empty permissions gracefully
-    let _ = result;
+    let response = hub
+        .handle_request("test_module", request)
+        .await
+        .expect("handshake");
+    assert!(matches!(
+        response.payload,
+        Some(ResponsePayload::HandshakeAck { .. })
+    ));
 
     // Test with all permissions
     let mut all_permissions = PermissionSet::new();
@@ -92,8 +104,14 @@ async fn test_permission_edge_cases() {
         },
     };
 
-    let result = hub.handle_request("test_module2", request2).await;
-    let _ = result;
+    let response = hub
+        .handle_request("test_module2", request2)
+        .await
+        .expect("handshake");
+    assert!(matches!(
+        response.payload,
+        Some(ResponsePayload::HandshakeAck { .. })
+    ));
 }
 
 #[tokio::test]
@@ -115,17 +133,9 @@ async fn test_error_recovery() {
 
     let result = hub.handle_request("test_module", request).await;
 
-    // Should return error but not panic
-    match result {
-        Ok(_) => {
-            // Request succeeded (handshake might succeed even with mismatch)
-        }
-        Err(e) => {
-            // Expected error
-            assert!(matches!(
-                e,
-                ModuleError::OperationError(_) | ModuleError::PermissionDenied(_)
-            ));
-        }
-    }
+    let message = result.expect_err("module id mismatch").to_string();
+    assert!(
+        message.contains("module_id mismatch"),
+        "unexpected error: {message}"
+    );
 }

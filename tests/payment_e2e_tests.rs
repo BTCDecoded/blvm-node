@@ -12,7 +12,6 @@ use blvm_node::config::PaymentConfig;
 use blvm_node::payment::processor::PaymentProcessor;
 use blvm_node::payment::state_machine::PaymentStateMachine;
 use blvm_node::storage::Storage;
-use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -292,10 +291,15 @@ async fn test_congestion_complete_workflow() {
     // Broadcast batch (covenant path may succeed or fail depending on readiness)
     // Note: For a single transaction, we need to manually trigger covenant update
     // In real scenario, this happens when batch reaches max size
-    let result = manager.broadcast_batch(batch_id);
-    // May fail if batch is not ready, which is expected behavior
-    // This tests the error handling path
-    assert!(result.is_ok() || result.is_err());
+    let proof = manager.broadcast_batch(batch_id).expect("broadcast");
+    assert_ne!(proof.template_hash, [0u8; 32]);
+    assert_eq!(proof.payment_request_id, format!("{batch_id}_batch"));
+    assert_eq!(proof.transaction_template.outputs.len(), 1);
+    assert_eq!(proof.transaction_template.outputs[0].value, 10_000);
+    assert_eq!(
+        proof.transaction_template.outputs[0].script_pubkey,
+        vec![0x51, 0x87]
+    );
 }
 
 // ============================================================================
