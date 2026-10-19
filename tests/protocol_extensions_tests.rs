@@ -272,6 +272,10 @@ async fn test_handle_get_filtered_block_uses_block_height_not_tip() {
     });
     storage
         .chain()
+        .cache_block_chainwork(&tip_header.prev_block_hash, &tip_header, 0)
+        .unwrap();
+    storage
+        .chain()
         .update_tip(&tip_hash, &tip_header, 100)
         .unwrap();
 

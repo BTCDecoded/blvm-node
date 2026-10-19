@@ -334,6 +334,16 @@ pub fn unique_transaction() -> Transaction {
         .build()
 }
 
+/// Record parent chainwork, then move the tip. Height above zero names that parent.
+pub fn connect_tip(chain: &ChainState, tip_hash: &Hash, header: &BlockHeader, height: u64) {
+    if height > 0 {
+        chain
+            .cache_block_chainwork(&header.prev_block_hash, header, 0)
+            .unwrap();
+    }
+    chain.update_tip(tip_hash, header, height).unwrap();
+}
+
 pub fn valid_block_header() -> BlockHeader {
     BlockHeader {
         version: 1,
