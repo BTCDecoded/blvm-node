@@ -1111,8 +1111,8 @@ pub struct ChainInfo {
     pub tip_hash: Hash,
     /// Current block height
     pub height: u64,
-    /// Current difficulty
-    pub difficulty: u32,
+    /// Current difficulty, the same float `getdifficulty` returns.
+    pub difficulty: f64,
     /// Chain work
     pub chain_work: u64,
     /// Is synced
@@ -1174,6 +1174,9 @@ pub struct PaymentState {
     pub tx_hash: Option<Hash>,
     /// Confirmations (if confirmed)
     pub confirmations: Option<u32>,
+    /// Failure reason when status is failed.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// Result of block submission

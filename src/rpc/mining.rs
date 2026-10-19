@@ -149,6 +149,76 @@ impl MiningRpc {
             .unwrap_or_else(|| vec![(0, fallback)]))
     }
 
+    /// Coinbase the template would add in front of the mempool transactions.
+    ///
+    /// The output value does not change the serialized length. Height does, through the BIP34 script.
+    fn template_coinbase(height: u64) -> Transaction {
+        let script_sig = blvm_protocol::bip_validation::encode_bip34_coinbase_script(height);
+        Transaction {
+            version: 1,
+            inputs: vec![blvm_protocol::TransactionInput {
+                prevout: blvm_protocol::OutPoint {
+                    hash: [0u8; 32],
+                    index: 0xffffffff,
+                },
+                script_sig,
+                sequence: 0xfffffffe,
+            }]
+            .into(),
+            outputs: blvm_protocol::tx_outputs![blvm_protocol::TransactionOutput {
+                value: 0,
+                script_pubkey: vec![
+                    blvm_protocol::opcodes::OP_DUP,
+                    blvm_protocol::opcodes::OP_HASH160,
+                    blvm_protocol::opcodes::PUSH_20_BYTES,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    0x00,
+                    blvm_protocol::opcodes::OP_EQUALVERIFY,
+                    blvm_protocol::opcodes::OP_CHECKSIG,
+                ],
+            }],
+            lock_time: height.saturating_sub(1),
+        }
+    }
+
+    /// `(size, weight, tx count)` for the next block. An empty pool stays at zero.
+    fn template_field_snapshot(&self, tip_height: u64) -> (u64, u64, u64) {
+        let Some(mempool) = self.mempool.as_ref() else {
+            return (0, 0, 0);
+        };
+        let txs = mempool.get_transactions();
+        if txs.is_empty() {
+            return (0, 0, 0);
+        }
+        let coinbase_len =
+            serialize_transaction(&Self::template_coinbase(tip_height.saturating_add(1))).len()
+                as u64;
+        let tx_len: u64 = txs
+            .iter()
+            .map(|tx| serialize_transaction(tx).len() as u64)
+            .sum();
+        let size = coinbase_len + tx_len;
+        (size, size.saturating_mul(4), txs.len() as u64 + 1)
+    }
+
     /// Get mining information
     pub async fn get_mining_info(&self) -> RpcResult<Value> {
         #[cfg(debug_assertions)]
@@ -158,8 +228,14 @@ impl MiningRpc {
 
         // This avoids multiple storage lookups for height, tip_header, chain_info
         thread_local! {
-            static CACHED_MINING_INFO: std::cell::RefCell<(Option<Value>, Instant, Option<u64>)> = {
-                std::cell::RefCell::new((None, Instant::now(), None))
+            static CACHED_MINING_INFO: std::cell::RefCell<(
+                Option<Value>,
+                Instant,
+                Option<u64>,
+                Option<usize>,
+                Option<usize>,
+            )> = {
+                std::cell::RefCell::new((None, Instant::now(), None, None, None))
             };
         }
 
@@ -170,11 +246,18 @@ impl MiningRpc {
             0
         };
 
+        let pooled_now = self.mempool.as_ref().map(|mempool| mempool.size());
+        let pool_id = self
+            .mempool
+            .as_ref()
+            .map(|mempool| Arc::as_ptr(mempool) as usize);
         let should_refresh = CACHED_MINING_INFO.with(|cache| {
             let cache = cache.borrow();
             cache.0.is_none()
                 || cache.1.elapsed() >= CACHE_REFRESH_TIP
                 || cache.2 != Some(current_height)
+                || cache.3 != pool_id
+                || cache.4 != pooled_now
         });
 
         if should_refresh {
@@ -226,10 +309,9 @@ impl MiningRpc {
                 0.0
             };
 
-            // Get current block template info (if available)
-            let currentblocksize = 0;
-            let currentblockweight = 0;
-            let currentblocktx = 0;
+            // An empty pool is not a mined block. A non-empty pool is the coinbase plus those transactions.
+            let (currentblocksize, currentblockweight, currentblocktx) =
+                self.template_field_snapshot(blocks);
 
             // Determine chain name from storage chain params
             let chain = if let Some(ref storage) = self.storage {
@@ -262,7 +344,13 @@ impl MiningRpc {
             // Cache the result
             CACHED_MINING_INFO.with(|cache| {
                 let mut cache = cache.borrow_mut();
-                *cache = (Some(value.clone()), Instant::now(), Some(current_height));
+                *cache = (
+                    Some(value.clone()),
+                    Instant::now(),
+                    Some(current_height),
+                    pool_id,
+                    pooled_now,
+                );
             });
 
             Ok(value)
@@ -314,7 +402,7 @@ impl MiningRpc {
 
         // 4. Extract coinbase parameters from request or use defaults
         let coinbase_script = self.extract_coinbase_script(params).unwrap_or_default();
-        let coinbase_address = self.extract_coinbase_address(params).unwrap_or_default();
+        let coinbase_address = self.extract_coinbase_address(params)?;
 
         let network = self.consensus_network();
         let mempool_witnesses =
@@ -608,17 +696,16 @@ impl MiningRpc {
         Some(vec![])
     }
 
-    fn extract_coinbase_address(&self, params: &Value) -> Option<ByteString> {
+    fn extract_coinbase_address(&self, params: &Value) -> RpcResult<ByteString> {
         if let Some(template_request) = params.get(0) {
             if let Some(addr) = template_request.get("coinbaseaddress") {
                 if let Some(addr_str) = addr.as_str() {
-                    if let Ok(script) = address_string_to_script_pubkey(addr_str) {
-                        return Some(script);
-                    }
+                    return address_string_to_script_pubkey(addr_str)
+                        .map_err(|e| RpcError::invalid_params(format!("coinbaseaddress: {e}")));
                 }
             }
         }
-        Some(vec![])
+        Ok(vec![])
     }
 
     fn transaction_to_json(&self, tx: &Transaction) -> Value {
@@ -1150,49 +1237,51 @@ impl MiningRpc {
             }
         }
 
+        if conf_target < 1 || conf_target > 1008 {
+            return Err(RpcError::invalid_params(format!(
+                "Invalid conf_target {conf_target}. Must be between 1 and 1008"
+            )));
+        }
+
         // Get mempool transactions and UTXO set for fee calculation
         let mempool_txs = if let Some(ref mempool) = self.mempool {
             let utxo_set = self.get_utxo_set()?;
-            mempool.get_prioritized_transactions(100, &utxo_set) // Get top 100 by fee rate
+            mempool.get_prioritized_transactions(100, &utxo_set)
         } else {
             vec![]
         };
 
-        // Calculate fee rate based on mempool state
-        // Simple algorithm: use median fee rate of top transactions
-        let fee_rate = if !mempool_txs.is_empty() {
-            let _utxo_set = self.get_utxo_set()?;
-            let mut fee_rates = Vec::new();
-
-            // MempoolManager.get_prioritized_transactions() already ranks by fee; compute rates here.
-            for tx in &mempool_txs {
-                let fee = self.calculate_transaction_fee(tx); // Now uses UTXO set
-                let size = self.calculate_weight(tx) as usize;
-
-                if size > 0 {
-                    let vsize = (size as u64).div_ceil(4).max(1);
-                    let rate = (fee as f64) / (vsize as f64) * 1000.0 / 100_000_000.0;
-                    fee_rates.push(rate);
-                }
+        let mut fee_rates = Vec::new();
+        for tx in &mempool_txs {
+            let fee = self.calculate_transaction_fee(tx);
+            let size = self.calculate_weight(tx) as usize;
+            if size > 0 && fee > 0 {
+                let vsize = (size as u64).div_ceil(4).max(1);
+                let rate = (fee as f64) / (vsize as f64) * 1000.0 / 100_000_000.0;
+                fee_rates.push(rate);
             }
+        }
 
-            // Use median fee rate, or minimum if no transactions
-            if !fee_rates.is_empty() {
-                fee_rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let median_idx = fee_rates.len() / 2;
-                fee_rates[median_idx]
-            } else {
-                0.00001 // Default: 1 sat/vB
-            }
+        if fee_rates.is_empty() {
+            return Ok(json!({
+                "errors": ["Insufficient data or no feerate found"],
+                "blocks": conf_target
+            }));
+        }
+
+        fee_rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // One observed rate is the answer for every target. A spread picks a higher
+        // rate for a shorter target and a lower rate for a longer one.
+        let index = if fee_rates.len() == 1 {
+            0
         } else {
-            // No mempool transactions - return minimum fee
-            0.00001 // 1 sat/vB
+            let last = (fee_rates.len() - 1) as u64;
+            ((1008 - conf_target) * last) / 1007
         };
-
-        // Adjust based on estimate_mode
+        let fee_rate = fee_rates[index as usize];
         let adjusted_rate = match estimate_mode {
-            "economical" => fee_rate * 0.8,   // 20% lower for economical
-            "conservative" => fee_rate * 1.2, // 20% higher for conservative
+            "economical" => fee_rate * 0.8,
+            "conservative" => fee_rate * 1.2,
             _ => fee_rate,
         };
 
@@ -1637,5 +1726,105 @@ mod tests {
             .unwrap();
         assert!((quote["feerate"].as_f64().unwrap() - 0.00001).abs() < 1e-12);
         assert_eq!(quote["blocks"].as_u64(), Some(6));
+    }
+
+    #[tokio::test]
+    async fn empty_pool_is_not_a_fee_estimate_or_a_mined_block() {
+        let (_dir, _storage, _mempool, mining) = regtest_mining();
+        let quote = mining
+            .estimate_smart_fee(&serde_json::json!([6u64, "conservative"]))
+            .await
+            .unwrap();
+        assert!(quote.get("feerate").is_none());
+        assert!(!quote["errors"].as_array().unwrap().is_empty());
+        assert_eq!(quote["blocks"].as_u64(), Some(6));
+        assert!(
+            mining
+                .estimate_smart_fee(&serde_json::json!([0u64]))
+                .await
+                .is_err()
+        );
+
+        let info = mining.get_mining_info().await.unwrap();
+        assert_eq!(info["pooledtx"].as_u64(), Some(0));
+        assert_eq!(info["currentblocktx"].as_u64(), Some(0));
+        assert_eq!(info["currentblocksize"].as_u64(), Some(0));
+        assert_eq!(info["currentblockweight"].as_u64(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_spread_of_rates_quotes_a_higher_fee_for_a_shorter_target() {
+        use blvm_protocol::segwit::transaction_weight_from_stacks;
+
+        let (_dir, storage, mempool, mining) = regtest_mining();
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        mempool.set_policy_config(Some(policy));
+
+        for (byte, sats_per_vb) in [([5u8; 32], 1i64), ([6u8; 32], 10)] {
+            let funding = OutPoint {
+                hash: byte,
+                index: 0,
+            };
+            let mut tx = spend(funding, 50_000);
+            tx.inputs[0].script_sig = vec![OP_1];
+            let vsize = transaction_weight_from_stacks(&tx, None)
+                .unwrap()
+                .div_ceil(4)
+                .max(1) as i64;
+            tx.outputs[0].value = 50_000;
+            storage
+                .utxos()
+                .add_utxo(
+                    &funding,
+                    &UTXO {
+                        value: 50_000 + vsize * sats_per_vb,
+                        script_pubkey: vec![OP_1].into(),
+                        height: 0,
+                        is_coinbase: false,
+                    },
+                )
+                .unwrap();
+            assert!(mempool.add_transaction(tx).unwrap());
+        }
+
+        let soon = mining
+            .estimate_smart_fee(&serde_json::json!([1u64, "unset"]))
+            .await
+            .unwrap();
+        let later = mining
+            .estimate_smart_fee(&serde_json::json!([1008u64, "unset"]))
+            .await
+            .unwrap();
+        let soon_rate = soon["feerate"].as_f64().unwrap();
+        let later_rate = later["feerate"].as_f64().unwrap();
+        assert!(soon_rate > later_rate);
+        assert!((soon_rate - 0.00010).abs() < 1e-12);
+        assert!((later_rate - 0.00001).abs() < 1e-12);
+    }
+
+    #[tokio::test]
+    async fn one_pool_transaction_sets_the_template_size() {
+        let (_dir, _storage, mempool, mining) = regtest_mining();
+        let funding = OutPoint {
+            hash: [7u8; 32],
+            index: 0,
+        };
+        let mut tx = spend(funding, 40_000);
+        tx.inputs[0].script_sig = vec![OP_1];
+        assert!(mempool.add_transaction(tx.clone()).unwrap());
+
+        let info = mining.get_mining_info().await.unwrap();
+        let coinbase = MiningRpc::template_coinbase(1);
+        let expected = blvm_protocol::serialization::serialize_transaction(&tx).len()
+            + blvm_protocol::serialization::serialize_transaction(&coinbase).len();
+        assert_eq!(info["pooledtx"].as_u64(), Some(1));
+        assert_eq!(info["currentblocktx"].as_u64(), Some(2));
+        assert_eq!(info["currentblocksize"].as_u64(), Some(expected as u64));
+        assert_eq!(
+            info["currentblockweight"].as_u64(),
+            Some((expected as u64).saturating_mul(4))
+        );
     }
 }

@@ -48,84 +48,55 @@ impl NetworkRpc {
         #[cfg(debug_assertions)]
         debug!("RPC: getnetworkinfo");
 
-        use std::sync::OnceLock;
+        let (services, relayfee, connections, networkactive, subversion) =
+            if let Some(ref network) = self.network_manager {
+                (
+                    network.advertised_services(),
+                    network.relay_fee_btc_per_kvb(),
+                    network.peer_count(),
+                    network.is_network_active(),
+                    format!("/BitcoinCommons:{}/", env!("CARGO_PKG_VERSION")),
+                )
+            } else {
+                (
+                    NetworkManager::new("127.0.0.1:0".parse().unwrap()).advertised_services(),
+                    0.00001,
+                    0,
+                    true,
+                    "/blvm-node:0.1.0/".to_string(),
+                )
+            };
 
-        static CACHED_NETWORK_INFO: OnceLock<Value> = OnceLock::new();
-
-        if let Some(ref network) = self.network_manager {
-            let peer_count = network.peer_count();
-
-            // Build static template once
-            let base_info = CACHED_NETWORK_INFO.get_or_init(|| {
-                json!({
-                    "version": 70015,
-                    "subversion": format!("/BitcoinCommons:{}/", env!("CARGO_PKG_VERSION")),
-                    "protocolversion": 70015,
-                    "localservices": "0000000000000001",
-                    "localrelay": true,
-                    "timeoffset": 0,
-                    "networkactive": true,
-                    "connections": 0,
-                    "networks": [
-                        {
-                            "name": "ipv4",
-                            "limited": false,
-                            "reachable": true,
-                            "proxy": "",
-                            "proxy_randomize_credentials": false
-                        },
-                        {
-                            "name": "ipv6",
-                            "limited": false,
-                            "reachable": true,
-                            "proxy": "",
-                            "proxy_randomize_credentials": false
-                        }
-                    ],
-                    "relayfee": 0.00001000,
-                    "incrementalfee": 0.00001000,
-                    "localaddresses": [],
-                    "warnings": ""
-                })
-            });
-
-            // Clone and update only the dynamic field
-            let mut result = base_info.clone();
-            result["connections"] = json!(peer_count);
-            result["networkactive"] = json!(network.is_network_active());
-            Ok(result)
-        } else {
-            Ok(json!({
-                "version": 70015,
-                "subversion": "/blvm-node:0.1.0/",
-                "protocolversion": 70015,
-                "localservices": "0000000000000001",
-                "localrelay": true,
-                "timeoffset": 0,
-                "networkactive": true,
-                "connections": 0,
-                "networks": [
-                    {
-                        "name": "ipv4",
-                        "limited": false,
-                        "reachable": true,
-                        "proxy": "",
-                        "proxy_randomize_credentials": false
-                    },
-                    {
-                        "name": "ipv6",
-                        "limited": false,
-                        "reachable": true,
-                        "proxy": "",
-                        "proxy_randomize_credentials": false
-                    }
-                ],
-                "relayfee": 0.00001000,
-                "incrementalfee": 0.00001000,
-                "localaddresses": [],
-                "warnings": ""
-            }))
-        }
+        Ok(json!({
+            "version": 70015,
+            "subversion": subversion,
+            "protocolversion": 70015,
+            "localservices": format!("{services:016x}"),
+            "localrelay": true,
+            "timeoffset": 0,
+            "networkactive": networkactive,
+            "connections": connections,
+            "networks": [
+                {
+                    "name": "ipv4",
+                    "limited": false,
+                    "reachable": true,
+                    "proxy": "",
+                    "proxy_randomize_credentials": false
+                },
+                {
+                    "name": "ipv6",
+                    "limited": false,
+                    "reachable": true,
+                    "proxy": "",
+                    "proxy_randomize_credentials": false
+                }
+            ],
+            "relayfee": relayfee,
+            "incrementalfee": 0.00001,
+            "localaddresses": [],
+            "warnings": ""
+        }))
     }
 
     /// Get peer information
@@ -133,18 +104,36 @@ impl NetworkRpc {
         debug!("RPC: getpeerinfo");
 
         if let Some(ref network) = self.network_manager {
+            let filters = {
+                let states = network.peer_states().read().await;
+                states
+                    .iter()
+                    .map(|(addr, state)| (*addr, (state.relay_tx, state.min_fee_rate)))
+                    .collect::<std::collections::HashMap<_, _>>()
+            };
             let peer_manager = network.peer_manager().await;
-
-            // This avoids: 1) cloning all addresses, 2) looking up each peer again
             let mut peers = Vec::new();
             for addr in peer_manager.peer_addresses() {
                 if let Some(peer) = peer_manager.get_peer(&addr) {
+                    let sock = match addr {
+                        crate::network::transport::TransportAddr::Tcp(sock) => Some(sock),
+                        #[cfg(feature = "quinn")]
+                        crate::network::transport::TransportAddr::Quinn(sock) => Some(sock),
+                        #[cfg(feature = "iroh")]
+                        crate::network::transport::TransportAddr::Iroh(_) => None,
+                    };
+                    let state = sock.and_then(|sock| filters.get(&sock));
+                    let relaytxes = state.map(|(relay, _)| *relay).unwrap_or(true);
+                    let minfeefilter = state
+                        .and_then(|(_, fee)| *fee)
+                        .map(|sats| sats as f64 / 100_000_000.0)
+                        .unwrap_or(0.0);
                     peers.push(json!({
                         "id": peer.id(),
                         "addr": addr.to_string(),
                         "addrlocal": "",
                         "services": format!("{:016x}", peer.services()),
-                        "relaytxes": true,
+                        "relaytxes": relaytxes,
                         "lastsend": peer.last_send(),
                         "lastrecv": peer.last_recv(),
                         "bytessent": peer.bytes_sent(),
@@ -162,7 +151,7 @@ impl NetworkRpc {
                         "synced_blocks": -1,
                         "inflight": [],
                         "whitelisted": false,
-                        "minfeefilter": 0.00001000,
+                        "minfeefilter": minfeefilter,
                         "bytessent_per_msg": {},
                         "bytesrecv_per_msg": {}
                     }));
@@ -299,22 +288,22 @@ impl NetworkRpc {
             )
         })?;
 
-        if let Some(ref network) = self.network_manager {
-            // Send disconnect message to network manager
-            // The network manager will handle peer removal via PeerDisconnected message
-            let peer_manager = network.peer_manager().await;
-            use crate::network::transport::TransportAddr;
-            let transport_addr = TransportAddr::Tcp(addr);
-            if peer_manager.get_peer(&transport_addr).is_some() {
-                // Send disconnect signal - peer will be removed in process_messages
-                // This is handled by the peer's connection closing naturally
-                debug!("Disconnect peer {} requested", addr);
-                // Note: Actual disconnection happens when peer connection closes
-                // For immediate disconnect, we'd need to add a disconnect method to Peer
-            } else {
-                debug!("Peer {} not found", addr);
-            }
+        let Some(ref network) = self.network_manager else {
+            return Err(RpcError::invalid_params(format!(
+                "Peer {address} is not connected"
+            )));
+        };
+        use crate::network::transport::TransportAddr;
+        let transport_addr = TransportAddr::Tcp(addr);
+        let mut peer_manager = network.peer_manager().await;
+        if peer_manager.get_peer(&transport_addr).is_none() {
+            return Err(RpcError::invalid_params(format!(
+                "Peer {address} is not connected"
+            )));
         }
+        peer_manager.remove_peer(&transport_addr);
+        drop(peer_manager);
+        network.peer_states().write().await.remove(&addr);
         Ok(Value::Null)
     }
 
@@ -327,12 +316,17 @@ impl NetworkRpc {
 
         if let Some(ref network) = self.network_manager {
             let stats = network.get_network_stats().await;
+            let messagequeuesize = network
+                .dos_protection()
+                .get_metrics()
+                .await
+                .message_queue_size;
             Ok(json!({
                 "totalbytesrecv": stats.bytes_received,
                 "totalbytessent": stats.bytes_sent,
                 "activeconnections": stats.active_connections,
                 "bannedpeers": stats.banned_peers,
-                "messagequeuesize": 0, // Would need to track this separately
+                "messagequeuesize": messagequeuesize,
                 "timemillis": current_timestamp() as u128 * 1000
             }))
         } else {
@@ -431,11 +425,15 @@ impl NetworkRpc {
             let now = current_timestamp();
 
             let unban_timestamp = if absolute {
-                bantime // Already a timestamp
+                bantime
             } else if bantime == 0 {
-                0 // Permanent ban
+                0
             } else {
-                now + bantime // Relative ban
+                now.checked_add(bantime).ok_or_else(|| {
+                    RpcError::invalid_params(format!(
+                        "setban: bantime {bantime} overflows the unban time"
+                    ))
+                })?
             };
 
             match command {
@@ -498,50 +496,46 @@ impl NetworkRpc {
     pub async fn getaddednodeinfo(&self, params: &Value) -> RpcResult<Value> {
         debug!("RPC: getaddednodeinfo");
 
-        let node = param_str_required(params, 0, "getaddednodeinfo")?;
+        let requested = param_str(params, 0).map(str::to_string);
+        let _dns = param_bool_default(params, 1, false);
 
-        let dns = param_bool_default(params, 1, false);
+        let Some(ref network) = self.network_manager else {
+            return Ok(json!([]));
+        };
 
-        if let Some(ref network) = self.network_manager {
-            // Parse node address
+        let persistent_peers = network.get_persistent_peers().await;
+        let targets: Vec<SocketAddr> = if let Some(node) = requested.as_deref() {
             let addr: SocketAddr = node
                 .parse()
                 .map_err(|e| RpcError::invalid_params(format!("Invalid node address: {e}")))?;
+            if !persistent_peers.contains(&addr) {
+                return Ok(json!([]));
+            }
+            vec![addr]
+        } else {
+            persistent_peers.into_iter().collect()
+        };
 
-            // Check if node is in persistent peer list
-            let persistent_peers = network.get_persistent_peers().await;
-            let _is_added = persistent_peers.contains(&addr);
-
-            let peer_manager = network.peer_manager().await;
-            use crate::network::transport::TransportAddr;
+        let peer_manager = network.peer_manager().await;
+        use crate::network::transport::TransportAddr;
+        let mut rows = Vec::new();
+        for addr in targets {
             let transport_addr = TransportAddr::Tcp(addr);
             let is_connected = peer_manager
                 .get_peer(&transport_addr)
                 .map(|peer| peer.is_connected())
                 .unwrap_or(false);
-
-            Ok(json!([{
-                "addednode": node,
+            let shown = requested.clone().unwrap_or_else(|| addr.to_string());
+            rows.push(json!({
+                "addednode": shown,
                 "connected": is_connected,
-                "addresses": if dns {
-                    vec![json!({
-                        "address": node,
-                        "connected": is_connected
-                    })]
-                } else {
-                    vec![json!({
-                        "address": addr.to_string(),
-                        "connected": is_connected
-                    })]
-                }
-            }]))
-        } else {
-            Ok(json!([{
-                "addednode": node,
-                "connected": false,
-                "addresses": []
-            }]))
+                "addresses": [{
+                    "address": addr.to_string(),
+                    "connected": is_connected
+                }]
+            }));
         }
+        Ok(json!(rows))
     }
 
     /// Get node addresses
@@ -553,37 +547,30 @@ impl NetworkRpc {
         let count = param_u64_default(params, 0, 1).min(100) as usize; // Limit to 100
 
         if let Some(ref network) = self.network_manager {
-            // Get peer addresses
-            let peer_addrs = network.get_peer_addresses().await;
-
-            // Convert to node address format
+            let peer_manager = network.peer_manager().await;
             let mut addresses = Vec::new();
-            for addr in peer_addrs.into_iter().take(count) {
-                match addr {
-                    crate::network::transport::TransportAddr::Tcp(sock) => {
-                        addresses.push(json!({
-                            "time": current_timestamp(),
-                            "services": "0000000000000001",
-                            "address": sock.ip().to_string(),
-                            "port": sock.port(),
-                            "network": if sock.is_ipv4() { "ipv4" } else { "ipv6" }
-                        }));
-                    }
+            for addr in peer_manager.peer_addresses().into_iter().take(count) {
+                let services = peer_manager
+                    .get_peer(&addr)
+                    .map(|peer| peer.services())
+                    .unwrap_or(0);
+                let sock = match addr {
+                    crate::network::transport::TransportAddr::Tcp(sock) => Some(sock),
                     #[cfg(feature = "quinn")]
-                    crate::network::transport::TransportAddr::Quinn(sock) => {
-                        addresses.push(json!({
-                            "time": current_timestamp(),
-                            "services": "0000000000000001",
-                            "address": sock.ip().to_string(),
-                            "port": sock.port(),
-                            "network": if sock.is_ipv4() { "ipv4" } else { "ipv6" }
-                        }));
-                    }
+                    crate::network::transport::TransportAddr::Quinn(sock) => Some(sock),
                     #[cfg(feature = "iroh")]
-                    crate::network::transport::TransportAddr::Iroh(_) => {
-                        // Skip Iroh peers for this method (no SocketAddr)
-                    }
-                }
+                    crate::network::transport::TransportAddr::Iroh(_) => None,
+                };
+                let Some(sock) = sock else {
+                    continue;
+                };
+                addresses.push(json!({
+                    "time": current_timestamp(),
+                    "services": format!("{services:016x}"),
+                    "address": sock.ip().to_string(),
+                    "port": sock.port(),
+                    "network": if sock.is_ipv4() { "ipv4" } else { "ipv6" }
+                }));
             }
 
             Ok(json!(addresses))
@@ -660,5 +647,183 @@ mod info_locks {
         let rpc = NetworkRpc::new();
         assert!(rpc.set_ban(&json!(["10.0.0.0/8", "add"])).await.is_err());
         assert!(rpc.set_ban(&json!(["10.0.0.1", "add"])).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn localservices_and_relayfee_follow_the_node() {
+        use crate::node::mempool::MempoolManager;
+        use crate::storage::Storage;
+        use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(dir.path()).unwrap());
+        let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
+        let mempool = Arc::new(MempoolManager::new());
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.min_relay_fee_rate = 5;
+        mempool.set_policy_config(Some(policy));
+        let nm = Arc::new(
+            NetworkManager::new("127.0.0.1:0".parse().unwrap())
+                .with_dependencies(protocol, storage, mempool),
+        );
+        let info = NetworkRpc::with_dependencies(Arc::clone(&nm))
+            .get_network_info()
+            .await
+            .unwrap();
+        assert_eq!(
+            info["localservices"].as_str().unwrap(),
+            format!("{:016x}", nm.advertised_services())
+        );
+        assert!((info["relayfee"].as_f64().unwrap() - 0.00005).abs() < 1e-12);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_relay_feefilter_and_address_services() {
+        let nm = Arc::new(NetworkManager::new("127.0.0.1:0".parse().unwrap()));
+        let quiet: SocketAddr = "1.2.3.4:8333".parse().unwrap();
+        let open: SocketAddr = "1.2.3.5:8333".parse().unwrap();
+        let mut quiet_peer = Peer::new_for_testing(quiet);
+        quiet_peer.set_services(0x0600_0009);
+        let mut open_peer = Peer::new_for_testing(open);
+        open_peer.set_services(1);
+        {
+            let mut peers = nm.peer_manager().await;
+            peers
+                .add_peer(TransportAddr::Tcp(quiet), quiet_peer)
+                .unwrap();
+            peers.add_peer(TransportAddr::Tcp(open), open_peer).unwrap();
+        }
+        let mut state = blvm_protocol::network::PeerState::new();
+        state.relay_tx = false;
+        state.min_fee_rate = Some(1500);
+        nm.peer_states().write().await.insert(quiet, state);
+
+        let rpc = NetworkRpc::with_dependencies(Arc::clone(&nm));
+        let info = rpc.get_peer_info().await.unwrap();
+        let rows = info.as_array().unwrap();
+        let quiet_row = rows
+            .iter()
+            .find(|row| row["addr"].as_str().unwrap().contains("1.2.3.4"))
+            .unwrap();
+        let open_row = rows
+            .iter()
+            .find(|row| row["addr"].as_str().unwrap().contains("1.2.3.5"))
+            .unwrap();
+        assert_eq!(quiet_row["relaytxes"], false);
+        assert!((quiet_row["minfeefilter"].as_f64().unwrap() - 0.000015).abs() < 1e-12);
+        assert_eq!(open_row["minfeefilter"].as_f64(), Some(0.0));
+
+        let addrs = rpc.getnodeaddresses(&json!([10])).await.unwrap();
+        let quiet_addr = addrs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["address"] == "1.2.3.4")
+            .unwrap();
+        assert_eq!(quiet_addr["services"], "0000000006000009");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn added_peers_disconnect_queue_and_bans() {
+        let nm = Arc::new(NetworkManager::new("127.0.0.1:0".parse().unwrap()));
+        let sock: SocketAddr = "1.2.3.4:8333".parse().unwrap();
+        let rpc = NetworkRpc::with_dependencies(Arc::clone(&nm));
+
+        assert!(
+            rpc.getaddednodeinfo(&json!(["1.2.3.4:8333"]))
+                .await
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        nm.add_persistent_peer(sock);
+        {
+            let mut peers = nm.peer_manager().await;
+            peers
+                .add_peer(TransportAddr::Tcp(sock), Peer::new_for_testing(sock))
+                .unwrap();
+        }
+        let added = rpc
+            .getaddednodeinfo(&json!(["1.2.3.4:8333"]))
+            .await
+            .unwrap();
+        assert_eq!(added[0]["connected"], true);
+        let listed = crate::rpc::rest::network::get_added_node_info(&rpc, None, false)
+            .await
+            .unwrap();
+        assert!(listed.to_string().contains("1.2.3.4:8333"));
+
+        rpc.disconnect_node(&json!(["1.2.3.4:8333"])).await.unwrap();
+        assert!(
+            rpc.get_peer_info()
+                .await
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(rpc.disconnect_node(&json!(["9.9.9.9:8333"])).await.is_err());
+
+        nm.dos_protection().update_metrics(0, 10, 0, 0).await;
+        let totals = rpc.get_net_totals(&json!([])).await.unwrap();
+        assert_eq!(totals["messagequeuesize"].as_u64(), Some(10));
+
+        assert!(
+            rpc.set_ban(&json!(["1.2.3.4", "add", u64::MAX, false]))
+                .await
+                .is_err()
+        );
+        assert!(nm.get_banned_peers().is_empty());
+        let before = current_timestamp();
+        rpc.set_ban(&json!(["1.2.3.4", "add", 86_400, false]))
+            .await
+            .unwrap();
+        let until = nm
+            .get_banned_peers()
+            .iter()
+            .find(|(addr, _)| addr.ip().to_string() == "1.2.3.4")
+            .unwrap()
+            .1;
+        assert!(until >= before + 86_400);
+        assert!(until <= current_timestamp() + 86_400);
+
+        assert!(
+            crate::rpc::rest::network::set_ban(&rpc, "8.8.8.8", "add", None, Some(true))
+                .await
+                .is_err()
+        );
+        crate::rpc::rest::network::set_ban(&rpc, "8.8.8.8", "add", Some(1_700_000_000), Some(true))
+            .await
+            .unwrap();
+        let banned = rpc.list_banned(&json!([])).await.unwrap();
+        let absolute = banned
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["address"].as_str().unwrap().starts_with("8.8.8.8"))
+            .unwrap();
+        assert_eq!(absolute["banned_until"].as_u64(), Some(1_700_000_000));
+
+        rpc.setnetworkactive(&json!([false])).await.unwrap();
+        let stayed = crate::rpc::rest::network::set_network_active_body(&rpc, &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(stayed, false);
+        assert_eq!(
+            rpc.get_network_info().await.unwrap()["networkactive"],
+            false
+        );
+        crate::rpc::rest::network::set_network_active_body(&rpc, &json!({"state": false}))
+            .await
+            .unwrap();
+        assert_eq!(
+            rpc.get_network_info().await.unwrap()["networkactive"],
+            false
+        );
+        crate::rpc::rest::network::set_network_active_body(&rpc, &json!({"state": true}))
+            .await
+            .unwrap();
+        assert_eq!(rpc.get_network_info().await.unwrap()["networkactive"], true);
     }
 }

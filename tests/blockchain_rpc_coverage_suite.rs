@@ -328,7 +328,7 @@ async fn test_getaddresstxids_with_bech32_address() {
 
     let address = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
     let decoded = BitcoinAddress::decode(address).expect("regtest bech32 test vector");
-    let mut script = vec![0x00];
+    let mut script = vec![0x00, decoded.witness_program.len() as u8];
     script.extend_from_slice(&decoded.witness_program);
 
     use blvm_node::config::IndexingConfig;
@@ -392,6 +392,58 @@ async fn test_get_block_filter_for_wire_block() {
         .await
         .unwrap();
     assert!(filter.get("filter").is_some());
+}
+
+#[tokio::test]
+async fn test_get_block_filter_chains_from_parent_header() {
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
+    let genesis = seed_wire_block(&storage);
+    let child = blvm_node::Block {
+        header: blvm_protocol::BlockHeader {
+            version: 1,
+            prev_block_hash: genesis,
+            merkle_root: [0u8; 32],
+            timestamp: 1_231_006_506,
+            bits: 0x0f00ffff,
+            nonce: 2,
+        },
+        transactions: vec![].into_boxed_slice(),
+    };
+    let child_hash = storage.blocks().get_block_hash(&child);
+    storage.blocks().store_block(&child).unwrap();
+    let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
+    let rpc = BlockchainRpc::with_dependencies_and_protocol(storage.clone(), protocol);
+    let child_hex = blvm_node::storage::hashing::hash_to_rpc_hex(&child_hash);
+
+    assert!(
+        rpc.get_block_filter(&serde_json::json!([child_hex.clone(), 0]))
+            .await
+            .is_err()
+    );
+    assert!(
+        storage
+            .blocks()
+            .get_filter_header(&child_hash)
+            .unwrap()
+            .is_none()
+    );
+
+    let genesis_hex = blvm_node::storage::hashing::hash_to_rpc_hex(&genesis);
+    let genesis_filter = rpc
+        .get_block_filter(&serde_json::json!([genesis_hex, 0]))
+        .await
+        .unwrap();
+    let genesis_header = hex::decode(genesis_filter["header"].as_str().unwrap()).unwrap();
+    let child_filter = rpc
+        .get_block_filter(&serde_json::json!([child_hex, 0]))
+        .await
+        .unwrap();
+    let mut chained = hex::decode(child_filter["filter"].as_str().unwrap()).unwrap();
+    chained.extend_from_slice(&genesis_header);
+    let expected = blvm_node::storage::hashing::double_sha256(&chained);
+    let got = hex::decode(child_filter["header"].as_str().unwrap()).unwrap();
+    assert_eq!(got, expected.as_slice());
 }
 
 #[tokio::test]
@@ -486,6 +538,54 @@ async fn test_load_txoutset_missing_path_errors() {
 }
 
 #[tokio::test]
+async fn test_load_txoutset_installs_outputs_and_rejects_other_base_hash() {
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
+    let snap_dir = TempDir::new().unwrap();
+    let manager = blvm_node::storage::assumeutxo::AssumeUtxoManager::new(snap_dir.path());
+    let mut utxo_set = blvm_protocol::UtxoSet::default();
+    for index in 0..3u32 {
+        utxo_set.insert(
+            blvm_protocol::OutPoint {
+                hash: [0x44; 32],
+                index,
+            },
+            Arc::new(blvm_protocol::UTXO {
+                value: 1_000,
+                script_pubkey: vec![0x51].into(),
+                height: 1,
+                is_coinbase: false,
+            }),
+        );
+    }
+    let snapshot_hash = [0x22; 32];
+    manager
+        .create_snapshot(&utxo_set, snapshot_hash, 9)
+        .unwrap();
+    let path = snap_dir.path().join("utxo_snapshot_9.dat");
+    let path_str = path.to_string_lossy().to_string();
+    let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
+    let rpc = BlockchainRpc::with_dependencies_and_protocol(storage, protocol);
+
+    let wrong = blvm_node::storage::hashing::hash_to_rpc_hex(&[0x11; 32]);
+    assert!(
+        rpc.load_txout_set(&serde_json::json!([path_str.clone(), wrong]))
+            .await
+            .is_err()
+    );
+    let before = rpc.get_txoutset_info().await.unwrap();
+    assert_eq!(before["txouts"], 0);
+
+    let right = blvm_node::storage::hashing::hash_to_rpc_hex(&snapshot_hash);
+    rpc.load_txout_set(&serde_json::json!([path_str, right]))
+        .await
+        .unwrap();
+    let info = rpc.get_txoutset_info().await.unwrap();
+    assert_eq!(info["txouts"], 3);
+    assert_eq!(info["bestblock"], right);
+}
+
+#[tokio::test]
 async fn test_verify_chain_default_params() {
     let (_dir, _storage, rpc) = rpc_with_chain();
     let ok = rpc.verify_chain(None, None).await.unwrap();
@@ -552,4 +652,37 @@ async fn test_getchaintxstats_cumulative_txcount() {
         stats.get("txcount").unwrap().as_u64(),
         Some(DIFFICULTY_INTERVAL)
     );
+}
+
+#[tokio::test]
+async fn test_blockchain_state_stays_in_initial_download_at_height_one() {
+    let (_dir, storage, rpc) = rpc_with_chain();
+    let state = rpc.get_blockchain_state().await.unwrap();
+    assert_ne!(state["verificationprogress"].as_f64(), Some(1.0));
+    assert_eq!(state["initialblockdownload"].as_bool(), Some(true));
+    assert_eq!(
+        state["pruned"].as_bool(),
+        Some(storage.is_pruning_enabled())
+    );
+    let info = rpc.get_blockchain_info().await.unwrap();
+    assert_eq!(state["mediantime"], info["mediantime"]);
+}
+
+#[tokio::test]
+async fn test_address_queries_error_when_the_index_is_off() {
+    let (_dir, _storage, rpc) = rpc_with_chain();
+    let address = "51";
+    let balance = rpc.getaddressbalance(&serde_json::json!([address])).await;
+    let txids = rpc.getaddresstxids(&serde_json::json!([address])).await;
+    let info = rpc.get_address_info(&serde_json::json!([address])).await;
+    for result in [balance, txids, info] {
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("address index is not enabled"), "{err}");
+    }
+}
+
+#[tokio::test]
+async fn test_verifychain_without_storage_is_an_error() {
+    let bare = BlockchainRpc::new();
+    assert!(bare.verify_chain(Some(3), Some(288)).await.is_err());
 }

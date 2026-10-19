@@ -1374,26 +1374,8 @@ impl Node {
                                 .node_payment_address
                                 .as_ref()
                                 .and_then(|addr_str| {
-                                    // Decode Bitcoin address to script pubkey
-                                    use blvm_protocol::address::BitcoinAddress;
-                                    BitcoinAddress::decode(addr_str).ok().and_then(|addr| {
-                                        // Convert address to script pubkey
-                                        match (addr.witness_version, addr.witness_program.len()) {
-                                            // SegWit v0: P2WPKH (20 bytes) or P2WSH (32 bytes)
-                                            (0, 20) | (0, 32) => {
-                                                let mut script = vec![blvm_protocol::opcodes::OP_0];
-                                                script.extend_from_slice(&addr.witness_program);
-                                                Some(script)
-                                            }
-                                            // Taproot v1: P2TR (32 bytes)
-                                            (1, 32) => {
-                                                let mut script = vec![blvm_protocol::opcodes::OP_1];
-                                                script.extend_from_slice(&addr.witness_program);
-                                                Some(script)
-                                            }
-                                            _ => None,
-                                        }
-                                    })
+                                    crate::rpc::rawtx::address_string_to_script_pubkey(addr_str)
+                                        .ok()
                                 });
                             self.network.set_node_payment_script(node_script).await;
 

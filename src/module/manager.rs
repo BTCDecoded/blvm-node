@@ -721,12 +721,15 @@ impl ModuleManager {
                 };
                 modules.insert(module_name.to_string(), managed);
                 drop(modules);
+                #[cfg(unix)]
                 if let Some(ref ipc) = self.ipc_server {
                     ipc.lock()
                         .await
                         .register_cli_spec(module_name.to_string(), cli_spec)
                         .await;
                 }
+                #[cfg(not(unix))]
+                let _ = cli_spec;
                 let loaded_modules = self.event_manager.loaded_modules();
                 let mut loaded = loaded_modules.lock().await;
                 let timestamp = crate::utils::current_timestamp();

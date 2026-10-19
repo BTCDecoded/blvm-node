@@ -144,6 +144,7 @@ impl ChainState {
             &genesis_header.prev_block_hash,
             BlockIndexStatus::Valid,
         )?;
+        self.cache_block_chainwork(&genesis_hash, genesis_header, 0)?;
         Ok(())
     }
 
@@ -164,6 +165,26 @@ impl ChainState {
             subsidy_halving_interval,
         };
         self.initialize_with_params(genesis_header, chain_params)
+    }
+
+    /// Point the active tip at a loaded UTXO snapshot.
+    ///
+    /// The snapshot file does not carry a block header, so an existing header is kept
+    /// and a new chain record uses an empty header.
+    pub fn set_snapshot_tip(&self, block_hash: &Hash, height: u64) -> Result<()> {
+        let mut info = match self.load_chain_info()? {
+            Some(info) => info,
+            None => ChainInfo {
+                tip_hash: *block_hash,
+                tip_header: BlockHeader::default(),
+                height,
+                total_work: 0,
+                chain_params: ChainParams::default(),
+            },
+        };
+        info.tip_hash = *block_hash;
+        info.height = height;
+        self.store_chain_info(&info)
     }
 
     /// Store chain information
@@ -245,9 +266,9 @@ impl ChainState {
         header: &BlockHeader,
         height: u64,
     ) -> Result<()> {
+        let chainwork = self.chainwork_for_header(header, height)?;
         let block_work = Self::calculate_work_from_bits(header.bits);
         self.store_work(block_hash, block_work)?;
-        let chainwork = self.chainwork_for_header(header, height)?;
         self.store_chainwork(block_hash, chainwork)?;
         Ok(())
     }
@@ -259,21 +280,18 @@ impl ChainState {
     ) -> Result<blvm_consensus::pow::U256> {
         let block_work = Self::calculate_work_from_bits(header.bits);
         let prev_chainwork = if height > 0 {
-            if let Ok(Some(prev_hash)) = self.get_prev_block_hash(header) {
-                self.get_chainwork(&prev_hash)?
-                    .unwrap_or_else(blvm_consensus::pow::U256::zero)
-            } else {
-                blvm_consensus::pow::U256::zero()
+            match self.get_chainwork(&header.prev_block_hash)? {
+                Some(prev) => prev,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "parent chainwork is absent for height {height}"
+                    ));
+                }
             }
         } else {
             blvm_consensus::pow::U256::zero()
         };
         Ok(prev_chainwork.saturating_add(block_work))
-    }
-
-    /// Get previous block hash from header
-    fn get_prev_block_hash(&self, header: &BlockHeader) -> Result<Option<Hash>> {
-        Ok(Some(header.prev_block_hash))
     }
 
     /// Get current chain height
@@ -1034,8 +1052,14 @@ impl ChainState {
         // ── Compute all chainworks in memory ──────────────────────────────────────────
         let (_, first_header, first_height) = entries[0];
         let mut prev_chainwork = if first_height > 0 {
-            self.get_chainwork(&first_header.prev_block_hash)?
-                .unwrap_or_else(blvm_consensus::pow::U256::zero)
+            match self.get_chainwork(&first_header.prev_block_hash)? {
+                Some(prev) => prev,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "parent chainwork is absent for height {first_height}"
+                    ));
+                }
+            }
         } else {
             blvm_consensus::pow::U256::zero()
         };

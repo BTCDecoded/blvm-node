@@ -171,9 +171,18 @@ async fn create_pool(
                 initial_participants.push((participant_id, contribution, script));
             }
 
-            let config = if body["config"].is_object() {
-                serde_json::from_value(body["config"].clone())
-                    .unwrap_or_else(|_| crate::payment::pool::PoolConfig::default())
+            let config = if body.get("config").is_some() && !body["config"].is_null() {
+                match serde_json::from_value(body["config"].clone()) {
+                    Ok(config) => config,
+                    Err(e) => {
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            "BAD_REQUEST",
+                            &format!("invalid pool config: {e}"),
+                            request_id,
+                        );
+                    }
+                }
             } else {
                 crate::payment::pool::PoolConfig::default()
             };
@@ -258,39 +267,51 @@ async fn join_pool(
             );
         }
     };
-    let participant_id = body
-        .get("participant_id")
-        .and_then(|id| id.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-
+    let Some(participant_id) = body.get("participant_id").and_then(|id| id.as_str()) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "participant_id required",
+            request_id,
+        );
+    };
     let contribution = body
         .get("contribution")
         .and_then(|c| c.as_u64())
         .unwrap_or(0);
+    let script_pubkey = match body
+        .get("script_pubkey")
+        .and_then(|s| s.as_str())
+        .map(hex::decode)
+    {
+        Some(Ok(script)) if !script.is_empty() => script,
+        _ => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "script_pubkey hex is required",
+                request_id,
+            );
+        }
+    };
 
-    // Validate contribution meets minimum
-    if contribution < pool_state.config.min_contribution {
-        return error_response(
+    match pool_engine.join_pool(&pool_state, participant_id, contribution, script_pubkey) {
+        Ok(updated) => success_response(
+            json!({
+                "pool_id": pool_id,
+                "participant_id": participant_id,
+                "contribution": contribution,
+                "pool_state": serde_json::to_value(&updated).unwrap_or(json!(null)),
+            }),
+            request_id,
+        ),
+        Err(e) => error_response(
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
-            &format!(
-                "Contribution {} below minimum {}",
-                contribution, pool_state.config.min_contribution
-            ),
+            &e.to_string(),
             request_id,
-        );
+        ),
     }
-
-    success_response(
-        json!({
-            "pool_id": pool_id,
-            "participant_id": participant_id,
-            "contribution": contribution,
-            "message": "Join pool request received (full implementation pending)"
-        }),
-        request_id,
-    )
 }
 
 #[cfg(feature = "ctv")]
@@ -364,15 +385,23 @@ async fn distribute_pool(
         );
     }
 
-    success_response(
-        json!({
-            "pool_id": pool_id,
-            "distribution": distribution,
-            "total_balance": pool_state.total_balance,
-            "message": "Distribute pool request received (full implementation pending)"
-        }),
-        request_id,
-    )
+    match pool_engine.distribute(&pool_state, distribution) {
+        Ok((updated, covenant)) => success_response(
+            json!({
+                "pool_id": pool_id,
+                "total_balance": updated.total_balance,
+                "pool_state": serde_json::to_value(&updated).unwrap_or(json!(null)),
+                "covenant_proof": serde_json::to_value(&covenant).unwrap_or(json!(null)),
+            }),
+            request_id,
+        ),
+        Err(e) => error_response(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            &e.to_string(),
+            request_id,
+        ),
+    }
 }
 
 #[cfg(feature = "ctv")]

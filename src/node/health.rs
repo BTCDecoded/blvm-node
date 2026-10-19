@@ -51,6 +51,8 @@ pub struct HealthReport {
 pub struct HealthChecker {
     /// Start time for uptime calculation
     start_time: SystemTime,
+    /// Uptime taken from the node clock when the checker is built for an RPC.
+    uptime_override: Option<u64>,
 }
 
 impl HealthChecker {
@@ -58,7 +60,14 @@ impl HealthChecker {
     pub fn new() -> Self {
         Self {
             start_time: SystemTime::now(),
+            uptime_override: None,
         }
+    }
+
+    /// Report this many seconds instead of the time since this checker was created.
+    pub fn with_uptime(mut self, uptime_seconds: u64) -> Self {
+        self.uptime_override = Some(uptime_seconds);
+        self
     }
 
     /// Perform comprehensive health check
@@ -72,10 +81,12 @@ impl HealthChecker {
     ) -> HealthReport {
         let timestamp = current_timestamp();
 
-        let uptime = SystemTime::now()
-            .duration_since(self.start_time)
-            .unwrap_or_default()
-            .as_secs();
+        let uptime = self.uptime_override.unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(self.start_time)
+                .unwrap_or_default()
+                .as_secs()
+        });
 
         let mut components = Vec::new();
 

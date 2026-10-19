@@ -1318,6 +1318,10 @@ pub struct PaymentConfig {
     /// Merchants should wait for this many confirmations before releasing high-value goods.
     #[serde(default = "default_safe_confirmation_depth")]
     pub safe_confirmation_depth: u32,
+
+    /// BIP-47 scan private key, 32 bytes hex. Absent means a payment code cannot be derived.
+    #[serde(default)]
+    pub bip47_scan_key: Option<String>,
 }
 
 fn default_safe_confirmation_depth() -> u32 {
@@ -1343,6 +1347,7 @@ impl Default for PaymentConfig {
             payment_store_path: "data/payments".to_string(),
             module_payments_enabled: true,
             safe_confirmation_depth: default_safe_confirmation_depth(),
+            bip47_scan_key: None,
         }
     }
 }

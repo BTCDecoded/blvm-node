@@ -251,6 +251,7 @@ fn test_payment_config_serialization() {
         module_payments_enabled: true,
         node_payment_address: None,
         safe_confirmation_depth: 6,
+        bip47_scan_key: None,
     };
 
     let serialized = serde_json::to_string(&config).expect("Should serialize");
@@ -414,6 +415,7 @@ async fn test_payment_processor_with_custom_config() {
         merchant_key: None,
         node_payment_address: None,
         safe_confirmation_depth: 6,
+        bip47_scan_key: None,
     };
 
     let _processor = PaymentProcessor::new(config).expect("Should create processor");

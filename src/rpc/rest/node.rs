@@ -61,13 +61,7 @@ pub async fn set_logging(
     include: Option<Vec<String>>,
     exclude: Option<Vec<String>>,
 ) -> Result<Value> {
-    let mut params = json!([]);
-    if let Some(inc) = include {
-        params.as_array_mut().unwrap().push(json!(inc));
-    }
-    if let Some(exc) = exclude {
-        params.as_array_mut().unwrap().push(json!(exc));
-    }
+    let params = json!([include.unwrap_or_default(), exclude.unwrap_or_default()]);
     let logging = control.logging(&params).await?;
     Ok(logging)
 }

@@ -251,6 +251,27 @@ impl CongestionManager {
         Ok(())
     }
 
+    /// Drop one transaction from a batch. The remaining transactions stay.
+    pub fn remove_from_batch(&mut self, batch_id: &str, tx_id: &str) -> Result<(), PaymentError> {
+        let batch_clone = {
+            let batch = self.batches.get_mut(batch_id).ok_or_else(|| {
+                PaymentError::ProcessingError(format!("Batch {batch_id} not found"))
+            })?;
+            let before = batch.transactions.len();
+            batch.transactions.retain(|tx| tx.tx_id != tx_id);
+            if batch.transactions.len() == before {
+                return Err(PaymentError::ProcessingError(format!(
+                    "transaction {tx_id} is not in batch {batch_id}"
+                )));
+            }
+            batch.clone()
+        };
+        if let Err(e) = self.save_batch(&batch_clone) {
+            tracing::warn!("Failed to save batch {batch_id} after removal: {e}");
+        }
+        Ok(())
+    }
+
     /// Check current network congestion
     ///
     /// # Returns
@@ -263,33 +284,26 @@ impl CongestionManager {
 
         let mempool_size = mempool_manager.size();
 
-        let utxo_set = self
-            .storage
-            .as_ref()
-            .and_then(|s| s.utxos().load_utxo_set().ok())
-            .unwrap_or_default();
-
         let mut fee_rates: Vec<u64> = mempool_manager
-            .fee_rates_sat_vb(&utxo_set)
+            .fee_rates_for_storage(self.storage.as_deref())
             .into_iter()
             .filter(|rate| *rate > 0)
             .collect();
 
-        let (avg_fee_rate, median_fee_rate) = if fee_rates.is_empty() {
-            (self.config.min_fee_rate, self.config.min_fee_rate)
+        let (avg_fee_rate, median_fee_rate, estimated_blocks) = if fee_rates.is_empty() {
+            // No pooled rate was measured. Do not publish the configured minimum as a measurement.
+            (0, 0, 0)
         } else {
             fee_rates.sort_unstable();
             let sum: u64 = fee_rates.iter().sum();
             let avg = sum / fee_rates.len() as u64;
             let median = fee_rates[fee_rates.len() / 2];
-            (avg, median)
-        };
-
-        // Heuristic: higher avg fee rate → fewer blocks to confirm.
-        let estimated_blocks = if avg_fee_rate >= self.config.target_fee_rate {
-            1 // High fee rate = fast confirmation
-        } else {
-            (self.config.target_fee_rate / avg_fee_rate.max(1)) as u32
+            let estimated = if avg >= self.config.target_fee_rate {
+                1
+            } else {
+                (self.config.target_fee_rate / avg.max(1)) as u32
+            };
+            (avg, median, estimated)
         };
 
         Ok(CongestionMetrics {
@@ -351,11 +365,12 @@ impl CongestionManager {
             return Ok(true);
         }
 
-        // Check network congestion
-        let metrics = self.check_congestion()?;
-        if metrics.avg_fee_rate <= batch.target_fee_rate {
-            // Network fees are low enough, broadcast
-            return Ok(true);
+        // A measured pool whose average is at or below the target can broadcast.
+        // A missing mempool or an empty rate list is not evidence that fees are low.
+        if let Ok(metrics) = self.check_congestion() {
+            if metrics.avg_fee_rate > 0 && metrics.avg_fee_rate <= batch.target_fee_rate {
+                return Ok(true);
+            }
         }
 
         Ok(false)
@@ -407,15 +422,32 @@ impl CongestionManager {
                     PaymentError::ProcessingError(format!("Batch {} not found", batch_id))
                 })?;
 
-                let covenant = batch.covenant_template.as_ref().ok_or_else(|| {
+                batch.covenant_template.as_ref().ok_or_else(|| {
                     PaymentError::ProcessingError("Batch covenant not created".to_string())
                 })?;
 
+                batch.covenant_template.clone().ok_or_else(|| {
+                    PaymentError::ProcessingError("Batch covenant not created".to_string())
+                })?
+            };
+
+            let ready = self.should_broadcast(batch_id)?;
+            if !ready {
+                return Ok(covenant);
+            }
+
+            self.enqueue_batch_transaction(&covenant)?;
+            let stored = {
+                let batch = self.batches.get_mut(batch_id).ok_or_else(|| {
+                    PaymentError::ProcessingError(format!("Batch {} not found", batch_id))
+                })?;
                 batch.ready_to_broadcast = true;
                 batch.broadcast_at = Some(current_timestamp());
-
-                covenant.clone()
+                batch.clone()
             };
+            if let Err(e) = self.save_batch(&stored) {
+                tracing::warn!("Failed to save batch {batch_id} after broadcast: {e}");
+            }
 
             info!(
                 "Batch {} ready to broadcast with {} transactions at fee rate {} sat/vbyte",
@@ -424,6 +456,52 @@ impl CongestionManager {
 
             Ok(covenant)
         }
+    }
+
+    /// Put the covenant template into the mempool. The template's inputs are the spends.
+    #[cfg(feature = "ctv")]
+    fn enqueue_batch_transaction(&self, covenant: &CovenantProof) -> Result<(), PaymentError> {
+        use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput};
+
+        let mempool = self.mempool_manager.as_ref().ok_or_else(|| {
+            PaymentError::ProcessingError("Mempool manager not available".to_string())
+        })?;
+        let template = &covenant.transaction_template;
+        let tx = Transaction {
+            version: template.version as u64,
+            inputs: template
+                .inputs
+                .iter()
+                .map(|input| TransactionInput {
+                    prevout: OutPoint {
+                        hash: input.prevout_hash,
+                        index: input.prevout_index,
+                    },
+                    script_sig: Vec::new(),
+                    sequence: input.sequence as u64,
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            outputs: template
+                .outputs
+                .iter()
+                .map(|output| TransactionOutput {
+                    value: output.value as i64,
+                    script_pubkey: output.script_pubkey.clone(),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            lock_time: template.lock_time as u64,
+        };
+        let accepted = mempool.add_transaction(tx).map_err(|e| {
+            PaymentError::ProcessingError(format!("batch transaction was not accepted: {e}"))
+        })?;
+        if !accepted {
+            return Err(PaymentError::ProcessingError(
+                "batch transaction was not accepted".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Adjust fee rate based on network conditions

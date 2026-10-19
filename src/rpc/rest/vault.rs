@@ -156,9 +156,18 @@ async fn create_vault(
             }
         };
 
-        let config = if body["config"].is_object() {
-            serde_json::from_value(body["config"].clone())
-                .unwrap_or_else(|_| crate::payment::vault::VaultConfig::default())
+        let config = if body.get("config").is_some() && !body["config"].is_null() {
+            match serde_json::from_value(body["config"].clone()) {
+                Ok(config) => config,
+                Err(e) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        "BAD_REQUEST",
+                        &format!("invalid vault config: {e}"),
+                        request_id,
+                    );
+                }
+            }
         } else {
             crate::payment::vault::VaultConfig::default()
         };
@@ -239,29 +248,38 @@ async fn unvault_vault(
             }
         };
 
-        // Parse deposit amount from body
-        let amount = body
-            .and_then(|v| v.get("amount").and_then(|a| a.as_u64()))
-            .unwrap_or(0);
+        let unvault_script = match body
+            .as_ref()
+            .and_then(|v| v.get("unvault_script"))
+            .and_then(|s| s.as_str())
+            .map(hex::decode)
+        {
+            Some(Ok(script)) if !script.is_empty() => script,
+            _ => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "BAD_REQUEST",
+                    "unvault_script hex is required",
+                    request_id,
+                );
+            }
+        };
 
-        if amount == 0 {
-            return error_response(
+        return match vault_engine.unvault(&vault_state, unvault_script) {
+            Ok(updated) => success_response(
+                json!({
+                    "vault_id": vault_id,
+                    "vault_state": serde_json::to_value(&updated).unwrap_or(json!(null)),
+                }),
+                request_id,
+            ),
+            Err(e) => error_response(
                 StatusCode::BAD_REQUEST,
                 "BAD_REQUEST",
-                "Deposit amount must be greater than 0",
+                &e.to_string(),
                 request_id,
-            );
-        }
-
-        return success_response(
-            json!({
-                "vault_id": vault_id,
-                "amount": amount,
-                "current_balance": vault_state.deposit_amount,
-                "message": "Deposit request received (full implementation pending)"
-            }),
-            request_id,
-        );
+            ),
+        };
     }
 }
 
@@ -319,11 +337,18 @@ async fn withdraw_from_vault(
             }
         };
 
-        // Parse withdrawal amount from body
-        let amount = body
-            .and_then(|v| v.get("amount").and_then(|a| a.as_u64()))
-            .unwrap_or(0);
-
+        let body = match body.as_ref() {
+            Some(body) => body,
+            None => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "BAD_REQUEST",
+                    "Request body required",
+                    request_id,
+                );
+            }
+        };
+        let amount = body.get("amount").and_then(|a| a.as_u64()).unwrap_or(0);
         if amount == 0 {
             return error_response(
                 StatusCode::BAD_REQUEST,
@@ -332,26 +357,39 @@ async fn withdraw_from_vault(
                 request_id,
             );
         }
-
-        let available = vault_state.deposit_amount;
-        if amount > available {
-            return error_response(
+        let withdrawal_script = match body
+            .get("withdrawal_script")
+            .and_then(|s| s.as_str())
+            .map(hex::decode)
+        {
+            Some(Ok(script)) if !script.is_empty() => script,
+            _ => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "BAD_REQUEST",
+                    "withdrawal_script hex is required",
+                    request_id,
+                );
+            }
+        };
+        let tip = vault_engine.known_tip();
+        return match vault_engine.withdraw(&vault_state, withdrawal_script, tip, Some(amount)) {
+            Ok(updated) => success_response(
+                json!({
+                    "vault_id": vault_id,
+                    "amount": amount,
+                    "remaining_balance": updated.deposit_amount,
+                    "vault_state": serde_json::to_value(&updated).unwrap_or(json!(null)),
+                }),
+                request_id,
+            ),
+            Err(e) => error_response(
                 StatusCode::BAD_REQUEST,
                 "BAD_REQUEST",
-                &format!("Insufficient balance: {} > {}", amount, available),
+                &e.to_string(),
                 request_id,
-            );
-        }
-
-        return success_response(
-            json!({
-                "vault_id": vault_id,
-                "amount": amount,
-                "remaining_balance": available.saturating_sub(amount),
-                "message": "Withdrawal request received (full implementation pending)"
-            }),
-            request_id,
-        );
+            ),
+        };
     }
 }
 

@@ -143,7 +143,7 @@ mod tests {
             Ok(ChainInfo {
                 tip_hash: Hash::default(),
                 height: 0,
-                difficulty: 0,
+                difficulty: 0.0,
                 chain_work: 0,
                 is_synced: false,
             })

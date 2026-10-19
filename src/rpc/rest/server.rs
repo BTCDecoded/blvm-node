@@ -1484,10 +1484,7 @@ impl RestApiServer {
                     };
                     let locktime = body.get("locktime").and_then(|v| v.as_u64());
                     let replaceable = body.get("replaceable").and_then(|v| v.as_bool());
-                    let version = body
-                        .get("version")
-                        .and_then(|v| v.as_u64())
-                        .map(|v| v as u32);
+                    let version = body.get("version").and_then(|v| v.as_u64());
                     match transactions::create_transaction(
                         &server.rawtx,
                         inputs,
@@ -2106,7 +2103,7 @@ impl RestApiServer {
             (Method::POST, Some("active"), _) => {
                 let body = match read_json_body(req).await {
                     Ok(Some(v)) => v,
-                    Ok(None) => json!({ "state": true }),
+                    Ok(None) => json!({}),
                     Err(e) => {
                         return Self::error_response_with_headers(
                             security_headers,
@@ -2118,8 +2115,7 @@ impl RestApiServer {
                         );
                     }
                 };
-                let state = body.get("state").and_then(|v| v.as_bool()).unwrap_or(true);
-                net_ok!(rest_network::set_network_active(&server.network, state).await)
+                net_ok!(rest_network::set_network_active_body(&server.network, &body).await)
             }
             (Method::POST, Some("nodes"), None) => {
                 let body = match read_json_body(req).await {

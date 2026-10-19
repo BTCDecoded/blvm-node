@@ -221,15 +221,13 @@ async fn test_effective_includes_present() {
     let tx_result = &result.as_array().unwrap()[0];
 
     let fees = tx_result.get("fees").unwrap();
-
-    // effective-includes should be present (even if empty array)
-    assert!(
-        fees.get("effective-includes").is_some(),
-        "effective-includes should always be present when allowed"
-    );
-
-    let includes = fees.get("effective-includes").unwrap();
-    assert!(includes.is_array(), "effective-includes should be an array");
+    let allowed = tx_result["allowed"].as_bool().unwrap();
+    if allowed {
+        let includes = fees.get("effective-includes").unwrap();
+        assert!(includes.is_array());
+    } else {
+        assert!(tx_result.get("reject-reason").is_some());
+    }
 }
 
 /// Test vsize calculation uses proper BIP141 formula
@@ -324,9 +322,86 @@ async fn test_single_transaction_format() {
     let results = result.as_array().unwrap();
     assert_eq!(results.len(), 1);
 
-    // Should not have package-error
-    assert!(
-        results[0].get("package-error").is_none(),
-        "Single transaction should not have package-error"
-    );
+    assert!(results[0].get("package-error").is_none());
+}
+
+#[tokio::test]
+async fn test_missing_prevout_is_rejected_and_a_funded_spend_reports_its_fee() {
+    use blvm_protocol::serialization::transaction::serialize_transaction;
+    use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput};
+
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
+    let mempool = Arc::new(MempoolManager::new());
+    let rawtx = RawTxRpc::with_dependencies(storage.clone(), mempool, None, None);
+
+    let missing = Transaction {
+        version: 1,
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
+            prevout: OutPoint {
+                hash: [0u8; 32],
+                index: 0,
+            },
+            script_sig: vec![],
+            sequence: 0xffffffff,
+        }],
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
+            value: 1,
+            script_pubkey: vec![0x51].into(),
+        }],
+        lock_time: 0,
+    };
+    let missing_hex = hex::encode(serialize_transaction(&missing));
+    let rejected = rawtx
+        .testmempoolaccept(&json!([[missing_hex]]))
+        .await
+        .unwrap();
+    let row = &rejected.as_array().unwrap()[0];
+    assert_eq!(row["allowed"], json!(false));
+    assert_eq!(row["fees"]["base"], json!(0.0));
+
+    let prev = [0x44u8; 32];
+    storage
+        .utxos()
+        .add_utxo(
+            &OutPoint {
+                hash: prev,
+                index: 0,
+            },
+            &blvm_node::UTXO {
+                value: 50_000,
+                script_pubkey: vec![0x51].into(),
+                height: 1,
+                is_coinbase: false,
+            },
+        )
+        .unwrap();
+    let spend = Transaction {
+        version: 1,
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
+            prevout: OutPoint {
+                hash: prev,
+                index: 0,
+            },
+            script_sig: vec![0x51],
+            sequence: 0xffffffff,
+        }],
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
+            value: 40_000,
+            script_pubkey: vec![0x51].into(),
+        }],
+        lock_time: 0,
+    };
+    let spend_hex = hex::encode(serialize_transaction(&spend));
+    let accepted = rawtx
+        .testmempoolaccept(&json!([[spend_hex.clone()]]))
+        .await
+        .unwrap();
+    let row = &accepted.as_array().unwrap()[0];
+    assert_eq!(row["allowed"], json!(true));
+    let fee = row["fees"]["base"].as_f64().unwrap();
+    assert!((fee - 0.0001).abs() < 1e-12);
+
+    let bare = RawTxRpc::new();
+    assert!(bare.testmempoolaccept(&json!([[spend_hex]])).await.is_err());
 }

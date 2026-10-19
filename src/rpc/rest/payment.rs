@@ -128,10 +128,30 @@ async fn create_payment_request(
     };
 
     // Parse merchant_data (optional)
-    let merchant_data = body
-        .get("merchant_data")
-        .and_then(|v| v.as_str())
-        .and_then(|s| hex::decode(s).ok());
+    let merchant_data = match body.get("merchant_data") {
+        None => None,
+        Some(value) => {
+            let Some(hex_text) = value.as_str() else {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "BAD_REQUEST",
+                    "merchant_data must be hex",
+                    request_id,
+                );
+            };
+            match hex::decode(hex_text) {
+                Ok(bytes) => Some(bytes),
+                Err(_) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        "BAD_REQUEST",
+                        "invalid merchant_data",
+                        request_id,
+                    );
+                }
+            }
+        }
+    };
 
     // Parse create_covenant (optional, default: false)
     let create_covenant = body
@@ -326,7 +346,7 @@ fn payment_state_to_json(state: &PaymentState) -> Value {
             json!({
                 "state": "in_mempool",
                 "request_id": request_id,
-                "tx_hash": hex::encode(tx_hash),
+                "tx_hash": crate::storage::hashing::hash_to_rpc_hex(tx_hash),
             })
         }
         PaymentState::Settled {
@@ -339,8 +359,8 @@ fn payment_state_to_json(state: &PaymentState) -> Value {
             json!({
                 "state": "settled",
                 "request_id": request_id,
-                "tx_hash": hex::encode(tx_hash),
-                "block_hash": hex::encode(block_hash),
+                "tx_hash": crate::storage::hashing::hash_to_rpc_hex(tx_hash),
+                "block_hash": crate::storage::hashing::hash_to_rpc_hex(block_hash),
                 "confirmation_count": confirmation_count,
                 "safe_for_release": *confirmation_count >= DEFAULT_SAFE_DEPTH,
             })
@@ -354,7 +374,7 @@ fn payment_state_to_json(state: &PaymentState) -> Value {
             json!({
                 "state": "reorg_pending",
                 "request_id": request_id,
-                "tx_hash": hex::encode(tx_hash),
+                "tx_hash": crate::storage::hashing::hash_to_rpc_hex(tx_hash),
                 "reason": reason,
             })
         }

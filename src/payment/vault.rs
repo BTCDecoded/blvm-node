@@ -71,8 +71,14 @@ pub struct VaultState {
     pub deposit_covenant: CovenantProof,
     pub unvault_covenant: Option<CovenantProof>,
     pub withdrawal_covenant: Option<CovenantProof>,
+    /// Recovery covenant. The recovery transaction hash stays unset until that transaction exists.
+    #[serde(default)]
+    pub recovery_covenant: Option<CovenantProof>,
     pub created_at: u64,
     pub withdrawal_available_at: Option<u64>, // Block height
+    /// Block height at which recovery may complete.
+    #[serde(default)]
+    pub recovery_available_at: Option<u64>,
 }
 
 /// Vault Engine
@@ -270,8 +276,10 @@ impl VaultEngine {
                 deposit_covenant,
                 unvault_covenant: None,
                 withdrawal_covenant: None,
+                recovery_covenant: None,
                 created_at,
                 withdrawal_available_at: None,
+                recovery_available_at: None,
             };
 
             // Save vault state
@@ -335,9 +343,14 @@ impl VaultEngine {
                 None,
             )?;
 
+            let tip = self.known_tip();
             let mut new_state = vault_state.clone();
             new_state.unvault_covenant = Some(unvault_covenant);
-            new_state.state = VaultLifecycle::Unvaulting;
+            new_state.withdrawal_available_at =
+                Some(tip + vault_state.config.withdrawal_delay_blocks as u64);
+            new_state.state = VaultLifecycle::Unvaulted {
+                unvaulted_at_block: tip,
+            };
 
             // Save vault state
             self.save_vault(&new_state)?;
@@ -367,9 +380,11 @@ impl VaultEngine {
         vault_state: &VaultState,
         withdrawal_script: Vec<u8>,
         current_block_height: u64,
+        amount: Option<u64>,
     ) -> Result<VaultState, PaymentError> {
         #[cfg(not(feature = "ctv"))]
         {
+            let _ = (withdrawal_script, current_block_height, amount);
             return Err(PaymentError::FeatureNotEnabled(
                 "Vaults require CTV feature".to_string(),
             ));
@@ -413,10 +428,18 @@ impl VaultEngine {
 
             use blvm_protocol::payment::PaymentOutput;
 
+            let pay = amount.unwrap_or(vault_state.deposit_amount);
+            if pay == 0 || pay > vault_state.deposit_amount {
+                return Err(PaymentError::ProcessingError(format!(
+                    "Withdrawal amount {pay} is outside the deposited {}",
+                    vault_state.deposit_amount
+                )));
+            }
+
             // Create withdrawal covenant
             let withdrawal_outputs = vec![PaymentOutput {
                 script: withdrawal_script,
-                amount: Some(vault_state.deposit_amount),
+                amount: Some(pay),
             }];
 
             let withdrawal_covenant = self.covenant_engine.create_payment_covenant(
@@ -427,7 +450,10 @@ impl VaultEngine {
 
             let mut new_state = vault_state.clone();
             new_state.withdrawal_covenant = Some(withdrawal_covenant);
-            new_state.state = VaultLifecycle::Withdrawing;
+            new_state.deposit_amount = vault_state.deposit_amount - pay;
+            if new_state.deposit_amount == 0 {
+                new_state.state = VaultLifecycle::Withdrawing;
+            }
 
             // Save vault state
             self.save_vault(&new_state)?;
@@ -489,14 +515,23 @@ impl VaultEngine {
                 amount: Some(vault_state.deposit_amount),
             }];
 
-            let _recovery_covenant = self.covenant_engine.create_payment_covenant(
+            let recovery_covenant = self.covenant_engine.create_payment_covenant(
                 &format!("{}_recovery", vault_state.vault_id),
                 &recovery_outputs,
                 None,
             )?;
 
+            let tip = self.known_tip();
+            let available = vault_state
+                .recovery_available_at
+                .unwrap_or(tip + vault_state.config.withdrawal_delay_blocks as u64);
             let mut new_state = vault_state.clone();
-            new_state.state = VaultLifecycle::Recovered;
+            new_state.recovery_covenant = Some(recovery_covenant);
+            new_state.recovery_available_at = Some(available);
+            new_state.recovery_tx_hash = None;
+            if tip >= available {
+                new_state.state = VaultLifecycle::Recovered;
+            }
 
             // Save vault state
             self.save_vault(&new_state)?;
@@ -505,6 +540,14 @@ impl VaultEngine {
 
             Ok(new_state)
         }
+    }
+
+    /// Tip height from chain storage. An engine with no chain uses height 0.
+    pub(crate) fn known_tip(&self) -> u64 {
+        self.storage
+            .as_ref()
+            .and_then(|storage| storage.chain().get_height().ok().flatten())
+            .unwrap_or(0)
     }
 
     /// Check if withdrawal is eligible based on block height

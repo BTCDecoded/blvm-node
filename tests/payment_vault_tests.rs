@@ -90,7 +90,8 @@ fn test_unvault() {
 
     assert!(result.is_ok(), "Unvaulting should succeed");
     let new_state = result.unwrap();
-    assert_eq!(new_state.state, VaultLifecycle::Unvaulting);
+    assert!(matches!(new_state.state, VaultLifecycle::Unvaulted { .. }));
+    assert_eq!(new_state.withdrawal_available_at, Some(144));
     assert!(new_state.unvault_covenant.is_some());
 }
 
@@ -203,6 +204,7 @@ fn test_withdraw() {
         &unvaulted_state,
         final_withdrawal_script,
         current_block_height,
+        None,
     );
 
     assert!(result.is_ok(), "Withdrawal should succeed after delay");
@@ -244,6 +246,7 @@ fn test_withdraw_fails_before_delay() {
         &unvaulted_state,
         final_withdrawal_script,
         current_block_height,
+        None,
     );
 
     assert!(result.is_err(), "Withdrawal should fail before delay");
@@ -268,9 +271,11 @@ fn test_recover() {
     let recovery_script = vec![0x54, 0x87]; // OP_4, OP_EQUAL
     let result = engine.recover(&vault_state, recovery_script);
 
-    assert!(result.is_ok(), "Recovery should succeed");
+    assert!(result.is_ok(), "Recovery should store the covenant");
     let recovered_state = result.unwrap();
-    assert_eq!(recovered_state.state, VaultLifecycle::Recovered);
+    assert_eq!(recovered_state.state, VaultLifecycle::Deposited);
+    assert!(recovered_state.recovery_covenant.is_some());
+    assert!(recovered_state.recovery_tx_hash.is_none());
 }
 
 /// Test recovery fails when not configured

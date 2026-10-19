@@ -78,15 +78,14 @@ pub async fn create_transaction(
     outputs: Value,
     locktime: Option<u64>,
     replaceable: Option<bool>,
-    version: Option<u32>,
+    version: Option<u64>,
 ) -> Result<Value> {
-    let mut params = json!([inputs, outputs]);
-    if let Some(lt) = locktime {
-        params.as_array_mut().unwrap().push(json!(lt));
-    }
-    if let Some(rbf) = replaceable {
-        params.as_array_mut().unwrap().push(json!(rbf));
-    }
+    let mut params = json!([
+        inputs,
+        outputs,
+        locktime.unwrap_or(0),
+        replaceable.unwrap_or(true)
+    ]);
     if let Some(v) = version {
         params.as_array_mut().unwrap().push(json!(v));
     }

@@ -859,9 +859,14 @@ impl RpcServer {
                         )
                     }
                     "/health/detailed" => {
-                        // Detailed health report
+                        let status = Self::health_overall_status(&health_value);
+                        let status_code = if Self::health_is_live(status) {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        };
                         (
-                            StatusCode::OK,
+                            status_code,
                             serde_json::to_string(&health_value)
                                 .unwrap_or_else(|_| "{}".to_string()),
                         )
@@ -1718,13 +1723,19 @@ impl RpcServer {
                     ))
                 }
             }
-            "getdescriptorinfo" | "analyzepsbt" => Err(errors::RpcError::new(
-                errors::RpcErrorCode::ServerError(-32001),
-                format!(
-                    "Method '{method}' requires the blvm-miniscript module to be loaded. \
-                     Load it with: loadmodule \"blvm-miniscript\""
-                ),
-            )),
+            "getdescriptorinfo" | "analyzepsbt" => {
+                let overrides = self.rpc_core_overrides.read().await;
+                if let Some((_, handler)) = overrides.get(method) {
+                    return handler.handle(params).await;
+                }
+                Err(errors::RpcError::new(
+                    errors::RpcErrorCode::ServerError(-32001),
+                    format!(
+                        "Method '{method}' requires the blvm-miniscript module to be loaded. \
+                         Load it with: loadmodule \"blvm-miniscript\""
+                    ),
+                ))
+            }
 
             _ => {
                 // Check core overrides first, then extension endpoints.

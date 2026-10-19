@@ -9,12 +9,18 @@ use crate::node::mempool::MempoolManager;
 use crate::rpc::errors::RpcResult;
 use crate::rpc::params::{param_bool_default, param_str, param_str_required};
 use crate::storage::Storage;
-use crate::utils::current_timestamp;
 use blvm_protocol::Hash;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::debug;
+
+fn wire_len(mempool: &MempoolManager, hash: &Hash, tx: &blvm_protocol::Transaction) -> usize {
+    let witnesses = mempool.get_transaction_witnesses(hash);
+    crate::rpc::txwire::tx_wire(tx, witnesses.as_deref())
+        .bytes
+        .len()
+}
 
 /// Walk parent or child edges already stored on the pool. `descendants` follows children.
 fn follow_pool_edges(mempool: &MempoolManager, roots: Vec<Hash>, descendants: bool) -> Vec<Hash> {
@@ -69,24 +75,25 @@ impl MempoolRpc {
 
         if let Some(ref mempool) = self.mempool {
             let size = mempool.size();
-
-            // This is much faster for large mempools (approximate: avg tx size ~250 bytes)
-            let bytes = if size == 0 {
-                0
-            } else {
-                // Fast path: estimate from size (good enough for RPC)
-                // For exact calculation, would need to serialize all, but that's expensive
-                size * 250 // Approximate average transaction size
-            };
+            use blvm_protocol::block::calculate_tx_id;
+            let bytes: usize = mempool
+                .get_transactions()
+                .iter()
+                .map(|tx| {
+                    let hash = calculate_tx_id(tx);
+                    wire_len(mempool, &hash, tx)
+                })
+                .sum();
+            let relay = mempool.min_relay_fee_btc_per_kvb();
 
             Ok(json!({
                 "loaded": true,
                 "size": size,
                 "bytes": bytes,
                 "usage": bytes,
-                "maxmempool": 300000000,
-                "mempoolminfee": 0.00001000,
-                "minrelaytxfee": 0.00001000
+                "maxmempool": mempool.max_mempool_bytes(),
+                "mempoolminfee": relay,
+                "minrelaytxfee": relay
             }))
         } else {
             // Graceful degradation: return empty mempool info when mempool unavailable
@@ -98,9 +105,9 @@ impl MempoolRpc {
                 "size": 0,
                 "bytes": 0,
                 "usage": 0,
-                "maxmempool": 300000000,
-                "mempoolminfee": 0.00001000,
-                "minrelaytxfee": 0.00001000,
+                "maxmempool": 300u64.saturating_mul(1_048_576),
+                "mempoolminfee": 0.00001,
+                "minrelaytxfee": 0.00001,
                 "note": "Mempool not available - returning empty mempool"
             }))
         }
@@ -118,7 +125,6 @@ impl MempoolRpc {
         if let Some(ref mempool) = self.mempool {
             let transactions = mempool.get_transactions();
             use blvm_protocol::block::calculate_tx_id;
-            use blvm_protocol::serialization::transaction::serialize_transaction;
 
             if verbose {
                 let mut result = serde_json::Map::new();
@@ -136,7 +142,7 @@ impl MempoolRpc {
                     let txid_hex = crate::storage::hashing::hash_to_rpc_hex(&txid);
                     let witnesses = mempool.get_transaction_witnesses(&txid);
                     let wtxid = crate::rpc::txwire::tx_wire(&tx, witnesses.as_deref()).hash_hex;
-                    let size = serialize_transaction(&tx).len();
+                    let size = wire_len(mempool, &txid, &tx);
 
                     let fee_btc = if let (Some(mempool), Some(utxo_set)) =
                         (self.mempool.as_ref(), utxo_set.as_ref())
@@ -163,9 +169,10 @@ impl MempoolRpc {
                     let size_of = |hash: &blvm_protocol::Hash| -> usize {
                         mempool
                             .get_transaction(hash)
-                            .map(|tx| serialize_transaction(&tx).len())
+                            .map(|tx| wire_len(mempool, hash, &tx))
                             .unwrap_or(0)
                     };
+                    let modified_fee_btc = self.mempool_modified_fee_btc(mempool, &txid, &tx);
                     let ancestor_fees = fee_btc + ancestors.iter().map(fee_sats).sum::<f64>();
                     let descendant_fees = fee_btc + descendants.iter().map(fee_sats).sum::<f64>();
                     let ancestor_size = size + ancestors.iter().map(size_of).sum::<usize>();
@@ -183,7 +190,7 @@ impl MempoolRpc {
                         json!({
                             "size": size,
                             "fee": fee_btc,
-                            "modifiedfee": fee_btc,
+                            "modifiedfee": modified_fee_btc,
                             "time": mempool.accepted_at(&txid),
                             "height": -1,
                             "descendantcount": 1 + descendants.len(),
@@ -195,7 +202,7 @@ impl MempoolRpc {
                             "wtxid": wtxid,
                             "fees": {
                                 "base": fee_btc,
-                                "modified": fee_btc,
+                                "modified": modified_fee_btc,
                                 "ancestor": ancestor_fees,
                                 "descendant": descendant_fees
                             },
@@ -319,32 +326,7 @@ impl MempoolRpc {
         })?;
 
         if let Some(ref mempool) = self.mempool {
-            // Find descendants by checking which transactions spend outputs created by this transaction which transactions spend outputs created by this transaction which transactions spend outputs created by this transaction
-            let mut descendants = Vec::new();
-
-            if let Some(tx) = mempool.get_transaction(&hash) {
-                // Get all output outpoints from this transaction
-                let mut output_outpoints = Vec::new();
-                for (idx, _output) in tx.outputs.iter().enumerate() {
-                    output_outpoints.push(blvm_protocol::OutPoint {
-                        hash,
-                        index: idx as u32,
-                    });
-                }
-
-                // Find transactions that spend these outputs
-                use blvm_protocol::block::calculate_tx_id;
-                let transactions = mempool.get_transactions();
-                for descendant_tx in transactions {
-                    let descendant_hash = calculate_tx_id(&descendant_tx);
-                    for input in &descendant_tx.inputs {
-                        if output_outpoints.contains(&input.prevout) {
-                            descendants.push(descendant_hash);
-                            break;
-                        }
-                    }
-                }
-            }
+            let descendants = self.get_descendants(mempool, &hash);
 
             if verbose {
                 // Return detailed descendant information
@@ -413,21 +395,25 @@ impl MempoolRpc {
         hash: &Hash,
         tx: &blvm_protocol::Transaction,
     ) -> Value {
-        use blvm_protocol::serialization::transaction::serialize_transaction;
-
-        let size = serialize_transaction(tx).len();
+        let size = wire_len(mempool, hash, tx);
         let ancestors = self.get_ancestors(mempool, hash);
         let descendants = self.get_descendants(mempool, hash);
 
         let ancestor_size: usize = ancestors
             .iter()
-            .filter_map(|h| mempool.get_transaction(h))
-            .map(|tx| serialize_transaction(&tx).len())
+            .filter_map(|h| {
+                mempool
+                    .get_transaction(h)
+                    .map(|tx| wire_len(mempool, h, &tx))
+            })
             .sum();
         let descendant_size: usize = descendants
             .iter()
-            .filter_map(|h| mempool.get_transaction(h))
-            .map(|tx| serialize_transaction(&tx).len())
+            .filter_map(|h| {
+                mempool
+                    .get_transaction(h)
+                    .map(|tx| wire_len(mempool, h, &tx))
+            })
             .sum();
 
         let base_fee_btc = self.mempool_tx_fee_btc(mempool, tx);
@@ -444,7 +430,7 @@ impl MempoolRpc {
             "size": size,
             "fee": base_fee_btc,
             "modifiedfee": modified_fee_btc,
-            "time": current_timestamp(),
+            "time": mempool.accepted_at(hash),
             "height": -1,
             "descendantcount": descendants.len() + 1,
             "descendantsize": descendant_size + size,
@@ -467,7 +453,7 @@ impl MempoolRpc {
                 .iter()
                 .map(crate::storage::hashing::hash_to_rpc_hex)
                 .collect::<Vec<_>>(),
-            "bip125-replaceable": false
+            "bip125-replaceable": blvm_protocol::mempool::signals_rbf(tx)
         })
     }
 
@@ -490,9 +476,8 @@ impl MempoolRpc {
         hash: &Hash,
         tx: &blvm_protocol::Transaction,
     ) -> u64 {
-        let base = self.mempool_tx_fee_sat(mempool, tx);
-        let delta = mempool.get_fee_delta(hash).max(0) as u64;
-        base.saturating_add(delta)
+        let base = self.mempool_tx_fee_sat(mempool, tx) as i64;
+        base.saturating_add(mempool.get_fee_delta(hash)).max(0) as u64
     }
 
     fn mempool_modified_fee_btc(
@@ -515,64 +500,14 @@ impl MempoolRpc {
             .sum()
     }
 
-    /// Helper: Get ancestors for a transaction
+    /// Ancestors of `tx_hash`, following every in-pool parent edge.
     fn get_ancestors(&self, mempool: &MempoolManager, tx_hash: &Hash) -> Vec<Hash> {
-        let mut ancestors = Vec::new();
-
-        if let Some(tx) = mempool.get_transaction(tx_hash) {
-            // Find transactions that this transaction depends on (spends their outputs)
-            use blvm_protocol::block::calculate_tx_id;
-            for input in &tx.inputs {
-                // Find transaction that created this output by checking all transactions
-                let transactions = mempool.get_transactions();
-                for ancestor_tx in transactions {
-                    let ancestor_hash = calculate_tx_id(&ancestor_tx);
-                    for (idx, _output) in ancestor_tx.outputs.iter().enumerate() {
-                        if input.prevout.hash == ancestor_hash
-                            && input.prevout.index == idx as u32
-                            && !ancestors.contains(&ancestor_hash)
-                        {
-                            ancestors.push(ancestor_hash);
-                        }
-                    }
-                }
-            }
-        }
-
-        ancestors
+        follow_pool_edges(mempool, mempool.dependency_hashes(tx_hash), false)
     }
 
-    /// Helper: Get descendants for a transaction
+    /// Descendants of `tx_hash`, following every in-pool child edge.
     fn get_descendants(&self, mempool: &MempoolManager, tx_hash: &Hash) -> Vec<Hash> {
-        let mut descendants = Vec::new();
-
-        if let Some(tx) = mempool.get_transaction(tx_hash) {
-            // Get all output outpoints from this transaction
-            let mut output_outpoints = Vec::new();
-            for (idx, _output) in tx.outputs.iter().enumerate() {
-                output_outpoints.push(blvm_protocol::OutPoint {
-                    hash: *tx_hash,
-                    index: idx as u32,
-                });
-            }
-
-            // Find transactions that spend these outputs
-            use blvm_protocol::block::calculate_tx_id;
-            let transactions = mempool.get_transactions();
-            for descendant_tx in transactions {
-                let descendant_hash = calculate_tx_id(&descendant_tx);
-                for input in &descendant_tx.inputs {
-                    if output_outpoints.contains(&input.prevout) {
-                        if !descendants.contains(&descendant_hash) {
-                            descendants.push(descendant_hash);
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-
-        descendants
+        follow_pool_edges(mempool, mempool.descendant_hashes(tx_hash), true)
     }
 }
 
