@@ -721,6 +721,7 @@ impl ModuleManager {
                 };
                 modules.insert(module_name.to_string(), managed);
                 drop(modules);
+                #[cfg(unix)]
                 if let Some(ref ipc) = self.ipc_server {
                     ipc.lock()
                         .await
