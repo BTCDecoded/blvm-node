@@ -17,6 +17,7 @@ use blvm_node::rpc::rest::pool::handle_pool_request;
 #[cfg(feature = "rest-api")]
 use blvm_node::rpc::rest::vault::handle_vault_request;
 use blvm_node::storage::Storage;
+use blvm_node::utils::new_request_id;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use http_body_util::Full;
@@ -24,7 +25,6 @@ use hyper::{Method, Response, StatusCode};
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
-use blvm_node::utils::new_request_id;
 
 /// Helper to create test payment state machine
 fn create_test_state_machine() -> Arc<PaymentStateMachine> {
