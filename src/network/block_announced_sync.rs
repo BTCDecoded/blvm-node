@@ -494,6 +494,19 @@ mod tests {
         frame
     }
 
+    fn connect_tip(storage: &Storage, tip_hash: &Hash, tip_header: &BlockHeader, height: u64) {
+        if height > 0 {
+            storage
+                .chain()
+                .cache_block_chainwork(&tip_header.prev_block_hash, tip_header, 0)
+                .unwrap();
+        }
+        storage
+            .chain()
+            .update_tip(tip_hash, tip_header, height)
+            .unwrap();
+    }
+
     fn with_proof(mut header: BlockHeader) -> BlockHeader {
         for nonce in 0..200_000 {
             header.nonce = nonce;
@@ -517,10 +530,7 @@ mod tests {
             bits: 0x207fffff,
             nonce: 0,
         };
-        storage
-            .chain()
-            .update_tip(&tip_hash, &tip_header, 1)
-            .unwrap();
+        connect_tip(&storage, &tip_hash, &tip_header, 1);
 
         let header_one = with_proof(BlockHeader {
             version: 1,
@@ -644,10 +654,7 @@ mod tests {
             bits: 0x207fffff,
             nonce: 0,
         };
-        storage
-            .chain()
-            .update_tip(&tip_hash, &tip_header, 1)
-            .unwrap();
+        connect_tip(&storage, &tip_hash, &tip_header, 1);
         let linking = with_proof(BlockHeader {
             version: 1,
             prev_block_hash: tip_hash,
@@ -717,10 +724,7 @@ mod tests {
             bits: 0x207fffff,
             nonce: 0,
         };
-        storage
-            .chain()
-            .update_tip(&tip_hash, &tip_header, 1)
-            .unwrap();
+        connect_tip(&storage, &tip_hash, &tip_header, 1);
         let unlinked = BlockHeader {
             version: 1,
             prev_block_hash: [1u8; 32],
@@ -780,10 +784,7 @@ mod tests {
             bits: 0x207fffff,
             nonce: 0,
         };
-        storage
-            .chain()
-            .update_tip(&tip_hash, &tip_header, 1)
-            .unwrap();
+        connect_tip(&storage, &tip_hash, &tip_header, 1);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let peer_addr = listener.local_addr().unwrap();
         let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
@@ -850,10 +851,7 @@ mod tests {
             bits: 0x207fffff,
             nonce: 1,
         };
-        storage
-            .chain()
-            .update_tip(&tip_hash, &tip_header, 1)
-            .unwrap();
+        connect_tip(&storage, &tip_hash, &tip_header, 1);
         storage.blocks().store_height(1, &tip_hash).unwrap();
         let sibling = with_proof(BlockHeader {
             version: 1,
@@ -948,10 +946,7 @@ mod tests {
             bits: 0x207fffff,
             nonce: 0,
         };
-        storage
-            .chain()
-            .update_tip(&tip_hash, &tip_header, 1)
-            .unwrap();
+        connect_tip(&storage, &tip_hash, &tip_header, 1);
         let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
         let nm = Arc::new(
             NetworkManager::new("127.0.0.1:0".parse().unwrap()).with_dependencies(

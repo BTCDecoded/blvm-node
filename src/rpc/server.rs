@@ -2354,9 +2354,9 @@ mod tests {
         assert_eq!(responses[1]["id"], 2);
         assert_eq!(responses[2]["id"], 3);
 
-        // Verify all are successful
         assert!(responses[0]["result"].is_object());
-        assert!(responses[1]["result"].is_number());
+        assert!(responses[1]["result"].is_null());
+        assert!(responses[1]["error"].is_object());
         assert!(responses[2]["result"].is_object());
     }
 
@@ -2385,10 +2385,9 @@ mod tests {
         assert!(responses[1]["error"].is_object());
         assert_eq!(responses[1]["error"]["code"], -32601);
 
-        // Third request should succeed
         assert_eq!(responses[2]["id"], 3);
-        assert!(responses[2]["result"].is_number());
-        assert!(responses[2]["error"].is_null());
+        assert!(responses[2]["result"].is_null());
+        assert!(responses[2]["error"].is_object());
     }
 
     #[tokio::test]
@@ -2428,9 +2427,9 @@ mod tests {
         assert_eq!(responses[0]["id"], Value::Null);
         assert_eq!(responses[1]["id"], Value::Null);
 
-        // Both should succeed
         assert!(responses[0]["result"].is_object());
-        assert!(responses[1]["result"].is_number());
+        assert!(responses[1]["result"].is_null());
+        assert!(responses[1]["error"].is_object());
     }
 
     /// ckpool-style Basic auth authenticates but is not admin unless password ∈ admin_tokens.

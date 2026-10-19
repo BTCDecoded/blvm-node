@@ -2114,6 +2114,10 @@ mod createraw_locks {
             nonce: 1,
         };
         storage.chain().initialize(&header).unwrap();
+        storage
+            .chain()
+            .cache_block_chainwork(&header.prev_block_hash, &header, 0)
+            .unwrap();
         let tip = storage.chain().get_tip_hash().unwrap().unwrap();
         storage.chain().update_tip(&tip, &header, 2000).unwrap();
         let created = OutPoint {
