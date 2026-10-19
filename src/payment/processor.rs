@@ -417,31 +417,6 @@ impl PaymentProcessor {
         Ok(())
     }
 
-    /// Create module payment request (75/15/10 split)
-    ///
-    /// Payment split:
-    /// - 75% to module author
-    /// - 15% to marketplace module developer (Commons developers)
-    /// - 10% to node operator
-    ///
-    /// # Security
-    ///
-    /// This method verifies that the author and marketplace addresses are cryptographically
-    /// signed in the module manifest. The node operator's address (10%) is provided by
-    /// the node and is not signed (node can choose their own address).
-    ///
-    /// # Note
-    ///
-    /// The 15% goes to the marketplace module developer (who developed the marketplace module),
-    /// not to "Commons governance" as a separate entity. The marketplace module handles
-    /// registry, discovery, and payment processing.
-    ///
-    /// # Arguments
-    ///
-    /// * `manifest` - Module manifest containing signed payment addresses
-    /// * `module_hash` - Module hash (for encryption key derivation)
-    /// * `node_script` - Node operator's payment script (10% of payment)
-    /// * `merchant_key` - Optional merchant key for signing payment request
     /// BIP-47 payment address at `notification_index`. Index 0 is the first payment address.
     pub(crate) fn derive_bip47_address(
         &self,
@@ -517,6 +492,31 @@ impl PaymentProcessor {
         Ok(crate::rpc::rawtx::base58check_encode(&address_payload))
     }
 
+    /// Create module payment request (75/15/10 split)
+    ///
+    /// Payment split:
+    /// - 75% to module author
+    /// - 15% to marketplace module developer (Commons developers)
+    /// - 10% to node operator
+    ///
+    /// # Security
+    ///
+    /// This method verifies that the author and marketplace addresses are cryptographically
+    /// signed in the module manifest. The node operator's address (10%) is provided by
+    /// the node and is not signed (node can choose their own address).
+    ///
+    /// # Note
+    ///
+    /// The 15% goes to the marketplace module developer (who developed the marketplace module),
+    /// not to "Commons governance" as a separate entity. The marketplace module handles
+    /// registry, discovery, and payment processing.
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - Module manifest containing signed payment addresses
+    /// * `module_hash` - Module hash (for encryption key derivation)
+    /// * `node_script` - Node operator's payment script (10% of payment)
+    /// * `merchant_key` - Optional merchant key for signing payment request
     pub async fn create_module_payment_request(
         &self,
         manifest: &crate::module::registry::manifest::ModuleManifest,

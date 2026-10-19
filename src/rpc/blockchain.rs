@@ -819,7 +819,7 @@ impl BlockchainRpc {
                 c.get_or_refresh(
                     CACHE_REFRESH_TIP,
                     &(current_height, bits.unwrap_or(0)),
-                    || bits.map(|b| Self::calculate_difficulty(b)).unwrap_or(1.0),
+                    || bits.map(Self::calculate_difficulty).unwrap_or(1.0),
                 )
             });
             Ok(Value::Number(

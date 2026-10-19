@@ -1237,7 +1237,7 @@ impl MiningRpc {
             }
         }
 
-        if conf_target < 1 || conf_target > 1008 {
+        if !(1..=1008).contains(&conf_target) {
             return Err(RpcError::invalid_params(format!(
                 "Invalid conf_target {conf_target}. Must be between 1 and 1008"
             )));
