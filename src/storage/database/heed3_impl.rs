@@ -535,8 +535,8 @@ fn disk_based_map_size_mb(disk_free_mb: u64) -> usize {
         // 48 GiB min, 4 TiB max
         target.clamp(48 * 1024, 4 * 1024 * 1024)
     } else {
-        // Fallback: previous hardcoded default (256 GiB).
-        262_144usize
+        // A failed probe uses the same 48 GiB floor as a small positive reading.
+        48 * 1024
     }
 }
 
@@ -671,7 +671,7 @@ pub(crate) fn map_size_mb_for_existing_file(file_mb: usize, free_mb: u64) -> usi
 ///
 /// Uses `statvfs(2)` on Linux/Unix (via the `libc` crate which is a default feature).
 /// Falls back to 0 on platforms where it is unavailable, which causes the caller to
-/// use the legacy 256 GiB default.
+/// use the 48 GiB floor.
 fn disk_free_mb_for_path(path: Option<&std::path::Path>) -> u64 {
     #[cfg(all(target_os = "linux", feature = "libc"))]
     {
@@ -768,6 +768,16 @@ pub struct Heed3Tree {
     write_lock: Arc<Mutex<()>>,
     db: ByteDb,
     name: String,
+}
+
+#[cfg(test)]
+thread_local! {
+    static ABORT_THREE_PUTS_BEFORE_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub fn abort_next_three_put_commit(abort: bool) {
+    ABORT_THREE_PUTS_BEFORE_COMMIT.with(|flag| flag.set(abort));
 }
 
 impl Heed3Tree {
@@ -952,6 +962,44 @@ impl Heed3Tree {
             wtxn.commit()?;
         }
         Ok(count)
+    }
+
+    /// One LMDB write transaction across three trees that share this environment.
+    /// A failure drops the transaction, so none of the puts are stored.
+    pub fn commit_three_puts(
+        &self,
+        first: &[(Vec<u8>, Vec<u8>)],
+        second_tree: &Heed3Tree,
+        second: &[(Vec<u8>, Vec<u8>)],
+        third_tree: &Heed3Tree,
+        third: &[(Vec<u8>, Vec<u8>)],
+    ) -> anyhow::Result<()> {
+        if !std::sync::Arc::ptr_eq(&self.env, &second_tree.env)
+            || !std::sync::Arc::ptr_eq(&self.env, &third_tree.env)
+        {
+            anyhow::bail!("header trees are not one heed3 environment");
+        }
+        let _guard = self.write_lock.lock();
+        let mut wtxn = self.env.write_txn()?;
+        for (key, value) in first {
+            self.db.put(&mut wtxn, key.as_slice(), value.as_slice())?;
+        }
+        #[cfg(test)]
+        if ABORT_THREE_PUTS_BEFORE_COMMIT.with(|flag| flag.replace(false)) {
+            anyhow::bail!("header batch aborted before commit");
+        }
+        for (key, value) in second {
+            second_tree
+                .db
+                .put(&mut wtxn, key.as_slice(), value.as_slice())?;
+        }
+        for (key, value) in third {
+            third_tree
+                .db
+                .put(&mut wtxn, key.as_slice(), value.as_slice())?;
+        }
+        wtxn.commit()?;
+        Ok(())
     }
 
     /// E4: bulk-load **globally** sorted keys with `MDB_APPEND` (empty / append-only DB).
@@ -1183,7 +1231,13 @@ impl BatchWriter for Heed3BatchWriter {
 
 #[cfg(test)]
 mod map_size_tests {
-    use super::map_size_mb_for_existing_file;
+    use super::{disk_based_map_size_mb, map_size_mb_for_existing_file};
+
+    #[test]
+    fn failed_disk_probe_uses_the_48gib_floor() {
+        assert_eq!(disk_based_map_size_mb(0), 48 * 1024);
+        assert_eq!(disk_based_map_size_mb(1), 48 * 1024);
+    }
 
     #[test]
     fn map_size_bumps_for_near_full_1tib_file() {

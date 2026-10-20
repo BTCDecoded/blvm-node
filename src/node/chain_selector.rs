@@ -14,18 +14,7 @@ pub fn chainwork_at(storage: &Storage, hash: &Hash) -> Result<U256> {
         .unwrap_or_else(U256::zero))
 }
 
-fn sequence_id_at(storage: &Storage, hash: &Hash) -> u64 {
-    storage
-        .chain()
-        .block_index()
-        .get(hash)
-        .ok()
-        .flatten()
-        .map(|e| e.sequence_id)
-        .unwrap_or(u64::MAX)
-}
-
-/// True when `candidate_tip` should replace the active tip (more work, or equal work with lower sequence).
+/// True when `candidate_tip` has strictly more cumulative chainwork than the active tip.
 pub fn should_activate_over_active_tip(storage: &Storage, candidate_tip: &Hash) -> Result<bool> {
     let (active_tip, _) = storage.chain().get_tip_hash_and_height()?;
     if *candidate_tip == active_tip {
@@ -33,13 +22,7 @@ pub fn should_activate_over_active_tip(storage: &Storage, candidate_tip: &Hash) 
     }
     let active_work = chainwork_at(storage, &active_tip)?;
     let candidate_work = chainwork_at(storage, candidate_tip)?;
-    match candidate_work.cmp(&active_work) {
-        std::cmp::Ordering::Greater => Ok(true),
-        std::cmp::Ordering::Less => Ok(false),
-        std::cmp::Ordering::Equal => {
-            Ok(sequence_id_at(storage, candidate_tip) < sequence_id_at(storage, &active_tip))
-        }
-    }
+    Ok(candidate_work > active_work)
 }
 
 /// True when `candidate_tip` has strictly more cumulative chainwork than the active tip.
@@ -116,11 +99,11 @@ mod tests {
     }
 
     #[test]
-    fn equal_work_activates_earlier_sequence() {
+    fn equal_work_keeps_the_active_tip() {
         let active = [2u8; 32];
         let candidate = [1u8; 32];
         let storage = storage_with_sibling_tips(candidate, active, active, U256::from_u128(100));
-        assert!(should_activate_over_active_tip(&storage, &candidate).unwrap());
+        assert!(!should_activate_over_active_tip(&storage, &candidate).unwrap());
     }
 
     #[test]
@@ -133,5 +116,20 @@ mod tests {
             .store_chainwork(&candidate, U256::from_u128(200))
             .unwrap();
         assert!(should_activate_over_active_tip(&storage, &candidate).unwrap());
+    }
+
+    #[test]
+    fn a_sequence_read_error_is_not_max_and_the_tip_stays() {
+        let active = [1u8; 32];
+        let candidate = [2u8; 32];
+        let storage = storage_with_sibling_tips(active, candidate, active, U256::from_u128(100));
+        storage
+            .chain()
+            .block_index()
+            .insert_undecodable(&active)
+            .unwrap();
+        assert!(storage.chain().block_index().get(&active).is_err());
+        assert!(!should_activate_over_active_tip(&storage, &candidate).unwrap());
+        assert_eq!(storage.chain().get_tip_hash().unwrap().unwrap(), active);
     }
 }

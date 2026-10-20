@@ -202,6 +202,14 @@ fn ibd_header_locator_hashes(
     Ok(hashes)
 }
 
+pub(crate) fn header_range_timeout(config: &crate::config::RequestTimeoutConfig) -> Duration {
+    Duration::from_secs(config.async_request_timeout_seconds)
+}
+
+pub(crate) fn header_batch_extends(locator: &[u8; 32], first_prev: &[u8; 32]) -> bool {
+    first_prev == locator
+}
+
 /// Download headers for a range starting from the given locator hash.
 ///
 /// Standalone async function that can be spawned as a task.
@@ -219,7 +227,7 @@ pub(crate) async fn download_header_range(
     let mut consecutive_failures = 0;
     let mut current_peer = peer;
     const MAX_FAILURES: u32 = 3; // fail fast per peer, then switch
-    const TIMEOUT_SECS: u64 = 10;
+    let timeout_wait = header_range_timeout(network.request_timeout_config());
 
     while current_height <= end_height {
         let get_headers = GetHeadersMessage {
@@ -258,12 +266,23 @@ pub(crate) async fn download_header_range(
             continue;
         }
 
-        match timeout(Duration::from_secs(TIMEOUT_SECS), headers_rx).await {
+        match timeout(timeout_wait, headers_rx).await {
             Ok(Ok(headers)) => {
                 consecutive_failures = 0;
 
                 if headers.is_empty() {
                     break;
+                }
+
+                if !header_batch_extends(&current_hash, &headers[0].prev_block_hash) {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= MAX_FAILURES {
+                        return Err(anyhow::anyhow!(
+                            "Headers from {} do not connect to the locator",
+                            current_peer
+                        ));
+                    }
+                    continue;
                 }
 
                 for header in headers {
@@ -302,7 +321,7 @@ pub(crate) async fn download_header_range(
                 }
 
                 let max_headers = network.protocol_limits().max_headers_results;
-                if all_headers.len() % max_headers != 0 {
+                if !crate::config::headers_batch_is_full(all_headers.len(), max_headers) {
                     break;
                 }
             }
@@ -1040,5 +1059,26 @@ mod n13_tests {
         // No row yet (header still inside the same uncommitted batch).
         assert!(header_prev_links(None, &accepted_155498, &accepted_155498));
         assert!(!header_prev_links(None, &accepted_155498, &disk_155498));
+    }
+}
+
+#[cfg(test)]
+mod header_range_timeout_tests {
+    use super::header_range_timeout;
+    use crate::config::RequestTimeoutConfig;
+    use tokio::time::Duration;
+
+    #[test]
+    fn header_range_waits_for_the_configured_async_timeout() {
+        let wait = header_range_timeout(&RequestTimeoutConfig::default());
+        assert_eq!(wait, Duration::from_secs(300));
+        assert!(wait > Duration::from_secs(11));
+    }
+
+    #[test]
+    fn disconnected_header_is_not_appended() {
+        let locator = [1u8; 32];
+        assert!(!super::header_batch_extends(&locator, &[2u8; 32]));
+        assert!(super::header_batch_extends(&locator, &locator));
     }
 }

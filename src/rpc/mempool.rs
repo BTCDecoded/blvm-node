@@ -22,6 +22,15 @@ fn wire_len(mempool: &MempoolManager, hash: &Hash, tx: &blvm_protocol::Transacti
         .len()
 }
 
+/// A transaction is BIP125-replaceable when it or an in-pool ancestor signals RBF.
+fn reports_bip125_replaceable(
+    tx: &blvm_protocol::Transaction,
+    ancestors: impl IntoIterator<Item = blvm_protocol::Transaction>,
+) -> bool {
+    use blvm_protocol::mempool::signals_rbf;
+    signals_rbf(tx) || ancestors.into_iter().any(|ancestor| signals_rbf(&ancestor))
+}
+
 /// Walk parent or child edges already stored on the pool. `descendants` follows children.
 fn follow_pool_edges(mempool: &MempoolManager, roots: Vec<Hash>, descendants: bool) -> Vec<Hash> {
     let mut out = Vec::new();
@@ -129,10 +138,19 @@ impl MempoolRpc {
             if verbose {
                 let mut result = serde_json::Map::new();
 
-                let utxo_set = if let (Some(_mempool), Some(storage)) =
-                    (self.mempool.as_ref(), self.storage.as_ref())
-                {
-                    Some(storage.utxos().get_all_utxos().unwrap_or_default())
+                let utxo_set = if let Some(storage) = self.storage.as_ref() {
+                    let mut set = blvm_protocol::UtxoSet::default();
+                    for tx in &transactions {
+                        for input in &tx.inputs {
+                            if set.contains_key(&input.prevout) {
+                                continue;
+                            }
+                            if let Ok(Some(utxo)) = storage.utxos().get_utxo(&input.prevout) {
+                                set.insert(input.prevout, std::sync::Arc::new(utxo));
+                            }
+                        }
+                    }
+                    Some(set)
                 } else {
                     None
                 };
@@ -192,7 +210,7 @@ impl MempoolRpc {
                             "fee": fee_btc,
                             "modifiedfee": modified_fee_btc,
                             "time": mempool.accepted_at(&txid),
-                            "height": -1,
+                            "height": mempool.admission_height(&txid),
                             "descendantcount": 1 + descendants.len(),
                             "descendantsize": descendant_size,
                             "descendantfees": descendant_fees,
@@ -208,7 +226,10 @@ impl MempoolRpc {
                             },
                             "depends": depends,
                             "spentby": spentby,
-                            "bip125-replaceable": blvm_protocol::mempool::signals_rbf(&tx)
+                            "bip125-replaceable": reports_bip125_replaceable(
+                                &tx,
+                                ancestors.iter().filter_map(|hash| mempool.get_transaction(hash))
+                            )
                         }),
                     );
                 }
@@ -431,7 +452,7 @@ impl MempoolRpc {
             "fee": base_fee_btc,
             "modifiedfee": modified_fee_btc,
             "time": mempool.accepted_at(hash),
-            "height": -1,
+            "height": mempool.admission_height(hash),
             "descendantcount": descendants.len() + 1,
             "descendantsize": descendant_size + size,
             "descendantfees": descendant_fees_btc,
@@ -453,7 +474,10 @@ impl MempoolRpc {
                 .iter()
                 .map(crate::storage::hashing::hash_to_rpc_hex)
                 .collect::<Vec<_>>(),
-            "bip125-replaceable": blvm_protocol::mempool::signals_rbf(tx)
+            "bip125-replaceable": reports_bip125_replaceable(
+                tx,
+                ancestors.iter().filter_map(|hash| mempool.get_transaction(hash))
+            )
         })
     }
 
@@ -514,5 +538,108 @@ impl MempoolRpc {
 impl Default for MempoolRpc {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod replaceable_tests {
+    use super::reports_bip125_replaceable;
+    use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput};
+
+    fn tx_with_sequence(sequence: u64) -> Transaction {
+        Transaction {
+            version: 2,
+            inputs: blvm_protocol::tx_inputs![TransactionInput {
+                prevout: OutPoint {
+                    hash: [1u8; 32],
+                    index: 0,
+                },
+                script_sig: vec![],
+                sequence,
+            }],
+            outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                value: 1_000,
+                script_pubkey: vec![0x51],
+            }],
+            lock_time: 0,
+        }
+    }
+
+    #[test]
+    fn child_of_a_replaceable_parent_is_replaceable() {
+        let parent = tx_with_sequence(0xfffffffd);
+        let child = tx_with_sequence(0xffffffff);
+        assert!(reports_bip125_replaceable(&child, [parent]));
+        assert!(!reports_bip125_replaceable(&child, []));
+    }
+}
+
+#[cfg(test)]
+mod verbose_pool_tests {
+    use super::MempoolRpc;
+    use crate::node::mempool::MempoolManager;
+    use crate::storage::Storage;
+    use blvm_protocol::opcodes::OP_1;
+    use blvm_protocol::{
+        OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet,
+    };
+    use serde_json::json;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn verbose_mempool_prices_the_spent_prevout() {
+        use blvm_protocol::block::calculate_tx_id;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let mempool = Arc::new(MempoolManager::new());
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        mempool.set_policy_config(Some(policy));
+        let funding = OutPoint {
+            hash: [3u8; 32],
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        storage.utxos().add_utxo(&funding, &utxo).unwrap();
+        storage
+            .utxos()
+            .insert_undecodable_utxo(&OutPoint {
+                hash: [9u8; 32],
+                index: 1,
+            })
+            .unwrap();
+        let mut set = UtxoSet::default();
+        set.insert(funding, Arc::new(utxo));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set)));
+        let tx = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: funding,
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 40_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        assert!(mempool.add_transaction(tx.clone()).unwrap());
+        let info = MempoolRpc::with_dependencies(mempool, storage)
+            .getrawmempool(&json!([true]))
+            .await
+            .unwrap();
+        let txid = crate::storage::hashing::hash_to_rpc_hex(&calculate_tx_id(&tx));
+        let fee = info[&txid]["fee"].as_f64().unwrap();
+        assert!((fee - 0.0001).abs() < 1e-12, "{fee}");
     }
 }

@@ -1355,6 +1355,20 @@ impl IbdUtxoStore {
         r.map(|r| (*r.utxo).clone())
     }
 
+    /// Cache hit, or the on-disk row after a flush-and-evict. Commitment removal needs the
+    /// script and value that `get` no longer has once the entry has left the cache.
+    pub fn get_for_commitment_removal(&self, key: &OutPointKey) -> Option<UTXO> {
+        if let Some(utxo) = self.get(key) {
+            return Some(utxo);
+        }
+        if self.memory_only {
+            return None;
+        }
+        let (loaded, _) =
+            load_keys_from_disk(Arc::clone(&self.disk), vec![*key], self.value_codec).ok()?;
+        loaded.get(key).cloned()
+    }
+
     #[inline]
     pub fn insert(&self, key: OutPointKey, utxo: UTXO) {
         self.cache_put(key, Arc::new(utxo), UNPROTECTED_HEIGHT);
@@ -2881,7 +2895,14 @@ impl IbdUtxoStore {
 
         for entry in self.cache.iter() {
             let key = *entry.key();
-            match encode_utxo_with_codec(codec, entry.value().utxo.as_ref()) {
+            let encoded = encode_utxo_with_codec(codec, entry.value().utxo.as_ref());
+            #[cfg(test)]
+            let encoded = if std::env::var_os("BLVM_TEST_UTXO_ENCODE_FAIL").is_some() {
+                Err(anyhow::anyhow!("test encode failure"))
+            } else {
+                encoded
+            };
+            match encoded {
                 Ok(bytes) => batch.push((key, bytes)),
                 Err(e) => {
                     encode_errors += 1;
@@ -2902,13 +2923,15 @@ impl IbdUtxoStore {
         if !batch.is_empty() {
             total += flush_batch(&batch)?;
         }
-        if let Err(e) = self.disk.flush_to_disk() {
-            warn!("[IBD_UTXO_STORE] flush_full_cache_to_lmdb: flush_to_disk failed: {e}");
+        if encode_errors > 0 {
+            anyhow::bail!(
+                "flush_full_cache_to_lmdb: {encode_errors} encode errors; {total} entries written"
+            );
         }
-        info!(
-            "[IBD_UTXO_STORE] flush_full_cache_to_lmdb: complete \
-             ({total} written, {encode_errors} encode errors)"
-        );
+        self.disk
+            .flush_to_disk()
+            .map_err(|e| anyhow::anyhow!("flush_full_cache_to_lmdb: flush_to_disk failed: {e}"))?;
+        info!("[IBD_UTXO_STORE] flush_full_cache_to_lmdb: complete ({total} written)");
         Ok(total)
     }
 
@@ -2942,5 +2965,183 @@ mod del_backlog_unit_tests {
         unsafe {
             std::env::remove_var("BLVM_IBD_DRAIN_CAP");
         }
+    }
+
+    #[test]
+    fn encode_error_and_failed_sync_do_not_report_a_finished_flush() {
+        use crate::storage::database::{BatchWriter, Tree};
+        use blvm_protocol::UTXO;
+        use std::sync::Arc;
+
+        struct FailFlush;
+        impl Tree for FailFlush {
+            fn insert(&self, _: &[u8], _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn get(&self, _: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+                Ok(None)
+            }
+            fn remove(&self, _: &[u8]) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn contains_key(&self, _: &[u8]) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            fn clear(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn len(&self) -> anyhow::Result<usize> {
+                Ok(0)
+            }
+            fn iter(&self) -> Box<dyn Iterator<Item = anyhow::Result<(Vec<u8>, Vec<u8>)>> + '_> {
+                Box::new(std::iter::empty())
+            }
+            fn batch(&self) -> anyhow::Result<Box<dyn BatchWriter + '_>> {
+                struct NullBatch;
+                impl BatchWriter for NullBatch {
+                    fn put(&mut self, _: &[u8], _: &[u8]) {}
+                    fn delete(&mut self, _: &[u8]) {}
+                    fn commit(self: Box<Self>) -> anyhow::Result<()> {
+                        Ok(())
+                    }
+                    fn len(&self) -> usize {
+                        0
+                    }
+                }
+                Ok(Box::new(NullBatch))
+            }
+            fn flush_to_disk(&self) -> anyhow::Result<()> {
+                anyhow::bail!("sync failed")
+            }
+        }
+
+        let store = IbdUtxoStore::new(Arc::new(FailFlush), usize::MAX);
+        store.cache_put(
+            [7u8; 40],
+            Arc::new(UTXO {
+                value: 1,
+                script_pubkey: vec![0x51].into(),
+                height: 1,
+                is_coinbase: false,
+            }),
+            1,
+        );
+        let sync_err = store.flush_full_cache_to_lmdb().unwrap_err();
+        assert!(sync_err.to_string().contains("flush_to_disk"), "{sync_err}");
+
+        unsafe {
+            std::env::set_var("BLVM_TEST_UTXO_ENCODE_FAIL", "1");
+        }
+        let encode_err = store.flush_full_cache_to_lmdb().unwrap_err();
+        unsafe {
+            std::env::remove_var("BLVM_TEST_UTXO_ENCODE_FAIL");
+        }
+        assert!(encode_err.to_string().contains("encode"), "{encode_err}");
+    }
+
+    #[test]
+    fn evicted_utxo_still_leaves_the_commitment_tree() {
+        use crate::storage::database::{BatchWriter, Tree};
+        use blvm_protocol::UTXO;
+        use blvm_protocol::types::OutPoint;
+        use blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        struct MapTree {
+            rows: Mutex<HashMap<Vec<u8>, Vec<u8>>>,
+        }
+        impl Tree for MapTree {
+            fn insert(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
+                self.rows
+                    .lock()
+                    .unwrap()
+                    .insert(key.to_vec(), value.to_vec());
+                Ok(())
+            }
+            fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+                Ok(self.rows.lock().unwrap().get(key).cloned())
+            }
+            fn remove(&self, key: &[u8]) -> anyhow::Result<()> {
+                self.rows.lock().unwrap().remove(key);
+                Ok(())
+            }
+            fn contains_key(&self, key: &[u8]) -> anyhow::Result<bool> {
+                Ok(self.rows.lock().unwrap().contains_key(key))
+            }
+            fn clear(&self) -> anyhow::Result<()> {
+                self.rows.lock().unwrap().clear();
+                Ok(())
+            }
+            fn len(&self) -> anyhow::Result<usize> {
+                Ok(self.rows.lock().unwrap().len())
+            }
+            fn iter(&self) -> Box<dyn Iterator<Item = anyhow::Result<(Vec<u8>, Vec<u8>)>> + '_> {
+                let rows = self.rows.lock().unwrap().clone();
+                Box::new(rows.into_iter().map(Ok))
+            }
+            fn batch(&self) -> anyhow::Result<Box<dyn BatchWriter + '_>> {
+                struct MapBatch<'a> {
+                    rows: &'a Mutex<HashMap<Vec<u8>, Vec<u8>>>,
+                    puts: Vec<(Vec<u8>, Vec<u8>)>,
+                    dels: Vec<Vec<u8>>,
+                }
+                impl BatchWriter for MapBatch<'_> {
+                    fn put(&mut self, key: &[u8], value: &[u8]) {
+                        self.puts.push((key.to_vec(), value.to_vec()));
+                    }
+                    fn delete(&mut self, key: &[u8]) {
+                        self.dels.push(key.to_vec());
+                    }
+                    fn commit(self: Box<Self>) -> anyhow::Result<()> {
+                        let mut rows = self.rows.lock().unwrap();
+                        for key in self.dels {
+                            rows.remove(&key);
+                        }
+                        for (key, value) in self.puts {
+                            rows.insert(key, value);
+                        }
+                        Ok(())
+                    }
+                    fn len(&self) -> usize {
+                        self.puts.len() + self.dels.len()
+                    }
+                }
+                Ok(Box::new(MapBatch {
+                    rows: &self.rows,
+                    puts: Vec::new(),
+                    dels: Vec::new(),
+                }))
+            }
+        }
+
+        let store = IbdUtxoStore::new(
+            Arc::new(MapTree {
+                rows: Mutex::new(HashMap::new()),
+            }),
+            1,
+        );
+        let outpoint = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let key = crate::storage::disk_utxo::outpoint_to_key(&outpoint);
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![0x51].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        let arc = Arc::new(utxo.clone());
+        store.cache_put(key, Arc::clone(&arc), 1);
+        store.flush_pending_batch(&[(key, Some(arc))]).unwrap();
+        store.remove(&key);
+        assert!(store.get(&key).is_none());
+        let loaded = store.get_for_commitment_removal(&key).unwrap();
+        assert_eq!(loaded, utxo);
+        let mut tree = UtxoMerkleTree::new().unwrap();
+        let inserted = tree.insert(outpoint, loaded.clone()).unwrap();
+        let removed = tree.remove(&outpoint, &loaded).unwrap();
+        assert_ne!(inserted, removed);
     }
 }

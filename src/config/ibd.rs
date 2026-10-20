@@ -18,6 +18,11 @@ macro_rules! latch_env {
     }};
 }
 
+/// Gigabytes to bytes. `None` when the product does not fit in `u64`.
+pub fn bandwidth_gb_to_bytes(gb: u64) -> Option<u64> {
+    gb.checked_mul(1024 * 1024 * 1024)
+}
+
 /// IBD bandwidth protection configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IbdProtectionConfig {

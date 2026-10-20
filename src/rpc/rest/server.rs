@@ -2444,6 +2444,17 @@ impl RestApiServer {
                     })
                     .unwrap_or(6); // Default to 6 blocks if not specified
 
+                if !(1..=1008).contains(&target_blocks) {
+                    return Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::BAD_REQUEST,
+                        "BAD_REQUEST",
+                        "blocks must be between 1 and 1008",
+                        None,
+                        request_id,
+                    );
+                }
+
                 match fees::get_fee_estimate(&server.mining, Some(target_blocks)).await {
                     Ok(data) => {
                         Self::success_response_with_headers(data, request_id, security_headers)
@@ -2551,5 +2562,36 @@ impl RestApiServer {
         }
 
         http_response
+    }
+}
+
+#[cfg(test)]
+mod fee_request_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn blocks_zero_is_a_bad_request() {
+        let server = Arc::new(RestApiServer::new(
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::new(blockchain::BlockchainRpc::new()),
+            Arc::new(network::NetworkRpc::new()),
+            Arc::new(mempool::MempoolRpc::new()),
+            Arc::new(mining::MiningRpc::new()),
+            Arc::new(rawtx::RawTxRpc::new()),
+        ));
+        let uri: Uri = "/api/v1/fees/estimate?blocks=0".parse().unwrap();
+        let response = RestApiServer::handle_fee_request(
+            server,
+            Method::GET,
+            "/api/v1/fees/estimate",
+            &uri,
+            "req".to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("BAD_REQUEST"), "{text}");
+        assert!(!text.contains("INTERNAL_ERROR"), "{text}");
     }
 }

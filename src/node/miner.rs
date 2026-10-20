@@ -96,7 +96,11 @@ impl TransactionSelector {
 
         let mut selected = Vec::new();
         let mut selected_ids = HashSet::new();
-        let mut current_size = 0usize;
+        let mut current_size = if self.max_block_size > TEMPLATE_RESERVE_BYTES {
+            TEMPLATE_RESERVE_BYTES
+        } else {
+            0
+        };
         let mut current_weight = TEMPLATE_RESERVE_WEIGHT.min(self.max_block_weight);
         let mut current_sigops = 0u64;
         let mut waiting: VecDeque<Transaction> = VecDeque::new();
@@ -588,6 +592,7 @@ impl TransactionSelector {
 
 /// Header, a 3-byte transaction count, and a coinbase that will gain a witness commitment.
 const TEMPLATE_RESERVE_WEIGHT: u64 = 4_000;
+const TEMPLATE_RESERVE_BYTES: usize = (TEMPLATE_RESERVE_WEIGHT / 4) as usize;
 
 /// BIP141 weight: `3 × stripped size + total size`.
 fn bip141_weight(tx: &Transaction, input_witnesses: Option<&[Witness]>) -> u64 {
@@ -1692,6 +1697,33 @@ mod tests {
         assert!(fit < 20);
         assert_eq!(selected.len(), fit);
         assert!(used <= 4_000_000);
+    }
+
+    #[test]
+    fn selector_leaves_room_for_the_coinbase() {
+        let mut sample = create_test_transaction(2, 1_000);
+        sample.inputs[0].script_sig = vec![0x51];
+        while blvm_consensus::transaction::calculate_transaction_size(&sample) < 100 {
+            sample.inputs[0].script_sig.push(0);
+        }
+        let one = blvm_consensus::transaction::calculate_transaction_size(&sample);
+        let selector = TransactionSelector::with_params(TEMPLATE_RESERVE_BYTES + one, 4_000_000, 0);
+        let mut mempool = MockMempoolProvider::new();
+        for i in 0..5u64 {
+            let mut tx = sample.clone();
+            tx.lock_time = i;
+            mempool.add_transaction(tx);
+        }
+        let selected = selector.select_transactions(&mempool, &blvm_protocol::UtxoSet::default());
+        let stripped: usize = selected
+            .iter()
+            .map(blvm_consensus::transaction::calculate_transaction_size)
+            .sum();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(
+            stripped + TEMPLATE_RESERVE_BYTES,
+            TEMPLATE_RESERVE_BYTES + one
+        );
     }
 
     #[test]

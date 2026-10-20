@@ -100,10 +100,13 @@ async fn test_block_request_completion_first_connection() -> Result<()> {
     let peer_addr: SocketAddr = "127.0.0.1:18444".parse().unwrap();
     let block_rx = network.register_block_request(peer_addr, block_hash);
 
-    // Handshake: otherwise `dispatch_protocol_message` drops non-Version traffic.
+    // Handshake: a block is ignored until Verack.
     network
         .handle_incoming_wire_tcp(peer_addr, build_version_wire_message())
         .await?;
+    let verack =
+        ProtocolParser::serialize_message(&ProtocolMessage::Verack).expect("serialize Verack");
+    network.handle_incoming_wire_tcp(peer_addr, verack).await?;
 
     // Simulate peer sending block (same path as RawMessageReceived -> handle_incoming_wire_tcp)
     network

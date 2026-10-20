@@ -20,6 +20,8 @@ pub struct Peer {
     transport_addr: TransportAddr, // Full transport address (may differ from SocketAddr for Iroh)
     message_tx: mpsc::UnboundedSender<NetworkMessage>,
     pub(crate) send_tx: mpsc::UnboundedSender<Vec<u8>>, // Channel for sending messages
+    /// Read loop for this connection. Aborting it drops the read half.
+    read_task: Option<tokio::task::AbortHandle>,
     connected: bool,
     /// Connection time (Unix timestamp)
     conntime: u64,
@@ -55,6 +57,8 @@ pub struct Peer {
     /// Best block height from version message (peer's chain tip)
     /// This indicates how many blocks the peer has
     start_height: i32,
+    /// Peer clock from the version message, as a Unix timestamp.
+    version_time: Option<i64>,
     /// Whether this is an outbound connection (we initiated it)
     is_outbound: bool,
     /// Best block hash (from version message or headers)
@@ -111,6 +115,7 @@ impl Peer {
             transport_addr,
             message_tx,
             send_tx,
+            read_task: None,
             connected: true,
             conntime: now,
             last_send: now,
@@ -127,6 +132,7 @@ impl Peer {
             version: 70015,
             user_agent: Some("/test-peer/".to_string()),
             start_height: 0,
+            version_time: None,
             is_outbound: false,
             best_block_hash: None,
             best_block_height: None,
@@ -160,6 +166,7 @@ impl Peer {
         let transport_addr_clone = transport_addr.clone();
         let transport_addr_write = transport_addr.clone();
         let message_tx_clone = message_tx.clone();
+        let message_tx_write = message_tx.clone();
 
         // Use interior mutability pattern: TcpConnection has separate Arc<Mutex> for
         // reader and writer internally, so we can share it via Arc without outer Mutex.
@@ -172,7 +179,7 @@ impl Peer {
         let conn_read = Arc::clone(&conn);
 
         // Spawn read task - this task owns its locked access while reading
-        tokio::spawn(async move {
+        let read_task = tokio::spawn(async move {
             loop {
                 // Get mutable access and call recv - this blocks inside recv
                 // but that's fine since TcpConnection.recv() only locks its reader half
@@ -247,6 +254,9 @@ impl Peer {
                     }
                     Err(e) => {
                         warn!("Peer write error for {:?}: {}", transport_addr_write, e);
+                        let _ = message_tx_write.send(NetworkMessage::PeerDisconnected(
+                            transport_addr_write.clone(),
+                        ));
                         break;
                     }
                 }
@@ -260,6 +270,7 @@ impl Peer {
             transport_addr,
             message_tx,
             send_tx,
+            read_task: Some(read_task.abort_handle()),
             connected: true,
             conntime: now,
             last_send: now,
@@ -276,6 +287,7 @@ impl Peer {
             version: 0,  // Protocol version from version message (set when version received)
             user_agent: None, // User agent from version message (set when version received)
             start_height: 0, // Best block height from version message (set when version received)
+            version_time: None,
             is_outbound: false, // Default to false, should be set by caller
             pending_ping_nonce: None,
             ping_sent_time: None,
@@ -333,9 +345,10 @@ impl Peer {
         let transport_addr_clone = transport_addr.clone();
         let transport_addr_write = transport_addr.clone();
         let message_tx_clone = message_tx.clone();
+        let message_tx_write = message_tx.clone();
 
         // Spawn read task - owns the reader half exclusively
-        tokio::spawn(async move {
+        let read_task = tokio::spawn(async move {
             let mut reader = reader;
             loop {
                 // Read Bitcoin wire format header (24 bytes)
@@ -419,28 +432,12 @@ impl Peer {
         });
 
         // Spawn write task - owns the writer half exclusively
-        tokio::spawn(async move {
-            let mut writer = writer;
-            while let Some(data) = send_rx.recv().await {
-                match writer.write_all(&data).await {
-                    Ok(_) => {
-                        if let Err(e) = writer.flush().await {
-                            warn!("Peer flush error for {:?}: {}", transport_addr_write, e);
-                            break;
-                        }
-                        debug!(
-                            "Sent {} bytes to peer {:?}",
-                            data.len(),
-                            transport_addr_write
-                        );
-                    }
-                    Err(e) => {
-                        warn!("Peer write error for {:?}: {}", transport_addr_write, e);
-                        break;
-                    }
-                }
-            }
-        });
+        tokio::spawn(run_peer_writer(
+            writer,
+            send_rx,
+            message_tx_write,
+            transport_addr_write,
+        ));
 
         let now = current_timestamp();
 
@@ -448,6 +445,7 @@ impl Peer {
             addr,
             transport_addr,
             send_tx,
+            read_task: Some(read_task.abort_handle()),
             message_tx,
             connected: true,
             conntime: now,
@@ -465,6 +463,7 @@ impl Peer {
             version: 0,
             user_agent: None,
             start_height: 0,
+            version_time: None,
             is_outbound: false, // Default to false, should be set by caller
             best_block_hash: None,
             best_block_height: None,
@@ -627,6 +626,24 @@ impl Peer {
         self.start_height
     }
 
+    pub fn set_version_time(&mut self, timestamp: i64) {
+        self.version_time = Some(timestamp);
+    }
+
+    /// Version timestamp minus `now`. Zero when the peer has not sent a version time.
+    pub fn time_offset(&self, now: u64) -> i64 {
+        self.version_time
+            .map(|timestamp| timestamp.saturating_sub(now as i64))
+            .unwrap_or(0)
+    }
+
+    /// Header height when one is stored, otherwise the version start height.
+    pub fn synced_block_height(&self) -> i64 {
+        self.best_block_height
+            .map(|height| height as i64)
+            .unwrap_or(self.start_height as i64)
+    }
+
     /// Check if peer has a specific service flag
     pub fn has_service(&self, flag: u64) -> bool {
         (self.services & flag) != 0
@@ -746,6 +763,17 @@ impl Peer {
         self.permissions
     }
 
+    /// Drop the read and write halves so the TCP connection closes.
+    pub fn shutdown_connection(&mut self) {
+        if let Some(task) = self.read_task.take() {
+            task.abort();
+        }
+        let (closed_tx, closed_rx) = mpsc::unbounded_channel();
+        drop(closed_rx);
+        drop(std::mem::replace(&mut self.send_tx, closed_tx));
+        self.connected = false;
+    }
+
     /// Check if peer has NoBan permission (won't be disconnected for misbehavior)
     pub fn has_noban_permission(&self) -> bool {
         // NoBan flag = 1 (NetPermissionFlags::NoBan)
@@ -770,5 +798,111 @@ impl Peer {
     /// Get timestamp of last block announcement
     pub fn last_block_announcement(&self) -> Option<u64> {
         self.last_block_announcement
+    }
+}
+
+async fn run_peer_writer<W>(
+    mut writer: W,
+    mut send_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    message_tx: mpsc::UnboundedSender<NetworkMessage>,
+    addr: TransportAddr,
+) where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    while let Some(data) = send_rx.recv().await {
+        match writer.write_all(&data).await {
+            Ok(()) => {
+                if let Err(e) = writer.flush().await {
+                    warn!("Peer flush error for {:?}: {}", addr, e);
+                    let _ = message_tx.send(NetworkMessage::PeerDisconnected(addr));
+                    break;
+                }
+                debug!("Sent {} bytes to peer {:?}", data.len(), addr);
+            }
+            Err(e) => {
+                warn!("Peer write error for {:?}: {}", addr, e);
+                let _ = message_tx.send(NetworkMessage::PeerDisconnected(addr));
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod write_error_tests {
+    use super::run_peer_writer;
+    use crate::network::NetworkMessage;
+    use crate::network::transport::TransportAddr;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::AsyncWrite;
+    use tokio::sync::mpsc;
+
+    struct BrokenWrite;
+
+    impl AsyncWrite for BrokenWrite {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "write",
+            )))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn write_error_removes_the_peer() {
+        let (send_tx, send_rx) = mpsc::unbounded_channel();
+        let (message_tx, mut message_rx) = mpsc::unbounded_channel();
+        let addr = TransportAddr::Tcp("127.0.0.1:8333".parse().unwrap());
+        let writer = tokio::spawn(run_peer_writer(
+            BrokenWrite,
+            send_rx,
+            message_tx,
+            addr.clone(),
+        ));
+        send_tx.send(vec![1, 2, 3]).unwrap();
+        let message = message_rx.recv().await;
+        assert!(matches!(message, Some(NetworkMessage::PeerDisconnected(got)) if got == addr));
+        writer.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::Peer;
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn shutdown_closes_the_tcp_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let (message_tx, _message_rx) = mpsc::unbounded_channel();
+        let mut peer = Peer::from_tcp_stream_split(server, addr, message_tx, 4_000_000);
+        peer.shutdown_connection();
+        let mut client = client;
+        let mut buf = [0u8; 8];
+        let read = tokio::time::timeout(Duration::from_secs(2), client.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read, 0);
     }
 }

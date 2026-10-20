@@ -250,11 +250,16 @@ impl RawTxRpc {
             Some(crate::rpc::validation::MAX_HEX_STRING_LENGTH),
         )?;
 
-        // Parse optional parameters
+        // Parse optional parameters. An omitted cap is 0.10 BTC/kvB unless high fees are allowed.
         let maxfeerate_btc_per_kvb: Option<f64> = param_f64(params, 1)
             .or_else(|| param_str(params, 1).and_then(|s| s.parse::<f64>().ok()));
 
         let allowhighfees: bool = param_bool_default(params, 2, false);
+        let max_feerate_cap = if allowhighfees {
+            None
+        } else {
+            Some(maxfeerate_btc_per_kvb.unwrap_or(0.10))
+        };
 
         let tx_bytes = hex::decode(&hex_string).map_err(|e| {
             RpcError::invalid_params_with_fields(
@@ -339,10 +344,22 @@ impl RawTxRpc {
                         });
                     }
 
-                    // Transaction structure is valid, now check inputs against UTXO set
-                    let utxo_set = storage.utxos().get_all_utxos().map_err(|e| {
-                        RpcError::internal_error(format!("Failed to get UTXO set: {e}"))
-                    })?;
+                    // Look up this transaction's prevouts. A bad row elsewhere in the tree
+                    // is not part of this check.
+                    let mut utxo_set = blvm_protocol::UtxoSet::default();
+                    for input in &tx.inputs {
+                        match storage.utxos().get_utxo(&input.prevout) {
+                            Ok(Some(utxo)) => {
+                                utxo_set.insert(input.prevout, std::sync::Arc::new(utxo));
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                return Err(RpcError::internal_error(format!(
+                                    "sendrawtransaction: utxo read failed: {err}"
+                                )));
+                            }
+                        }
+                    }
 
                     // Check if all inputs exist in the chain set or an unspent pool output.
                     for input in &tx.inputs {
@@ -398,8 +415,8 @@ impl RawTxRpc {
                         0.0
                     };
 
-                    // Check maxfeerate if provided and allowhighfees is false
-                    if let Some(max_feerate) = maxfeerate_btc_per_kvb {
+                    // Check the fee cap. allowhighfees skips it. An omitted maxfeerate is 0.10 BTC/kvB.
+                    if let Some(max_feerate) = max_feerate_cap {
                         if !allowhighfees && fee_rate_btc_per_kvb > max_feerate {
                             return Err(RpcError::with_data(
                                 RpcErrorCode::TxRejected,
@@ -431,7 +448,7 @@ impl RawTxRpc {
                         Ok(true) => {
                             debug!("Transaction {} accepted to mempool", txid_hex);
                             if let Some(ref network) = self.network {
-                                let fee = mempool.cached_fee_rate(&txid);
+                                let fee = mempool.cached_fee_basis(&txid);
                                 network.announce_accepted_transaction(txid, fee).await;
                             }
                         }
@@ -938,7 +955,7 @@ impl RawTxRpc {
                         "txid": Self::rpc_txid(&input.prevout.hash),
                         "vout": input.prevout.index,
                         "scriptSig": {
-                            "asm": "",
+                            "asm": script_asm(input.script_sig.as_ref()),
                             "hex": hex::encode(&input.script_sig)
                         },
                         "txinwitness": txinwitness,
@@ -961,7 +978,7 @@ impl RawTxRpc {
                     "scriptPubKey": {
                         "asm": "",
                         "hex": hex::encode(&output.script_pubkey),
-                        "reqSigs": 1,
+                        "reqSigs": required_signatures(output.script_pubkey.as_ref()),
                         "type": script_pubkey_type(output.script_pubkey.as_ref()),
                         "addresses": []
                     }
@@ -996,42 +1013,50 @@ impl RawTxRpc {
         }
 
         if let Some(ref storage) = self.storage {
-            if let Ok(Some(tx)) = storage.transactions().get_transaction(&txid_array) {
-                let block_witness = Self::block_witness_for_tx(storage, &txid_array);
-                let mempool_witness = self
-                    .mempool
-                    .as_ref()
-                    .and_then(|m| m.get_transaction_witnesses(&txid_array));
-                let witnesses = block_witness.or(mempool_witness);
-                Self::format_getrawtransaction_response(&tx, witnesses.as_deref(), verbose)
-            } else if let Some((block_hash, height)) =
-                crate::module::pipeline::try_lookup_block_for_txids(&[txid.to_string()])
-            {
-                if let Ok(Some(block)) = storage.blocks().get_block(&block_hash) {
-                    let (block, witnesses) =
-                        crate::module::pipeline::try_rehydrate_block_for_consensus(
-                            height,
-                            block_hash,
-                            block,
-                            Vec::new(),
-                        );
-                    use blvm_protocol::block::calculate_tx_id;
-                    if let Some((idx, tx)) = block
-                        .transactions
-                        .iter()
-                        .enumerate()
-                        .find(|(_, tx)| calculate_tx_id(tx) == txid_array)
+            match storage.transactions().get_transaction(&txid_array) {
+                Ok(Some(tx)) => {
+                    let block_witness = Self::block_witness_for_tx(storage, &txid_array);
+                    let mempool_witness = self
+                        .mempool
+                        .as_ref()
+                        .and_then(|m| m.get_transaction_witnesses(&txid_array));
+                    let witnesses = block_witness.or(mempool_witness);
+                    Self::format_getrawtransaction_response(&tx, witnesses.as_deref(), verbose)
+                }
+                Err(err) => Err(RpcError::internal_error(format!(
+                    "getrawtransaction: storage read failed: {err}"
+                ))),
+                Ok(None) => {
+                    if let Some((block_hash, height)) =
+                        crate::module::pipeline::try_lookup_block_for_txids(&[txid.to_string()])
                     {
-                        let w = witnesses.get(idx).cloned();
-                        Self::format_getrawtransaction_response(tx, w.as_deref(), verbose)
+                        if let Ok(Some(block)) = storage.blocks().get_block(&block_hash) {
+                            let (block, witnesses) =
+                                crate::module::pipeline::try_rehydrate_block_for_consensus(
+                                    height,
+                                    block_hash,
+                                    block,
+                                    Vec::new(),
+                                );
+                            use blvm_protocol::block::calculate_tx_id;
+                            if let Some((idx, tx)) = block
+                                .transactions
+                                .iter()
+                                .enumerate()
+                                .find(|(_, tx)| calculate_tx_id(tx) == txid_array)
+                            {
+                                let w = witnesses.get(idx).cloned();
+                                Self::format_getrawtransaction_response(tx, w.as_deref(), verbose)
+                            } else {
+                                Err(RpcError::tx_not_found(""))
+                            }
+                        } else {
+                            Err(RpcError::tx_not_found(""))
+                        }
                     } else {
                         Err(RpcError::tx_not_found(""))
                     }
-                } else {
-                    Err(RpcError::tx_not_found(""))
                 }
-            } else {
-                Err(RpcError::tx_not_found(""))
             }
         } else {
             Err(RpcError::tx_not_found(txid))
@@ -1118,14 +1143,14 @@ impl RawTxRpc {
                             tokio::task::spawn_blocking({
                                 let storage = storage.clone();
                                 move || -> Result<([u8; 32], u64), anyhow::Error> {
-                                    let best_hash = storage
-                                        .chain()
-                                        .get_tip_hash()
-                                        .ok()
-                                        .flatten()
-                                        .unwrap_or([0u8; 32]);
+                                    let best_hash =
+                                        storage.chain().get_tip_hash()?.ok_or_else(|| {
+                                            anyhow::anyhow!("chain tip hash is missing")
+                                        })?;
                                     let tip_height =
-                                        storage.chain().get_height().ok().flatten().unwrap_or(0);
+                                        storage.chain().get_height()?.ok_or_else(|| {
+                                            anyhow::anyhow!("chain tip height is missing")
+                                        })?;
                                     Ok((best_hash, tip_height))
                                 }
                             })
@@ -1135,8 +1160,20 @@ impl RawTxRpc {
                     )
                     .await
                     {
-                        Ok(Ok(Ok((hash, height)))) => (hash, height),
-                        _ => ([0u8; 32], 0), // Fallback on error/timeout
+                        Ok(Ok(Ok(pair))) => pair,
+                        Ok(Ok(Err(e))) => {
+                            return Err(RpcError::internal_error(format!("tip read failed: {e}")));
+                        }
+                        Ok(Err(e)) => {
+                            return Err(RpcError::internal_error(format!(
+                                "tip read task failed: {e}"
+                            )));
+                        }
+                        Err(_) => {
+                            return Err(RpcError::internal_error(
+                                "Timeout reading chain tip".to_string(),
+                            ));
+                        }
                     };
 
                     let tx_height = Some(utxo.height);
@@ -1558,7 +1595,7 @@ impl RawTxRpc {
             ));
         }
         let sats = (amount * 100_000_000.0).round();
-        if sats > u64::MAX as f64 {
+        if sats > u64::MAX as f64 || sats > blvm_protocol::constants::MAX_MONEY as f64 {
             return Err(RpcError::invalid_params("amount is too large".to_string()));
         }
         Ok(sats as u64)
@@ -1606,6 +1643,11 @@ impl RawTxRpc {
 
         // Parse optional parameters
         let locktime = param_u64_default(params, 2, 0);
+        if locktime > u32::MAX as u64 {
+            return Err(RpcError::invalid_params(
+                "locktime does not fit in 4 bytes".to_string(),
+            ));
+        }
         let replaceable = param_bool_default(params, 3, true);
         let version = param_u64_default(params, 4, 2);
         if version > u32::MAX as u64 {
@@ -1849,6 +1891,186 @@ impl Default for RawTxRpc {
     }
 }
 
+pub(crate) fn script_asm(script: &[u8]) -> String {
+    let mut words = Vec::new();
+    let mut i = 0;
+    while i < script.len() {
+        let op = script[i];
+        i += 1;
+        let push_len = if (1..=75).contains(&op) {
+            Some((0, op as usize))
+        } else if op == 0x4c && i < script.len() {
+            Some((1, script[i] as usize))
+        } else if op == 0x4d && i + 1 < script.len() {
+            Some((2, u16::from_le_bytes([script[i], script[i + 1]]) as usize))
+        } else if op == 0x4e && i + 3 < script.len() {
+            Some((
+                4,
+                u32::from_le_bytes(script[i..i + 4].try_into().unwrap()) as usize,
+            ))
+        } else {
+            None
+        };
+        if let Some((len_bytes, data_len)) = push_len {
+            let start = i + len_bytes;
+            if script.len() < start + data_len {
+                words.push(opcode_name(op));
+                break;
+            }
+            words.push(hex::encode(&script[start..start + data_len]));
+            i = start + data_len;
+        } else {
+            words.push(opcode_name(op));
+        }
+    }
+    words.join(" ")
+}
+
+fn opcode_name(op: u8) -> String {
+    if (0x51..=0x60).contains(&op) {
+        return format!("OP_{}", op - 0x50);
+    }
+    let name = match op {
+        0x00 => "OP_0",
+        0x4f => "OP_1NEGATE",
+        0x50 => "OP_RESERVED",
+        0x61 => "OP_NOP",
+        0x62 => "OP_VER",
+        0x63 => "OP_IF",
+        0x64 => "OP_NOTIF",
+        0x65 => "OP_VERIF",
+        0x66 => "OP_VERNOTIF",
+        0x67 => "OP_ELSE",
+        0x68 => "OP_ENDIF",
+        0x69 => "OP_VERIFY",
+        0x6a => "OP_RETURN",
+        0x6b => "OP_TOALTSTACK",
+        0x6c => "OP_FROMALTSTACK",
+        0x6d => "OP_2DROP",
+        0x6e => "OP_2DUP",
+        0x6f => "OP_3DUP",
+        0x70 => "OP_2OVER",
+        0x71 => "OP_2ROT",
+        0x72 => "OP_2SWAP",
+        0x73 => "OP_IFDUP",
+        0x74 => "OP_DEPTH",
+        0x75 => "OP_DROP",
+        0x76 => "OP_DUP",
+        0x77 => "OP_NIP",
+        0x78 => "OP_OVER",
+        0x79 => "OP_PICK",
+        0x7a => "OP_ROLL",
+        0x7b => "OP_ROT",
+        0x7c => "OP_SWAP",
+        0x7d => "OP_TUCK",
+        0x7e => "OP_CAT",
+        0x7f => "OP_SUBSTR",
+        0x80 => "OP_LEFT",
+        0x81 => "OP_RIGHT",
+        0x82 => "OP_SIZE",
+        0x83 => "OP_INVERT",
+        0x84 => "OP_AND",
+        0x85 => "OP_OR",
+        0x86 => "OP_XOR",
+        0x87 => "OP_EQUAL",
+        0x88 => "OP_EQUALVERIFY",
+        0x89 => "OP_RESERVED1",
+        0x8a => "OP_RESERVED2",
+        0x8b => "OP_1ADD",
+        0x8c => "OP_1SUB",
+        0x8d => "OP_2MUL",
+        0x8e => "OP_2DIV",
+        0x8f => "OP_NEGATE",
+        0x90 => "OP_ABS",
+        0x91 => "OP_NOT",
+        0x92 => "OP_0NOTEQUAL",
+        0x93 => "OP_ADD",
+        0x94 => "OP_SUB",
+        0x95 => "OP_MUL",
+        0x96 => "OP_DIV",
+        0x97 => "OP_MOD",
+        0x98 => "OP_LSHIFT",
+        0x99 => "OP_RSHIFT",
+        0x9a => "OP_BOOLAND",
+        0x9b => "OP_BOOLOR",
+        0x9c => "OP_NUMEQUAL",
+        0x9d => "OP_NUMEQUALVERIFY",
+        0x9e => "OP_NUMNOTEQUAL",
+        0x9f => "OP_LESSTHAN",
+        0xa0 => "OP_GREATERTHAN",
+        0xa1 => "OP_LESSTHANOREQUAL",
+        0xa2 => "OP_GREATERTHANOREQUAL",
+        0xa3 => "OP_MIN",
+        0xa4 => "OP_MAX",
+        0xa5 => "OP_WITHIN",
+        0xa6 => "OP_RIPEMD160",
+        0xa7 => "OP_SHA1",
+        0xa8 => "OP_SHA256",
+        0xa9 => "OP_HASH160",
+        0xaa => "OP_HASH256",
+        0xab => "OP_CODESEPARATOR",
+        0xac => "OP_CHECKSIG",
+        0xad => "OP_CHECKSIGVERIFY",
+        0xae => "OP_CHECKMULTISIG",
+        0xaf => "OP_CHECKMULTISIGVERIFY",
+        0xb0 => "OP_NOP1",
+        0xb1 => "OP_CHECKLOCKTIMEVERIFY",
+        0xb2 => "OP_CHECKSEQUENCEVERIFY",
+        0xb3 => "OP_CHECKTEMPLATEVERIFY",
+        0xb4 => "OP_NOP5",
+        0xb5 => "OP_NOP6",
+        0xb6 => "OP_NOP7",
+        0xb7 => "OP_NOP8",
+        0xb8 => "OP_NOP9",
+        0xb9 => "OP_NOP10",
+        0xba => "OP_CHECKSIGADD",
+        0xcc => "OP_CHECKSIGFROMSTACK",
+        _ => return format!("OP_{op:02x}"),
+    };
+    name.to_string()
+}
+
+pub(crate) fn required_signatures(script: &[u8]) -> u64 {
+    if script.last() != Some(&0xae) || script.len() < 3 {
+        return 1;
+    }
+    let Some(required) = small_push_int(script[0]) else {
+        return 1;
+    };
+    let Some(keys) = small_push_int(script[script.len() - 2]) else {
+        return 1;
+    };
+    if required > keys {
+        return 1;
+    }
+    let mut index = 1;
+    let mut seen = 0u64;
+    while index < script.len() - 2 {
+        let op = script[index];
+        index += 1;
+        if !(1..=75).contains(&op) {
+            return 1;
+        }
+        let data_len = op as usize;
+        if index + data_len > script.len() - 2 {
+            return 1;
+        }
+        index += data_len;
+        seen += 1;
+    }
+    if seen == keys { required } else { 1 }
+}
+
+fn small_push_int(op: u8) -> Option<u64> {
+    if op == 0x00 {
+        Some(0)
+    } else if (0x51..=0x60).contains(&op) {
+        Some(u64::from(op - 0x50))
+    } else {
+        None
+    }
+}
+
 pub(crate) fn script_pubkey_type(script: &[u8]) -> &'static str {
     use blvm_protocol::opcodes::{
         OP_0, OP_1, OP_CHECKSIG, OP_DUP, OP_EQUAL, OP_EQUALVERIFY, OP_HASH160, OP_RETURN,
@@ -1942,6 +2164,35 @@ mod createraw_locks {
     }
 
     #[tokio::test]
+    async fn locktime_above_u32_max_is_rejected() {
+        let rpc = RawTxRpc::new();
+        let err = rpc
+            .createrawtransaction(&json!([
+                [{"txid": "11".repeat(32), "vout": 0}],
+                {"bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4": 0.001},
+                4294967296u64
+            ]))
+            .await
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("locktime"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn output_above_max_money_is_rejected() {
+        let rpc = RawTxRpc::new();
+        let err = rpc
+            .createrawtransaction(&json!([
+                [{"txid": "11".repeat(32), "vout": 0}],
+                {"bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4": 21000001.0}
+            ]))
+            .await
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("too large"), "{text}");
+    }
+
+    #[tokio::test]
     async fn both_writers_emit_three_sats_and_an_eighty_byte_op_return() {
         use blvm_protocol::opcodes::OP_PUSHDATA1;
         let rpc = RawTxRpc::new();
@@ -1994,6 +2245,127 @@ mod createraw_locks {
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn omitted_maxfeerate_rejects_a_rate_above_one_tenth_btc_per_kvb() {
+        use crate::node::mempool::MempoolManager;
+        use crate::storage::Storage;
+        use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::{
+            OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet,
+        };
+        use std::sync::Arc;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let mempool = Arc::new(MempoolManager::new());
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        mempool.set_policy_config(Some(policy));
+        let funding = OutPoint {
+            hash: [6u8; 32],
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 2_000_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        storage.utxos().add_utxo(&funding, &utxo).unwrap();
+        let mut set = UtxoSet::default();
+        set.insert(funding, Arc::new(utxo));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set)));
+        let tx = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: funding,
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 1_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let hex_tx = RawTxRpc::serialize_transaction_with_witness(&tx, None);
+        let rpc = RawTxRpc::with_dependencies(storage, Arc::clone(&mempool), None, None);
+        let err = rpc.sendrawtransaction(&json!([hex_tx])).await.unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("BTC/kvB"), "{text}");
+        assert!(
+            mempool
+                .get_transaction(&blvm_protocol::block::calculate_tx_id(&tx))
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn sendrawtransaction_looks_up_prevouts_not_the_utxo_set() {
+        use crate::node::mempool::MempoolManager;
+        use crate::storage::Storage;
+        use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO};
+        use std::sync::Arc;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let mempool = Arc::new(MempoolManager::new());
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        mempool.set_policy_config(Some(policy));
+        let funding = OutPoint {
+            hash: [6u8; 32],
+            index: 0,
+        };
+        storage
+            .utxos()
+            .add_utxo(
+                &funding,
+                &UTXO {
+                    value: 2_000_000,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 1,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+        storage
+            .utxos()
+            .insert_undecodable_utxo(&OutPoint {
+                hash: [9u8; 32],
+                index: 0,
+            })
+            .unwrap();
+        let tx = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: funding,
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 1_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let hex_tx = RawTxRpc::serialize_transaction_with_witness(&tx, None);
+        let err = RawTxRpc::with_dependencies(storage, mempool, None, None)
+            .sendrawtransaction(&json!([hex_tx]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("BTC/kvB"), "{err}");
+        assert!(!err.contains("Failed to get UTXO set"), "{err}");
     }
 
     #[tokio::test]
@@ -2335,5 +2707,155 @@ mod createraw_locks {
         assert_eq!(script[0], OP_HASH160);
         assert_eq!(*script.last().unwrap(), OP_EQUAL);
         assert_eq!(&script[2..22], &[0x22; 20]);
+    }
+}
+
+#[cfg(test)]
+mod gettxout_tip_tests {
+    use super::RawTxRpc;
+    use crate::node::mempool::MempoolManager;
+    use crate::storage::Storage;
+    use blvm_protocol::{OutPoint, UTXO};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn failed_tip_read_is_not_a_zero_bestblock() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let hash = [7u8; 32];
+        storage
+            .utxos()
+            .add_utxo(
+                &OutPoint { hash, index: 0 },
+                &UTXO {
+                    value: 50_000,
+                    script_pubkey: vec![0x51].into(),
+                    height: 100,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+        let rpc = RawTxRpc::with_dependencies(
+            Arc::clone(&storage),
+            Arc::new(MempoolManager::new()),
+            None,
+            None,
+        );
+        let txid = crate::storage::hashing::hash_to_rpc_hex(&hash);
+        let err = rpc
+            .gettxout(&json!([txid, 0, false]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tip read failed"), "{err}");
+        assert!(!err.contains(&"0".repeat(64)), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod raw_tx_read_tests {
+    use super::RawTxRpc;
+    use crate::node::mempool::MempoolManager;
+    use crate::storage::Storage;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn a_storage_read_error_is_not_a_missing_transaction() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let txid = [8u8; 32];
+        storage
+            .transactions()
+            .insert_undecodable_transaction(&txid)
+            .unwrap();
+        let rpc = RawTxRpc::with_dependencies(
+            Arc::clone(&storage),
+            Arc::new(MempoolManager::new()),
+            None,
+            None,
+        );
+        let hex_id = crate::storage::hashing::hash_to_rpc_hex(&txid);
+        let err = rpc
+            .getrawtransaction(&json!([hex_id]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("storage read failed"), "{err}");
+        assert!(!err.contains("Transaction not found"), "{err}");
+
+        let missing = [9u8; 32];
+        let missing_err = rpc
+            .getrawtransaction(&json!([crate::storage::hashing::hash_to_rpc_hex(&missing)]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            missing_err.contains("Transaction not found"),
+            "{missing_err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod script_sig_asm_tests {
+    use super::RawTxRpc;
+    use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput};
+
+    #[test]
+    fn script_sig_asm_names_op_1() {
+        let tx = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [1u8; 32],
+                    index: 0,
+                },
+                script_sig: vec![0x51],
+                sequence: 0xffffffff,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 1,
+                script_pubkey: vec![0x51],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let value = RawTxRpc::format_getrawtransaction_response(&tx, None, true).unwrap();
+        assert_eq!(value["vin"][0]["scriptSig"]["hex"], "51");
+        assert_eq!(value["vin"][0]["scriptSig"]["asm"], "OP_1");
+    }
+
+    #[test]
+    fn bare_multisig_req_sigs_is_the_threshold() {
+        let mut script = vec![0x52];
+        for byte in [0x02u8, 0x03, 0x04] {
+            script.push(0x21);
+            script.push(byte);
+            script.extend(std::iter::repeat(0x11).take(32));
+        }
+        script.extend([0x53, 0xae]);
+        let tx = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [1u8; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: 0xffffffff,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 1,
+                script_pubkey: script,
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let value = RawTxRpc::format_getrawtransaction_response(&tx, None, true).unwrap();
+        assert_eq!(value["vout"][0]["scriptPubKey"]["reqSigs"], 2);
     }
 }

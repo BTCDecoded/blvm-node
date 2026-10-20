@@ -63,6 +63,10 @@ impl AddressEntry {
     /// Check if address is fresh (seen within expiration window)
     pub fn is_fresh(&self, expiration_seconds: u64) -> bool {
         let now = current_timestamp();
+        let advertised = self.addr.time as u64;
+        if self.addr.time == 0 || advertised > now.saturating_add(10 * 60) {
+            return false;
+        }
         now.saturating_sub(self.last_seen) < expiration_seconds
     }
 }
@@ -137,8 +141,12 @@ impl AddressDatabase {
                 }
                 let mut entry = AddressEntry::new(addr, services);
                 if !refresh {
-                    entry.first_seen = entry.addr.time as u64;
-                    entry.last_seen = entry.addr.time as u64;
+                    let advertised = entry.addr.time as u64;
+                    let received = current_timestamp();
+                    if entry.addr.time != 0 && advertised <= received {
+                        entry.first_seen = advertised;
+                        entry.last_seen = advertised;
+                    }
                 }
                 self.addresses.insert(socket_addr, entry);
             }
@@ -363,7 +371,7 @@ impl AddressDatabase {
                 }
                 // Create a placeholder NetworkAddress for Iroh (not used, just for consistency)
                 let placeholder_addr = NetworkAddress {
-                    time: 0,
+                    time: current_timestamp() as u32,
                     services,
                     ip: [0; 16],
                     port: 0,
@@ -818,5 +826,24 @@ mod tests {
         assert_eq!(stored.addr.time, 0);
         let handed = db.get_fresh_addresses(10);
         assert!(handed.iter().all(|a| a.time != 0));
+    }
+
+    #[test]
+    fn future_address_timestamp_is_not_fresh() {
+        let mut db = AddressDatabase::new(10);
+        let current = create_test_address("1.2.3.4", 8333);
+        let mut future = create_test_address("5.6.7.8", 8333);
+        future.time = current_timestamp().saturating_add(365 * 24 * 60 * 60) as u32;
+        db.add_address(current.clone(), 1);
+        db.add_address(future.clone(), 1);
+        let fresh = db.get_fresh_addresses(10);
+        assert!(fresh.iter().any(|addr| addr.ip == current.ip));
+        assert!(fresh.iter().all(|addr| addr.ip != future.ip));
+        let stored = db
+            .addresses
+            .get(&db.network_addr_to_socket(&future))
+            .expect("stored");
+        assert!(stored.last_seen <= current_timestamp());
+        assert!(stored.last_seen + 5 >= current_timestamp());
     }
 }

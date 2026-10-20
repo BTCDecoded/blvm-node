@@ -21,6 +21,38 @@ pub fn handle_sendpkgtxn(_relay: &PackageRelay, msg: &SendPkgTxnMessage) -> Resu
     Ok(())
 }
 
+/// A package transaction is either a full wire encoding, witness included,
+/// or the older bincode `Transaction`, which has no witness.
+pub(crate) fn decode_package_transaction(
+    raw: &[u8],
+) -> Result<(Transaction, Option<Vec<blvm_protocol::segwit::Witness>>), ()> {
+    if let Ok((tx, witnesses, consumed)) =
+        blvm_protocol::serialization::transaction::deserialize_transaction_with_witness(raw)
+    {
+        if consumed == raw.len() {
+            return Ok((tx, Some(witnesses)));
+        }
+    }
+    match bincode::deserialize::<Transaction>(raw) {
+        Ok(tx) => Ok((tx, None)),
+        Err(_) => Err(()),
+    }
+}
+
+fn package_witness_stack(
+    witnesses: &Option<Vec<blvm_protocol::segwit::Witness>>,
+) -> Option<Vec<Vec<u8>>> {
+    let stacks = witnesses.as_ref()?;
+    if stacks.iter().all(|stack| stack.is_empty()) {
+        return None;
+    }
+    let mut flat = Vec::new();
+    for stack in stacks {
+        flat.extend(stack.iter().cloned());
+    }
+    Some(flat)
+}
+
 /// Handle pkgtxn: validate package and return optional rejection.
 ///
 /// `utxo` prices the package. Without it the fee test is skipped.
@@ -29,12 +61,15 @@ pub fn handle_pkgtxn(
     msg: &PkgTxnMessage,
     utxo: Option<&blvm_protocol::UtxoSet>,
 ) -> Result<Option<PkgTxnRejectMessage>> {
-    // Deserialize transactions (they are bincode-serialized blvm_protocol::Transaction)
     let mut txs: Vec<Transaction> = Vec::with_capacity(msg.transactions.len());
+    let mut package_witnesses = Vec::with_capacity(msg.transactions.len());
     for raw in &msg.transactions {
-        match bincode::deserialize::<Transaction>(raw) {
-            Ok(tx) => txs.push(tx),
-            Err(_) => {
+        match decode_package_transaction(raw) {
+            Ok((tx, witnesses)) => {
+                package_witnesses.push(package_witness_stack(&witnesses));
+                txs.push(tx);
+            }
+            Err(()) => {
                 return Ok(Some(PkgTxnRejectMessage {
                     package_id: msg.package_id.clone(),
                     reason: PackageRejectReason::InvalidStructure as u8,
@@ -45,7 +80,11 @@ pub fn handle_pkgtxn(
     }
 
     // Construct package
-    let pkg = match TransactionPackage::new_with_utxo_set(txs, utxo) {
+    let pkg = match TransactionPackage::new_with_utxo_set_and_witnesses(
+        txs,
+        utxo,
+        Some(&package_witnesses),
+    ) {
         Ok(p) => p,
         Err(_) => {
             return Ok(Some(PkgTxnRejectMessage {

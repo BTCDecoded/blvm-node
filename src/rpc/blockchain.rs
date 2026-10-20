@@ -278,6 +278,20 @@ impl BlockchainRpc {
             .unwrap_or("regtest") // Default fallback
     }
 
+    fn witness_address_on_this_chain(
+        address_network: blvm_protocol::address::Network,
+        chain: &str,
+    ) -> bool {
+        use blvm_protocol::address::Network;
+        match address_network {
+            Network::Mainnet => chain == "mainnet",
+            Network::Testnet | Network::Testnet4 | Network::Signet => {
+                matches!(chain, "testnet" | "testnet4" | "signet")
+            }
+            Network::Regtest => chain == "regtest",
+        }
+    }
+
     /// Core-compatible `chain` field for getblockchaininfo (`main`, `test`, `regtest`).
     fn core_chain_field(&self) -> &str {
         if let Some(ref storage) = self.storage {
@@ -519,6 +533,11 @@ impl BlockchainRpc {
 
     /// Get block by hash
     pub async fn get_block(&self, hash: &str) -> Result<Value> {
+        self.get_block_with_verbosity(hash, 1).await
+    }
+
+    /// `verbosity` 0 is the block hex. Any other value is the JSON object.
+    pub async fn get_block_with_verbosity(&self, hash: &str, verbosity: u64) -> Result<Value> {
         debug!("RPC: getblock {}", hash);
 
         let hash_array = decode_hash32(hash).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -540,6 +559,17 @@ impl BlockchainRpc {
             .await
             {
                 Ok(Ok(Ok(Some(block)))) => {
+                    if verbosity == 0 {
+                        use blvm_protocol::serialization::serialize_block_with_witnesses;
+                        let witnesses = storage
+                            .blocks()
+                            .get_witness(&hash_array)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default();
+                        let bytes = serialize_block_with_witnesses(&block, &witnesses, true);
+                        return Ok(Value::String(hex::encode(bytes)));
+                    }
                     // Block found - calculate all required fields (similar to get_block_header)
                     let block_height = storage.blocks().get_height_by_hash(&hash_array)?;
 
@@ -656,13 +686,14 @@ impl BlockchainRpc {
         debug!("RPC: getblockhash {}", height);
 
         if let Some(ref storage) = self.storage {
-            if let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height) {
-                return Ok(Value::String(encode_hash32_rpc(&hash)));
+            match storage.blocks().get_hash_by_height(height) {
+                Ok(Some(hash)) => Ok(Value::String(encode_hash32_rpc(&hash))),
+                Ok(None) => Err(BlockNotFoundError::new(format!("at height {height}")).into()),
+                Err(err) => Err(anyhow::anyhow!("getblockhash: storage read failed: {err}")),
             }
-            return Err(BlockNotFoundError::new(format!("at height {height}")).into());
+        } else {
+            Err(anyhow::anyhow!("Storage not available"))
         }
-
-        Err(anyhow::anyhow!("Storage not available"))
     }
 
     /// Get block header
@@ -676,7 +707,12 @@ impl BlockchainRpc {
 
             if let Ok(Some(header)) = storage.blocks().get_header(&hash_array) {
                 if verbose {
-                    let block_height = storage.blocks().get_height_by_hash(&hash_array)?;
+                    let Some(block_height) = storage.blocks().get_height_by_hash(&hash_array)?
+                    else {
+                        return Err(anyhow::anyhow!(
+                            "getblockheader: header has no height index"
+                        ));
+                    };
 
                     let tip_height = CACHED_TIP_HEIGHT.with(|c| {
                         c.get_or_refresh(CACHE_REFRESH_TIP, || {
@@ -688,16 +724,9 @@ impl BlockchainRpc {
                         })
                     });
 
-                    let confirmations = block_height
-                        .map(|h| Self::calculate_confirmations(h, tip_height))
-                        .unwrap_or(0);
-
-                    let mediantime = match block_height {
-                        Some(height) => {
-                            self.median_time_through_height(storage, height, header.timestamp)
-                        }
-                        None => header.timestamp,
-                    };
+                    let confirmations = Self::calculate_confirmations(block_height, tip_height);
+                    let mediantime =
+                        self.median_time_through_height(storage, block_height, header.timestamp);
 
                     // Calculate difficulty
                     let difficulty = Self::calculate_difficulty(header.bits);
@@ -709,30 +738,23 @@ impl BlockchainRpc {
                         .unwrap_or(0);
 
                     // Find next block hash
-                    let next_blockhash = block_height.and_then(|h| {
-                        storage
-                            .blocks()
-                            .get_hash_by_height(h + 1)
-                            .ok()
-                            .flatten()
-                            .map(|h| encode_hash32_rpc(&h))
-                    });
+                    let next_blockhash = storage
+                        .blocks()
+                        .get_hash_by_height(block_height + 1)
+                        .ok()
+                        .flatten()
+                        .map(|h| encode_hash32_rpc(&h));
 
-                    let chainwork = if let Some(_height) = block_height {
-                        // O(1) lookup instead of O(n) calculation!
-                        storage
-                            .chain()
-                            .get_chainwork(&hash_array)?
-                            .map(Self::format_chainwork)
-                            .unwrap_or_else(|| ZERO_HASH_STR.to_string())
-                    } else {
-                        ZERO_HASH_STR.to_string()
-                    };
+                    let chainwork = storage
+                        .chain()
+                        .get_chainwork(&hash_array)?
+                        .map(Self::format_chainwork)
+                        .unwrap_or_else(|| ZERO_HASH_STR.to_string());
 
                     Ok(json!({
                         "hash": hash,
                         "confirmations": confirmations,
-                        "height": block_height.unwrap_or(0),
+                        "height": block_height,
                         "version": header.version,
                         "versionHex": format!("{:08x}", header.version),
                         "merkleroot": encode_hash32_rpc(&header.merkle_root),
@@ -751,6 +773,10 @@ impl BlockchainRpc {
                     let header_bytes = serialize_block_header(&header);
                     Ok(Value::String(hex::encode(header_bytes)))
                 }
+            } else if let Err(err) = storage.blocks().get_header(&hash_array) {
+                Err(anyhow::anyhow!(
+                    "getblockheader: storage read failed: {err}"
+                ))
             } else {
                 Err(BlockNotFoundError::new("").into())
             }
@@ -968,15 +994,11 @@ impl BlockchainRpc {
 
         if let Some(ref storage) = self.storage {
             let check_level = checklevel.unwrap_or(3);
-            let num_blocks = numblocks.unwrap_or(288);
-
             let tip_height = storage.chain().get_height()?.unwrap_or(0);
             if tip_height == 0 {
                 return Ok(json!(true)); // Empty chain is valid
             }
-
-            // Start from genesis or from (tip_height - num_blocks)
-            let start_height = tip_height.saturating_sub(num_blocks);
+            let start_height = verify_chain_start_height(tip_height, numblocks);
 
             let mut errors = Vec::new();
             let blockstore = storage.blocks();
@@ -1075,17 +1097,10 @@ impl BlockchainRpc {
 
                         // Check level 2+: Verify merkle root
                         if check_level >= 2 {
-                            use blvm_protocol::mining::{
-                                calculate_merkle_root, calculate_merkle_root_from_tx_ids,
-                            };
+                            use blvm_protocol::mining::calculate_merkle_root;
 
-                            let calculated_root = crate::module::pipeline::try_get_canonical_txids(
-                                height, block_hash,
-                            )
-                            .and_then(|txids| calculate_merkle_root_from_tx_ids(&txids).ok())
-                            .or_else(|| calculate_merkle_root(&block.transactions).ok());
-
-                            if let Some(calculated_root) = calculated_root {
+                            if let Ok(calculated_root) = calculate_merkle_root(&block.transactions)
+                            {
                                 if calculated_root != block.header.merkle_root {
                                     errors.push(format!(
                                         "Block at height {height} has incorrect merkle root"
@@ -1253,7 +1268,7 @@ impl BlockchainRpc {
                     } else if hash == tip_hash {
                         "active"
                     } else {
-                        "valid"
+                        "valid-fork"
                     };
 
                     tips.push(json!({
@@ -1283,16 +1298,16 @@ impl BlockchainRpc {
         #[cfg(debug_assertions)]
         debug!("RPC: getchaintxstats");
 
-        let nblocks = param_u64_default(params, 0, 144); // Default: 1 day (144 blocks at 10 min/block)
+        let nblocks = if params.as_array().is_none_or(|items| items.is_empty()) {
+            None
+        } else {
+            Some(param_u64_default(params, 0, 4320))
+        };
 
         if let Some(ref storage) = self.storage {
             let tip_height = storage.chain().get_height()?.unwrap_or(0);
 
-            let start_height = if tip_height >= nblocks {
-                tip_height - nblocks + 1
-            } else {
-                0
-            };
+            let start_height = chain_tx_stats_start_height(tip_height, nblocks);
 
             let range_size = (tip_height - start_height + 1) as usize;
 
@@ -1441,6 +1456,13 @@ impl BlockchainRpc {
                 let input_count: usize = block.transactions.iter().map(|tx| tx.inputs.len()).sum();
                 let output_count: usize =
                     block.transactions.iter().map(|tx| tx.outputs.len()).sum();
+                let spent_prevouts: usize = block
+                    .transactions
+                    .iter()
+                    .skip(1)
+                    .map(|tx| tx.inputs.len())
+                    .sum();
+                let utxo_increase = output_count as i64 - spent_prevouts as i64;
 
                 // Sum output values inside the money range. A value outside that range is left out.
                 let total_out = u64::try_from(crate::storage::chainstate::utxo_money_total(
@@ -1561,7 +1583,33 @@ impl BlockchainRpc {
                             .count()
                     })
                     .unwrap_or(0);
-                let swtotal_size: usize = tx_sizes.iter().sum();
+                let segwit_tx = |index: usize| {
+                    witnesses
+                        .as_ref()
+                        .and_then(|all| all.get(index))
+                        .is_some_and(|stacks| stacks.iter().any(|stack| !stack.is_empty()))
+                };
+                let swtotal_size: usize = tx_sizes
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| segwit_tx(*index))
+                    .map(|(_, size)| *size)
+                    .sum();
+                let swtotal_weight: u64 = block
+                    .transactions
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| segwit_tx(*index))
+                    .map(|(index, tx)| {
+                        let witness = witnesses
+                            .as_ref()
+                            .and_then(|all| all.get(index))
+                            .map(|stacks| stacks.as_slice());
+                        let (_, _, weight, _) =
+                            crate::rpc::rawtx::RawTxRpc::calculate_segwit_sizes(tx, witness);
+                        weight
+                    })
+                    .sum();
 
                 Ok(json!({
                     "avgfee": if tx_count > 1 { total_fees as f64 / (tx_count - 1) as f64 / 100_000_000.0 } else { 0.0 },
@@ -1583,7 +1631,7 @@ impl BlockchainRpc {
                     "outs": output_count,
                     "subsidy": subsidy,
                     "swtotal_size": swtotal_size,
-                    "swtotal_weight": block_weight,
+                    "swtotal_weight": swtotal_weight,
                     "swtxs": swtxs,
                     "time": block.header.timestamp,
                     "total_out": total_out,
@@ -1591,7 +1639,7 @@ impl BlockchainRpc {
                     "total_weight": block_weight,
                     "totalfee": total_fees as f64 / 100_000_000.0,
                     "txs": tx_count,
-                    "utxo_increase": 0,
+                    "utxo_increase": utxo_increase,
                     "utxo_size_inc": 0
                 }))
             } else {
@@ -1742,21 +1790,23 @@ impl BlockchainRpc {
             let Some(header) = storage.blocks().get_header(&hash)? else {
                 break;
             };
-            #[cfg(feature = "production")]
-            if let Ok(Some(undo)) = storage.blocks().get_undo_log(&hash) {
-                for entry in &undo.entries {
-                    if entry.new_utxo.is_some() {
-                        let _ = storage.utxos().remove_utxo(&entry.outpoint);
-                    }
-                    if let Some(prev) = &entry.previous_utxo {
-                        let _ = storage.utxos().add_utxo(&entry.outpoint, prev.as_ref());
-                    }
+            let undo = storage
+                .blocks()
+                .get_undo_log(&hash)?
+                .ok_or_else(|| anyhow::anyhow!("missing undo log for invalidated block"))?;
+            for entry in &undo.entries {
+                if entry.new_utxo.is_some() {
+                    let _ = storage.utxos().remove_utxo(&entry.outpoint);
+                }
+                if let Some(prev) = &entry.previous_utxo {
+                    let _ = storage.utxos().add_utxo(&entry.outpoint, prev.as_ref());
                 }
             }
             let height = storage.chain().get_height()?.unwrap_or(0);
             if height == 0 {
                 break;
             }
+            storage.blocks().clear_height_index(height)?;
             let parent = header.prev_block_hash;
             let Some(parent_header) = storage.blocks().get_header(&parent)? else {
                 break;
@@ -1843,16 +1893,6 @@ impl BlockchainRpc {
         if let Some(ref storage) = self.storage {
             storage.chain().unmark_invalid(&hash)?;
             storage.chain().block_index().clear_invalid_status(&hash)?;
-            if let Some(header) = storage.blocks().get_header(&hash)? {
-                let tip = storage.chain().get_tip_hash()?;
-                if tip == Some(header.prev_block_hash) {
-                    let height = storage.chain().get_height()?.unwrap_or(0);
-                    storage
-                        .chain()
-                        .update_tip(&hash, &header, height.saturating_add(1))?;
-                }
-            }
-
             Ok(Value::Null)
         } else {
             // Graceful degradation: return informative error instead of failing silently
@@ -2297,6 +2337,12 @@ impl BlockchainRpc {
         use blvm_protocol::address::BitcoinAddress;
 
         if let Ok(decoded) = BitcoinAddress::decode(&address) {
+            if !Self::witness_address_on_this_chain(decoded.network, self.get_chain_name()) {
+                return Ok(json!({
+                    "isvalid": false,
+                    "address": address,
+                }));
+            }
             let Ok(script_pubkey) = address_string_to_script_pubkey(&address) else {
                 return Ok(json!({
                     "isvalid": false,
@@ -2397,14 +2443,22 @@ impl BlockchainRpc {
                             hash: txid,
                             index: idx as u32,
                         };
-                        if storage.utxos().get_utxo(&outpoint).ok().flatten().is_some() {
-                            balance += output.value;
-                            utxo_count += 1;
-                            utxos.push(json!({
-                                "txid": encode_hash32_rpc(&txid),
-                                "vout": idx,
-                                "value": output.value,
-                            }));
+                        match storage.utxos().get_utxo(&outpoint) {
+                            Ok(Some(_)) => {
+                                balance += output.value;
+                                utxo_count += 1;
+                                utxos.push(json!({
+                                    "txid": encode_hash32_rpc(&txid),
+                                    "vout": idx,
+                                    "value": output.value,
+                                }));
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                return Err(anyhow::anyhow!(
+                                    "getaddressinfo: utxo read failed: {err}"
+                                ));
+                            }
                         }
                     }
                 }
@@ -2573,6 +2627,156 @@ mod block_stats_tests {
         assert_eq!(stats["outs"], 2);
         assert_eq!(stats["total_out"].as_u64(), Some(50_000));
         assert_eq!(stats["totalfee"].as_f64(), Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn utxo_increase_is_outputs_minus_spent_prevouts() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let coinbase = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [0u8; 32],
+                    index: 0xffffffff,
+                },
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 50_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                timestamp: 2,
+                bits: 0,
+                nonce: 1,
+            },
+            transactions: vec![coinbase, tx_with_output(40_000)].into_boxed_slice(),
+        };
+        let hash = storage.blocks().get_block_hash(&block);
+        storage.blocks().store_block(&block).unwrap();
+        let stats = BlockchainRpc::with_dependencies(storage)
+            .get_block_stats(&json!([crate::storage::hashing::hash_to_rpc_hex(&hash)]))
+            .await
+            .unwrap();
+        assert_eq!(stats["outs"], 2);
+        assert_eq!(stats["ins"], 2);
+        assert_eq!(stats["utxo_increase"].as_i64(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn header_without_a_height_is_not_height_zero() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [9u8; 32],
+            merkle_root: [3u8; 32],
+            timestamp: 50,
+            bits: 0x207fffff,
+            nonce: 4,
+        };
+        let hash = [4u8; 32];
+        storage.blocks().store_header(&hash, &header).unwrap();
+        let rpc_hash = crate::storage::hashing::hash_to_rpc_hex(&hash);
+        let err = BlockchainRpc::with_dependencies(storage)
+            .get_block_header(&rpc_hash, true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no height index"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_height_read_error_is_not_a_missing_block() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        storage.blocks().insert_short_height_row(100).unwrap();
+        let err = BlockchainRpc::with_dependencies(storage)
+            .get_block_hash(100)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("storage read failed"), "{err}");
+        assert!(!err.contains("Block not found"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn segwit_totals_skip_the_legacy_transaction() {
+        use blvm_protocol::serialization::transaction::serialize_transaction_with_witness;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let legacy = tx_with_output(50_000);
+        let segwit = tx_with_output(40_000);
+        let witness = vec![vec![vec![0x01u8]]];
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                timestamp: 3,
+                bits: 0,
+                nonce: 5,
+            },
+            transactions: vec![legacy, segwit.clone()].into_boxed_slice(),
+        };
+        let hash = storage.blocks().get_block_hash(&block);
+        storage.blocks().store_block(&block).unwrap();
+        storage
+            .blocks()
+            .store_witness(&hash, &[Vec::new(), witness.clone()])
+            .unwrap();
+        let stats = BlockchainRpc::with_dependencies(storage)
+            .get_block_stats(&json!([crate::storage::hashing::hash_to_rpc_hex(&hash)]))
+            .await
+            .unwrap();
+        let segwit_size = serialize_transaction_with_witness(&segwit, &witness)
+            .unwrap()
+            .len();
+        assert_eq!(stats["swtxs"], 1);
+        assert_eq!(stats["swtotal_size"].as_u64(), Some(segwit_size as u64));
+        assert!(
+            stats["swtotal_weight"].as_u64().unwrap() < stats["total_weight"].as_u64().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn getblock_verbosity_zero_is_hex_and_one_is_json() {
+        use blvm_protocol::serialization::serialize_block_with_witnesses;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                timestamp: 1,
+                bits: 0,
+                nonce: 2,
+            },
+            transactions: vec![tx_with_output(50_000)].into_boxed_slice(),
+        };
+        let hash = storage.blocks().get_block_hash(&block);
+        storage.blocks().store_block(&block).unwrap();
+        let rpc_hash = crate::storage::hashing::hash_to_rpc_hex(&hash);
+        let rpc = BlockchainRpc::with_dependencies(storage);
+        let hex_value = rpc.get_block_with_verbosity(&rpc_hash, 0).await.unwrap();
+        let expected = hex::encode(serialize_block_with_witnesses(&block, &[], true));
+        assert_eq!(hex_value.as_str(), Some(expected.as_str()));
+        let object = rpc.get_block(&rpc_hash).await.unwrap();
+        assert!(object.get("tx").is_some());
+        assert!(object.as_str().is_none());
     }
 
     #[cfg(feature = "production")]
@@ -2816,6 +3020,231 @@ mod block_stats_tests {
     }
 
     #[tokio::test]
+    async fn side_tip_is_valid_fork() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let parent = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            timestamp: 1_600_000_000,
+            bits: 0,
+            nonce: 1,
+        };
+        storage.chain().initialize(&parent).unwrap();
+        let parent_hash = storage.chain().get_tip_hash().unwrap().unwrap();
+        let main = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: parent_hash,
+                merkle_root: [0u8; 32],
+                timestamp: 1_600_000_001,
+                bits: 0,
+                nonce: 2,
+            },
+            transactions: vec![tx_with_output(50_000)].into_boxed_slice(),
+        };
+        let main_hash = storage.blocks().get_block_hash(&main);
+        storage
+            .chain()
+            .update_tip(&main_hash, &main.header, 1)
+            .unwrap();
+        let fork = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: parent_hash,
+                merkle_root: [0u8; 32],
+                timestamp: 1_600_000_002,
+                bits: 0,
+                nonce: 3,
+            },
+            transactions: vec![tx_with_output(50_000)].into_boxed_slice(),
+        };
+        let fork_hash = storage.blocks().get_block_hash(&fork);
+        storage
+            .chain()
+            .block_index()
+            .insert(
+                &fork_hash,
+                1,
+                &parent_hash,
+                crate::storage::block_index::BlockIndexStatus::Valid,
+            )
+            .unwrap();
+
+        let tips = BlockchainRpc::with_dependencies(storage)
+            .get_chain_tips()
+            .await
+            .unwrap();
+        let tips = tips.as_array().unwrap();
+        let status_of = |hash: &blvm_protocol::Hash| {
+            let hex = crate::storage::hashing::hash_to_rpc_hex(hash);
+            tips.iter()
+                .find(|tip| tip["hash"].as_str() == Some(hex.as_str()))
+                .unwrap()["status"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(status_of(&main_hash), "active");
+        assert_eq!(status_of(&fork_hash), "valid-fork");
+    }
+
+    #[tokio::test]
+    async fn verifychain_uses_the_stored_transactions() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let parent = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            timestamp: 1_600_000_000,
+            bits: 0,
+            nonce: 1,
+        };
+        storage.chain().initialize(&parent).unwrap();
+        let parent_hash = storage.chain().get_tip_hash().unwrap().unwrap();
+        let tx = tx_with_output(50_000);
+        let root = blvm_protocol::mining::calculate_merkle_root(std::slice::from_ref(&tx)).unwrap();
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: parent_hash,
+                merkle_root: root,
+                timestamp: 1_600_000_001,
+                bits: 0,
+                nonce: 2,
+            },
+            transactions: vec![tx].into_boxed_slice(),
+        };
+        let hash = storage.blocks().get_block_hash(&block);
+        storage.blocks().store_block(&block).unwrap();
+        storage.blocks().store_height(1, &hash).unwrap();
+        storage.chain().update_tip(&hash, &block.header, 1).unwrap();
+        let rpc = BlockchainRpc::with_dependencies(Arc::clone(&storage));
+        assert_eq!(
+            rpc.verify_chain(Some(2), Some(1)).await.unwrap(),
+            serde_json::Value::Bool(true)
+        );
+
+        let mut wrong = block.clone();
+        wrong.header.merkle_root = [9u8; 32];
+        wrong.header.nonce = 3;
+        let wrong_hash = storage.blocks().get_block_hash(&wrong);
+        storage.blocks().store_block(&wrong).unwrap();
+        storage.blocks().store_height(1, &wrong_hash).unwrap();
+        storage
+            .chain()
+            .update_tip(&wrong_hash, &wrong.header, 1)
+            .unwrap();
+        let report = rpc.verify_chain(Some(2), Some(1)).await.unwrap();
+        let errors = report["errors"].as_array().unwrap();
+        assert!(errors.iter().any(|err| {
+            err.as_str()
+                .is_some_and(|s| s.contains("incorrect merkle root"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn missing_undo_log_does_not_move_the_tip() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let parent = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            timestamp: 1_600_000_000,
+            bits: 0,
+            nonce: 1,
+        };
+        storage.chain().initialize(&parent).unwrap();
+        let parent_hash = storage.chain().get_tip_hash().unwrap().unwrap();
+        storage
+            .blocks()
+            .store_header(&parent_hash, &parent)
+            .unwrap();
+        let child = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: parent_hash,
+                merkle_root: [0u8; 32],
+                timestamp: 1_600_000_001,
+                bits: 0,
+                nonce: 2,
+            },
+            transactions: vec![tx_with_output(50_000)].into_boxed_slice(),
+        };
+        let child_hash = storage.blocks().get_block_hash(&child);
+        storage.blocks().store_block(&child).unwrap();
+        storage
+            .blocks()
+            .store_header(&child_hash, &child.header)
+            .unwrap();
+        storage.blocks().store_height(1, &child_hash).unwrap();
+        storage
+            .chain()
+            .update_tip(&child_hash, &child.header, 1)
+            .unwrap();
+
+        let err = BlockchainRpc::with_dependencies(Arc::clone(&storage))
+            .invalidate_block(&json!([crate::storage::hashing::hash_to_rpc_hex(
+                &child_hash
+            )]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing undo log"), "{err}");
+        assert_eq!(storage.chain().get_tip_hash().unwrap().unwrap(), child_hash);
+    }
+
+    #[tokio::test]
+    async fn reconsider_clears_the_mark_and_leaves_the_tip() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let parent = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            timestamp: 1_600_000_000,
+            bits: 0,
+            nonce: 1,
+        };
+        storage.chain().initialize(&parent).unwrap();
+        let parent_hash = storage.chain().get_tip_hash().unwrap().unwrap();
+        let child = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: parent_hash,
+                merkle_root: [0u8; 32],
+                timestamp: 1_600_000_001,
+                bits: 0,
+                nonce: 2,
+            },
+            transactions: vec![tx_with_output(50_000)].into_boxed_slice(),
+        };
+        let child_hash = storage.blocks().get_block_hash(&child);
+        storage
+            .blocks()
+            .store_header(&child_hash, &child.header)
+            .unwrap();
+        storage.chain().mark_invalid(&child_hash).unwrap();
+
+        BlockchainRpc::with_dependencies(Arc::clone(&storage))
+            .reconsider_block(&json!([crate::storage::hashing::hash_to_rpc_hex(
+                &child_hash
+            )]))
+            .await
+            .unwrap();
+
+        assert!(!storage.chain().is_invalid(&child_hash).unwrap());
+        assert_eq!(
+            storage.chain().get_tip_hash().unwrap().unwrap(),
+            parent_hash
+        );
+        assert_eq!(storage.chain().get_height().unwrap(), Some(0));
+    }
+
+    #[tokio::test]
     async fn p2wpkh_index_off_errors_and_a_full_spend_reports_both_sides() {
         use blvm_protocol::block::calculate_tx_id;
 
@@ -2869,6 +3298,53 @@ mod block_stats_tests {
     }
 
     #[tokio::test]
+    async fn a_utxo_read_error_is_not_reported_as_spent() {
+        use blvm_protocol::block::calculate_tx_id;
+
+        let script = {
+            let mut s = vec![0x00, 0x14];
+            s.extend_from_slice(&[0x11u8; 20]);
+            s
+        };
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut indexing = crate::config::IndexingConfig::default();
+        indexing.enable_address_index = true;
+        let storage = Arc::new(
+            Storage::with_backend_pruning_and_indexing(
+                temp.path(),
+                crate::storage::database::default_backend(),
+                None,
+                Some(indexing),
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let mut paying = tx_with_output(50_000);
+        paying.outputs[0].script_pubkey = script.clone();
+        paying.outputs[0].value = 50_000;
+        let txid = calculate_tx_id(&paying);
+        storage
+            .transactions()
+            .index_transaction(&paying, &[2u8; 32], 1, 0)
+            .unwrap();
+        storage
+            .utxos()
+            .insert_undecodable_utxo(&blvm_protocol::OutPoint {
+                hash: txid,
+                index: 0,
+            })
+            .unwrap();
+        let err = BlockchainRpc::with_dependencies(storage)
+            .get_address_info(&json!([hex::encode(&script)]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("utxo read failed"), "{err}");
+    }
+
+    #[tokio::test]
     async fn signet_stays_unknown_and_segwit_follows_its_activation_height() {
         use crate::storage::chainstate::ChainParams;
         use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
@@ -2912,5 +3388,101 @@ mod block_stats_tests {
             .unwrap();
         assert_eq!(named["chain"], "testnet4");
         assert_eq!(named["initialblockdownload"], true);
+    }
+}
+
+/// First height `getchaintxstats` includes.
+/// An omitted count covers 4320 blocks ending at the tip.
+pub(crate) fn chain_tx_stats_start_height(tip_height: u64, nblocks: Option<u64>) -> u64 {
+    let nblocks = nblocks.unwrap_or(4320);
+    if tip_height >= nblocks {
+        tip_height - nblocks + 1
+    } else {
+        0
+    }
+}
+
+/// First height `verifychain` checks.
+/// An omitted count checks 288 blocks ending at the tip. `0` starts at genesis.
+pub(crate) fn verify_chain_start_height(tip_height: u64, num_blocks: Option<u64>) -> u64 {
+    match num_blocks.unwrap_or(288) {
+        0 => 0,
+        n => tip_height.saturating_sub(n.saturating_sub(1)),
+    }
+}
+
+#[cfg(test)]
+mod verify_chain_span_tests {
+    use super::chain_tx_stats_start_height;
+    use super::verify_chain_start_height;
+
+    #[test]
+    fn omitted_count_checks_288_blocks_and_zero_checks_the_whole_chain() {
+        let tip = 10_000u64;
+        let omitted = verify_chain_start_height(tip, None);
+        assert_eq!(tip - omitted + 1, 288);
+        assert_eq!(verify_chain_start_height(tip, Some(0)), 0);
+        assert_eq!(verify_chain_start_height(tip, Some(1)), tip);
+    }
+
+    #[test]
+    fn omitted_chain_tx_stats_covers_one_month() {
+        let tip = 10_000u64;
+        let omitted = chain_tx_stats_start_height(tip, None);
+        assert_eq!(tip - omitted + 1, 4320);
+        let explicit = chain_tx_stats_start_height(tip, Some(144));
+        assert_eq!(tip - explicit + 1, 144);
+    }
+}
+
+#[cfg(test)]
+mod validate_address_network_tests {
+    use super::BlockchainRpc;
+    use crate::storage::Storage;
+    use blvm_protocol::address::{BitcoinAddress, Network};
+    use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn mainnet_rejects_a_testnet_witness_address() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::BitcoinV1).unwrap());
+        let rpc = BlockchainRpc::with_dependencies_and_protocol(storage, protocol);
+        let program = vec![0x11u8; 20];
+        let testnet = BitcoinAddress::new(Network::Testnet, 0, program.clone())
+            .unwrap()
+            .encode()
+            .unwrap();
+        let mainnet = BitcoinAddress::new(Network::Mainnet, 0, program)
+            .unwrap()
+            .encode()
+            .unwrap();
+        let rejected = rpc.validate_address(&json!([testnet])).await.unwrap();
+        assert_eq!(rejected["isvalid"], false);
+        let accepted = rpc.validate_address(&json!([mainnet])).await.unwrap();
+        assert_eq!(accepted["isvalid"], true);
+    }
+
+    #[tokio::test]
+    async fn version_zero_program_of_the_wrong_length_is_invalid() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::BitcoinV1).unwrap());
+        let rpc = BlockchainRpc::with_dependencies_and_protocol(storage, protocol);
+        let p2wsh = BitcoinAddress::new(Network::Mainnet, 0, vec![0x22u8; 32])
+            .unwrap()
+            .encode()
+            .unwrap();
+        assert_eq!(
+            rpc.validate_address(&json!([p2wsh])).await.unwrap()["isvalid"],
+            true
+        );
+        let wrong_length = "bc1qzyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zymalz5m";
+        assert_eq!(
+            rpc.validate_address(&json!([wrong_length])).await.unwrap()["isvalid"],
+            false
+        );
     }
 }

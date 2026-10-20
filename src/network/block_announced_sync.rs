@@ -397,7 +397,7 @@ impl NetworkManager {
     pub(crate) async fn announce_accepted_transaction(
         &self,
         txid: Hash,
-        fee_sat_per_vb: Option<u64>,
+        fee_basis: Option<(u64, u64)>,
     ) {
         if !self.relay_policies().enable_tx_relay {
             return;
@@ -410,10 +410,12 @@ impl NetworkManager {
                 match states.get(&peer_addr) {
                     Some(state) if !state.relay_tx => false,
                     Some(state) => match state.min_fee_rate {
-                        Some(min) => super::wire_dispatch::fee_rate_meets_filter(
-                            fee_sat_per_vb.unwrap_or(0),
-                            min,
-                        ),
+                        Some(min) => match fee_basis {
+                            Some((fee_sats, vsize)) => {
+                                super::wire_dispatch::fee_rate_meets_filter(fee_sats, vsize, min)
+                            }
+                            None => false,
+                        },
                         None => true,
                     },
                     None => true,

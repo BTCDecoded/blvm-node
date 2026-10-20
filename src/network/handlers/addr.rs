@@ -167,13 +167,6 @@ impl NetworkManager {
         let now = current_timestamp();
         let min_interval = self.network_timing().addr_relay_min_interval_seconds;
 
-        {
-            let last_sent = *self.last_addr_sent().lock().await;
-            if now.saturating_sub(last_sent) < min_interval {
-                return Ok(());
-            }
-        }
-
         let ban_list = self.ban_list().read().await.clone();
         let connected_peers: Vec<SocketAddr> = {
             let pm = self.peer_manager_ref().lock().await;
@@ -201,21 +194,39 @@ impl NetworkManager {
         let relay_msg = ProtocolMessage::Addr(addr_msg);
         let wire_msg = ProtocolParser::serialize_message(&relay_msg)?;
 
-        let peer_addrs: Vec<SocketAddr> = {
+        let mut peer_addrs: Vec<SocketAddr> = {
             let pm = self.peer_manager_ref().lock().await;
             pm.peer_socket_addresses()
                 .into_iter()
                 .filter(|addr| *addr != sender_addr)
                 .collect()
         };
+        peer_addrs.sort();
+        let subset: Vec<SocketAddr> = {
+            let last_sent = self.last_addr_sent().lock().await;
+            peer_addrs
+                .into_iter()
+                .filter(|addr| {
+                    now.saturating_sub(*last_sent.get(addr).unwrap_or(&0)) >= min_interval
+                })
+                .take(2)
+                .collect()
+        };
 
-        for peer_addr in peer_addrs {
+        let mut sent = Vec::new();
+        for peer_addr in subset {
             if let Err(e) = self.send_to_peer(peer_addr, wire_msg.clone()).await {
                 warn!("Failed to relay addresses to {}: {}", peer_addr, e);
+            } else {
+                sent.push(peer_addr);
             }
         }
-
-        *self.last_addr_sent().lock().await = now;
+        if !sent.is_empty() {
+            let mut last_sent = self.last_addr_sent().lock().await;
+            for peer_addr in sent {
+                last_sent.insert(peer_addr, now);
+            }
+        }
 
         Ok(())
     }
@@ -257,5 +268,49 @@ mod tests {
             addresses: vec![legacy_addr(8333)],
         };
         nm.handle_addr(peer, msg).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn second_addr_is_offered_to_a_peer_the_first_did_not_use() {
+        use crate::network::peer::Peer;
+        use crate::network::transport::TransportAddr;
+
+        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let nm = NetworkManager::new(listen);
+        let sender: SocketAddr = "127.0.0.1:18420".parse().unwrap();
+        let mut incoming = Vec::new();
+        for port in [18421u16, 18422, 18423] {
+            let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+            let (peer, rx) = Peer::pair_for_testing(addr);
+            nm.peer_manager_ref()
+                .lock()
+                .await
+                .add_peer(TransportAddr::Tcp(addr), peer)
+                .unwrap();
+            incoming.push((addr, rx));
+        }
+        let addresses = vec![legacy_addr_public(8333)];
+        nm.relay_addresses(sender, &addresses).await.unwrap();
+        nm.relay_addresses(sender, &addresses).await.unwrap();
+        let mut got = 0usize;
+        for (_addr, rx) in &mut incoming {
+            if rx.try_recv().is_ok() {
+                got += 1;
+            }
+        }
+        assert_eq!(got, 3);
+    }
+
+    fn legacy_addr_public(port: u16) -> NetworkAddress {
+        let mut ip = [0u8; 16];
+        ip[10] = 0xff;
+        ip[11] = 0xff;
+        ip[12..16].copy_from_slice(&[8, 8, 8, 8]);
+        NetworkAddress {
+            services: 1,
+            ip,
+            port,
+            time: current_timestamp() as u32,
+        }
     }
 }

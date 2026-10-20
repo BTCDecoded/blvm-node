@@ -111,6 +111,8 @@ pub struct RpcServer {
     connection_limiter: Option<Arc<tokio::sync::Mutex<ConnectionRateLimiter>>>,
     /// Batch rate multiplier cap: min(batch_len, this) tokens consumed
     batch_rate_multiplier_cap: u32,
+    /// Deadline for one RPC method. The awaited call is dropped when this elapses.
+    rpc_timeout: std::time::Duration,
 }
 
 impl RpcServer {
@@ -171,6 +173,7 @@ impl RpcServer {
             max_request_size,
             connection_limiter,
             batch_rate_multiplier_cap,
+            rpc_timeout: crate::utils::timeout::DEFAULT_RPC_TIMEOUT,
         }
     }
 
@@ -225,6 +228,25 @@ impl RpcServer {
     pub fn with_batch_rate_multiplier_cap(mut self, cap: u32) -> Self {
         self.batch_rate_multiplier_cap = cap;
         self
+    }
+
+    /// Set the deadline for one RPC method.
+    pub fn with_rpc_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.rpc_timeout = timeout;
+        self
+    }
+
+    async fn await_bounded<F, T>(
+        timeout: std::time::Duration,
+        call: F,
+    ) -> Result<T, errors::RpcError>
+    where
+        F: std::future::Future<Output = Result<T, errors::RpcError>>,
+    {
+        match tokio::time::timeout(timeout, call).await {
+            Ok(result) => result,
+            Err(_) => Err(errors::RpcError::request_timeout()),
+        }
     }
 
     /// Create with dependencies
@@ -372,6 +394,7 @@ impl RpcServer {
             max_request_size: self.max_request_size,
             connection_limiter: self.connection_limiter.clone(),
             batch_rate_multiplier_cap: self.batch_rate_multiplier_cap,
+            rpc_timeout: self.rpc_timeout,
         });
 
         loop {
@@ -1153,7 +1176,8 @@ impl RpcServer {
         let params = request.get("params").cloned().unwrap_or_else(|| json!([]));
         let id = request.get("id");
 
-        let result = server.call_method(method, params).await;
+        let result =
+            Self::await_bounded(server.rpc_timeout, server.call_method(method, params)).await;
 
         match result {
             Ok(response) => {
@@ -1181,6 +1205,15 @@ impl RpcServer {
             return "[]".to_string();
         }
 
+        let cap = server.batch_rate_multiplier_cap as usize;
+        if requests.len() > cap {
+            let err = errors::RpcError::invalid_request(format!(
+                "batch of {} calls exceeds the cap of {cap}",
+                requests.len()
+            ));
+            return serde_json::to_string(&err.to_json(None)).unwrap_or_else(|_| "{}".to_string());
+        }
+
         // Process all requests in parallel using tokio::task::spawn
         // Each request is processed independently, maintaining order
         let handles: Vec<_> = requests
@@ -1201,7 +1234,10 @@ impl RpcServer {
                         .unwrap_or_else(|| json!([]));
                     let id = req_clone.get("id").cloned();
 
-                    let result = server_clone.call_method(method, params).await;
+                    let timeout = server_clone.rpc_timeout;
+                    let result =
+                        Self::await_bounded(timeout, server_clone.call_method(method, params))
+                            .await;
 
                     // Build response maintaining original request ID
                     let response = match result {
@@ -1258,13 +1294,14 @@ impl RpcServer {
                 .map_err(errors::rpc_error_from_blockchain_result),
             "getblock" => {
                 let hash = crate::rpc::params::param_str(&params, 0).unwrap_or("");
+                let verbosity = crate::rpc::params::param_u64_default(&params, 1, 1);
                 self.blockchain
-                    .get_block(hash)
+                    .get_block_with_verbosity(hash, verbosity)
                     .await
                     .map_err(errors::rpc_error_from_blockchain_result)
             }
             "getblockhash" => {
-                let height = crate::rpc::params::param_u64_default(&params, 0, 0);
+                let height = crate::rpc::params::param_u64_required(&params, 0, "getblockhash")?;
                 self.blockchain
                     .get_block_hash(height)
                     .await
@@ -2102,6 +2139,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rpc_call_past_the_deadline_is_a_timeout_and_does_not_finish() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let server = RpcServer::new("127.0.0.1:0".parse().unwrap());
+        assert_eq!(server.rpc_timeout, std::time::Duration::from_secs(60));
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&finished);
+        let err = RpcServer::await_bounded(std::time::Duration::from_millis(20), async move {
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            flag.store(true, Ordering::SeqCst);
+            Ok(json!(true))
+        })
+        .await
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("timed out"), "{text}");
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        assert!(!finished.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn getblockhash_without_a_height_is_an_error() {
+        let server = RpcServer::new("127.0.0.1:0".parse().unwrap());
+        let err = server
+            .call_method("getblockhash", json!([]))
+            .await
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("getblockhash"), "{text}");
+        assert!(text.contains("integer"), "{text}");
+    }
+
+    #[tokio::test]
     async fn test_call_method_getrawtransaction() {
         let server = RpcServer::new("127.0.0.1:0".parse().unwrap());
         let params = json!(["0000000000000000000000000000000000000000000000000000000000000000"]);
@@ -2563,5 +2634,39 @@ mod tests {
                 panic!("generatetoaddress must be admin-gated for read-only Bearer tokens");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod batch_cap_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_batch_longer_than_the_cap_is_rejected() {
+        let server = Arc::new(
+            RpcServer::new("127.0.0.1:0".parse().unwrap()).with_batch_rate_multiplier_cap(2),
+        );
+        let over = json!([
+            {"jsonrpc":"2.0","method":"getblockcount","id":1},
+            {"jsonrpc":"2.0","method":"getblockcount","id":2},
+            {"jsonrpc":"2.0","method":"getblockcount","id":3}
+        ]);
+        let rejected =
+            RpcServer::process_request_with_server(Arc::clone(&server), &over.to_string()).await;
+        let value: Value = serde_json::from_str(&rejected).unwrap();
+        assert!(value.get("error").is_some(), "{rejected}");
+        assert!(value.as_array().is_none(), "{rejected}");
+
+        let within = json!([
+            {"jsonrpc":"2.0","method":"getblockcount","id":1},
+            {"jsonrpc":"2.0","method":"getblockcount","id":2}
+        ]);
+        let accepted = RpcServer::process_request_with_server(server, &within.to_string()).await;
+        let rows: Value = serde_json::from_str(&accepted).unwrap();
+        assert_eq!(
+            rows.as_array().map(|rows| rows.len()),
+            Some(2),
+            "{accepted}"
+        );
     }
 }

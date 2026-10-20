@@ -395,11 +395,9 @@ impl MiningRpc {
             .ok_or_else(|| RpcError::internal_error("No chain tip"))?;
         let prev_headers = self.headers_for_work(template_block_height.saturating_sub(1))?;
 
-        // 2. Get mempool transactions
-        let mempool_txs: Vec<Transaction> = self.get_mempool_transactions()?;
-
-        // 3. Get UTXO set
+        // One UTXO read prices the pool and builds the template.
         let utxo_set = self.get_utxo_set()?;
+        let mempool_txs: Vec<Transaction> = self.mempool_transactions_priced(&utxo_set)?;
 
         // 4. Extract coinbase parameters from request or use defaults
         let coinbase_script = self.extract_coinbase_script(params).unwrap_or_default();
@@ -479,7 +477,7 @@ impl MiningRpc {
         // Bitcoin Core `hashTarget.GetHex()` — full 256-bit target from nBits.
         let target_hex = blvm_protocol::pow::expand_target(template.header.bits)
             .map(|t| t.gbt_target_hex())
-            .unwrap_or_else(|_| format!("{:064x}", template.target));
+            .unwrap_or_else(|_| template.target.gbt_target_hex());
 
         // Convert bits to hex (8 characters)
         let bits_hex = format!("{:08x}", template.header.bits);
@@ -577,13 +575,14 @@ impl MiningRpc {
     }
 
     fn get_mempool_transactions(&self) -> RpcResult<Vec<Transaction>> {
-        if let Some(ref mempool) = self.mempool {
-            // Get UTXO set for fee calculation
-            let utxo_set = self.get_utxo_set()?;
+        let utxo_set = self.get_utxo_set()?;
+        self.mempool_transactions_priced(&utxo_set)
+    }
 
-            // Fee-rate order. Selection stops when the block is full.
+    fn mempool_transactions_priced(&self, utxo_set: &UtxoSet) -> RpcResult<Vec<Transaction>> {
+        if let Some(ref mempool) = self.mempool {
             let limit = mempool.size();
-            Ok(mempool.get_prioritized_transactions(limit, &utxo_set))
+            Ok(mempool.get_prioritized_transactions(limit, utxo_set))
         } else {
             Ok(vec![])
         }
@@ -670,6 +669,24 @@ impl MiningRpc {
         Ok(hashrate)
     }
 
+    fn utxos_for_prevouts(&self, txs: &[Transaction]) -> UtxoSet {
+        let mut set = UtxoSet::default();
+        let Some(storage) = self.storage.as_ref() else {
+            return set;
+        };
+        for tx in txs {
+            for input in &tx.inputs {
+                if set.contains_key(&input.prevout) {
+                    continue;
+                }
+                if let Ok(Some(utxo)) = storage.utxos().get_utxo(&input.prevout) {
+                    set.insert(input.prevout, Arc::new(utxo));
+                }
+            }
+        }
+        set
+    }
+
     fn get_utxo_set(&self) -> RpcResult<UtxoSet> {
         if let Some(ref storage) = self.storage {
             // Get UTXO set from storage
@@ -718,7 +735,7 @@ impl MiningRpc {
         });
         let wire = crate::rpc::txwire::tx_wire(tx, witnesses.as_deref());
         let fee = self.calculate_transaction_fee(tx);
-        let sigops = self.count_sigops(tx);
+        let sigops = self.count_sigops(tx, witnesses.as_deref());
         let weight = self.calculate_weight(tx);
 
         json!({
@@ -741,18 +758,32 @@ impl MiningRpc {
         mempool.calculate_transaction_fee(tx, &utxo_set)
     }
 
-    fn count_sigops(&self, tx: &Transaction) -> u32 {
-        // Use consensus layer sigop counting
+    fn count_sigops(&self, tx: &Transaction, witnesses: Option<&[Witness]>) -> u32 {
         #[cfg(feature = "sigop")]
         {
-            // Transaction types are the same between blvm_protocol and blvm_consensus
-            // (blvm_protocol re-exports them), so we can use tx directly
-            use blvm_protocol::sigop::get_legacy_sigop_count;
-            get_legacy_sigop_count(tx)
+            use blvm_protocol::UTXO;
+            use blvm_protocol::sigop::get_transaction_sigop_cost_with_utxos;
+
+            let owned: Vec<Option<UTXO>> = tx
+                .inputs
+                .iter()
+                .map(|input| {
+                    self.storage
+                        .as_ref()
+                        .and_then(|storage| storage.utxos().get_utxo(&input.prevout).ok().flatten())
+                })
+                .collect();
+            let refs: Vec<Option<&UTXO>> = owned.iter().map(|utxo| utxo.as_ref()).collect();
+            if let Ok(cost) =
+                get_transaction_sigop_cost_with_utxos(tx, &refs, witnesses, 0x01 | 0x800)
+            {
+                return u32::try_from(cost).unwrap_or(u32::MAX);
+            }
+            0
         }
         #[cfg(not(feature = "sigop"))]
         {
-            // Fallback: basic counting
+            let _ = witnesses;
             let mut count = 0u32;
             for output in &tx.outputs {
                 for &byte in &output.script_pubkey {
@@ -1146,21 +1177,29 @@ impl MiningRpc {
                 "submitblock: storage is required to connect the block".to_string(),
             )
         })?;
-        let tip = storage
-            .chain()
-            .get_tip_hash()
-            .map_err(|e| RpcError::internal_error(format!("Failed to get chain tip: {e}")))?
-            .ok_or_else(|| {
-                RpcError::internal_error("submitblock: chain not initialized (no tip)".to_string())
-            })?;
-        let prev_ok = if let Ok(Some(tip_header)) = storage.blocks().get_header(&tip) {
-            blvm_consensus::block::validate_prev_block_hash(&block.header, &tip_header)
-        } else {
-            block.header.prev_block_hash == tip
-        };
-        if !prev_ok {
+        let parent_hash = block.header.prev_block_hash;
+        let parent_stored = storage
+            .blocks()
+            .get_header(&parent_hash)
+            .map_err(|e| {
+                RpcError::internal_error(format!("submitblock: failed to read parent header: {e}"))
+            })?
+            .is_some();
+        if !parent_stored {
             return Err(RpcError::invalid_params(
-                "submitblock: prev_block_hash does not match current chain tip".to_string(),
+                "submitblock: prev_block_hash is not a stored header".to_string(),
+            ));
+        }
+        let block_hash = storage.blocks().get_block_hash(&block);
+        if storage
+            .blocks()
+            .get_header(&block_hash)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return Err(RpcError::invalid_params(
+                "submitblock: block header is already stored".to_string(),
             ));
         }
         let protocol = self.protocol_engine.as_ref().ok_or_else(|| {
@@ -1197,7 +1236,6 @@ impl MiningRpc {
         if let Some(ref mempool) = self.mempool {
             mempool.remove_for_connected_block(&block.transactions);
         }
-        let block_hash = storage.blocks().get_block_hash(&block);
         if let Some(ref ep) = self.event_publisher {
             ep.publish_block_mined(&block_hash, connect_height, None)
                 .await;
@@ -1244,17 +1282,22 @@ impl MiningRpc {
             )));
         }
 
-        // Get mempool transactions and UTXO set for fee calculation
-        let mempool_txs = if let Some(ref mempool) = self.mempool {
-            let utxo_set = self.get_utxo_set()?;
-            mempool.get_prioritized_transactions(100, &utxo_set)
+        let (mempool_txs, prevouts) = if let Some(ref mempool) = self.mempool {
+            let pooled = mempool.get_transactions();
+            let prevouts = self.utxos_for_prevouts(&pooled);
+            let ranked = mempool.get_prioritized_transactions(100, &prevouts);
+            (ranked, prevouts)
         } else {
-            vec![]
+            (Vec::new(), UtxoSet::default())
         };
 
         let mut fee_rates = Vec::new();
         for tx in &mempool_txs {
-            let fee = self.calculate_transaction_fee(tx);
+            let fee = self
+                .mempool
+                .as_ref()
+                .map(|pool| pool.calculate_transaction_fee(tx, &prevouts))
+                .unwrap_or(0);
             let size = self.calculate_weight(tx) as usize;
             if size > 0 && fee > 0 {
                 let vsize = (size as u64).div_ceil(4).max(1);
@@ -1281,7 +1324,16 @@ impl MiningRpc {
         };
         let fee_rate = fee_rates[index as usize];
         let adjusted_rate = match estimate_mode {
-            "economical" => fee_rate * 0.8,
+            "economical" => {
+                let floor_sats = self
+                    .mempool
+                    .as_ref()
+                    .map(|pool| pool.min_relay_fee_rate_sat_per_vb())
+                    .unwrap_or(1)
+                    .max(1);
+                let floor = floor_sats as f64 * 1_000.0 / 100_000_000.0;
+                (fee_rate * 0.8).max(floor)
+            }
             "conservative" => fee_rate * 1.2,
             _ => fee_rate,
         };
@@ -1389,7 +1441,7 @@ pub(crate) fn mempool_witnesses_for_template(
                     hex::encode(txid)
                 ));
             }
-            Ok(None)
+            Ok(Some(vec![Vec::new(); tx.inputs.len()]))
         })
         .collect()
 }
@@ -1474,6 +1526,37 @@ mod tests {
         let mining = MiningRpc::with_dependencies(storage, mempool);
         assert_eq!(mining.calculate_transaction_fee(&child), 15_000);
         assert_eq!(mining.calculate_transaction_fee(&spend(negative, 1_000)), 0);
+    }
+
+    #[test]
+    fn witness_sigop_cost_is_the_template_sigops() {
+        use blvm_protocol::opcodes::OP_CHECKSIG;
+        use blvm_protocol::segwit::Witness;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let mempool = Arc::new(MempoolManager::new());
+        let prevout = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let mut script_pubkey = vec![0x00, 0x20];
+        script_pubkey.extend_from_slice(&[0u8; 32]);
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: script_pubkey.into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        storage.utxos().add_utxo(&prevout, &utxo).unwrap();
+        let tx = spend(prevout, 40_000);
+        let witness: Witness = vec![vec![OP_CHECKSIG]];
+        let mining = MiningRpc::with_dependencies(storage, mempool);
+        assert_eq!(blvm_protocol::sigop::get_legacy_sigop_count(&tx), 0);
+        assert_eq!(
+            mining.count_sigops(&tx, Some(std::slice::from_ref(&witness))),
+            1
+        );
     }
 
     #[test]
@@ -1690,6 +1773,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stored_parent_is_handed_to_connect_when_it_is_not_the_tip() {
+        use blvm_protocol::serialization::serialize_block_with_witnesses;
+        use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+
+        let (_dir, storage, _mempool, mining) = regtest_mining();
+        mining
+            .generate_to_address(&one_block_params())
+            .await
+            .unwrap();
+        let tip = storage.chain().get_tip_hash().unwrap().unwrap();
+        let block = storage.blocks().get_block(&tip).unwrap().unwrap();
+        let parent = block.header.prev_block_hash;
+        let genesis = BitcoinProtocolEngine::new(ProtocolVersion::Regtest)
+            .unwrap()
+            .get_network_params()
+            .genesis_block
+            .header
+            .clone();
+        storage.blocks().store_header(&parent, &genesis).unwrap();
+        let mut sibling = block;
+        sibling.header.nonce = sibling.header.nonce.wrapping_add(1);
+        let bytes = serialize_block_with_witnesses(
+            &sibling,
+            &vec![vec![]; sibling.transactions.len()],
+            true,
+        );
+        let result = mining
+            .submit_block(&serde_json::json!([hex::encode(&bytes)]))
+            .await;
+        match &result {
+            Ok(value) => assert!(value.is_null()),
+            Err(err) => assert!(!err.to_string().contains("current chain tip"), "{err}"),
+        }
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
     async fn one_sat_per_virtual_byte_quotes_before_the_mode_multiplier() {
         use blvm_protocol::segwit::transaction_weight_from_stacks;
 
@@ -1727,6 +1847,93 @@ mod tests {
             .unwrap();
         assert!((quote["feerate"].as_f64().unwrap() - 0.00001).abs() < 1e-12);
         assert_eq!(quote["blocks"].as_u64(), Some(6));
+    }
+
+    #[tokio::test]
+    async fn economical_estimate_stays_at_the_relay_floor() {
+        use blvm_protocol::segwit::transaction_weight_from_stacks;
+
+        let (_dir, storage, mempool, mining) = regtest_mining();
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 1;
+        let funding = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let mut tx = spend(funding, 50_000);
+        tx.inputs[0].script_sig = vec![OP_1];
+        let vsize = transaction_weight_from_stacks(&tx, None)
+            .unwrap()
+            .div_ceil(4)
+            .max(1) as i64;
+        tx.outputs[0].value = 50_000;
+        let utxo = UTXO {
+            value: 50_000 + vsize,
+            script_pubkey: vec![OP_1].into(),
+            height: 0,
+            is_coinbase: false,
+        };
+        storage.utxos().add_utxo(&funding, &utxo).unwrap();
+        let mut set = UtxoSet::default();
+        set.insert(funding, Arc::new(utxo));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set)));
+        mempool.set_policy_config(Some(policy));
+        assert!(mempool.add_transaction(tx).unwrap());
+
+        let quote = mining
+            .estimate_smart_fee(&serde_json::json!([6u64, "economical"]))
+            .await
+            .unwrap();
+        assert!((quote["feerate"].as_f64().unwrap() - 0.00001).abs() < 1e-12);
+    }
+
+    #[tokio::test]
+    async fn estimate_uses_the_spent_prevout_when_another_row_is_bad() {
+        let (_dir, storage, mempool, mining) = regtest_mining();
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        mempool.set_policy_config(Some(policy));
+        let funding = OutPoint {
+            hash: [8u8; 32],
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        storage.utxos().add_utxo(&funding, &utxo).unwrap();
+        storage
+            .utxos()
+            .insert_undecodable_utxo(&OutPoint {
+                hash: [9u8; 32],
+                index: 1,
+            })
+            .unwrap();
+        let mut set = UtxoSet::default();
+        set.insert(funding, Arc::new(utxo));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set)));
+        let tx = spend(funding, 40_000);
+        assert!(mempool.add_transaction(tx).unwrap());
+        let quote = mining
+            .estimate_smart_fee(&serde_json::json!([6u64, "unset"]))
+            .await
+            .unwrap();
+        assert!(quote["feerate"].as_f64().unwrap() > 0.0, "{quote}");
+    }
+
+    #[tokio::test]
+    async fn getblocktemplate_reads_the_utxo_set_once() {
+        let (_dir, _storage, _mempool, mining) = regtest_mining();
+        crate::storage::utxostore::reset_get_all_utxos_calls();
+        mining
+            .get_block_template(&serde_json::json!([]))
+            .await
+            .unwrap();
+        assert_eq!(crate::storage::utxostore::get_all_utxos_calls(), 1);
     }
 
     #[tokio::test]
