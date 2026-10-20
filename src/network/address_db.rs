@@ -371,7 +371,7 @@ impl AddressDatabase {
                 }
                 // Create a placeholder NetworkAddress for Iroh (not used, just for consistency)
                 let placeholder_addr = NetworkAddress {
-                    time: 0,
+                    time: current_timestamp() as u32,
                     services,
                     ip: [0; 16],
                     port: 0,

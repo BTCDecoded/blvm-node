@@ -96,7 +96,11 @@ impl TransactionSelector {
 
         let mut selected = Vec::new();
         let mut selected_ids = HashSet::new();
-        let mut current_size = TEMPLATE_RESERVE_BYTES.min(self.max_block_size);
+        let mut current_size = if self.max_block_size > TEMPLATE_RESERVE_BYTES {
+            TEMPLATE_RESERVE_BYTES
+        } else {
+            0
+        };
         let mut current_weight = TEMPLATE_RESERVE_WEIGHT.min(self.max_block_weight);
         let mut current_sigops = 0u64;
         let mut waiting: VecDeque<Transaction> = VecDeque::new();

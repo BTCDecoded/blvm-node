@@ -61,8 +61,7 @@ pub(crate) fn unsolicited_header_meets_required_work(
     else {
         return false;
     };
-    header.bits == required
-        && blvm_protocol::pow::check_proof_of_work(header).unwrap_or(false)
+    header.bits == required && blvm_protocol::pow::check_proof_of_work(header).unwrap_or(false)
 }
 
 fn block_hash_from_header(header: &BlockHeader) -> [u8; 32] {
@@ -1882,6 +1881,23 @@ mod plan_wire_locks {
             .cache_block_chainwork(&tip.prev_block_hash, &tip, 0)
             .unwrap();
         node.storage.chain().update_tip(&tip_hash, &tip, 5).unwrap();
+        let mut indexed = Vec::new();
+        let mut prev_hash = [0u8; 32];
+        for height in 0..5u64 {
+            let header = BlockHeader {
+                version: 1,
+                prev_block_hash: prev_hash,
+                merkle_root: [height as u8; 32],
+                timestamp: 1_700_000_000 - (5 - height) * 600,
+                bits: 0x207fffff,
+                nonce: height,
+            };
+            let hash = blvm_consensus::block::block_header_hash(&header);
+            indexed.push((hash, header, height));
+            prev_hash = hash;
+        }
+        indexed.push((tip_hash, tip.clone(), 5));
+        node.storage.blocks().store_headers_batch(&indexed).unwrap();
         let bad = BlockHeader {
             version: 1,
             prev_block_hash: tip_hash,

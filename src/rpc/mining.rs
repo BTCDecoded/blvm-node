@@ -1189,6 +1189,18 @@ impl MiningRpc {
                 "submitblock: prev_block_hash is not a stored header".to_string(),
             ));
         }
+        let block_hash = storage.blocks().get_block_hash(&block);
+        if storage
+            .blocks()
+            .get_header(&block_hash)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return Err(RpcError::invalid_params(
+                "submitblock: block header is already stored".to_string(),
+            ));
+        }
         let protocol = self.protocol_engine.as_ref().ok_or_else(|| {
             RpcError::internal_error(
                 "submitblock: protocol engine is required to connect the block".to_string(),
@@ -1223,7 +1235,6 @@ impl MiningRpc {
         if let Some(ref mempool) = self.mempool {
             mempool.remove_for_connected_block(&block.transactions);
         }
-        let block_hash = storage.blocks().get_block_hash(&block);
         if let Some(ref ep) = self.event_publisher {
             ep.publish_block_mined(&block_hash, connect_height, None)
                 .await;
@@ -1429,7 +1440,7 @@ pub(crate) fn mempool_witnesses_for_template(
                     hex::encode(txid)
                 ));
             }
-            Ok(None)
+            Ok(Some(vec![Vec::new(); tx.inputs.len()]))
         })
         .collect()
 }
