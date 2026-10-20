@@ -1073,11 +1073,46 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/cargo"
           echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
 
+      # Build runs last on a host that test/clippy/docs/fuzz may already have filled.
+      # Free space before restoring the target cache, and skip that restore when
+      # space is still short (run 39430830510 hit ENOSPC during restore + unpack).
+      - name: Low-disk guard before cache restore
+        id: disk
+        run: |
+          df -h / "${{ github.workspace }}" /mnt/data 2>/dev/null || true
+          CARGO_TEMP="${RUNNER_TEMP}/cargo"
+          if [ -d "$CARGO_TEMP" ]; then
+            rm -rf "$CARGO_TEMP/registry/src" "$CARGO_TEMP/git/checkouts" 2>/dev/null || true
+          fi
+          BUILD_ROOT="${BLVM_RUNNER_DATA_ROOT}"
+          RUN_ID="${{ github.run_id }}"
+          if [ -d "$BUILD_ROOT" ]; then
+            find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
+              -not -name "$RUN_ID" \
+              -exec rm -rf {} + 2>/dev/null || true
+          fi
+          rm -rf fuzz/target 2>/dev/null || true
+          AVAIL=$(df -B1 "${{ github.workspace }}" | tail -1 | awk '{print $4}')
+          MIN_FREE=$((20 * 1024 * 1024 * 1024))
+          if [ -n "$AVAIL" ] && [ "$AVAIL" -lt "$MIN_FREE" ]; then
+            echo "::warning::Only $AVAIL bytes free; skipping target cache restore (cold build)"
+            echo "restore-target=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "restore-target=true" >> "$GITHUB_OUTPUT"
+          fi
+          df -h "${{ github.workspace }}" || true
+
+      - name: Prune runner caches
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: prune
+
       - name: Cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
           operation: bind-env
           cache-key: ${{ needs.setup.outputs.cache-key }}
+          include-target: ${{ steps.disk.outputs.restore-target }}
 
       - name: Restore Cargo cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
