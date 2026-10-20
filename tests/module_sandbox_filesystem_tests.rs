@@ -83,9 +83,9 @@ fn test_validate_path_nonexistent() {
     let data_dir = temp_dir.path().join("data");
     let nonexistent = data_dir.join("nonexistent.txt");
 
-    // Validate nonexistent path should fail (canonicalize will fail)
+    // A new file inside the data directory is allowed. The parent is the sandbox.
     let result = sandbox.validate_path(&nonexistent);
-    assert!(result.is_err());
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -153,12 +153,13 @@ fn test_validate_path_parent_directory_traversal() {
     // Create subdirectory
     std::fs::create_dir_all(&subdir).unwrap();
 
-    // Try to access parent directory using ../
-    let traversal_path = subdir.join("..").join("outside.txt");
+    // subdir/../ stays inside the data directory. Two levels up leaves the sandbox.
+    let inside = sandbox.validate_path(subdir.join("..").join("outside.txt"));
+    assert!(inside.is_ok());
+
     let outside_file = temp_dir.path().join("outside.txt");
     std::fs::write(&outside_file, "test").unwrap();
-
-    // Should fail (canonicalize should resolve to outside sandbox)
+    let traversal_path = subdir.join("..").join("..").join("outside.txt");
     let result = sandbox.validate_path(&traversal_path);
     assert!(result.is_err());
 }
