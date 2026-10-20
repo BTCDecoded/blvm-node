@@ -1015,4 +1015,39 @@ mod rate_limiter_tests {
         assert!(!limiters.contains_key(&idle));
         assert!(limiters.contains_key(&active));
     }
+
+    /// Idle time while full is not banked: right after a long idle period, exhausting the
+    /// bucket leaves nothing (otherwise a client gets 2x burst back-to-back).
+    #[tokio::test(start_paused = true)]
+    async fn idle_while_full_is_not_banked() {
+        let mut l = RpcRateLimiter::new(3, 1);
+        advance(Duration::from_secs(100)).await;
+        for _ in 0..3 {
+            assert!(l.check_and_consume());
+        }
+        assert!(!l.check_and_consume());
+    }
+
+    /// A refill that overfills the bucket drops the sub-token remainder.
+    #[tokio::test(start_paused = true)]
+    async fn overfill_drops_remainder() {
+        let mut l = RpcRateLimiter::new(1, 1);
+        assert!(l.check_and_consume());
+        advance(Duration::from_millis(1500)).await;
+        assert!(l.check_and_consume());
+        advance(Duration::from_millis(600)).await;
+        assert!(!l.check_and_consume());
+    }
+
+    /// A refill that exactly fills the bucket also drops the remainder.
+    #[tokio::test(start_paused = true)]
+    async fn exact_fill_drops_remainder() {
+        let mut l = RpcRateLimiter::new(2, 1);
+        assert!(l.check_and_consume_n(2));
+        advance(Duration::from_millis(1500)).await;
+        advance(Duration::from_millis(700)).await;
+        assert!(l.check_and_consume_n(2));
+        advance(Duration::from_millis(900)).await;
+        assert!(!l.check_and_consume());
+    }
 }
