@@ -127,11 +127,15 @@ async fn test_rest_unvault_vault() {
         "vault_id": "test_vault_rest_3",
         "deposit_amount": 100000,
         "withdrawal_script": "5176a914000000000000000000000000000000000000000087",
+        // VaultConfig has no serde defaults, so a partial config is rejected with 400.
         "config": {
+            "withdrawal_delay_blocks": 144,
+            "recovery_script": null,
+            "max_withdrawal": null,
             "require_unvault": true
         }
     }));
-    handle_vault_request(
+    let create_response = handle_vault_request(
         Arc::clone(&state_machine),
         &Method::POST,
         "/api/v1/vaults",
@@ -139,6 +143,7 @@ async fn test_rest_unvault_vault() {
         request_id.clone(),
     )
     .await;
+    assert_eq!(create_response.status(), StatusCode::OK);
 
     // Then unvault
     let unvault_body = Some(json!({
