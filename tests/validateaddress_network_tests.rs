@@ -89,3 +89,55 @@ async fn base58_network_checked_on_regtest_node() {
     assert!(isvalid(&rpc, TEST_P2PKH).await);
     assert!(isvalid(&rpc, TEST_P2SH).await);
 }
+
+// Review's probes on blvm-node#30 @ 26c4d5e: full address matrix per network, so testnet3,
+// signet and testnet4 are covered by both the base58 version check and the stored-network
+// fallback in `get_chain_name()`.
+const BC1: &str = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+const BC1P: &str = "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0";
+const TB1: &str = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx";
+const TB1P: &str = "tb1pqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesf3hn0c";
+const BCRT1: &str = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
+const M1: &str = MAIN_P2PKH;
+const M3: &str = MAIN_P2SH;
+const TM: &str = TEST_P2PKH;
+const T2: &str = TEST_P2SH;
+
+async fn matrix(v: ProtocolVersion) -> Vec<(&'static str, bool)> {
+    let (_d, s) = storage_initialized_like_node_start(v);
+    let rpc = BlockchainRpc::with_dependencies(s);
+    let mut out = vec![];
+    for a in [BC1, BC1P, TB1, TB1P, BCRT1, M1, M3, TM, T2] {
+        out.push((a, isvalid(&rpc, a).await));
+    }
+    let st = rpc.get_blockchain_state().await.unwrap();
+    let info = rpc.get_blockchain_info().await.unwrap();
+    eprintln!(
+        "{v:?}: getblockchainstate.chain={} getblockchaininfo.chain={} {:?}",
+        st["chain"], info["chain"], out
+    );
+    out
+}
+fn exp(out: &[(&str, bool)], valid: &[&str]) {
+    for (a, got) in out {
+        assert_eq!(*got, valid.contains(a), "{a}");
+    }
+}
+#[tokio::test]
+async fn rv_q2_testnet3() {
+    exp(
+        &matrix(ProtocolVersion::Testnet3).await,
+        &[TB1, TB1P, TM, T2],
+    );
+}
+#[tokio::test]
+async fn rv_q3_signet() {
+    exp(&matrix(ProtocolVersion::Signet).await, &[TB1, TB1P, TM, T2]);
+}
+#[tokio::test]
+async fn rv_q4_testnet4() {
+    exp(
+        &matrix(ProtocolVersion::Testnet4).await,
+        &[TB1, TB1P, TM, T2],
+    );
+}
