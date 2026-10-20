@@ -832,8 +832,8 @@ async fn run_peer_writer<W>(
 #[cfg(test)]
 mod write_error_tests {
     use super::run_peer_writer;
-    use crate::network::transport::TransportAddr;
     use crate::network::NetworkMessage;
+    use crate::network::transport::TransportAddr;
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use tokio::io::AsyncWrite;

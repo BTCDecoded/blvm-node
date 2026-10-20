@@ -3117,9 +3117,11 @@ mod tests {
             .into(),
             lock_time: 0,
         };
-        assert!(!mempool
-            .add_transaction_with_witness(tx.clone(), Some(vec![vec![]]))
-            .unwrap());
+        assert!(
+            !mempool
+                .add_transaction_with_witness(tx.clone(), Some(vec![vec![]]))
+                .unwrap()
+        );
         assert!(mempool.get_transaction(&calculate_tx_id(&tx)).is_none());
     }
 
@@ -3194,7 +3196,11 @@ mod tests {
         let txid = calculate_tx_id(&tx);
         set.remove(&second);
         let ranked = mempool.get_prioritized_transactions(10, &set);
-        assert!(ranked.iter().all(|ranked_tx| calculate_tx_id(ranked_tx) != txid));
+        assert!(
+            ranked
+                .iter()
+                .all(|ranked_tx| calculate_tx_id(ranked_tx) != txid)
+        );
         assert!(mempool.cached_fee_basis(&txid).is_none());
     }
 

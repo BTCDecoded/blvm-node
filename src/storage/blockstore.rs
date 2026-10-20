@@ -1425,7 +1425,7 @@ impl BlockStore {
 #[cfg(test)]
 mod header_height_tests {
     use super::*;
-    use crate::storage::database::{create_database, default_backend, Database};
+    use crate::storage::database::{Database, create_database, default_backend};
     use std::sync::Arc;
     use tempfile::TempDir;
 

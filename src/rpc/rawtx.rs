@@ -1143,14 +1143,12 @@ impl RawTxRpc {
                             tokio::task::spawn_blocking({
                                 let storage = storage.clone();
                                 move || -> Result<([u8; 32], u64), anyhow::Error> {
-                                    let best_hash = storage
-                                        .chain()
-                                        .get_tip_hash()?
-                                        .ok_or_else(|| anyhow::anyhow!("chain tip hash is missing"))?;
-                                    let tip_height = storage
-                                        .chain()
-                                        .get_height()?
-                                        .ok_or_else(|| {
+                                    let best_hash =
+                                        storage.chain().get_tip_hash()?.ok_or_else(|| {
+                                            anyhow::anyhow!("chain tip hash is missing")
+                                        })?;
+                                    let tip_height =
+                                        storage.chain().get_height()?.ok_or_else(|| {
                                             anyhow::anyhow!("chain tip height is missing")
                                         })?;
                                     Ok((best_hash, tip_height))
@@ -2297,10 +2295,7 @@ mod createraw_locks {
         };
         let hex_tx = RawTxRpc::serialize_transaction_with_witness(&tx, None);
         let rpc = RawTxRpc::with_dependencies(storage, Arc::clone(&mempool), None, None);
-        let err = rpc
-            .sendrawtransaction(&json!([hex_tx]))
-            .await
-            .unwrap_err();
+        let err = rpc.sendrawtransaction(&json!([hex_tx])).await.unwrap_err();
         let text = err.to_string();
         assert!(text.contains("BTC/kvB"), "{text}");
         assert!(
@@ -2796,7 +2791,10 @@ mod raw_tx_read_tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(missing_err.contains("Transaction not found"), "{missing_err}");
+        assert!(
+            missing_err.contains("Transaction not found"),
+            "{missing_err}"
+        );
     }
 }
 

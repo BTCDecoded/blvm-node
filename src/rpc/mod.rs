@@ -906,10 +906,7 @@ mod tests {
         rpc.with_auth_config(RpcAuthConfig::rate_limit_only(10, 1))
             .await;
         let err = rpc.start().await.unwrap_err().to_string();
-        assert!(
-            err.contains("without authentication"),
-            "{err}"
-        );
+        assert!(err.contains("without authentication"), "{err}");
 
         let mut rest = RpcManager::new("127.0.0.1:18332".parse().unwrap());
         rest.enable_rest_api("0.0.0.0:18333".parse().unwrap());

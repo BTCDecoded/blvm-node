@@ -16,10 +16,10 @@ pub use known_trees::KNOWN_TREE_NAMES;
 
 #[cfg(feature = "heed3")]
 mod heed3_impl;
-#[cfg(feature = "heed3")]
-pub use heed3_impl::{Heed3Database, Heed3ModuleDatabase, Heed3Tree};
 #[cfg(all(test, feature = "heed3"))]
 pub(crate) use heed3_impl::abort_next_three_put_commit;
+#[cfg(feature = "heed3")]
+pub use heed3_impl::{Heed3Database, Heed3ModuleDatabase, Heed3Tree};
 
 /// Database abstraction trait
 ///

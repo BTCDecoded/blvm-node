@@ -1293,9 +1293,7 @@ impl NetworkManager {
         rx
     }
 
-    fn block_fetch_timeout(
-        config: &crate::config::RequestTimeoutConfig,
-    ) -> std::time::Duration {
+    fn block_fetch_timeout(config: &crate::config::RequestTimeoutConfig) -> std::time::Duration {
         std::time::Duration::from_secs(config.async_request_timeout_seconds)
     }
 
@@ -1512,7 +1510,10 @@ impl NetworkManager {
                 };
                 // Deliver a copy to every live receiver. A closed sibling is skipped.
                 // Removing the key is safe only after each live receiver has the block.
-                let live: Vec<_> = senders.into_iter().filter(|sender| !sender.is_closed()).collect();
+                let live: Vec<_> = senders
+                    .into_iter()
+                    .filter(|sender| !sender.is_closed())
+                    .collect();
                 if live.is_empty() {
                     crate::node::parallel_ibd::body_dup::note_loser_branch_dropped();
                     if crate::node::parallel_ibd::late_body::try_admit(
@@ -2690,9 +2691,7 @@ impl NetworkManager {
     ) -> Result<()> {
         if let Some(ref mempool_manager) = self.mempool_manager {
             for (tx, witnesses) in txs {
-                match mempool_manager
-                    .add_transaction_with_witness(tx.clone(), witnesses.clone())
-                {
+                match mempool_manager.add_transaction_with_witness(tx.clone(), witnesses.clone()) {
                     Ok(true) => {
                         let txid = blvm_protocol::block::calculate_tx_id(tx);
                         let fee = mempool_manager.cached_fee_basis(&txid);

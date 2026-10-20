@@ -162,7 +162,8 @@ mod tests {
         mempool.set_policy_config(Some(policy));
         mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set)));
         let listen: SocketAddr = "127.0.0.1:18581".parse().unwrap();
-        let nm = NetworkManager::new(listen).with_dependencies(protocol, storage, Arc::clone(&mempool));
+        let nm =
+            NetworkManager::new(listen).with_dependencies(protocol, storage, Arc::clone(&mempool));
         nm.submit_transactions_to_mempool(&[(decoded, decoded_witness)])
             .await
             .unwrap();

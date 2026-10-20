@@ -912,10 +912,11 @@ mod info_locks {
         rpc.set_ban(&json!(["1.2.3.4", "add", 0, true]))
             .await
             .unwrap();
-        assert!(nm
-            .get_banned_peers()
-            .iter()
-            .all(|(addr, _)| addr.ip().to_string() != "1.2.3.4"));
+        assert!(
+            nm.get_banned_peers()
+                .iter()
+                .all(|(addr, _)| addr.ip().to_string() != "1.2.3.4")
+        );
         rpc.set_ban(&json!(["1.2.3.5", "add", 0, false]))
             .await
             .unwrap();

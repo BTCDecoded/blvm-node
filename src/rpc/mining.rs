@@ -760,16 +760,16 @@ impl MiningRpc {
     fn count_sigops(&self, tx: &Transaction, witnesses: Option<&[Witness]>) -> u32 {
         #[cfg(feature = "sigop")]
         {
-            use blvm_protocol::sigop::get_transaction_sigop_cost_with_utxos;
             use blvm_protocol::UTXO;
+            use blvm_protocol::sigop::get_transaction_sigop_cost_with_utxos;
 
             let owned: Vec<Option<UTXO>> = tx
                 .inputs
                 .iter()
                 .map(|input| {
-                    self.storage.as_ref().and_then(|storage| {
-                        storage.utxos().get_utxo(&input.prevout).ok().flatten()
-                    })
+                    self.storage
+                        .as_ref()
+                        .and_then(|storage| storage.utxos().get_utxo(&input.prevout).ok().flatten())
                 })
                 .collect();
             let refs: Vec<Option<&UTXO>> = owned.iter().map(|utxo| utxo.as_ref()).collect();
@@ -1540,10 +1540,7 @@ mod tests {
         let tx = spend(prevout, 40_000);
         let witness: Witness = vec![vec![OP_CHECKSIG]];
         let mining = MiningRpc::with_dependencies(storage, mempool);
-        assert_eq!(
-            blvm_protocol::sigop::get_legacy_sigop_count(&tx),
-            0
-        );
+        assert_eq!(blvm_protocol::sigop::get_legacy_sigop_count(&tx), 0);
         assert_eq!(
             mining.count_sigops(&tx, Some(std::slice::from_ref(&witness))),
             1

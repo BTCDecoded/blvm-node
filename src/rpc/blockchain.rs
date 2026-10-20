@@ -707,8 +707,7 @@ impl BlockchainRpc {
 
             if let Ok(Some(header)) = storage.blocks().get_header(&hash_array) {
                 if verbose {
-                    let Some(block_height) =
-                        storage.blocks().get_height_by_hash(&hash_array)?
+                    let Some(block_height) = storage.blocks().get_height_by_hash(&hash_array)?
                     else {
                         return Err(anyhow::anyhow!(
                             "getblockheader: header has no height index"
@@ -775,7 +774,9 @@ impl BlockchainRpc {
                     Ok(Value::String(hex::encode(header_bytes)))
                 }
             } else if let Err(err) = storage.blocks().get_header(&hash_array) {
-                Err(anyhow::anyhow!("getblockheader: storage read failed: {err}"))
+                Err(anyhow::anyhow!(
+                    "getblockheader: storage read failed: {err}"
+                ))
             } else {
                 Err(BlockNotFoundError::new("").into())
             }
@@ -1098,8 +1099,7 @@ impl BlockchainRpc {
                         if check_level >= 2 {
                             use blvm_protocol::mining::calculate_merkle_root;
 
-                            if let Ok(calculated_root) =
-                                calculate_merkle_root(&block.transactions)
+                            if let Ok(calculated_root) = calculate_merkle_root(&block.transactions)
                             {
                                 if calculated_root != block.header.merkle_root {
                                     errors.push(format!(
@@ -1790,9 +1790,10 @@ impl BlockchainRpc {
             let Some(header) = storage.blocks().get_header(&hash)? else {
                 break;
             };
-            let undo = storage.blocks().get_undo_log(&hash)?.ok_or_else(|| {
-                anyhow::anyhow!("missing undo log for invalidated block")
-            })?;
+            let undo = storage
+                .blocks()
+                .get_undo_log(&hash)?
+                .ok_or_else(|| anyhow::anyhow!("missing undo log for invalidated block"))?;
             for entry in &undo.entries {
                 if entry.new_utxo.is_some() {
                     let _ = storage.utxos().remove_utxo(&entry.outpoint);
@@ -2744,7 +2745,9 @@ mod block_stats_tests {
             .len();
         assert_eq!(stats["swtxs"], 1);
         assert_eq!(stats["swtotal_size"].as_u64(), Some(segwit_size as u64));
-        assert!(stats["swtotal_weight"].as_u64().unwrap() < stats["total_weight"].as_u64().unwrap());
+        assert!(
+            stats["swtotal_weight"].as_u64().unwrap() < stats["total_weight"].as_u64().unwrap()
+        );
     }
 
     #[tokio::test]
@@ -3136,11 +3139,10 @@ mod block_stats_tests {
             .unwrap();
         let report = rpc.verify_chain(Some(2), Some(1)).await.unwrap();
         let errors = report["errors"].as_array().unwrap();
-        assert!(
-            errors
-                .iter()
-                .any(|err| err.as_str().is_some_and(|s| s.contains("incorrect merkle root")))
-        );
+        assert!(errors.iter().any(|err| {
+            err.as_str()
+                .is_some_and(|s| s.contains("incorrect merkle root"))
+        }));
     }
 
     #[tokio::test]
@@ -3192,10 +3194,7 @@ mod block_stats_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("missing undo log"), "{err}");
-        assert_eq!(
-            storage.chain().get_tip_hash().unwrap().unwrap(),
-            child_hash
-        );
+        assert_eq!(storage.chain().get_tip_hash().unwrap().unwrap(), child_hash);
     }
 
     #[tokio::test]
@@ -3332,7 +3331,10 @@ mod block_stats_tests {
             .unwrap();
         storage
             .utxos()
-            .insert_undecodable_utxo(&blvm_protocol::OutPoint { hash: txid, index: 0 })
+            .insert_undecodable_utxo(&blvm_protocol::OutPoint {
+                hash: txid,
+                index: 0,
+            })
             .unwrap();
         let err = BlockchainRpc::with_dependencies(storage)
             .get_address_info(&json!([hex::encode(&script)]))
@@ -3479,9 +3481,7 @@ mod validate_address_network_tests {
         );
         let wrong_length = "bc1qzyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zymalz5m";
         assert_eq!(
-            rpc.validate_address(&json!([wrong_length]))
-                .await
-                .unwrap()["isvalid"],
+            rpc.validate_address(&json!([wrong_length])).await.unwrap()["isvalid"],
             false
         );
     }

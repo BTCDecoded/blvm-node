@@ -2928,9 +2928,9 @@ impl IbdUtxoStore {
                 "flush_full_cache_to_lmdb: {encode_errors} encode errors; {total} entries written"
             );
         }
-        self.disk.flush_to_disk().map_err(|e| {
-            anyhow::anyhow!("flush_full_cache_to_lmdb: flush_to_disk failed: {e}")
-        })?;
+        self.disk
+            .flush_to_disk()
+            .map_err(|e| anyhow::anyhow!("flush_full_cache_to_lmdb: flush_to_disk failed: {e}"))?;
         info!("[IBD_UTXO_STORE] flush_full_cache_to_lmdb: complete ({total} written)");
         Ok(total)
     }
@@ -3042,9 +3042,9 @@ mod del_backlog_unit_tests {
     #[test]
     fn evicted_utxo_still_leaves_the_commitment_tree() {
         use crate::storage::database::{BatchWriter, Tree};
+        use blvm_protocol::UTXO;
         use blvm_protocol::types::OutPoint;
         use blvm_protocol::utxo_commitments::merkle_tree::UtxoMerkleTree;
-        use blvm_protocol::UTXO;
         use std::collections::HashMap;
         use std::sync::{Arc, Mutex};
 
@@ -3115,7 +3115,12 @@ mod del_backlog_unit_tests {
             }
         }
 
-        let store = IbdUtxoStore::new(Arc::new(MapTree { rows: Mutex::new(HashMap::new()) }), 1);
+        let store = IbdUtxoStore::new(
+            Arc::new(MapTree {
+                rows: Mutex::new(HashMap::new()),
+            }),
+            1,
+        );
         let outpoint = OutPoint {
             hash: [4u8; 32],
             index: 0,

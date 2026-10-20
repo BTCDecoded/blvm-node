@@ -1176,7 +1176,8 @@ impl RpcServer {
         let params = request.get("params").cloned().unwrap_or_else(|| json!([]));
         let id = request.get("id");
 
-        let result = Self::await_bounded(server.rpc_timeout, server.call_method(method, params)).await;
+        let result =
+            Self::await_bounded(server.rpc_timeout, server.call_method(method, params)).await;
 
         match result {
             Ok(response) => {
@@ -1300,8 +1301,7 @@ impl RpcServer {
                     .map_err(errors::rpc_error_from_blockchain_result)
             }
             "getblockhash" => {
-                let height =
-                    crate::rpc::params::param_u64_required(&params, 0, "getblockhash")?;
+                let height = crate::rpc::params::param_u64_required(&params, 0, "getblockhash")?;
                 self.blockchain
                     .get_block_hash(height)
                     .await
@@ -2663,6 +2663,10 @@ mod batch_cap_tests {
         ]);
         let accepted = RpcServer::process_request_with_server(server, &within.to_string()).await;
         let rows: Value = serde_json::from_str(&accepted).unwrap();
-        assert_eq!(rows.as_array().map(|rows| rows.len()), Some(2), "{accepted}");
+        assert_eq!(
+            rows.as_array().map(|rows| rows.len()),
+            Some(2),
+            "{accepted}"
+        );
     }
 }

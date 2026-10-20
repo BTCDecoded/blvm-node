@@ -56,12 +56,9 @@ pub(crate) fn unsolicited_header_meets_required_work(
     ancestor: &dyn Fn(u64) -> Option<(u64, u64)>,
 ) -> bool {
     let next_height = tip_height.saturating_add(1);
-    let Ok(Some(required)) = blvm_protocol::pow::next_required_bits(
-        network,
-        next_height,
-        header.timestamp,
-        ancestor,
-    ) else {
+    let Ok(Some(required)) =
+        blvm_protocol::pow::next_required_bits(network, next_height, header.timestamp, ancestor)
+    else {
         return false;
     };
     header.bits as u64 == required
@@ -656,9 +653,8 @@ impl NetworkManager {
                             if serve.is_empty() {
                                 return Ok(());
                             }
-                            refused_blocks_only = Some(crate::network::protocol::GetDataMessage {
-                                inventory: serve,
-                            });
+                            refused_blocks_only =
+                                Some(crate::network::protocol::GetDataMessage { inventory: serve });
                         }
                         Err(e) => {
                             warn!("IBD protection check failed for {}: {}", peer_addr, e);
@@ -871,10 +867,7 @@ impl NetworkManager {
                                 || header.timestamp == 0
                                 || header.prev_block_hash != prev
                                 || !unsolicited_header_meets_required_work(
-                                    header,
-                                    height,
-                                    network,
-                                    &ancestor,
+                                    header, height, network, &ancestor,
                                 )
                             {
                                 break;
@@ -999,7 +992,8 @@ impl NetworkManager {
                                     .ok()
                                     .flatten()
                                     .is_some_and(|txs| {
-                                        txs.iter().any(|tx| tx.iter().any(|stack| !stack.is_empty()))
+                                        txs.iter()
+                                            .any(|tx| tx.iter().any(|stack| !stack.is_empty()))
                                     });
                                 inventory.push(crate::network::protocol::InventoryVector {
                                     inv_type: if witnessed {
@@ -1268,10 +1262,7 @@ mod plan_wire_locks {
             .dispatch_protocol_message(node.peer, &tx, vec![1])
             .await
             .unwrap();
-        assert_eq!(
-            node.manager.process_pending_messages().await.unwrap(),
-            0
-        );
+        assert_eq!(node.manager.process_pending_messages().await.unwrap(), 0);
         let getdata = ProtocolMessage::GetData(GetDataMessage {
             inventory: vec![InventoryVector {
                 inv_type: MSG_TX,
@@ -1694,9 +1685,11 @@ mod plan_wire_locks {
         let bytes = node.incoming.recv().await.unwrap();
         match ProtocolParser::parse_message(&bytes).unwrap() {
             ProtocolMessage::Inv(InvMessage { inventory }) => {
-                assert!(inventory
-                    .iter()
-                    .any(|item| item.inv_type == MSG_WITNESS_BLOCK && item.hash == hash));
+                assert!(
+                    inventory
+                        .iter()
+                        .any(|item| item.inv_type == MSG_WITNESS_BLOCK && item.hash == hash)
+                );
                 assert!(inventory.iter().all(|item| item.inv_type != MSG_BLOCK));
             }
             other => panic!("expected inv, got {other:?}"),

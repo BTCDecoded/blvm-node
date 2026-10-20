@@ -3,9 +3,9 @@
 use blvm_node::config::{
     BanListSharingConfig, DosProtectionConfig, IbdProtectionConfig, IndexingConfig,
     IndexingStrategy, MempoolPolicyConfig, ModuleConfig, ModuleResourceLimitsConfig,
-    NetworkTimingConfig, NodeConfig, PruningConfig, PruningMode, RequestTimeoutConfig,
-    RpcAuthConfig, StorageConfig, TransportPreferenceConfig, bandwidth_gb_to_bytes,
-    headers_batch_is_full, headers_message_exceeds_limit, ProtocolLimitsConfig,
+    NetworkTimingConfig, NodeConfig, ProtocolLimitsConfig, PruningConfig, PruningMode,
+    RequestTimeoutConfig, RpcAuthConfig, StorageConfig, TransportPreferenceConfig,
+    bandwidth_gb_to_bytes, headers_batch_is_full, headers_message_exceeds_limit,
 };
 use std::path::PathBuf;
 use tempfile::TempDir;

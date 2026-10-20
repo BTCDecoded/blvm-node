@@ -130,9 +130,6 @@ mod tests {
             .unwrap();
         assert!(storage.chain().block_index().get(&active).is_err());
         assert!(!should_activate_over_active_tip(&storage, &candidate).unwrap());
-        assert_eq!(
-            storage.chain().get_tip_hash().unwrap().unwrap(),
-            active
-        );
+        assert_eq!(storage.chain().get_tip_hash().unwrap().unwrap(), active);
     }
 }

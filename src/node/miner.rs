@@ -1703,8 +1703,7 @@ mod tests {
             sample.inputs[0].script_sig.push(0);
         }
         let one = blvm_consensus::transaction::calculate_transaction_size(&sample);
-        let selector =
-            TransactionSelector::with_params(TEMPLATE_RESERVE_BYTES + one, 4_000_000, 0);
+        let selector = TransactionSelector::with_params(TEMPLATE_RESERVE_BYTES + one, 4_000_000, 0);
         let mut mempool = MockMempoolProvider::new();
         for i in 0..5u64 {
             let mut tx = sample.clone();
@@ -1717,7 +1716,10 @@ mod tests {
             .map(blvm_consensus::transaction::calculate_transaction_size)
             .sum();
         assert_eq!(selected.len(), 1);
-        assert_eq!(stripped + TEMPLATE_RESERVE_BYTES, TEMPLATE_RESERVE_BYTES + one);
+        assert_eq!(
+            stripped + TEMPLATE_RESERVE_BYTES,
+            TEMPLATE_RESERVE_BYTES + one
+        );
     }
 
     #[test]

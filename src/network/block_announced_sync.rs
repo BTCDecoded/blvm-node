@@ -411,11 +411,9 @@ impl NetworkManager {
                     Some(state) if !state.relay_tx => false,
                     Some(state) => match state.min_fee_rate {
                         Some(min) => match fee_basis {
-                            Some((fee_sats, vsize)) => super::wire_dispatch::fee_rate_meets_filter(
-                                fee_sats,
-                                vsize,
-                                min,
-                            ),
+                            Some((fee_sats, vsize)) => {
+                                super::wire_dispatch::fee_rate_meets_filter(fee_sats, vsize, min)
+                            }
                             None => false,
                         },
                         None => true,
