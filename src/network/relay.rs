@@ -321,7 +321,9 @@ impl RelayManager {
         let old_blocks: Vec<Hash> = self
             .recently_relayed_blocks
             .iter()
-            .filter(|&(_, timestamp)| now - timestamp > self.policies.max_relay_age)
+            .filter(|&(_, timestamp)| {
+                relay_entry_expired(now, *timestamp, self.policies.max_relay_age)
+            })
             .map(|(hash, _)| *hash)
             .collect();
 
@@ -333,7 +335,9 @@ impl RelayManager {
         let old_txs: Vec<Hash> = self
             .recently_relayed_txs
             .iter()
-            .filter(|&(_, timestamp)| now - timestamp > self.policies.max_relay_age)
+            .filter(|&(_, timestamp)| {
+                relay_entry_expired(now, *timestamp, self.policies.max_relay_age)
+            })
             .map(|(hash, _)| *hash)
             .collect();
 
@@ -376,10 +380,37 @@ impl RelayManager {
     }
 }
 
+fn relay_entry_expired(now: u64, timestamp: u64, max_relay_age: u64) -> bool {
+    now.saturating_sub(timestamp) > max_relay_age
+}
+
 /// Relay statistics
 #[derive(Debug, Clone)]
 pub struct RelayStats {
     pub relayed_blocks: usize,
     pub relayed_transactions: usize,
     pub policies: RelayPolicies,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn future_relay_timestamp_is_kept() {
+        let mut relay = RelayManager::new();
+        let now = current_timestamp();
+        let future = [1u8; 32];
+        let expired = [2u8; 32];
+        relay
+            .recently_relayed_txs
+            .insert(future, now.saturating_add(3_600));
+        relay.recently_relayed_txs.insert(
+            expired,
+            now.saturating_sub(relay.policies.max_relay_age + 1),
+        );
+        relay.cleanup_old_items();
+        assert!(relay.recently_relayed_txs.contains_key(&future));
+        assert!(!relay.recently_relayed_txs.contains_key(&expired));
+    }
 }

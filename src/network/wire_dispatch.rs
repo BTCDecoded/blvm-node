@@ -20,9 +20,23 @@ use tracing::{debug, info, warn};
 /// Compact-block short ids, `getblocktxn` indexes, and `blocktxn` transactions share this ceiling.
 const MAX_COMPACT_RELAY_ITEMS: usize = 50_000;
 
-/// `fee_sat_per_vb` is satoshis per virtual byte. `min_sat_per_kvb` is the BIP133 rate.
-pub(crate) fn fee_rate_meets_filter(fee_sat_per_vb: u64, min_sat_per_kvb: u64) -> bool {
-    fee_sat_per_vb.saturating_mul(1000) >= min_sat_per_kvb
+/// `fee_sats / vsize` meets the BIP133 filter. The comparison keeps the remainder below 1 sat/vB.
+pub(crate) fn fee_rate_meets_filter(fee_sats: u64, vsize: u64, min_sat_per_kvb: u64) -> bool {
+    vsize > 0 && fee_sats.saturating_mul(1000) / vsize >= min_sat_per_kvb
+}
+
+/// A mempool inv item is sent when the peer has no filter, or the cached basis meets it.
+pub(crate) fn mempool_inv_includes(
+    basis: Option<(u64, u64)>,
+    min_sat_per_kvb: Option<u64>,
+) -> bool {
+    match min_sat_per_kvb {
+        None => true,
+        Some(min) => match basis {
+            Some((fee_sats, vsize)) => fee_rate_meets_filter(fee_sats, vsize, min),
+            None => false,
+        },
+    }
 }
 
 /// Split an inventory so each message stays within `max_len`.
@@ -32,6 +46,26 @@ pub(crate) fn chunk_inventory<T: Clone>(items: Vec<T>, max_len: usize) -> Vec<Ve
         return vec![Vec::new()];
     }
     items.chunks(max_len).map(|chunk| chunk.to_vec()).collect()
+}
+
+/// An unsolicited header is accepted only at the difficulty required for the next height.
+pub(crate) fn unsolicited_header_meets_required_work(
+    header: &BlockHeader,
+    tip_height: u64,
+    network: blvm_protocol::types::Network,
+    ancestor: &dyn Fn(u64) -> Option<(u64, u64)>,
+) -> bool {
+    let next_height = tip_height.saturating_add(1);
+    let Ok(Some(required)) = blvm_protocol::pow::next_required_bits(
+        network,
+        next_height,
+        header.timestamp,
+        ancestor,
+    ) else {
+        return false;
+    };
+    header.bits as u64 == required
+        && blvm_protocol::pow::check_proof_of_work(header).unwrap_or(false)
 }
 
 fn block_hash_from_header(header: &BlockHeader) -> [u8; 32] {
@@ -52,6 +86,26 @@ pub(crate) fn block_getdata_is_historical_download(block_count: usize) -> bool {
     block_count > crate::network::block_announced_sync::MAX_BLOCK_REQUESTS_PER_INV
 }
 
+/// Blocks refused by IBD protection, and the other inventory items that are still served.
+pub(crate) fn split_ibd_refused_inventory(
+    inventory: &[crate::network::protocol::InventoryVector],
+) -> (
+    Vec<crate::network::protocol::InventoryVector>,
+    Vec<crate::network::protocol::InventoryVector>,
+) {
+    use crate::network::inventory::{MSG_BLOCK, MSG_WITNESS_BLOCK};
+    let mut refused = Vec::new();
+    let mut serve = Vec::new();
+    for item in inventory {
+        if item.inv_type == MSG_BLOCK || item.inv_type == MSG_WITNESS_BLOCK {
+            refused.push(item.clone());
+        } else {
+            serve.push(item.clone());
+        }
+    }
+    (refused, serve)
+}
+
 impl NetworkManager {
     /// Handle an incoming `block` wire message (IBD GetData response or relay).
     ///
@@ -63,6 +117,16 @@ impl NetworkManager {
         block_msg: BlockMessage,
         data: Vec<u8>,
     ) -> Result<()> {
+        let handshake_complete = self
+            .peer_states()
+            .read()
+            .await
+            .get(&peer_addr)
+            .is_some_and(|state| state.handshake_complete);
+        if !handshake_complete {
+            debug!("Peer {} sent a block before Verack — ignoring", peer_addr);
+            return Ok(());
+        }
         debug!(
             "Block message received from {} ({} bytes)",
             peer_addr,
@@ -188,6 +252,7 @@ impl NetworkManager {
                 peer.set_services(version_msg.services);
                 peer.set_user_agent(version_msg.user_agent.clone());
                 peer.set_start_height(version_msg.start_height);
+                peer.set_version_time(version_msg.timestamp);
                 debug!(
                     "Updated peer {} with version={}, services={}, user_agent={}, start_height={}",
                     peer_addr,
@@ -365,12 +430,12 @@ impl NetworkManager {
         // Pre-handshake guard: reject everything except Version before the peer
         // has identified itself.  Serving data (headers, inv, addr, …) to an
         // unversioned peer leaks information and bypasses per-peer limits.
-        let version_received = {
+        let (version_received, handshake_complete) = {
             let peer_states = self.peer_states().read().await;
-            peer_states
-                .get(&peer_addr)
-                .map(|s| s.version > 0)
-                .unwrap_or(false)
+            match peer_states.get(&peer_addr) {
+                Some(state) => (state.version > 0, state.handshake_complete),
+                None => (false, false),
+            }
         };
 
         if !version_received {
@@ -395,6 +460,19 @@ impl NetworkManager {
                     return Ok(());
                 }
             }
+        }
+
+        if matches!(
+            parsed,
+            ProtocolMessage::Tx(_) | ProtocolMessage::Block(_) | ProtocolMessage::GetData(_)
+        ) && !handshake_complete
+        {
+            debug!(
+                "Peer {} sent {:?} before Verack — ignoring",
+                peer_addr,
+                std::mem::discriminant(parsed)
+            );
+            return Ok(());
         }
 
         if version_received && !self.allow_peer_message(peer_addr).await {
@@ -546,6 +624,7 @@ impl NetworkManager {
                     .filter(|inv| inv.inv_type == MSG_BLOCK || inv.inv_type == MSG_WITNESS_BLOCK)
                     .count();
 
+                let mut refused_blocks_only = None;
                 if block_getdata_is_historical_download(block_count) {
                     match self.ibd_protection().can_serve_ibd(peer_addr).await {
                         Ok(true) => {
@@ -560,20 +639,26 @@ impl NetworkManager {
                             use crate::network::protocol::{
                                 NotFoundMessage, ProtocolMessage, ProtocolParser,
                             };
-                            let notfound = NotFoundMessage {
-                                inventory: getdata.inventory.clone(),
-                            };
-                            if let Ok(wire_msg) = ProtocolParser::serialize_message(
-                                &ProtocolMessage::NotFound(notfound),
-                            ) {
-                                if let Err(e) = self.send_to_peer(peer_addr, wire_msg).await {
-                                    warn!(
-                                        "Failed to send NotFound message to {}: {}",
-                                        peer_addr, e
-                                    );
+                            let (refused, serve) = split_ibd_refused_inventory(&getdata.inventory);
+                            if !refused.is_empty() {
+                                let notfound = NotFoundMessage { inventory: refused };
+                                if let Ok(wire_msg) = ProtocolParser::serialize_message(
+                                    &ProtocolMessage::NotFound(notfound),
+                                ) {
+                                    if let Err(e) = self.send_to_peer(peer_addr, wire_msg).await {
+                                        warn!(
+                                            "Failed to send NotFound message to {}: {}",
+                                            peer_addr, e
+                                        );
+                                    }
                                 }
                             }
-                            return Ok(());
+                            if serve.is_empty() {
+                                return Ok(());
+                            }
+                            refused_blocks_only = Some(crate::network::protocol::GetDataMessage {
+                                inventory: serve,
+                            });
                         }
                         Err(e) => {
                             warn!("IBD protection check failed for {}: {}", peer_addr, e);
@@ -586,9 +671,13 @@ impl NetworkManager {
                     .map(|e| e.get_protocol_version())
                     .unwrap_or(ProtocolVersion::BitcoinV1);
 
-                let serve_result = self
-                    .serve_getdata_request(peer_addr, getdata, protocol_version)
-                    .await;
+                let serve_result = if let Some(message) = refused_blocks_only.as_ref() {
+                    self.serve_getdata_request(peer_addr, message, protocol_version)
+                        .await
+                } else {
+                    self.serve_getdata_request(peer_addr, getdata, protocol_version)
+                        .await
+                };
                 if block_getdata_is_historical_download(block_count) {
                     // Pair start_ibd_serving — without this, concurrent count leaks to the cap
                     // and Mode T / archive getdata is rejected mid-soak.
@@ -721,7 +810,10 @@ impl NetworkManager {
             }
             ProtocolMessage::Headers(headers_msg) => {
                 let max_headers = self.protocol_limits().max_headers_results;
-                if headers_msg.headers.len() > max_headers {
+                if crate::config::headers_message_exceeds_limit(
+                    headers_msg.headers.len(),
+                    max_headers,
+                ) {
                     warn!(
                         "headers message size = {} exceeds max_headers_results ({}), disconnecting peer {}",
                         headers_msg.headers.len(),
@@ -767,12 +859,23 @@ impl NetworkManager {
                     };
                     if let Some(mut prev) = link_hash {
                         let mut height = header_height.max(block_height);
+                        let network = storage.chain().consensus_network();
+                        let ancestor = |h: u64| {
+                            let hash = storage.blocks().get_hash_by_height(h).ok().flatten()?;
+                            let stored = storage.blocks().get_header(&hash).ok().flatten()?;
+                            Some((stored.bits as u64, stored.timestamp))
+                        };
                         let mut batch = Vec::new();
                         for header in &headers_msg.headers {
                             if header.version < 1
                                 || header.timestamp == 0
                                 || header.prev_block_hash != prev
-                                || !blvm_protocol::pow::check_proof_of_work(header).unwrap_or(false)
+                                || !unsolicited_header_meets_required_work(
+                                    header,
+                                    height,
+                                    network,
+                                    &ancestor,
+                                )
                             {
                                 break;
                             }
@@ -874,7 +977,7 @@ impl NetworkManager {
             }
             ProtocolMessage::GetBlocks(getblocks) => {
                 if let Some(storage) = self.storage().as_ref() {
-                    use crate::network::inventory::MSG_BLOCK;
+                    use crate::network::inventory::{MSG_BLOCK, MSG_WITNESS_BLOCK};
                     use blvm_consensus::block::block_header_hash;
 
                     const MAX_GETBLOCKS_INV: usize = 500;
@@ -890,8 +993,20 @@ impl NetworkManager {
                                 if !storage.blocks().has_block_body(&hash).unwrap_or(false) {
                                     break;
                                 }
+                                let witnessed = storage
+                                    .blocks()
+                                    .get_witness(&hash)
+                                    .ok()
+                                    .flatten()
+                                    .is_some_and(|txs| {
+                                        txs.iter().any(|tx| tx.iter().any(|stack| !stack.is_empty()))
+                                    });
                                 inventory.push(crate::network::protocol::InventoryVector {
-                                    inv_type: MSG_BLOCK,
+                                    inv_type: if witnessed {
+                                        MSG_WITNESS_BLOCK
+                                    } else {
+                                        MSG_BLOCK
+                                    },
                                     hash,
                                 });
                             }
@@ -914,22 +1029,16 @@ impl NetworkManager {
                 // BIP35: respond with an Inv listing all txids currently in our mempool.
                 if let Some(mm) = self.mempool_manager() {
                     use crate::network::inventory::MSG_WITNESS_TX;
-                    use blvm_protocol::block::calculate_tx_id;
                     let min_sat_per_kvb = {
                         let states = self.peer_states().read().await;
                         states.get(&peer_addr).and_then(|state| state.min_fee_rate)
                     };
-                    let txns: Vec<blvm_protocol::Transaction> = mm.get_transactions();
-                    let inventory: Vec<crate::network::protocol::InventoryVector> = txns
-                        .iter()
-                        .filter_map(|tx| {
-                            let hash = calculate_tx_id(tx);
-                            if let Some(min) = min_sat_per_kvb {
-                                if let Some(fee) = mm.cached_fee_rate(&hash) {
-                                    if !fee_rate_meets_filter(fee, min) {
-                                        return None;
-                                    }
-                                }
+                    let inventory: Vec<crate::network::protocol::InventoryVector> = mm
+                        .pooled_fee_basis()
+                        .into_iter()
+                        .filter_map(|(hash, basis)| {
+                            if !mempool_inv_includes(basis, min_sat_per_kvb) {
+                                return None;
                             }
                             Some(crate::network::protocol::InventoryVector {
                                 inv_type: MSG_WITNESS_TX,
@@ -1059,6 +1168,38 @@ mod plan_wire_locks {
     };
     use std::sync::Arc;
 
+    #[test]
+    fn easy_self_target_does_not_meet_the_next_height() {
+        let parent_time = 1_600_000_000u64;
+        let mut header = BlockHeader {
+            version: 4,
+            prev_block_hash: [1u8; 32],
+            merkle_root: [2u8; 32],
+            timestamp: parent_time + 1,
+            bits: 0x207fffff,
+            nonce: 0,
+        };
+        while !blvm_protocol::pow::check_proof_of_work(&header).unwrap_or(false) {
+            header.nonce = header.nonce.wrapping_add(1);
+            if header.nonce == 0 {
+                panic!("easy target never met");
+            }
+        }
+        let ancestor = |h: u64| {
+            if h == 100 {
+                Some((0x1d00ffffu64, parent_time))
+            } else {
+                None
+            }
+        };
+        assert!(!unsolicited_header_meets_required_work(
+            &header,
+            100,
+            blvm_protocol::types::Network::Mainnet,
+            &ancestor,
+        ));
+    }
+
     struct Wired {
         manager: NetworkManager,
         peer: SocketAddr,
@@ -1089,6 +1230,7 @@ mod plan_wire_locks {
             .unwrap();
         let mut state = PeerState::new();
         state.version = 70015;
+        state.handshake_complete = true;
         manager.peer_states().write().await.insert(peer, state);
         Wired {
             manager,
@@ -1098,6 +1240,81 @@ mod plan_wire_locks {
             mempool,
             _dir: dir,
         }
+    }
+
+    #[tokio::test]
+    async fn tx_block_and_getdata_before_verack_are_ignored() {
+        use crate::network::inventory::MSG_TX;
+        use crate::network::protocol::{BlockMessage, TxMessage};
+        use blvm_protocol::Block;
+
+        let mut node = wired().await;
+        {
+            let mut states = node.manager.peer_states().write().await;
+            states.get_mut(&node.peer).unwrap().handshake_complete = false;
+        }
+        let _ = node.manager.process_pending_messages().await.unwrap();
+        let tx = ProtocolMessage::Tx(TxMessage {
+            transaction: spend(
+                blvm_protocol::OutPoint {
+                    hash: [3u8; 32],
+                    index: 0,
+                },
+                1000,
+            ),
+            witnesses: Vec::new(),
+        });
+        node.manager
+            .dispatch_protocol_message(node.peer, &tx, vec![1])
+            .await
+            .unwrap();
+        assert_eq!(
+            node.manager.process_pending_messages().await.unwrap(),
+            0
+        );
+        let getdata = ProtocolMessage::GetData(GetDataMessage {
+            inventory: vec![InventoryVector {
+                inv_type: MSG_TX,
+                hash: [9u8; 32],
+            }],
+        });
+        node.manager
+            .dispatch_protocol_message(node.peer, &getdata, Vec::new())
+            .await
+            .unwrap();
+        assert!(node.incoming.try_recv().is_err());
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [5u8; 32],
+                timestamp: 1_700_000_011,
+                bits: 0x207fffff,
+                nonce: 4,
+            },
+            transactions: vec![spend(
+                blvm_protocol::OutPoint {
+                    hash: [8u8; 32],
+                    index: 0,
+                },
+                1000,
+            )]
+            .into(),
+        };
+        let mut frame = vec![0u8; 28];
+        frame[16..20].copy_from_slice(&4u32.to_le_bytes());
+        node.manager
+            .handle_block_wire_message(
+                node.peer,
+                BlockMessage {
+                    block,
+                    witnesses: Vec::new(),
+                },
+                frame,
+            )
+            .await
+            .unwrap();
+        assert!(node.manager.try_recv_block().is_none());
     }
 
     fn spend(prevout: OutPoint, value: i64) -> Transaction {
@@ -1435,6 +1652,58 @@ mod plan_wire_locks {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn getblocks_reply_for_a_witness_block_uses_witness_inventory() {
+        use crate::network::inventory::{MSG_BLOCK, MSG_WITNESS_BLOCK};
+        use crate::network::protocol::GetBlocksMessage;
+        let mut node = wired().await;
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [7u8; 32],
+            timestamp: 1_700_000_013,
+            bits: 0x207fffff,
+            nonce: 6,
+        };
+        let block = blvm_protocol::Block {
+            header: header.clone(),
+            transactions: vec![spend(
+                OutPoint {
+                    hash: [9u8; 32],
+                    index: 0,
+                },
+                1000,
+            )]
+            .into(),
+        };
+        let hash = blvm_consensus::block::block_header_hash(&header);
+        node.storage.blocks().store_block(&block).unwrap();
+        node.storage.blocks().store_height(0, &hash).unwrap();
+        node.storage
+            .blocks()
+            .store_witness(&hash, &[vec![vec![vec![0x01]]]])
+            .unwrap();
+        let parsed = ProtocolMessage::GetBlocks(GetBlocksMessage {
+            version: 70016,
+            block_locator_hashes: vec![],
+            hash_stop: [0u8; 32],
+        });
+        node.manager
+            .dispatch_protocol_message(node.peer, &parsed, Vec::new())
+            .await
+            .unwrap();
+        let bytes = node.incoming.recv().await.unwrap();
+        match ProtocolParser::parse_message(&bytes).unwrap() {
+            ProtocolMessage::Inv(InvMessage { inventory }) => {
+                assert!(inventory
+                    .iter()
+                    .any(|item| item.inv_type == MSG_WITNESS_BLOCK && item.hash == hash));
+                assert!(inventory.iter().all(|item| item.inv_type != MSG_BLOCK));
+            }
+            other => panic!("expected inv, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn announce_lock_block_and_tx_leave_as_inv() {
         use crate::network::inventory::{MSG_WITNESS_BLOCK, MSG_WITNESS_TX};
         let mut node = wired().await;
@@ -1672,11 +1941,18 @@ mod plan_wire_locks {
     }
 
     #[test]
-    fn fee_filter_keeps_the_remainder_below_one_sat() {
-        assert!(!fee_rate_meets_filter(1, 1_500));
-        assert!(fee_rate_meets_filter(1, 1_000));
-        assert!(fee_rate_meets_filter(1, 999));
-        assert!(!fee_rate_meets_filter(0, 999));
+    fn fee_filter_keeps_a_fractional_satoshi() {
+        assert!(fee_rate_meets_filter(1999, 1000, 1_500));
+        assert!(!fee_rate_meets_filter(1000, 1000, 1_500));
+        assert!(fee_rate_meets_filter(1000, 1000, 1_000));
+        assert!(!fee_rate_meets_filter(0, 1000, 999));
+    }
+
+    #[test]
+    fn missing_fee_basis_is_omitted_from_a_filtered_mempool_inv() {
+        assert!(!mempool_inv_includes(None, Some(1_000)));
+        assert!(mempool_inv_includes(Some((1_000, 1)), Some(1_000)));
+        assert!(mempool_inv_includes(None, None));
     }
 
     #[test]
@@ -2130,7 +2406,7 @@ mod plan_wire_locks {
     async fn announce_reaches(node: &mut Wired) -> bool {
         while node.incoming.try_recv().is_ok() {}
         node.manager
-            .announce_accepted_transaction([6u8; 32], Some(1))
+            .announce_accepted_transaction([6u8; 32], Some((1, 1)))
             .await;
         loop {
             match node.incoming.try_recv() {
@@ -2219,5 +2495,27 @@ mod plan_wire_locks {
             .await
             .unwrap();
         assert!(announce_reaches(&mut omitted).await);
+    }
+}
+
+#[cfg(test)]
+mod ibd_refusal_tests {
+    use super::split_ibd_refused_inventory;
+    use crate::network::inventory::{MSG_WITNESS_BLOCK, MSG_WITNESS_TX};
+    use crate::network::protocol::InventoryVector;
+
+    #[test]
+    fn ibd_refusal_notfound_lists_blocks_and_keeps_the_transaction() {
+        let block = InventoryVector {
+            inv_type: MSG_WITNESS_BLOCK,
+            hash: [1u8; 32],
+        };
+        let tx = InventoryVector {
+            inv_type: MSG_WITNESS_TX,
+            hash: [2u8; 32],
+        };
+        let (refused, serve) = split_ibd_refused_inventory(&[block.clone(), tx.clone()]);
+        assert_eq!(refused, vec![block]);
+        assert_eq!(serve, vec![tx]);
     }
 }

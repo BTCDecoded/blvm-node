@@ -226,6 +226,14 @@ impl RpcError {
         Self::new(RpcErrorCode::TxRejected, reason)
     }
 
+    /// The RPC method exceeded `rpc_timeout_seconds`.
+    pub fn request_timeout() -> Self {
+        Self::new(
+            RpcErrorCode::ServerError(-32099),
+            "RPC request timed out",
+        )
+    }
+
     /// Transaction rejected with detailed context
     pub fn tx_rejected_with_context(
         reason: impl Into<String>,

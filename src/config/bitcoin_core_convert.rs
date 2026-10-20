@@ -9,7 +9,10 @@ use std::path::Path;
 pub struct BitcoinCoreConfig {
     pub network: Option<String>,
     pub testnet: bool,
+    pub testnet4: bool,
     pub regtest: bool,
+    pub dbcache_mb: Option<u64>,
+    pub max_mempool_mb: Option<u64>,
     pub rpc_port: Option<u16>,
     pub rpc_bind: Option<String>,
     pub rpc_allowip: Vec<String>,
@@ -71,6 +74,23 @@ pub fn parse_bitcoin_conf(path: &Path) -> std::io::Result<BitcoinCoreConfig> {
                 "mainnet" => {
                     if value == "1" || value == "true" {
                         config.network = Some("bitcoin-v1".to_string());
+                    }
+                }
+                "chain" => {
+                    if value.eq_ignore_ascii_case("testnet4") {
+                        config.testnet4 = true;
+                        config.testnet = false;
+                        config.regtest = false;
+                    }
+                }
+                "dbcache" => {
+                    if let Ok(mb) = value.parse() {
+                        config.dbcache_mb = Some(mb);
+                    }
+                }
+                "maxmempool" => {
+                    if let Ok(mb) = value.parse() {
+                        config.max_mempool_mb = Some(mb);
                     }
                 }
                 "rpcport" => {
@@ -146,7 +166,8 @@ fn default_core_datadir_base() -> Option<String> {
 
 /// Resolve Core `datadir=` plus network flags to the directory containing `chainstate/`.
 ///
-/// Core stores testnet at `<datadir>/testnet3`, regtest at `<datadir>/regtest`, mainnet at `<datadir>`.
+/// Core stores testnet at `<datadir>/testnet3`, testnet4 at `<datadir>/testnet4`,
+/// regtest at `<datadir>/regtest`, mainnet at `<datadir>`.
 pub fn effective_core_datadir(config: &BitcoinCoreConfig) -> Option<String> {
     let base = config
         .datadir
@@ -156,10 +177,42 @@ pub fn effective_core_datadir(config: &BitcoinCoreConfig) -> Option<String> {
     let base = base.trim_end_matches('/').to_string();
     if config.regtest {
         Some(format!("{base}/regtest"))
+    } else if config.testnet4 {
+        Some(format!("{base}/testnet4"))
     } else if config.testnet {
         Some(format!("{base}/testnet3"))
     } else {
         Some(base)
+    }
+}
+
+fn network_port(config: &BitcoinCoreConfig) -> &'static str {
+    if config.testnet4 {
+        "48333"
+    } else if config.testnet {
+        "18333"
+    } else if config.regtest {
+        "18444"
+    } else {
+        "8333"
+    }
+}
+
+/// Append `port` only when `addr` does not already name one.
+///
+/// Bracketed IPv6 (`[::1]`) contains colons and still needs a port. A trailing
+/// `:port` or `]:port` is left unchanged.
+fn addr_with_port(addr: &str, port: &str) -> String {
+    if let Some(rest) = addr.strip_prefix('[') {
+        if rest.contains("]:") {
+            addr.to_string()
+        } else {
+            format!("{addr}:{port}")
+        }
+    } else if addr.contains(':') {
+        addr.to_string()
+    } else {
+        format!("{addr}:{port}")
     }
 }
 
@@ -201,6 +254,9 @@ pub fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &Path) -> St
         toml.push_str("# When data_dir contains a synced Core layout (chainstate/ + blocks/),\n");
         toml.push_str("# blvm start auto-migrates to <data_dir>/blvm/ unless disabled.\n");
         toml.push_str("auto_migrate_core = true\n");
+        if let Some(mb) = config.dbcache_mb {
+            toml.push_str(&format!("dbcache_mb = {mb}\n"));
+        }
         toml.push('\n');
     } else {
         toml.push_str("# [storage]\n");
@@ -213,16 +269,11 @@ pub fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &Path) -> St
         toml.push_str(&format!("protocol_version = \"{network}\"\n"));
     }
 
-    let port = if config.testnet {
-        "18333"
-    } else if config.regtest {
-        "18444"
-    } else {
-        "8333"
-    };
+    let port = network_port(config);
 
     if let Some(ref bind) = config.bind {
-        toml.push_str(&format!("listen_addr = \"{bind}:{port}\"\n"));
+        let listen_addr = addr_with_port(bind, port);
+        toml.push_str(&format!("listen_addr = \"{listen_addr}\"\n"));
     } else if config.listen {
         toml.push_str(&format!("listen_addr = \"0.0.0.0:{port}\"\n"));
     }
@@ -239,11 +290,7 @@ pub fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &Path) -> St
         toml.push_str("\n# Persistent peers (from addnode/connect)\n");
         toml.push_str("persistent_peers = [\n");
         for peer in &persistent_peers {
-            let peer_with_port = if !peer.contains(':') {
-                format!("{peer}:{port}")
-            } else {
-                peer.clone()
-            };
+            let peer_with_port = addr_with_port(peer, port);
             toml.push_str(&format!("  \"{peer_with_port}\",\n"));
         }
         toml.push_str("]\n");
@@ -275,6 +322,11 @@ pub fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &Path) -> St
             }
             toml.push_str("]\n");
         }
+    }
+
+    if let Some(mb) = config.max_mempool_mb {
+        toml.push_str("\n[mempool]\n");
+        toml.push_str(&format!("max_mempool_mb = {mb}\n"));
     }
 
     toml.push_str("\n[transport_preference]\n");
@@ -369,5 +421,44 @@ mod tests {
         assert!(toml.contains("[storage]"));
         assert!(toml.contains("testnet3"));
         assert!(toml.contains("auto_migrate_core = true"));
+    }
+
+    #[test]
+    fn core_keys_keep_port_chain_cache_and_mempool() {
+        let dir = TempDir::new().unwrap();
+        let conf = dir.path().join("bitcoin.conf");
+        let mut f = std::fs::File::create(&conf).unwrap();
+        writeln!(f, "chain=testnet4").unwrap();
+        writeln!(f, "datadir=/data").unwrap();
+        writeln!(f, "bind=127.0.0.1:8333").unwrap();
+        writeln!(f, "addnode=[::1]").unwrap();
+        writeln!(f, "addnode=1.2.3.4:18444").unwrap();
+        writeln!(f, "dbcache=4096").unwrap();
+        writeln!(f, "maxmempool=50").unwrap();
+        drop(f);
+
+        let parsed = parse_bitcoin_conf(&conf).unwrap();
+        assert_eq!(
+            effective_core_datadir(&parsed).as_deref(),
+            Some("/data/testnet4")
+        );
+        let toml = generate_toml_config(&parsed, &conf);
+        assert!(toml.contains("data_dir = \"/data/testnet4\""));
+        assert!(toml.contains("listen_addr = \"127.0.0.1:8333\""));
+        assert!(!toml.contains("127.0.0.1:8333:8333"));
+        assert!(toml.contains("\"[::1]:48333\""));
+        assert!(toml.contains("\"1.2.3.4:18444\""));
+        assert!(toml.contains("dbcache_mb = 4096"));
+        assert!(toml.contains("max_mempool_mb = 50"));
+
+        let mainnet = dir.path().join("mainnet.conf");
+        let mut f = std::fs::File::create(&mainnet).unwrap();
+        writeln!(f, "addnode=[::1]").unwrap();
+        writeln!(f, "addnode=[::1]:8333").unwrap();
+        drop(f);
+        let parsed = parse_bitcoin_conf(&mainnet).unwrap();
+        let toml = generate_toml_config(&parsed, &mainnet);
+        assert!(toml.contains("\"[::1]:8333\""));
+        assert!(!toml.contains("\"[::1]:8333:8333\""));
     }
 }

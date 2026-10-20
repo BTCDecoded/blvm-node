@@ -1,9 +1,11 @@
 //! Tests for configuration parsing and validation
 
 use blvm_node::config::{
-    BanListSharingConfig, DosProtectionConfig, IndexingConfig, IndexingStrategy, ModuleConfig,
-    ModuleResourceLimitsConfig, NetworkTimingConfig, NodeConfig, PruningConfig, PruningMode,
-    RequestTimeoutConfig, RpcAuthConfig, StorageConfig, TransportPreferenceConfig,
+    BanListSharingConfig, DosProtectionConfig, IbdProtectionConfig, IndexingConfig,
+    IndexingStrategy, MempoolPolicyConfig, ModuleConfig, ModuleResourceLimitsConfig,
+    NetworkTimingConfig, NodeConfig, PruningConfig, PruningMode, RequestTimeoutConfig,
+    RpcAuthConfig, StorageConfig, TransportPreferenceConfig, bandwidth_gb_to_bytes,
+    headers_batch_is_full, headers_message_exceeds_limit, ProtocolLimitsConfig,
 };
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -362,6 +364,53 @@ fn test_node_config_get_transport_preference() {
     {
         assert!(!pref.allows_iroh());
     }
+}
+
+#[test]
+fn test_bandwidth_gigabytes_that_overflow_bytes_are_rejected() {
+    assert_eq!(bandwidth_gb_to_bytes(50), Some(50 * 1024 * 1024 * 1024));
+    assert_eq!(bandwidth_gb_to_bytes(1 << 34), None);
+
+    let mut config = NodeConfig::default();
+    let mut ibd = IbdProtectionConfig::default();
+    ibd.max_bandwidth_per_peer_per_day_gb = 1 << 34;
+    config.ibd_protection = Some(ibd);
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("max_bandwidth_per_peer_per_day_gb"));
+
+    config
+        .ibd_protection
+        .as_mut()
+        .unwrap()
+        .max_bandwidth_per_peer_per_day_gb = 50;
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_zero_header_cap_is_rejected_and_is_not_a_protocol_violation() {
+    let mut config = NodeConfig::default();
+    let mut limits = ProtocolLimitsConfig::default();
+    limits.max_headers_results = 0;
+    config.protocol_limits = Some(limits);
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("max_headers_results"));
+    assert!(!headers_message_exceeds_limit(1, 0));
+    assert!(!headers_batch_is_full(1, 0));
+    assert!(headers_batch_is_full(2000, 2000));
+    assert!(headers_message_exceeds_limit(2001, 2000));
+}
+
+#[test]
+fn test_mempool_expiry_hours_that_overflow_seconds_are_rejected() {
+    let mut config = NodeConfig::default();
+    let mut mempool = MempoolPolicyConfig::default();
+    mempool.mempool_expiry_hours = u64::MAX / 3600 + 1;
+    config.mempool = Some(mempool);
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("mempool_expiry_hours"));
+
+    config.mempool.as_mut().unwrap().mempool_expiry_hours = 336;
+    assert!(config.validate().is_ok());
 }
 
 #[test]

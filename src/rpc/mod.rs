@@ -308,6 +308,20 @@ impl RpcManager {
         self
     }
 
+    /// `rate_limit_only` installs a manager with authentication turned off.
+    /// That manager does not satisfy the public-bind check.
+    fn authentication_required(&self) -> bool {
+        self.auth_manager
+            .as_ref()
+            .is_some_and(|manager| manager.is_authentication_required())
+    }
+
+    fn public_bind_without_auth(&self, addr: SocketAddr) -> bool {
+        !self.authentication_required()
+            && !addr.ip().is_loopback()
+            && !self.allow_unauthenticated_rpc
+    }
+
     /// Enable marketplace auto-fetch for `loadmodule` (requires blvm-marketplace loaded).
     pub fn set_marketplace_fetch(&mut self, enabled: bool) {
         self.marketplace_fetch_enabled = enabled;
@@ -488,19 +502,26 @@ impl RpcManager {
     ///
     /// Starts TCP server (always) and optionally QUIC server if enabled
     pub async fn start(&mut self) -> Result<()> {
-        // Safety check: refuse to bind a public address without authentication configured.
-        // An unauthenticated RPC server on a public interface exposes stop/invalidateblock/
-        // loadmodule and other destructive methods to the network.
-        if self.auth_manager.is_none()
-            && !self.server_addr.ip().is_loopback()
-            && !self.allow_unauthenticated_rpc
-        {
+        // A rate limiter is not authentication. Public bind still requires
+        // `auth_required`, unless the operator opted out.
+        if self.public_bind_without_auth(self.server_addr) {
             return Err(anyhow::anyhow!(
                 "RPC server would bind to public address {} without authentication. \
                  Configure rpc.auth (add tokens) or call .allow_unauthenticated_rpc(true) \
                  to explicitly opt out of this safety check.",
                 self.server_addr
             ));
+        }
+        #[cfg(feature = "rest-api")]
+        if let Some(rest_api_addr) = self.rest_api_addr {
+            if self.public_bind_without_auth(rest_api_addr) {
+                return Err(anyhow::anyhow!(
+                    "REST API server would bind to public address {} without authentication. \
+                     Configure rpc.auth (add tokens) or call .allow_unauthenticated_rpc(true) \
+                     to explicitly opt out of this safety check.",
+                    rest_api_addr
+                ));
+            }
         }
 
         info!("Starting TCP RPC server on {}", self.server_addr);
@@ -667,6 +688,10 @@ impl RpcManager {
             }
         };
 
+        let server = server.with_rpc_timeout(crate::utils::timeout::rpc_timeout_from_config(
+            self.request_timeouts.as_ref(),
+        ));
+
         // Wrap in Arc so ModuleManager and NodeApiImpl can reference the same live server.
         let server_arc = Arc::new(server);
         self.server_arc = Some(Arc::clone(&server_arc));
@@ -723,20 +748,6 @@ impl RpcManager {
         // Start REST API server if enabled
         #[cfg(feature = "rest-api")]
         let rest_api_handle = if let Some(rest_api_addr) = self.rest_api_addr {
-            // Mirror the RPC safety check: refuse to expose REST on a public address
-            // without authentication.  REST POST endpoints (broadcast, mempool) are
-            // equally sensitive — an open public REST server is a network hazard.
-            if self.auth_manager.is_none()
-                && !rest_api_addr.ip().is_loopback()
-                && !self.allow_unauthenticated_rpc
-            {
-                return Err(anyhow::anyhow!(
-                    "REST API server would bind to public address {} without authentication. \
-                     Configure rpc.auth (add tokens) or call .allow_unauthenticated_rpc(true) \
-                     to explicitly opt out of this safety check.",
-                    rest_api_addr
-                ));
-            }
             if let (Some(storage), Some(mempool)) = (self.storage.as_ref(), self.mempool.as_ref()) {
                 info!("Starting REST API server on {}", rest_api_addr);
 
@@ -877,5 +888,47 @@ impl RpcManager {
     /// Get mining RPC methods
     pub fn mining(&self) -> &mining::MiningRpc {
         &self.mining_rpc
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RpcManager;
+    use crate::config::RpcAuthConfig;
+    use crate::rpc::auth::RpcAuthManager;
+    use hyper::HeaderMap;
+    use std::net::SocketAddr;
+
+    #[tokio::test]
+    async fn a_public_bind_with_only_a_rate_limiter_fails_startup() {
+        let addr: SocketAddr = "0.0.0.0:18332".parse().unwrap();
+        let mut rpc = RpcManager::new(addr);
+        rpc.with_auth_config(RpcAuthConfig::rate_limit_only(10, 1))
+            .await;
+        let err = rpc.start().await.unwrap_err().to_string();
+        assert!(
+            err.contains("without authentication"),
+            "{err}"
+        );
+
+        let mut rest = RpcManager::new("127.0.0.1:18332".parse().unwrap());
+        rest.enable_rest_api("0.0.0.0:18333".parse().unwrap());
+        rest.with_auth_config(RpcAuthConfig::rate_limit_only(10, 1))
+            .await;
+        let rest_err = rest.start().await.unwrap_err().to_string();
+        assert!(rest_err.contains("REST"), "{rest_err}");
+
+        let manager = RpcAuthManager::with_rate_limits(false, 10, 1);
+        let public_client: SocketAddr = "8.8.8.8:18332".parse().unwrap();
+        let rejected = manager
+            .authenticate_request(&HeaderMap::new(), public_client)
+            .await;
+        assert!(rejected.error.is_some(), "{rejected:?}");
+
+        let loopback: SocketAddr = "127.0.0.1:18332".parse().unwrap();
+        let allowed = manager
+            .authenticate_request(&HeaderMap::new(), loopback)
+            .await;
+        assert!(allowed.error.is_none());
     }
 }

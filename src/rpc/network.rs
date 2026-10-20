@@ -13,6 +13,18 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tracing::debug;
 
+fn services_without_a_network_manager() -> u64 {
+    use blvm_protocol::bip157::NODE_COMPACT_FILTERS;
+    use blvm_protocol::service_flags::standard;
+
+    let mut services = standard::NODE_WITNESS | standard::NODE_NETWORK | NODE_COMPACT_FILTERS;
+    #[cfg(feature = "utxo-commitments")]
+    {
+        services |= crate::network::protocol::NODE_UTXO_COMMITMENTS;
+    }
+    services
+}
+
 fn parse_ban_ip(subnet: &str) -> RpcResult<IpAddr> {
     if let Ok(sock) = subnet.parse::<SocketAddr>() {
         return Ok(sock.ip());
@@ -59,10 +71,10 @@ impl NetworkRpc {
                 )
             } else {
                 (
-                    NetworkManager::new("127.0.0.1:0".parse().unwrap()).advertised_services(),
+                    services_without_a_network_manager(),
                     0.00001,
                     0,
-                    true,
+                    false,
                     "/blvm-node:0.1.0/".to_string(),
                 )
             };
@@ -93,7 +105,7 @@ impl NetworkRpc {
                 }
             ],
             "relayfee": relayfee,
-            "incrementalfee": 0.00001,
+            "incrementalfee": relayfee,
             "localaddresses": [],
             "warnings": ""
         }))
@@ -111,6 +123,8 @@ impl NetworkRpc {
                     .map(|(addr, state)| (*addr, (state.relay_tx, state.min_fee_rate)))
                     .collect::<std::collections::HashMap<_, _>>()
             };
+            let persistent = network.get_persistent_peers().await;
+            let now = current_timestamp();
             let peer_manager = network.peer_manager().await;
             let mut peers = Vec::new();
             for addr in peer_manager.peer_addresses() {
@@ -139,16 +153,16 @@ impl NetworkRpc {
                         "bytessent": peer.bytes_sent(),
                         "bytesrecv": peer.bytes_recv(),
                         "conntime": peer.conntime(),
-                        "timeoffset": 0,
+                        "timeoffset": peer.time_offset(now),
                         "pingtime": peer.ping_secs(),
                         "minping": 0.0,
                         "version": peer.version() as i64,
                         "subver": peer.user_agent().unwrap_or(&"/unknown/".to_string()).clone(),
                         "inbound": !peer.is_outbound(),
-                        "addnode": false,
+                        "addnode": sock.map(|addr| persistent.contains(&addr)).unwrap_or(false),
                         "startingheight": peer.start_height(),
-                        "synced_headers": -1,
-                        "synced_blocks": -1,
+                        "synced_headers": peer.synced_block_height(),
+                        "synced_blocks": peer.synced_block_height(),
                         "inflight": [],
                         "whitelisted": false,
                         "minfeefilter": minfeefilter,
@@ -231,6 +245,9 @@ impl NetworkRpc {
             match command {
                 "add" => {
                     network.add_persistent_peer(addr);
+                    if let Err(e) = network.connect_to_peer(addr).await {
+                        debug!("addnode add stored {addr}; dial failed: {e}");
+                    }
                     debug!("Added node {} to persistent peer list", addr);
                     Ok(Value::Null)
                 }
@@ -438,6 +455,10 @@ impl NetworkRpc {
 
             match command {
                 "add" => {
+                    if absolute && bantime == 0 {
+                        network.unban_peer(addr);
+                        return Ok(Value::Null);
+                    }
                     network.ban_peer(addr, unban_timestamp);
                     debug!("Banned peer {} until {}", addr, unban_timestamp);
                     Ok(Value::Null)
@@ -624,6 +645,13 @@ mod info_locks {
         assert_eq!(info["networkactive"], false);
     }
 
+    #[tokio::test]
+    async fn missing_manager_is_not_network_active() {
+        let info = NetworkRpc::new().get_network_info().await.unwrap();
+        assert_eq!(info["networkactive"], false);
+        assert_eq!(info["connections"], 0);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn advertised_service_bit_is_shown() {
         let nm = Arc::new(NetworkManager::new("127.0.0.1:0".parse().unwrap()));
@@ -640,6 +668,29 @@ mod info_locks {
             .unwrap();
         assert_eq!(info[0]["services"], "0000000000000008");
         assert_ne!(info[0]["id"].as_u64(), Some(sock.port() as u64));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_info_uses_start_height_offset_and_addnode() {
+        let nm = Arc::new(NetworkManager::new("127.0.0.1:0".parse().unwrap()));
+        let sock: SocketAddr = "1.2.3.4:8333".parse().unwrap();
+        nm.add_persistent_peer(sock);
+        let mut peer = Peer::new_for_testing(sock);
+        peer.set_start_height(800_000);
+        peer.set_version_time(1_700_000_100);
+        {
+            let mut peers = nm.peer_manager().await;
+            peers.add_peer(TransportAddr::Tcp(sock), peer).unwrap();
+        }
+        let info = NetworkRpc::with_dependencies(Arc::clone(&nm))
+            .get_peer_info()
+            .await
+            .unwrap();
+        assert_eq!(info[0]["synced_blocks"], 800_000);
+        assert_eq!(info[0]["addnode"], true);
+        let offset = info[0]["timeoffset"].as_i64().unwrap();
+        let expected = 1_700_000_100 - current_timestamp() as i64;
+        assert!((offset - expected).abs() <= 2, "{offset} vs {expected}");
     }
 
     #[tokio::test]
@@ -675,6 +726,30 @@ mod info_locks {
             format!("{:016x}", nm.advertised_services())
         );
         assert!((info["relayfee"].as_f64().unwrap() - 0.00005).abs() < 1e-12);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn incrementalfee_follows_the_relay_floor() {
+        use crate::node::mempool::MempoolManager;
+        use crate::storage::Storage;
+        use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(dir.path()).unwrap());
+        let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
+        let mempool = Arc::new(MempoolManager::new());
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.min_relay_fee_rate = 5;
+        mempool.set_policy_config(Some(policy));
+        let nm = Arc::new(
+            NetworkManager::new("127.0.0.1:0".parse().unwrap())
+                .with_dependencies(protocol, storage, mempool),
+        );
+        let info = NetworkRpc::with_dependencies(nm)
+            .get_network_info()
+            .await
+            .unwrap();
+        assert!((info["incrementalfee"].as_f64().unwrap() - 0.00005).abs() < 1e-12);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -825,5 +900,50 @@ mod info_locks {
             .await
             .unwrap();
         assert_eq!(rpc.get_network_info().await.unwrap()["networkactive"], true);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn absolute_unban_time_zero_is_not_a_ban() {
+        let nm = Arc::new(NetworkManager::new("127.0.0.1:0".parse().unwrap()));
+        let rpc = NetworkRpc::with_dependencies(Arc::clone(&nm));
+        rpc.set_ban(&json!(["1.2.3.4", "add", 86_400, false]))
+            .await
+            .unwrap();
+        rpc.set_ban(&json!(["1.2.3.4", "add", 0, true]))
+            .await
+            .unwrap();
+        assert!(nm
+            .get_banned_peers()
+            .iter()
+            .all(|(addr, _)| addr.ip().to_string() != "1.2.3.4"));
+        rpc.set_ban(&json!(["1.2.3.5", "add", 0, false]))
+            .await
+            .unwrap();
+        let until = nm
+            .get_banned_peers()
+            .iter()
+            .find(|(addr, _)| addr.ip().to_string() == "1.2.3.5")
+            .unwrap()
+            .1;
+        assert_eq!(until, u64::MAX);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn addnode_add_dials_the_address() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let nm = Arc::new(NetworkManager::new("127.0.0.1:0".parse().unwrap()));
+        let rpc = NetworkRpc::with_dependencies(Arc::clone(&nm));
+        let accepted = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(3), listener.accept()).await
+        });
+        rpc.add_node(&json!([addr.to_string(), "add"]))
+            .await
+            .unwrap();
+        assert!(
+            accepted.await.unwrap().is_ok(),
+            "add did not open a connection"
+        );
+        assert!(nm.get_persistent_peers().await.contains(&addr));
     }
 }

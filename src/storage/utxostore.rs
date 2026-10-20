@@ -14,30 +14,45 @@ use zstd;
 #[cfg(feature = "production")]
 use std::sync::{OnceLock, RwLock};
 
-/// UTXO serialization cache (production feature only)
+/// UTXO serialization cache (production feature only).
 ///
-/// Caches serialized UTXO bytes to avoid re-serializing the same UTXO.
-/// Cache key is the OutPoint hash.
+/// Writes no longer store a txid-only copy here. The reader is the database.
 #[cfg(feature = "production")]
+#[allow(dead_code)]
 static SERIALIZATION_CACHE: OnceLock<RwLock<blvm_protocol::lru::LruCache<[u8; 32], Vec<u8>>>> =
     OnceLock::new();
 
 #[cfg(feature = "production")]
+#[allow(dead_code)]
 fn get_serialization_cache() -> &'static RwLock<blvm_protocol::lru::LruCache<[u8; 32], Vec<u8>>> {
     SERIALIZATION_CACHE.get_or_init(|| {
         use blvm_protocol::lru::LruCache;
         use std::num::NonZeroUsize;
-        // Cache 20,000 serialized UTXOs (balance between memory and hit rate)
-        // Each entry is ~100-200 bytes average, so ~2-4MB total
         RwLock::new(LruCache::new(NonZeroUsize::new(20_000).unwrap()))
     })
 }
 
-/// Calculate cache key from OutPoint
-#[cfg(feature = "production")]
-fn outpoint_cache_key(outpoint: &OutPoint) -> [u8; 32] {
-    // Use OutPoint hash directly as cache key (already 32 bytes)
-    outpoint.hash
+#[cfg(all(test, feature = "production"))]
+pub(crate) fn serialization_cache_len() -> usize {
+    get_serialization_cache()
+        .read()
+        .map(|cache| cache.len())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+thread_local! {
+    static GET_ALL_UTXOS_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_get_all_utxos_calls() {
+    GET_ALL_UTXOS_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn get_all_utxos_calls() -> u64 {
+    GET_ALL_UTXOS_CALLS.with(|calls| calls.get())
 }
 
 /// UTXO set storage manager
@@ -124,14 +139,7 @@ impl UtxoStore {
                 .par_iter()
                 .map(|(outpoint, utxo)| {
                     let key = self.outpoint_key(outpoint);
-
-                    let cache = get_serialization_cache();
-                    let cache_key = outpoint_cache_key(outpoint);
                     let value = self.serialize_utxo(utxo.as_ref())?;
-                    if let Ok(mut w) = cache.write() {
-                        w.put(cache_key, value.clone());
-                    }
-
                     Ok((key, value))
                 })
                 .collect::<Result<Vec<(Vec<u8>, Vec<u8>)>>>()?;
@@ -159,19 +167,6 @@ impl UtxoStore {
             // Store each UTXO sequentially
             for (outpoint, utxo) in utxo_set {
                 let key = self.outpoint_key(outpoint);
-
-                #[cfg(feature = "production")]
-                let value = {
-                    let cache = get_serialization_cache();
-                    let cache_key = outpoint_cache_key(outpoint);
-                    let serialized = self.serialize_utxo(utxo.as_ref())?;
-                    if let Ok(mut w) = cache.write() {
-                        w.put(cache_key, serialized.clone());
-                    }
-                    serialized
-                };
-
-                #[cfg(not(feature = "production"))]
                 let value = self.serialize_utxo(utxo.as_ref())?;
 
                 // Compress if enabled
@@ -221,25 +216,8 @@ impl UtxoStore {
     }
 
     /// Add a UTXO to the set
-    ///
-    /// Performance optimization: Caches serialized UTXO bytes
     pub fn add_utxo(&self, outpoint: &OutPoint, utxo: &UTXO) -> Result<()> {
         let key = self.outpoint_key(outpoint);
-
-        #[cfg(feature = "production")]
-        let value = {
-            // The memo is keyed only by txid, so a hit can be another vout or an
-            // older value. Always serialize the UTXO being stored.
-            let cache = get_serialization_cache();
-            let cache_key = outpoint_cache_key(outpoint);
-            let serialized = self.serialize_utxo(utxo)?;
-            if let Ok(mut w) = cache.write() {
-                w.put(cache_key, serialized.clone());
-            }
-            serialized
-        };
-
-        #[cfg(not(feature = "production"))]
         let value = self.serialize_utxo(utxo)?;
 
         // Compress UTXO data if compression is enabled
@@ -309,6 +287,13 @@ impl UtxoStore {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn insert_undecodable_utxo(&self, outpoint: &OutPoint) -> Result<()> {
+        let key = self.outpoint_key(outpoint);
+        self.utxos.insert(&key, b"not-a-utxo")?;
+        Ok(())
+    }
+
     /// Check if data is compressed (zstd magic bytes: 0x28, 0xB5, 0x2F, 0xFD)
     #[cfg(feature = "utxo-compression")]
     fn is_compressed(data: &[u8]) -> bool {
@@ -330,6 +315,8 @@ impl UtxoStore {
 
     /// Get all UTXOs in the set
     pub fn get_all_utxos(&self) -> Result<UtxoSet> {
+        #[cfg(test)]
+        GET_ALL_UTXOS_CALLS.with(|calls| calls.set(calls.get() + 1));
         self.load_utxo_set()
     }
 
@@ -665,5 +652,44 @@ mod tests {
                 .value,
             222
         );
+    }
+
+    #[test]
+    fn two_outputs_do_not_keep_a_txid_cache_copy() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = crate::storage::Storage::new(temp.path()).unwrap();
+        let utxos = storage.utxos();
+        let hash = [6u8; 32];
+        for (index, value) in [(0u32, 40_000i64), (1, 49_000)] {
+            utxos
+                .add_utxo(
+                    &OutPoint { hash, index },
+                    &UTXO {
+                        value,
+                        script_pubkey: vec![OP_1].into(),
+                        height: 1,
+                        is_coinbase: false,
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            utxos
+                .get_utxo(&OutPoint { hash, index: 0 })
+                .unwrap()
+                .unwrap()
+                .value,
+            40_000
+        );
+        assert_eq!(
+            utxos
+                .get_utxo(&OutPoint { hash, index: 1 })
+                .unwrap()
+                .unwrap()
+                .value,
+            49_000
+        );
+        #[cfg(feature = "production")]
+        assert_eq!(serialization_cache_len(), 0);
     }
 }

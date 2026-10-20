@@ -7,6 +7,7 @@ use anyhow::Result;
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::{Block, BlockHeader, Hash};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[cfg(feature = "block-compression")]
@@ -752,36 +753,25 @@ impl BlockStore {
     /// Get recent headers for median time-past calculation (BIP113)
     /// Returns up to `count` most recent headers, ordered from oldest to newest
     pub fn get_recent_headers(&self, count: usize) -> Result<Vec<BlockHeader>> {
-        let mut headers = Vec::new();
-
-        // Get current height (from height_index)
-        let mut current_height: Option<u64> = None;
-        let mut items: Vec<_> = self.height_index.iter().collect();
-        items.reverse();
-        if let Some(item) = items.into_iter().flatten().next() {
-            let (height_bytes, _hash) = item;
-            let mut height_bytes_array = [0u8; 8];
-            height_bytes_array.copy_from_slice(&height_bytes);
-            current_height = Some(u64::from_be_bytes(height_bytes_array));
+        if count == 0 {
+            return Ok(Vec::new());
         }
-
-        if let Some(mut height) = current_height {
-            // Collect headers from current_height backwards
-            for _ in 0..count {
-                let height_bytes = height.to_be_bytes();
-                if let Some(data) = self.recent_headers.get(&height_bytes)? {
-                    if let Ok(header) = bincode::deserialize::<BlockHeader>(&data) {
-                        headers.push(header);
-                    }
+        let Some(mut height) = self.highest_stored_height()? else {
+            return Ok(Vec::new());
+        };
+        let mut headers = Vec::with_capacity(count.min(height as usize + 1));
+        for _ in 0..count {
+            let height_bytes = height.to_be_bytes();
+            if let Some(data) = self.recent_headers.get(&height_bytes)? {
+                if let Ok(header) = bincode::deserialize::<BlockHeader>(&data) {
+                    headers.push(header);
                 }
-                if height == 0 {
-                    break;
-                }
-                height -= 1;
             }
+            if height == 0 {
+                break;
+            }
+            height -= 1;
         }
-
-        // Reverse to get oldest-to-newest order (required for get_median_time_past)
         headers.reverse();
         Ok(headers)
     }
@@ -1011,22 +1001,52 @@ impl BlockStore {
             return Ok(());
         }
 
-        // Create batch writers for each tree
-        let mut headers_batch = self.headers.batch()?;
-        let mut heights_batch = self.height_index.batch()?;
-        let mut hash_to_height_batch = self.hash_to_height.batch()?;
+        // One LMDB transaction when the three trees share an environment.
+        // A failure there leaves every tree as it was.
+        let mut header_ops = Vec::new();
+        let mut height_ops = Vec::new();
+        let mut hash_ops = Vec::new();
 
-        // Pre-serialize and add to batches
+        // A height already claimed keeps that hash. The other header is stored
+        // and indexed by hash, and it does not become the active hash at that height.
+        let mut claimed: HashMap<u64, Hash> = HashMap::new();
         for (hash, header, height) in entries {
             let header_data = bincode::serialize(header)?;
             let height_bytes = height.to_be_bytes();
 
-            headers_batch.put(hash.as_slice(), &header_data);
-            heights_batch.put(&height_bytes, hash.as_slice());
-            hash_to_height_batch.put(hash.as_slice(), &height_bytes);
+            header_ops.push((hash.to_vec(), header_data));
+            hash_ops.push((hash.to_vec(), height_bytes.to_vec()));
+            let active = match claimed.get(height) {
+                Some(hash) => Some(*hash),
+                None => self.get_hash_by_height(*height)?,
+            };
+            if active.is_none() || active.as_ref() == Some(hash) {
+                height_ops.push((height_bytes.to_vec(), hash.to_vec()));
+                claimed.insert(*height, *hash);
+            }
         }
 
-        // Commit all batches atomically
+        #[cfg(feature = "heed3")]
+        if let (Some(headers), Some(heights), Some(hashes)) = (
+            self.headers.as_heed3_tree(),
+            self.height_index.as_heed3_tree(),
+            self.hash_to_height.as_heed3_tree(),
+        ) {
+            return headers.commit_three_puts(&header_ops, heights, &height_ops, hashes, &hash_ops);
+        }
+
+        let mut headers_batch = self.headers.batch()?;
+        let mut heights_batch = self.height_index.batch()?;
+        let mut hash_to_height_batch = self.hash_to_height.batch()?;
+        for (key, value) in &header_ops {
+            headers_batch.put(key, value);
+        }
+        for (key, value) in &height_ops {
+            heights_batch.put(key, value);
+        }
+        for (key, value) in &hash_ops {
+            hash_to_height_batch.put(key, value);
+        }
         headers_batch.commit()?;
         heights_batch.commit()?;
         hash_to_height_batch.commit()?;
@@ -1038,12 +1058,24 @@ impl BlockStore {
     pub fn get_hash_by_height(&self, height: u64) -> Result<Option<Hash>> {
         let height_bytes = height.to_be_bytes();
         if let Some(data) = self.height_index.get(&height_bytes)? {
+            if data.len() != 32 {
+                return Err(anyhow::anyhow!(
+                    "height index row for {height} is {} bytes",
+                    data.len()
+                ));
+            }
             let mut hash = [0u8; 32];
             hash.copy_from_slice(&data);
             Ok(Some(hash))
         } else {
             Ok(None)
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_short_height_row(&self, height: u64) -> Result<()> {
+        self.height_index.insert(&height.to_be_bytes(), &[0x01])?;
+        Ok(())
     }
 
     /// Highest block height present in the height index (contiguous from genesis assumed for IBD).
@@ -1245,6 +1277,12 @@ impl BlockStore {
         Ok(())
     }
 
+    /// Drop the active hash at `height`. The header body stays. The height is no longer the header tip.
+    pub fn clear_height_index(&self, height: u64) -> Result<()> {
+        self.height_index.remove(&height.to_be_bytes())?;
+        Ok(())
+    }
+
     /// Remove block by height (removes body, keeps header)
     pub fn remove_block_by_height(&self, height: u64) -> Result<()> {
         if let Some(hash) = self.get_hash_by_height(height)? {
@@ -1381,5 +1419,103 @@ impl BlockStore {
             Some(data) => Ok(Some(bincode::deserialize(&data)?)),
             None => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod header_height_tests {
+    use super::*;
+    use crate::storage::database::{create_database, default_backend, Database};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    #[test]
+    fn later_hash_does_not_replace_the_height() {
+        let dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        let active = [1u8; 32];
+        let other = [2u8; 32];
+        store
+            .store_headers_batch(&[(active, BlockHeader::default(), 100)])
+            .unwrap();
+        store
+            .store_headers_batch(&[(other, BlockHeader::default(), 100)])
+            .unwrap();
+        assert_eq!(store.get_hash_by_height(100).unwrap(), Some(active));
+        assert_eq!(store.get_height_by_hash(&other).unwrap(), Some(100));
+        assert!(store.get_header(&other).unwrap().is_some());
+    }
+
+    #[cfg(feature = "heed3")]
+    #[test]
+    fn a_failed_header_batch_leaves_all_three_trees() {
+        let dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        let kept = [1u8; 32];
+        store
+            .store_headers_batch(&[(kept, BlockHeader::default(), 7)])
+            .unwrap();
+
+        crate::storage::database::abort_next_three_put_commit(true);
+        let added = [2u8; 32];
+        let err = store
+            .store_headers_batch(&[(added, BlockHeader::default(), 8)])
+            .unwrap_err();
+        assert!(err.to_string().contains("aborted before commit"), "{err}");
+        assert_eq!(store.get_hash_by_height(7).unwrap(), Some(kept));
+        assert!(store.get_header(&kept).unwrap().is_some());
+        assert_eq!(store.get_height_by_hash(&kept).unwrap(), Some(7));
+        assert!(store.get_header(&added).unwrap().is_none());
+        assert!(store.get_height_by_hash(&added).unwrap().is_none());
+        assert!(store.get_hash_by_height(8).unwrap().is_none());
+    }
+
+    #[test]
+    fn tip_moved_down_is_not_the_header_tip() {
+        let dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        let h0 = [1u8; 32];
+        let h1 = [2u8; 32];
+        let h2 = [3u8; 32];
+        store
+            .store_headers_batch(&[
+                (h0, BlockHeader::default(), 0),
+                (h1, BlockHeader::default(), 1),
+                (h2, BlockHeader::default(), 2),
+            ])
+            .unwrap();
+        assert_eq!(store.highest_stored_height().unwrap(), Some(2));
+        store.clear_height_index(2).unwrap();
+        assert_eq!(store.highest_stored_height().unwrap(), Some(1));
+        assert!(store.get_hash_by_height(2).unwrap().is_none());
+        assert_eq!(store.get_height_by_hash(&h2).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn eleven_recent_headers_skip_the_height_index() {
+        let dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        for height in 0..=20u64 {
+            let mut hash = [0u8; 32];
+            hash[0] = height as u8;
+            store.store_height(height, &hash).unwrap();
+        }
+        for height in 10..=20u64 {
+            let mut header = BlockHeader::default();
+            header.timestamp = 1_600_000_000 + height;
+            store.store_recent_header(height, &header).unwrap();
+        }
+        let headers = store.get_recent_headers(11).unwrap();
+        assert_eq!(headers.len(), 11);
+        assert_eq!(headers[0].timestamp, 1_600_000_010);
+        assert_eq!(headers[10].timestamp, 1_600_000_020);
     }
 }

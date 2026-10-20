@@ -259,8 +259,8 @@ pub struct NetworkManager {
     /// Address database for peer discovery
     /// Read-heavy: many reads to query addresses, fewer writes when adding addresses
     address_database: Arc<RwLock<super::address_db::AddressDatabase>>,
-    /// Last time we sent addr message (Unix timestamp)
-    last_addr_sent: Arc<Mutex<u64>>,
+    /// Last time we sent an addr message to each peer (Unix timestamp).
+    last_addr_sent: Arc<Mutex<HashMap<SocketAddr, u64>>>,
     /// Enable self-advertisement (send own address to peers)
     enable_self_advertisement: bool,
     /// Request timeout configuration
@@ -369,19 +369,36 @@ impl NetworkManager {
             config.and_then(|c| c.ibd_protection.as_ref())
         {
             let mut ibd_protection_config = super::ibd_protection::IbdProtectionConfig::default();
-            // Convert GB to bytes
-            ibd_protection_config.max_bandwidth_per_peer_per_day =
-                ibd_config.max_bandwidth_per_peer_per_day_gb * 1024 * 1024 * 1024;
-            ibd_protection_config.max_bandwidth_per_peer_per_hour =
-                ibd_config.max_bandwidth_per_peer_per_hour_gb * 1024 * 1024 * 1024;
-            ibd_protection_config.max_bandwidth_per_ip_per_day =
-                ibd_config.max_bandwidth_per_ip_per_day_gb * 1024 * 1024 * 1024;
-            ibd_protection_config.max_bandwidth_per_ip_per_hour =
-                ibd_config.max_bandwidth_per_ip_per_hour_gb * 1024 * 1024 * 1024;
-            ibd_protection_config.max_bandwidth_per_subnet_per_day =
-                ibd_config.max_bandwidth_per_subnet_per_day_gb * 1024 * 1024 * 1024;
-            ibd_protection_config.max_bandwidth_per_subnet_per_hour =
-                ibd_config.max_bandwidth_per_subnet_per_hour_gb * 1024 * 1024 * 1024;
+            // A product that does not fit stays at the default byte cap.
+            let assign_gb = |slot: &mut u64, gb: u64| {
+                if let Some(bytes) = crate::config::bandwidth_gb_to_bytes(gb) {
+                    *slot = bytes;
+                }
+            };
+            assign_gb(
+                &mut ibd_protection_config.max_bandwidth_per_peer_per_day,
+                ibd_config.max_bandwidth_per_peer_per_day_gb,
+            );
+            assign_gb(
+                &mut ibd_protection_config.max_bandwidth_per_peer_per_hour,
+                ibd_config.max_bandwidth_per_peer_per_hour_gb,
+            );
+            assign_gb(
+                &mut ibd_protection_config.max_bandwidth_per_ip_per_day,
+                ibd_config.max_bandwidth_per_ip_per_day_gb,
+            );
+            assign_gb(
+                &mut ibd_protection_config.max_bandwidth_per_ip_per_hour,
+                ibd_config.max_bandwidth_per_ip_per_hour_gb,
+            );
+            assign_gb(
+                &mut ibd_protection_config.max_bandwidth_per_subnet_per_day,
+                ibd_config.max_bandwidth_per_subnet_per_day_gb,
+            );
+            assign_gb(
+                &mut ibd_protection_config.max_bandwidth_per_subnet_per_hour,
+                ibd_config.max_bandwidth_per_subnet_per_hour_gb,
+            );
             ibd_protection_config.max_concurrent_ibd_serving =
                 ibd_config.max_concurrent_ibd_serving;
             ibd_protection_config.ibd_request_cooldown_seconds =
@@ -566,7 +583,7 @@ impl NetworkManager {
             #[cfg(feature = "governance")]
             governance_config: config.and_then(|c| c.governance.clone()),
             address_database,
-            last_addr_sent: Arc::new(Mutex::new(0)),
+            last_addr_sent: Arc::new(Mutex::new(HashMap::new())),
             enable_self_advertisement: config.map(|c| c.enable_self_advertisement).unwrap_or(true),
             request_timeout_config,
             protocol_limits,
@@ -788,6 +805,12 @@ impl NetworkManager {
                     peer_addr, violation_msg
                 );
             }
+            {
+                let mut pm = self.peer_manager.lock().await;
+                if let Some(peer) = pm.get_peer_mut(&TransportAddr::Tcp(peer_addr)) {
+                    peer.shutdown_connection();
+                }
+            }
             let _ = self
                 .peer_tx
                 .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
@@ -956,6 +979,12 @@ impl NetworkManager {
                 addr, time_ago
             );
             drop(pm); // Release lock before sending message
+            {
+                let mut pm = self.peer_manager.lock().await;
+                if let Some(peer) = pm.get_peer_mut(addr) {
+                    peer.shutdown_connection();
+                }
+            }
             let _ = self
                 .peer_tx
                 .send(NetworkMessage::PeerDisconnected(addr.clone()));
@@ -1264,6 +1293,12 @@ impl NetworkManager {
         rx
     }
 
+    fn block_fetch_timeout(
+        config: &crate::config::RequestTimeoutConfig,
+    ) -> std::time::Duration {
+        std::time::Duration::from_secs(config.async_request_timeout_seconds)
+    }
+
     /// Ask a connected peer for one full block via existing GetData (not persisted).
     pub async fn request_block(
         &self,
@@ -1275,7 +1310,7 @@ impl NetworkManager {
         use crate::network::inventory::MSG_WITNESS_BLOCK;
         use crate::network::protocol::{GetDataMessage, InventoryVector, ProtocolMessage};
 
-        const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        let fetch_timeout = Self::block_fetch_timeout(self.request_timeout_config());
 
         let peers = self.peer_addresses();
         for peer_addr in peers {
@@ -1301,7 +1336,7 @@ impl NetworkManager {
                 self.cancel_block_request(peer_addr, block_hash);
                 continue;
             }
-            match tokio::time::timeout(FETCH_TIMEOUT, block_rx).await {
+            match tokio::time::timeout(fetch_timeout, block_rx).await {
                 Ok(Ok((block, witnesses, _wire))) => return Some((block, witnesses)),
                 _ => self.cancel_block_request(peer_addr, block_hash),
             }
@@ -1475,43 +1510,40 @@ impl NetworkManager {
                     );
                     return false;
                 };
-                // Deliver to the first sender whose receiver is still alive. `oneshot::Sender::send`
-                // returns the payload back on `Err` when the receiver was dropped, so we can hand it
-                // to the next candidate without cloning. Senders from already-abandoned overlapping
-                // requests are skipped (their downloads timed out / aborted); the currently-waiting
-                // download's receiver is the live one and gets the block.
-                let mut payload = (block, witnesses, wire_payload);
-                for sender in senders {
-                    match sender.send(payload) {
-                        Ok(()) => return true,
-                        Err(returned) => payload = returned,
+                // Deliver a copy to every live receiver. A closed sibling is skipped.
+                // Removing the key is safe only after each live receiver has the block.
+                let live: Vec<_> = senders.into_iter().filter(|sender| !sender.is_closed()).collect();
+                if live.is_empty() {
+                    crate::node::parallel_ibd::body_dup::note_loser_branch_dropped();
+                    if crate::node::parallel_ibd::late_body::try_admit(
+                        peer_addr,
+                        block_hash,
+                        block,
+                        witnesses,
+                        wire_payload,
+                    ) {
+                        crate::node::parallel_ibd::body_dup::note_discard(
+                            crate::node::parallel_ibd::body_dup::DiscardReason::LateAdmit,
+                            None,
+                            wire_bytes,
+                        );
+                        return true;
                     }
-                }
-                // The key existed (this was an IBD response) but every receiver had been dropped.
-                // A still-needed height inside the admit window is kept; otherwise the coordinator
-                // requests it again.
-                let (block, witnesses, wire_payload) = payload;
-                crate::node::parallel_ibd::body_dup::note_loser_branch_dropped();
-                if crate::node::parallel_ibd::late_body::try_admit(
-                    peer_addr,
-                    block_hash,
-                    block,
-                    witnesses,
-                    wire_payload,
-                ) {
                     crate::node::parallel_ibd::body_dup::note_discard(
-                        crate::node::parallel_ibd::body_dup::DiscardReason::LateAdmit,
+                        crate::node::parallel_ibd::body_dup::DiscardReason::RequeueLoser,
                         None,
                         wire_bytes,
                     );
-                    return true;
+                    return false;
                 }
-                crate::node::parallel_ibd::body_dup::note_discard(
-                    crate::node::parallel_ibd::body_dup::DiscardReason::RequeueLoser,
-                    None,
-                    wire_bytes,
-                );
-                true
+                let payload = (block, witnesses, wire_payload);
+                let mut delivered = false;
+                for sender in live {
+                    if sender.send(payload.clone()).is_ok() {
+                        delivered = true;
+                    }
+                }
+                delivered
             })
         });
         // After admit lookup: `want` is the header index try_admit reads.
@@ -2646,17 +2678,24 @@ impl NetworkManager {
         )
     }
 
-    /// Submit validated transactions to the mempool
+    /// Submit validated transactions to the mempool.
+    /// Each witness is the stack list from the package bytes. `None` is a
+    /// transaction that carried no witness.
     pub(crate) async fn submit_transactions_to_mempool(
         &self,
-        txs: &[blvm_protocol::Transaction],
+        txs: &[(
+            blvm_protocol::Transaction,
+            Option<Vec<blvm_protocol::segwit::Witness>>,
+        )],
     ) -> Result<()> {
         if let Some(ref mempool_manager) = self.mempool_manager {
-            for tx in txs {
-                match mempool_manager.add_transaction(tx.clone()) {
+            for (tx, witnesses) in txs {
+                match mempool_manager
+                    .add_transaction_with_witness(tx.clone(), witnesses.clone())
+                {
                     Ok(true) => {
                         let txid = blvm_protocol::block::calculate_tx_id(tx);
-                        let fee = mempool_manager.cached_fee_rate(&txid);
+                        let fee = mempool_manager.cached_fee_basis(&txid);
                         self.announce_accepted_transaction(txid, fee).await;
                     }
                     Ok(false) => {}
@@ -2670,9 +2709,10 @@ impl NetworkManager {
         let utxo_lock = self.utxo_set.lock().await;
         let mempool_lock = self.mempool.lock().await;
         let (height, time_context) = self.pool_finality();
-        for tx in txs {
-            let _ = self.consensus.accept_to_memory_pool(
+        for (tx, witnesses) in txs {
+            let _ = self.consensus.accept_to_memory_pool_with_witness(
                 tx,
+                witnesses.as_deref(),
                 &utxo_lock,
                 &mempool_lock,
                 height,
@@ -2696,7 +2736,7 @@ impl NetworkManager {
             let txid = blvm_protocol::block::calculate_tx_id(&tx);
             match mempool_manager.add_transaction_with_witness(tx, witnesses) {
                 Ok(true) => {
-                    let fee = mempool_manager.cached_fee_rate(&txid);
+                    let fee = mempool_manager.cached_fee_basis(&txid);
                     self.announce_accepted_transaction(txid, fee).await;
                 }
                 Ok(false) => {}
@@ -3084,7 +3124,7 @@ impl NetworkManager {
         &self.peer_tx
     }
 
-    pub(crate) fn last_addr_sent(&self) -> &Arc<Mutex<u64>> {
+    pub(crate) fn last_addr_sent(&self) -> &Arc<Mutex<HashMap<SocketAddr, u64>>> {
         &self.last_addr_sent
     }
 
@@ -3656,5 +3696,44 @@ mod pruning_version_services {
         let pruned_bits = version_services(pruned_storage);
         assert_ne!(pruned_bits & NODE_NETWORK_LIMITED, 0);
         assert_eq!(pruned_bits & NODE_NETWORK, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_completion_delivers_to_every_live_waiter() {
+        use blvm_protocol::Block;
+        let manager = NetworkManager::new("127.0.0.1:0".parse().unwrap());
+        let peer: SocketAddr = "1.2.3.4:8333".parse().unwrap();
+        let hash = [9u8; 32];
+        let mut receivers = manager.register_block_requests_batch(peer, &[hash, hash]);
+        let block = Block {
+            header: blvm_protocol::BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [1u8; 32],
+                timestamp: 1,
+                bits: 0x207fffff,
+                nonce: 1,
+            },
+            transactions: Vec::new().into(),
+        };
+        assert!(manager.complete_block_request(peer, hash, block, Vec::new()));
+        let (first, _, _) = receivers.remove(0).try_recv().expect("older waiter");
+        let (second, _, _) = receivers.remove(0).try_recv().expect("newer waiter");
+        assert_eq!(first.header.nonce, 1);
+        assert_eq!(second.header.nonce, 1);
+    }
+}
+
+#[cfg(test)]
+mod block_fetch_timeout_tests {
+    use super::NetworkManager;
+    use crate::config::RequestTimeoutConfig;
+    use std::time::Duration;
+
+    #[test]
+    fn request_block_waits_for_the_configured_async_timeout() {
+        let wait = NetworkManager::block_fetch_timeout(&RequestTimeoutConfig::default());
+        assert_eq!(wait, Duration::from_secs(300));
+        assert_ne!(wait, Duration::from_secs(30));
     }
 }

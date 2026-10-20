@@ -26,6 +26,10 @@ struct RbfTracking {
     original_tx_hash: Hash,
 }
 
+fn next_replacement_count(counts: impl IntoIterator<Item = u32>) -> u32 {
+    counts.into_iter().max().unwrap_or(0).saturating_add(1)
+}
+
 /// Core mempool state (transactions + spent outputs)
 /// Wrapped in Mutex for add_transaction from Arc context (re-broadcast, sendrawtransaction)
 struct MempoolPool {
@@ -35,6 +39,8 @@ struct MempoolPool {
     /// Sigop-adjusted virtual size recorded at accept time.
     adjusted_vsize: HashMap<Hash, u64>,
     spent_outputs: HashSet<OutPoint>,
+    /// Spender txid for each outpoint the pool is spending.
+    spenders: HashMap<OutPoint, Hash>,
 }
 
 /// Mempool manager
@@ -56,9 +62,11 @@ pub struct MempoolManager {
     /// Maps fee_rate -> Vec<Hash> (multiple transactions can have same fee rate)
     /// Uses RwLock for interior mutability to allow &self methods
     fee_index: RwLock<BTreeMap<Reverse<u64>, Vec<Hash>>>,
-    /// Cache fee rates per transaction hash
+    /// Cache fee rates per transaction hash (sat/vB).
     /// Uses RwLock for interior mutability to allow &self methods
     fee_cache: RwLock<HashMap<Hash, u64>>,
+    /// Absolute fee and vsize used for the BIP133 filter. The sat/vB cache drops the remainder.
+    fee_basis: RwLock<HashMap<Hash, (u64, u64)>>,
     /// Mining priority fee deltas (satoshis), cumulative per BIP prioritisetransaction semantics.
     fee_deltas: RwLock<HashMap<Hash, i64>>,
     /// RBF configuration (optional)
@@ -73,6 +81,8 @@ pub struct MempoolManager {
     /// Transaction timestamps: when each transaction was added
     /// Uses RwLock for interior mutability
     tx_timestamps: RwLock<HashMap<Hash, u64>>,
+    /// Chain tip height when each transaction was accepted.
+    tx_heights: RwLock<HashMap<Hash, u64>>,
     /// Transaction dependency graph: child -> parent relationships
     /// Maps transaction hash to set of parent transaction hashes (transactions it depends on)
     /// Uses RwLock for interior mutability
@@ -344,17 +354,20 @@ impl MempoolManager {
                 tx_witnesses: HashMap::new(),
                 adjusted_vsize: HashMap::new(),
                 spent_outputs: HashSet::new(),
+                spenders: HashMap::new(),
             }),
             mempool: RwLock::new(Mempool::new()),
             utxo_set_arc: RwLock::new(None),
             event_callback: None,
             fee_index: RwLock::new(BTreeMap::new()),
             fee_cache: RwLock::new(HashMap::new()),
+            fee_basis: RwLock::new(HashMap::new()),
             fee_deltas: RwLock::new(HashMap::new()),
             rbf_config: RwLock::new(None),
             policy_config: RwLock::new(None),
             rbf_tracking: RwLock::new(HashMap::new()),
             tx_timestamps: RwLock::new(HashMap::new()),
+            tx_heights: RwLock::new(HashMap::new()),
             tx_dependencies: RwLock::new(HashMap::new()),
             tx_descendants: RwLock::new(HashMap::new()),
             utxo_set_hash: RwLock::new(None),
@@ -372,17 +385,20 @@ impl MempoolManager {
                 tx_witnesses: HashMap::new(),
                 adjusted_vsize: HashMap::new(),
                 spent_outputs: HashSet::new(),
+                spenders: HashMap::new(),
             }),
             mempool: RwLock::new(Mempool::new()),
             utxo_set_arc: RwLock::new(None),
             event_callback: None,
             fee_index: RwLock::new(BTreeMap::new()),
             fee_cache: RwLock::new(HashMap::new()),
+            fee_basis: RwLock::new(HashMap::new()),
             fee_deltas: RwLock::new(HashMap::new()),
             rbf_config: RwLock::new(rbf_config),
             policy_config: RwLock::new(None),
             rbf_tracking: RwLock::new(HashMap::new()),
             tx_timestamps: RwLock::new(HashMap::new()),
+            tx_heights: RwLock::new(HashMap::new()),
             tx_dependencies: RwLock::new(HashMap::new()),
             tx_descendants: RwLock::new(HashMap::new()),
             utxo_set_hash: RwLock::new(None),
@@ -648,24 +664,25 @@ impl MempoolManager {
             .clone()
             .unwrap_or_default();
 
-        let expiry_time = policy.mempool_expiry_hours * 3600;
-        let current_time = Self::current_timestamp();
-        // Optimization: Pre-allocate with estimated capacity
-        let estimated_removals = self.pool_lock().transactions.len() / 100; // Estimate ~1% will expire
-        let mut to_remove = Vec::with_capacity(estimated_removals);
+        if let Some(expiry_time) = policy.mempool_expiry_hours.checked_mul(3600) {
+            let current_time = Self::current_timestamp();
+            // Optimization: Pre-allocate with estimated capacity
+            let estimated_removals = self.pool_lock().transactions.len() / 100; // Estimate ~1% will expire
+            let mut to_remove = Vec::with_capacity(estimated_removals);
 
-        {
-            let timestamps = self.tx_timestamps.read().unwrap_or_else(|e| e.into_inner());
-            for (hash, timestamp) in timestamps.iter() {
-                if current_time.saturating_sub(*timestamp) > expiry_time {
-                    to_remove.push(*hash);
+            {
+                let timestamps = self.tx_timestamps.read().unwrap_or_else(|e| e.into_inner());
+                for (hash, timestamp) in timestamps.iter() {
+                    if current_time.saturating_sub(*timestamp) > expiry_time {
+                        to_remove.push(*hash);
+                    }
                 }
             }
-        }
 
-        for hash in to_remove {
-            debug!("Removing expired transaction {}", hex::encode(hash));
-            self.remove_transaction(&hash);
+            for hash in to_remove {
+                debug!("Removing expired transaction {}", hex::encode(hash));
+                self.remove_transaction(&hash);
+            }
         }
 
         // Check mempool size limits and evict if necessary
@@ -1370,7 +1387,8 @@ impl MempoolManager {
             .unwrap_or_else(|e| e.into_inner());
         for ancestor in &ancestors {
             let existing = descendant_closure(&descendants_map, ancestor);
-            let descendant_count = existing.len() as u32;
+            // The ancestor is part of its own descendant package.
+            let descendant_count = existing.len() as u32 + 1;
             if descendant_count + 1 > policy.max_descendant_count {
                 warn!(
                     "Transaction {} exceeds max descendant count: {} > {}",
@@ -1380,18 +1398,20 @@ impl MempoolManager {
                 );
                 return Ok(false);
             }
-            let descendant_size: u64 = {
+            let (ancestor_vsize, descendant_size): (u64, u64) = {
                 let pool = self.pool_lock();
-                existing
+                let ancestor_vsize = pool.adjusted_vsize.get(ancestor).copied().unwrap_or(0);
+                let descendant_size = existing
                     .iter()
                     .map(|h| pool.adjusted_vsize.get(h).copied().unwrap_or(0))
-                    .sum()
+                    .sum();
+                (ancestor_vsize, descendant_size)
             };
-            if descendant_size + candidate_vsize > policy.max_descendant_size {
+            if ancestor_vsize + descendant_size + candidate_vsize > policy.max_descendant_size {
                 warn!(
                     "Transaction {} exceeds max descendant size: {} > {}",
                     hex::encode(tx_hash),
-                    descendant_size + candidate_vsize,
+                    ancestor_vsize + descendant_size + candidate_vsize,
                     policy.max_descendant_size
                 );
                 return Ok(false);
@@ -1620,8 +1640,10 @@ impl MempoolManager {
         }
 
         let mut fee_rate_sat_vb = 0u64;
+        let mut fee_sats = 0u64;
         if utxo_wired {
             let fee = self.calculate_transaction_fee(&tx, &utxo_snapshot);
+            fee_sats = fee;
             let tx_size = candidate_vsize;
             fee_rate_sat_vb = if tx_size > 0 { fee / tx_size } else { 0 };
             if fee_rate_sat_vb < effective_policy.min_relay_fee_rate {
@@ -1648,14 +1670,7 @@ impl MempoolManager {
         // If conflict exists, check if RBF replacement is allowed
         let mut conflicting_tx_hashes: Vec<Hash> = Vec::new();
         for input in &tx.inputs {
-            if let Some(existing_tx) = self
-                .pool_lock()
-                .transactions
-                .values()
-                .find(|t| t.inputs.iter().any(|i| i.prevout == input.prevout))
-                .cloned()
-            {
-                let existing_hash = calculate_tx_id(&existing_tx);
+            if let Some(existing_hash) = self.pool_lock().spenders.get(&input.prevout).copied() {
                 if !conflicting_tx_hashes.contains(&existing_hash) {
                     conflicting_tx_hashes.push(existing_hash);
                 }
@@ -1740,10 +1755,13 @@ impl MempoolManager {
             };
             let replacement_count = {
                 let tracking = self.rbf_tracking.read().unwrap_or_else(|e| e.into_inner());
-                tracking
-                    .get(&primary_hash)
-                    .map(|t| t.replacement_count + 1)
-                    .unwrap_or(1)
+                let counts = direct_conflicts.iter().map(|hash| {
+                    tracking
+                        .get(hash)
+                        .map(|entry| entry.replacement_count)
+                        .unwrap_or(0)
+                });
+                next_replacement_count(counts)
             };
             {
                 let mut tracking = self.rbf_tracking.write().unwrap_or_else(|e| e.into_inner());
@@ -1783,25 +1801,29 @@ impl MempoolManager {
             return Ok(false);
         }
 
+        if let Some(wits) = &witnesses {
+            if wits.len() != tx.inputs.len() {
+                warn!(
+                    "Transaction {} rejected: witness count {} != input count {}",
+                    hex::encode(tx_hash),
+                    wits.len(),
+                    tx.inputs.len()
+                );
+                return Ok(false);
+            }
+        }
+
         // Add transaction to mempool (store full transaction + optional witnesses)
         {
             let mut pool = self.pool_lock();
             pool.transactions.insert(tx_hash, tx.clone());
             pool.adjusted_vsize.insert(tx_hash, candidate_vsize);
             if let Some(wits) = witnesses {
-                if wits.len() == tx.inputs.len() {
-                    pool.tx_witnesses.insert(tx_hash, wits);
-                } else {
-                    warn!(
-                        "Transaction {} witness count {} != input count {}, not storing witnesses",
-                        hex::encode(tx_hash),
-                        wits.len(),
-                        tx.inputs.len()
-                    );
-                }
+                pool.tx_witnesses.insert(tx_hash, wits);
             }
             for input in &tx.inputs {
                 pool.spent_outputs.insert(input.prevout);
+                pool.spenders.insert(input.prevout, tx_hash);
             }
         }
         self.mempool
@@ -1812,11 +1834,19 @@ impl MempoolManager {
         // Update dependency graph
         self.update_dependency_graph(&tx, &tx_hash);
 
-        // Record timestamp
+        // Record timestamp and the chain tip at admission.
         self.tx_timestamps
             .write()
             .unwrap()
             .insert(tx_hash, Self::current_timestamp());
+        let admission_height = self
+            .finality_context()
+            .map(|(next_height, _)| next_height.saturating_sub(1))
+            .unwrap_or(0);
+        self.tx_heights
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(tx_hash, admission_height);
 
         // Cache fee rate at insert (sat/vB) so eviction/sorting do not see stale zero rates.
         let fee_rate = fee_rate_sat_vb;
@@ -1824,6 +1854,10 @@ impl MempoolManager {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(tx_hash, fee_rate);
+        self.fee_basis
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(tx_hash, (fee_sats, candidate_vsize));
         self.fee_index
             .write()
             .unwrap()
@@ -1889,9 +1923,28 @@ impl MempoolManager {
             .copied()
     }
 
+    /// Absolute fee and vsize. The BIP133 filter uses this instead of the truncated sat/vB rate.
+    pub fn cached_fee_basis(&self, hash: &Hash) -> Option<(u64, u64)> {
+        self.fee_basis
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(hash)
+            .copied()
+    }
+
     /// Unix time when the transaction entered the pool.
     pub fn accepted_at(&self, hash: &Hash) -> u64 {
         self.tx_timestamps
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(hash)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Chain tip height when this transaction was accepted.
+    pub fn admission_height(&self, hash: &Hash) -> u64 {
+        self.tx_heights
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(hash)
@@ -1924,6 +1977,10 @@ impl MempoolManager {
         self.pool_lock().spent_outputs.contains(outpoint)
     }
 
+    pub(crate) fn spender_of(&self, outpoint: &OutPoint) -> Option<Hash> {
+        self.pool_lock().spenders.get(outpoint).copied()
+    }
+
     /// Cumulative mining priority fee delta (satoshis) from `prioritisetransaction`.
     pub fn get_fee_delta(&self, hash: &Hash) -> i64 {
         self.fee_deltas
@@ -1942,6 +1999,16 @@ impl MempoolManager {
     /// Get all transactions
     pub fn get_transactions(&self) -> Vec<Transaction> {
         self.pool_lock().transactions.values().cloned().collect()
+    }
+
+    /// Txid and cached fee basis for a mempool inventory. The transaction body stays in the pool.
+    pub fn pooled_fee_basis(&self) -> Vec<(Hash, Option<(u64, u64)>)> {
+        let hashes: Vec<Hash> = self.pool_lock().transactions.keys().copied().collect();
+        let basis = self.fee_basis.read().unwrap_or_else(|e| e.into_inner());
+        hashes
+            .into_iter()
+            .map(|hash| (hash, basis.get(&hash).copied()))
+            .collect()
     }
 
     /// Get prioritized transactions by fee rate
@@ -2024,20 +2091,14 @@ impl MempoolManager {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
-        let mut hasher = DefaultHasher::new();
-        utxo_set.len().hash(&mut hasher);
-
-        // Sample first 10 keys for change detection (fast heuristic)
-        let sample_size = utxo_set.len().min(10);
-        for (i, (outpoint, utxo)) in utxo_set.iter().enumerate() {
-            if i >= sample_size {
-                break;
-            }
+        let mut acc = utxo_set.len() as u64;
+        for (outpoint, utxo) in utxo_set.iter() {
+            let mut hasher = DefaultHasher::new();
             outpoint.hash(&mut hasher);
             utxo.value.hash(&mut hasher);
+            acc ^= hasher.finish();
         }
-
-        hasher.finish()
+        acc
     }
 
     /// Update fee index with current UTXO set
@@ -2073,6 +2134,10 @@ impl MempoolManager {
         {
             let mut fee_cache = self.fee_cache.write().unwrap_or_else(|e| e.into_inner());
             fee_cache.clear();
+            self.fee_basis
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
         }
 
         // Snapshot under pool lock only — never hold fee_cache/fee_index writes while locking pool
@@ -2114,16 +2179,22 @@ impl MempoolManager {
         for (tx_hash, tx) in &txs_snapshot {
             let mut input_total = 0u64;
             let mut within_money = true;
+            let mut fee_known = true;
             for input in &tx.inputs {
-                if let Some(&value) = utxo_cache.get(&input.prevout) {
-                    match add_money(input_total, value) {
-                        Some(sum) => input_total = sum,
-                        None => {
-                            within_money = false;
-                            break;
-                        }
+                let Some(&value) = utxo_cache.get(&input.prevout) else {
+                    fee_known = false;
+                    break;
+                };
+                match add_money(input_total, value) {
+                    Some(sum) => input_total = sum,
+                    None => {
+                        within_money = false;
+                        break;
                     }
                 }
+            }
+            if !fee_known {
+                continue;
             }
 
             let fee = if within_money {
@@ -2153,6 +2224,10 @@ impl MempoolManager {
             {
                 let mut fee_cache = self.fee_cache.write().unwrap_or_else(|e| e.into_inner());
                 fee_cache.insert(*tx_hash, fee_rate);
+                self.fee_basis
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(*tx_hash, (effective_fee, size as u64));
             }
             let mut fee_index = self.fee_index.write().unwrap_or_else(|e| e.into_inner());
             fee_index
@@ -2426,13 +2501,25 @@ impl MempoolManager {
     }
 
     fn install_utxo_snapshot(&self, utxo_set: &UtxoSet) {
-        let slot = self.utxo_set_arc.read().unwrap_or_else(|e| e.into_inner());
-        let Some(arc) = slot.as_ref() else {
-            return;
+        let arc = {
+            let slot = self.utxo_set_arc.read().unwrap_or_else(|e| e.into_inner());
+            let Some(arc) = slot.as_ref() else {
+                return;
+            };
+            Arc::clone(arc)
         };
         if let Ok(mut guard) = arc.try_lock() {
             *guard = utxo_set.clone();
+            return;
         }
+        let mut slot = self.utxo_set_arc.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(current) = slot.as_ref() {
+            if let Ok(mut guard) = current.try_lock() {
+                *guard = utxo_set.clone();
+                return;
+            }
+        }
+        *slot = Some(Arc::new(tokio::sync::Mutex::new(utxo_set.clone())));
     }
 
     /// Drop transactions a newly connected block confirmed or conflicted with.
@@ -2483,6 +2570,7 @@ impl MempoolManager {
             pool.adjusted_vsize.remove(hash);
             for input in &tx.inputs {
                 pool.spent_outputs.remove(&input.prevout);
+                pool.spenders.remove(&input.prevout);
             }
             tx
         };
@@ -2499,6 +2587,10 @@ impl MempoolManager {
             .unwrap_or_else(|e| e.into_inner())
             .remove(hash)
         {
+            self.fee_basis
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(hash);
             let mut fee_index = self.fee_index.write().unwrap_or_else(|e| e.into_inner());
             if let Some(tx_hashes) = fee_index.get_mut(&Reverse(fee_rate)) {
                 tx_hashes.retain(|&h| h != *hash);
@@ -2516,6 +2608,10 @@ impl MempoolManager {
 
         // Remove timestamp
         self.tx_timestamps
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(hash);
+        self.tx_heights
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .remove(hash);
@@ -2580,6 +2676,7 @@ impl MempoolManager {
             let n = pool.transactions.len();
             pool.transactions.clear();
             pool.spent_outputs.clear();
+            pool.spenders.clear();
             (n,)
         };
         self.mempool
@@ -2594,6 +2691,10 @@ impl MempoolManager {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        self.fee_basis
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         self.fee_deltas
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -2603,6 +2704,10 @@ impl MempoolManager {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.tx_timestamps
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.tx_heights
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
@@ -2819,6 +2924,95 @@ mod tests {
     }
 
     #[test]
+    fn an_outpoint_maps_to_its_spender() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+        use std::sync::Arc;
+
+        let mempool = MempoolManager::new();
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        mempool.set_policy_config(Some(policy));
+        let first = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        let second = OutPoint {
+            hash: [2u8; 32],
+            index: 0,
+        };
+        let mut set = blvm_protocol::UtxoSet::default();
+        for prevout in [first, second] {
+            set.insert(
+                prevout,
+                Arc::new(blvm_protocol::UTXO {
+                    value: 50_000,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 1,
+                    is_coinbase: false,
+                }),
+            );
+        }
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set)));
+        let spend = |prevout: OutPoint| Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout,
+                script_sig: Vec::new(),
+                sequence: 0xffffffff,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 40_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let left = spend(first);
+        let right = spend(second);
+        assert!(mempool.add_transaction(left.clone()).unwrap());
+        assert!(mempool.add_transaction(right.clone()).unwrap());
+        assert_eq!(mempool.spender_of(&first), Some(calculate_tx_id(&left)));
+        assert_eq!(mempool.spender_of(&second), Some(calculate_tx_id(&right)));
+    }
+
+    #[tokio::test]
+    async fn busy_utxo_lock_still_installs_the_reorg_snapshot() {
+        use blvm_protocol::opcodes::OP_1;
+        use std::sync::Arc;
+        let mempool = MempoolManager::new();
+        let old = funded(vec![OP_1], 50_000);
+        let arc = Arc::new(tokio::sync::Mutex::new(old));
+        mempool.set_utxo_set_arc(Arc::clone(&arc));
+        let _held = arc.lock().await;
+        let fresh = OutPoint {
+            hash: [9u8; 32],
+            index: 0,
+        };
+        let mut next = blvm_protocol::UtxoSet::default();
+        next.insert(
+            fresh,
+            Arc::new(blvm_protocol::UTXO {
+                value: 1,
+                script_pubkey: vec![OP_1].into(),
+                height: 1,
+                is_coinbase: false,
+            }),
+        );
+        mempool.apply_reorg(&[], &[], &[], &next);
+        let slot = mempool
+            .utxo_set_arc
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let current = slot.as_ref().expect("snapshot stays wired");
+        assert!(!Arc::ptr_eq(current, &arc));
+        let guard = current.try_lock().expect("installed snapshot is free");
+        assert!(guard.get(&fresh).is_some());
+    }
+
+    #[test]
     fn mempool_rejects_consensus_invalid_transactions() {
         use blvm_protocol::opcodes::{OP_0, OP_1};
 
@@ -2857,6 +3051,230 @@ mod tests {
             2_000,
         ))));
         assert!(mempool.add_transaction(legacy_empty_script()).unwrap());
+    }
+
+    #[test]
+    fn admission_height_is_the_tip() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+        let mempool = MempoolManager::new();
+        mempool.set_chain_tip(800_001, 0);
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+            vec![OP_1],
+            50_000,
+        ))));
+        let tx = legacy_empty_script();
+        assert!(mempool.add_transaction(tx.clone()).unwrap());
+        assert_eq!(mempool.admission_height(&calculate_tx_id(&tx)), 800_000);
+    }
+
+    #[test]
+    fn witness_count_mismatch_is_not_admitted() {
+        use blvm_protocol::block::calculate_tx_id;
+        use std::sync::Arc;
+
+        let mempool = MempoolManager::new();
+        let first = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        let second = OutPoint {
+            hash: [2u8; 32],
+            index: 0,
+        };
+        let mut set = blvm_protocol::UtxoSet::default();
+        for prevout in [first, second] {
+            set.insert(
+                prevout,
+                Arc::new(blvm_protocol::UTXO {
+                    value: 50_000,
+                    script_pubkey: vec![blvm_protocol::opcodes::OP_1].into(),
+                    height: 1,
+                    is_coinbase: false,
+                }),
+            );
+        }
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set)));
+        let tx = Transaction {
+            version: 1,
+            inputs: vec![
+                TransactionInput {
+                    prevout: first,
+                    script_sig: Vec::new(),
+                    sequence: 0xffffffff,
+                },
+                TransactionInput {
+                    prevout: second,
+                    script_sig: Vec::new(),
+                    sequence: 0xffffffff,
+                },
+            ]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 40_000,
+                script_pubkey: vec![blvm_protocol::opcodes::OP_1].into(),
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        assert!(!mempool
+            .add_transaction_with_witness(tx.clone(), Some(vec![vec![]]))
+            .unwrap());
+        assert!(mempool.get_transaction(&calculate_tx_id(&tx)).is_none());
+    }
+
+    #[test]
+    fn pooled_fee_basis_is_the_txid_and_the_cached_rate() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+            vec![OP_1],
+            50_000,
+        ))));
+        let tx = legacy_empty_script();
+        assert!(mempool.add_transaction(tx.clone()).unwrap());
+        let txid = calculate_tx_id(&tx);
+        let rows = mempool.pooled_fee_basis();
+        assert_eq!(rows, vec![(txid, mempool.cached_fee_basis(&txid))]);
+    }
+
+    #[test]
+    fn missing_prevout_is_not_ranked_at_zero() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+        use std::sync::Arc;
+
+        let first = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        let second = OutPoint {
+            hash: [2u8; 32],
+            index: 0,
+        };
+        let mut set = blvm_protocol::UtxoSet::default();
+        for prevout in [first, second] {
+            set.insert(
+                prevout,
+                Arc::new(blvm_protocol::UTXO {
+                    value: 40_000,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 1,
+                    is_coinbase: false,
+                }),
+            );
+        }
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set.clone())));
+        let tx = Transaction {
+            version: 1,
+            inputs: vec![
+                TransactionInput {
+                    prevout: first,
+                    script_sig: Vec::new(),
+                    sequence: 0xffffffff,
+                },
+                TransactionInput {
+                    prevout: second,
+                    script_sig: Vec::new(),
+                    sequence: 0xffffffff,
+                },
+            ]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 49_000,
+                script_pubkey: vec![OP_1].into(),
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        assert!(mempool.add_transaction(tx.clone()).unwrap());
+        let txid = calculate_tx_id(&tx);
+        set.remove(&second);
+        let ranked = mempool.get_prioritized_transactions(10, &set);
+        assert!(ranked.iter().all(|ranked_tx| calculate_tx_id(ranked_tx) != txid));
+        assert!(mempool.cached_fee_basis(&txid).is_none());
+    }
+
+    #[test]
+    fn a_value_outside_a_ten_entry_sample_rebuilds_the_fee() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+        use std::sync::Arc;
+
+        let mut set = blvm_protocol::UtxoSet::default();
+        for i in 0..11u8 {
+            set.insert(
+                OutPoint {
+                    hash: [i; 32],
+                    index: 0,
+                },
+                Arc::new(blvm_protocol::UTXO {
+                    value: 50_000,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 1,
+                    is_coinbase: false,
+                }),
+            );
+        }
+        let base = MempoolManager::calculate_utxo_set_hash(&set);
+        for i in 0..11u8 {
+            let mut changed = set.clone();
+            let op = OutPoint {
+                hash: [i; 32],
+                index: 0,
+            };
+            changed.insert(
+                op,
+                Arc::new(blvm_protocol::UTXO {
+                    value: 50_001,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 1,
+                    is_coinbase: false,
+                }),
+            );
+            assert_ne!(MempoolManager::calculate_utxo_set_hash(&changed), base);
+        }
+
+        let spend = OutPoint {
+            hash: [10; 32],
+            index: 0,
+        };
+        let tx = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: spend,
+                script_sig: Vec::new(),
+                sequence: 0xffffffff,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 40_000,
+                script_pubkey: vec![OP_1].into(),
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set.clone())));
+        assert!(mempool.add_transaction(tx.clone()).unwrap());
+        let txid = calculate_tx_id(&tx);
+        mempool.get_prioritized_transactions(1, &set);
+        let before = mempool.cached_fee_basis(&txid).unwrap().0;
+        set.insert(
+            spend,
+            Arc::new(blvm_protocol::UTXO {
+                value: 80_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 1,
+                is_coinbase: false,
+            }),
+        );
+        mempool.get_prioritized_transactions(1, &set);
+        let after = mempool.cached_fee_basis(&txid).unwrap().0;
+        assert!(after > before, "before {before} after {after}");
     }
 
     fn child_of(parent: OutPoint, value: i64) -> Transaction {
@@ -2920,7 +3338,7 @@ mod tests {
         let parent_hash = calculate_tx_id(&parent);
         assert!(mempool.add_transaction(parent).unwrap());
 
-        for index in 0..25 {
+        for index in 0..24 {
             let child = child_of(
                 OutPoint {
                     hash: parent_hash,
@@ -2936,12 +3354,73 @@ mod tests {
         let rejected = child_of(
             OutPoint {
                 hash: parent_hash,
-                index: 25,
+                index: 24,
             },
             1_000,
         );
         assert!(!mempool.add_transaction(rejected).unwrap());
-        assert_eq!(mempool.size(), 26);
+        assert_eq!(mempool.size(), 25);
+    }
+
+    #[test]
+    fn parent_vsize_counts_toward_descendant_size() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+        use std::sync::Arc;
+
+        let funding = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            funding,
+            Arc::new(blvm_protocol::UTXO {
+                value: 2_000_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set.clone())));
+
+        let parent = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: funding,
+                script_sig: Vec::new(),
+                sequence: 0xffffffff,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 50_000,
+                script_pubkey: vec![OP_1].into(),
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let parent_hash = calculate_tx_id(&parent);
+        assert!(mempool.add_transaction(parent).unwrap());
+        let parent_vsize = mempool
+            .pool_lock()
+            .adjusted_vsize
+            .get(&parent_hash)
+            .copied()
+            .unwrap();
+        let child = child_of(
+            OutPoint {
+                hash: parent_hash,
+                index: 0,
+            },
+            1_000,
+        );
+        let (child_vsize, _) = mempool.admit_vsize(&child, None, &utxo_set);
+        let mut policy = crate::config::MempoolPolicyConfig::default();
+        policy.max_descendant_size = parent_vsize + child_vsize - 1;
+        mempool.set_policy_config(Some(policy));
+        assert!(!mempool.add_transaction(child).unwrap());
+        assert_eq!(mempool.size(), 1);
     }
 
     #[test]
@@ -3016,7 +3495,7 @@ mod tests {
         );
         assert!(mempool.add_transaction(grandchild).unwrap());
 
-        for index in 1..24 {
+        for index in 1..23 {
             let child = child_of(
                 OutPoint {
                     hash: parent_hash,
@@ -3026,11 +3505,11 @@ mod tests {
             );
             assert!(mempool.add_transaction(child).unwrap(), "child {index}");
         }
-        // 24 children and one grandchild: the parent already has 25 descendants.
+        // Parent plus 24 descendants is the package limit of 25.
         let rejected = child_of(
             OutPoint {
                 hash: parent_hash,
-                index: 24,
+                index: 23,
             },
             1_000,
         );
@@ -4393,5 +4872,35 @@ mod tests {
         mempool.process_once().await.unwrap();
         assert!(mempool.get_transaction(&calculate_tx_id(&old)).is_none());
         assert!(mempool.get_transaction(&calculate_tx_id(&young)).is_some());
+    }
+
+    #[tokio::test]
+    async fn mempool_expiry_overflow_keeps_a_young_transaction() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+        let mut policy = open_policy();
+        policy.mempool_expiry_hours = u64::MAX / 3600 + 1;
+        let mempool = MempoolManager::new();
+        mempool.set_policy_config(Some(policy));
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+            vec![OP_1],
+            50_000,
+        ))));
+        let young = legacy_empty_script();
+        assert!(mempool.add_transaction(young.clone()).unwrap());
+        mempool.process_once().await.unwrap();
+        assert!(mempool.get_transaction(&calculate_tx_id(&young)).is_some());
+    }
+}
+
+#[cfg(test)]
+mod replacement_count_tests {
+    use super::next_replacement_count;
+
+    #[test]
+    fn stored_count_follows_the_highest_direct_conflict() {
+        assert_eq!(next_replacement_count([0, 4]), 5);
+        assert_eq!(next_replacement_count([4, 0]), 5);
+        assert_eq!(next_replacement_count([0]), 1);
     }
 }

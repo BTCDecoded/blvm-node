@@ -23,7 +23,7 @@ pub struct BlockIndexEntry {
     pub height: u64,
     pub prev_hash: Hash,
     pub status: BlockIndexStatus,
-    /// Monotonic connect order (lower = seen first). Used for equal-work tie-break.
+    /// Monotonic connect order. Fork choice does not read this field.
     #[serde(default)]
     pub sequence_id: u64,
 }
@@ -132,6 +132,12 @@ impl BlockIndex {
             Some(data) => Ok(Some(bincode::deserialize(&data)?)),
             None => Ok(None),
         }
+    }
+
+    #[cfg(test)]
+    pub fn insert_undecodable(&self, hash: &Hash) -> Result<()> {
+        self.entries.insert(hash.as_slice(), b"not-an-entry")?;
+        Ok(())
     }
 
     pub fn mark_invalid(&self, hash: &Hash) -> Result<()> {

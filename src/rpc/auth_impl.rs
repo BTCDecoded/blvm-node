@@ -478,8 +478,10 @@ impl RpcAuthManager {
             }
         } // end is_loopback guard
 
-        // If authentication is required but not provided, reject
-        if self.auth_required {
+        // If authentication is required but not provided, reject.
+        // A public client with no header is rejected even when the manager
+        // exists only to rate-limit. Loopback keeps the anonymous path.
+        if self.auth_required || !is_loopback {
             // Record authentication failure
             self.auth_failure_tracker.record_failure(client_addr).await;
 

@@ -669,6 +669,16 @@ fn default_max_headers_results() -> usize {
     2000
 }
 
+/// A headers reply fills a batch only when the cap is a positive size.
+pub fn headers_batch_is_full(received: usize, max_headers_results: usize) -> bool {
+    max_headers_results > 0 && received % max_headers_results == 0
+}
+
+/// One header is inside the cap when the cap is zero.
+pub fn headers_message_exceeds_limit(len: usize, max_headers_results: usize) -> bool {
+    max_headers_results > 0 && len > max_headers_results
+}
+
 impl Default for ProtocolLimitsConfig {
     fn default() -> Self {
         Self {
@@ -1124,6 +1134,54 @@ impl NodeConfig {
         if let Some(ref storage) = self.storage {
             if let Some(ref pruning) = storage.pruning {
                 pruning.validate()?;
+            }
+        }
+
+        if let Some(ref mempool) = self.mempool {
+            if mempool.mempool_expiry_hours.checked_mul(3600).is_none() {
+                anyhow::bail!(
+                    "mempool_expiry_hours {} does not fit in seconds",
+                    mempool.mempool_expiry_hours
+                );
+            }
+        }
+
+        if let Some(ref ibd) = self.ibd_protection {
+            for (name, gb) in [
+                (
+                    "max_bandwidth_per_peer_per_day_gb",
+                    ibd.max_bandwidth_per_peer_per_day_gb,
+                ),
+                (
+                    "max_bandwidth_per_peer_per_hour_gb",
+                    ibd.max_bandwidth_per_peer_per_hour_gb,
+                ),
+                (
+                    "max_bandwidth_per_ip_per_day_gb",
+                    ibd.max_bandwidth_per_ip_per_day_gb,
+                ),
+                (
+                    "max_bandwidth_per_ip_per_hour_gb",
+                    ibd.max_bandwidth_per_ip_per_hour_gb,
+                ),
+                (
+                    "max_bandwidth_per_subnet_per_day_gb",
+                    ibd.max_bandwidth_per_subnet_per_day_gb,
+                ),
+                (
+                    "max_bandwidth_per_subnet_per_hour_gb",
+                    ibd.max_bandwidth_per_subnet_per_hour_gb,
+                ),
+            ] {
+                if bandwidth_gb_to_bytes(gb).is_none() {
+                    anyhow::bail!("{name} {gb} does not fit in bytes");
+                }
+            }
+        }
+
+        if let Some(ref limits) = self.protocol_limits {
+            if limits.max_headers_results == 0 {
+                anyhow::bail!("max_headers_results must be greater than 0");
             }
         }
 

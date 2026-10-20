@@ -588,6 +588,13 @@ impl TxIndex {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn insert_undecodable_transaction(&self, tx_hash: &Hash) -> Result<()> {
+        self.tx_by_hash
+            .insert(tx_hash.as_slice(), b"not-a-transaction")?;
+        Ok(())
+    }
+
     /// Get transaction by hash
     pub fn get_transaction(&self, tx_hash: &Hash) -> Result<Option<Transaction>> {
         if let Some(data) = self.tx_by_hash.get(tx_hash.as_slice())? {

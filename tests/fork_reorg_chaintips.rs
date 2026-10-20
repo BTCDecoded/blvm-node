@@ -208,7 +208,7 @@ async fn getchaintips_lists_main_and_orphan_fork() -> anyhow::Result<()> {
         .map(|t| t.get("status").and_then(|s| s.as_str()).unwrap())
         .collect();
     assert!(statuses.contains(&"active"));
-    assert!(statuses.contains(&"valid"));
+    assert!(statuses.contains(&"valid-fork"));
 
     let fork_rpc_hash = blvm_node::storage::hashing::hash_to_rpc_hex(&fork_hash);
     let fork_entry = arr

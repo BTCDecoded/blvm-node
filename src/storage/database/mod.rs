@@ -18,6 +18,8 @@ pub use known_trees::KNOWN_TREE_NAMES;
 mod heed3_impl;
 #[cfg(feature = "heed3")]
 pub use heed3_impl::{Heed3Database, Heed3ModuleDatabase, Heed3Tree};
+#[cfg(all(test, feature = "heed3"))]
+pub(crate) use heed3_impl::abort_next_three_put_commit;
 
 /// Database abstraction trait
 ///
@@ -1858,7 +1860,8 @@ pub mod rocksdb_impl {
             );
 
             // Block cache: `[storage.cache] block_cache_mb` when that section is set,
-            // otherwise ENV > `dbcache_mb` (capped to the RAM tier) > RAM-tiered default.
+            // otherwise ENV > `dbcache_mb` > RAM-tiered default. The RAM tier is used
+            // only when `dbcache_mb` is 0.
             if let Some(header_mb) = storage_config
                 .and_then(|s| s.cache.as_ref())
                 .map(|cache| cache.header_cache_mb)
@@ -1877,12 +1880,10 @@ pub mod rocksdb_impl {
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or_else(|| {
-                        let from_config = storage_config.map(|s| s.dbcache_mb).unwrap_or(0);
-                        if from_config > 0 {
-                            from_config.min(default_block_cache)
-                        } else {
-                            default_block_cache
-                        }
+                        rocksdb_block_cache_mb(
+                            storage_config.map(|s| s.dbcache_mb).unwrap_or(0),
+                            default_block_cache,
+                        )
                     })
             };
             let dbcache_bytes = dbcache_mb.saturating_mul(1024).saturating_mul(1024);
@@ -3050,5 +3051,26 @@ pub(crate) mod tidesdb_impl {
         fn len(&self) -> usize {
             self.pending.len()
         }
+    }
+}
+
+/// RocksDB block-cache size when `[storage.cache] block_cache_mb` and
+/// `BLVM_DBCACHE_MB` are both unset. A positive `dbcache_mb` is used as given.
+pub(crate) fn rocksdb_block_cache_mb(dbcache_mb: usize, ram_tier_mb: usize) -> usize {
+    if dbcache_mb > 0 {
+        dbcache_mb
+    } else {
+        ram_tier_mb
+    }
+}
+
+#[cfg(test)]
+mod rocksdb_cache_tests {
+    use super::rocksdb_block_cache_mb;
+
+    #[test]
+    fn configured_dbcache_is_not_shrunk_to_the_ram_tier() {
+        assert_eq!(rocksdb_block_cache_mb(4096, 768), 4096);
+        assert_eq!(rocksdb_block_cache_mb(0, 768), 768);
     }
 }

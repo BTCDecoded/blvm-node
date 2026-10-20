@@ -1,3 +1,8 @@
+/// Losing shards resume only after the watermark and the storage flush both succeed.
+pub(crate) fn replay_shards_may_resume(watermark_ok: bool, storage_flush_ok: bool) -> bool {
+    watermark_ok && storage_flush_ok
+}
+
 /// Idle retire timeout path: drain adds when possible; when over cap and DEL-heavy, shard 0
 /// enqueues a sentinel checkpoint so `del_backlog` can run without a staged block at boundary.
 #[allow(clippy::too_many_arguments)]
@@ -207,7 +212,7 @@ fn run_ibd_retire_loop_with_commitment(
                 for dk in &delta_arc.deletions {
                     let op = blvm_protocol::utxo_overlay::utxo_deletion_key_to_outpoint(dk);
                     let key = outpoint_to_key(&op);
-                    if let Some(utxo) = store_r.get(&key) {
+                    if let Some(utxo) = store_r.get_for_commitment_removal(&key) {
                         if let Err(e) = t.remove(&op, &utxo) {
                             warn!("IBD commitment: remove failed at height {}: {}", h, e);
                         }
@@ -365,17 +370,28 @@ fn run_ibd_retire_loop_with_commitment(
                     }
                 }
                 store.restore_evict_after_local_replay(8_000_000);
-                if let Err(e) = storage_wm
+                let watermark_result = storage_wm
                     .chain()
-                    .force_set_ibd_utxo_watermark(local_replay_no_lmdb_max)
-                {
-                    warn!("[IBD_REPLAY_TRANSITION] force_set_ibd_utxo_watermark failed: {e}");
+                    .force_set_ibd_utxo_watermark(local_replay_no_lmdb_max);
+                let flush_result = if watermark_result.is_ok() {
+                    Some(storage_wm.flush())
+                } else {
+                    None
+                };
+                if replay_shards_may_resume(
+                    watermark_result.is_ok(),
+                    flush_result.as_ref().is_some_and(|result| result.is_ok()),
+                ) {
+                    local_replay_hydration_done.store(true, Ordering::Release);
+                } else {
+                    if let Some(e) = watermark_result
+                        .err()
+                        .or_else(|| flush_result.and_then(|result| result.err()))
+                    {
+                        *retire_err.lock() = Some(e);
+                    }
+                    return;
                 }
-                if let Err(e) = storage_wm.flush() {
-                    warn!("[IBD_REPLAY_TRANSITION] storage flush after watermark failed: {e}");
-                }
-                // Release losing shards AFTER hydration and watermark are committed to disk.
-                local_replay_hydration_done.store(true, Ordering::Release);
             } else {
                 // Losing shard: WAIT for the winning shard to finish flush_full_cache_to_lmdb
                 // before processing any block h > local_replay_no_lmdb_max. Without this wait,
@@ -687,17 +703,28 @@ fn run_ibd_retire_loop_no_commitment(
                     "[IBD_REPLAY_TRANSITION] h={h}: cache eviction re-enabled \
                      (nominal cap={utxo_nominal_max_entries}); MemoryGuard will tune further."
                 );
-                if let Err(e) = storage_wm
+                let watermark_result = storage_wm
                     .chain()
-                    .force_set_ibd_utxo_watermark(local_replay_no_lmdb_max)
-                {
-                    warn!("[IBD_REPLAY_TRANSITION] force_set_ibd_utxo_watermark failed: {e}");
+                    .force_set_ibd_utxo_watermark(local_replay_no_lmdb_max);
+                let flush_result = if watermark_result.is_ok() {
+                    Some(storage_wm.flush())
+                } else {
+                    None
+                };
+                if replay_shards_may_resume(
+                    watermark_result.is_ok(),
+                    flush_result.as_ref().is_some_and(|result| result.is_ok()),
+                ) {
+                    local_replay_hydration_done.store(true, Ordering::Release);
+                } else {
+                    if let Some(e) = watermark_result
+                        .err()
+                        .or_else(|| flush_result.and_then(|result| result.err()))
+                    {
+                        *retire_err.lock() = Some(e);
+                    }
+                    return;
                 }
-                if let Err(e) = storage_wm.flush() {
-                    warn!("[IBD_REPLAY_TRANSITION] storage flush after watermark failed: {e}");
-                }
-                // Release losing shards AFTER hydration and watermark are committed to disk.
-                local_replay_hydration_done.store(true, Ordering::Release);
             } else {
                 // Losing shard: WAIT for the winning shard to finish flush_full_cache_to_lmdb
                 // before processing any block h > local_replay_no_lmdb_max. Without this wait,
@@ -714,5 +741,18 @@ fn run_ibd_retire_loop_no_commitment(
                 store.restore_evict_after_local_replay(utxo_nominal_max_entries);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod replay_release_tests {
+    use super::replay_shards_may_resume;
+
+    #[test]
+    fn failed_watermark_or_flush_does_not_release_shards() {
+        assert!(!replay_shards_may_resume(false, true));
+        assert!(!replay_shards_may_resume(true, false));
+        assert!(!replay_shards_may_resume(false, false));
+        assert!(replay_shards_may_resume(true, true));
     }
 }
