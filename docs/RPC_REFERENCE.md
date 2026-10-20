@@ -46,16 +46,18 @@ Returns blockchain state information.
   "bestblockhash": "0000...",
   "difficulty": 4.656542373906925e-10,
   "mediantime": 1234567890,
-  "verificationprogress": 1.0,
-  "initialblockdownload": false,
+  "verificationprogress": 0.0,
+  "initialblockdownload": true,
   "chainwork": "0000...",
   "size_on_disk": 1234567890,
   "pruned": false,
-  "pruneheight": null,
+  "pruneheight": 0,
   "automatic_pruning": false,
   "warnings": ""
 }
 ```
+
+`verificationprogress` is `0.0` and `initialblockdownload` is `true` on every object this method builds, including after the tip moves. `pruneheight` is `0` when no prune height is stored. The method also returns `softforks`.
 
 ---
 
@@ -234,15 +236,17 @@ Returns pruning information.
 
 **Parameters**: None
 
-**Returns**:
+**Returns** (storage present, pruning manager absent):
 ```json
 {
-  "pruned": false,
-  "pruneheight": null,
-  "automatic_pruning": false,
-  "prune_target_size": 0
+  "pruning_enabled": false,
+  "mode": "disabled",
+  "auto_prune": false,
+  "current_height": 0
 }
 ```
+
+With a pruning manager, the object also includes `auto_prune_interval`, `min_blocks_to_keep`, `last_prune_height`, `total_blocks_pruned`, `total_blocks_kept`, `total_headers_kept`, and `total_storage_freed_bytes`.
 
 ---
 
