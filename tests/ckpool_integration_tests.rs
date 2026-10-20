@@ -107,7 +107,14 @@ async fn ckpool_getblocktemplate_shape() {
 
 #[tokio::test]
 async fn ckpool_validateaddress_solo_payout() {
-    let blockchain = BlockchainRpc::new();
+    // Solo payout on a mainnet ckpool: segwit addresses are checked against the node's chain.
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
+    let protocol = Arc::new(
+        blvm_protocol::BitcoinProtocolEngine::new(blvm_protocol::ProtocolVersion::BitcoinV1)
+            .unwrap(),
+    );
+    let blockchain = BlockchainRpc::with_dependencies_and_protocol(storage, protocol);
 
     let segwit = blockchain
         .validate_address(&json!(["bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"]))
