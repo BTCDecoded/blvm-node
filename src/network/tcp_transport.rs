@@ -245,13 +245,23 @@ impl TransportConnection for TcpConnection {
             }
         }
 
+        // Wrong network magic: do not allocate the claimed payload.
+        if crate::network::protocol::ProtocolParser::header_rejects_payload(&header) {
+            return Err(anyhow::anyhow!("bitcoin framing: bad network magic"));
+        }
+
         // Extract payload length from bytes 16-19 (little-endian)
         let payload_len =
             u32::from_le_bytes([header[16], header[17], header[18], header[19]]) as usize;
 
         if payload_len == 0 {
-            // Message with no payload (like verack)
-            return Ok(header.to_vec());
+            let message = header.to_vec();
+            if let Some(violation) =
+                crate::network::protocol::ProtocolParser::bitcoin_framing_violation(&message)
+            {
+                return Err(anyhow::anyhow!(violation.reason()));
+            }
+            return Ok(message);
         }
 
         // Validate message size before allocation (DoS protection)
@@ -271,6 +281,11 @@ impl TransportConnection for TcpConnection {
         // Combine header and payload
         let mut message = header.to_vec();
         message.extend_from_slice(&payload);
+        if let Some(violation) =
+            crate::network::protocol::ProtocolParser::bitcoin_framing_violation(&message)
+        {
+            return Err(anyhow::anyhow!(violation.reason()));
+        }
 
         Ok(message)
     }

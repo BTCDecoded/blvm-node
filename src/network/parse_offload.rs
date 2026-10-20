@@ -97,6 +97,7 @@ pub(crate) fn take_inbound_block(
     }
     match message {
         NetworkMessage::RawMessageReceived(data, peer_addr) if is_block_frame(&data) => {
+            let data = data.into_vec();
             let nm = Arc::clone(nm);
             tokio::spawn(async move {
                 if let Err(e) = offload_block(nm, peer_addr, data).await {
@@ -117,6 +118,11 @@ async fn offload_block(
     nm.track_bytes_received(data.len() as u64).await;
     if nm.is_banned(peer_addr) {
         return Ok(());
+    }
+    if let Some(violation) = ProtocolParser::bitcoin_framing_violation(&data) {
+        return nm
+            .disconnect_for_protocol_violation(peer_addr, violation.reason(), true)
+            .await;
     }
     if let Some(hash) =
         crate::node::parallel_ibd::wire_hash_gate::try_skip_obsolete_block_frame(&data)
