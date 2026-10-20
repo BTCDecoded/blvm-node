@@ -172,7 +172,7 @@ This document defines the security boundaries, threat model, and limitations of 
 
 #### Phase 3: Mainnet Hardening
 - [ ] Professional security audit (external, requires security firm)
-- [x] Formal verification of critical paths (property tests for node invariants added)
+- [x] Property tests for node invariants on critical paths (testing, not formal verification)
 - [x] Advanced peer management (connection quality tracking, peer selection, reliability scoring)
 - [x] Performance optimization (performance profiler infrastructure added)
 - [x] Monitoring and alerting (metrics collection, health checks, RPC endpoints)

@@ -492,7 +492,7 @@ pub trait NodeAPI: Send + Sync {
     /// Get block template (GBT equivalent)
     ///
     /// Returns a block template suitable for mining.
-    /// Uses the same formally verified consensus function as RPC getblocktemplate.
+    /// Uses the same tested blvm-consensus mining function as RPC getblocktemplate.
     ///
     /// # Arguments
     /// * `rules` - Consensus rules to apply (e.g., ["segwit"])
