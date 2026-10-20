@@ -104,9 +104,9 @@ pub struct RpcManager {
     protocol_engine: Option<Arc<BitcoinProtocolEngine>>,
     /// Shared late-bind so JSON-RPC and REST `MiningRpc` copies see Commons GBT.
     commons_gbt: mining::CommonsGbtSlot,
-    /// Allow binding a non-loopback address without an auth_manager.
-    /// Defaults to `false` — startup fails if a public bind is attempted without auth.
-    /// Set to `true` only in controlled environments (e.g. isolated test networks).
+    /// Allow binding a non-loopback address when authentication is not required.
+    /// Defaults to `false`. A rate-limit-only manager (`required: false`) is not
+    /// authentication. Set to `true` only in controlled environments.
     allow_unauthenticated_rpc: bool,
     /// When true, `loadmodule` may call blvm-marketplace to fetch missing modules before local discovery retry.
     marketplace_fetch_enabled: bool,
@@ -301,11 +301,23 @@ impl RpcManager {
         auth_manager
     }
 
-    /// Allow the RPC server to start on a non-loopback address without an auth manager.
+    /// Allow the RPC server to start on a non-loopback address without required auth.
     /// Call this only in isolated test networks or when a reverse-proxy enforces auth upstream.
+    /// Rate-limit-only mode does not count as authentication.
     pub fn allow_unauthenticated_rpc(mut self, allow: bool) -> Self {
         self.allow_unauthenticated_rpc = allow;
         self
+    }
+
+    /// True when anonymous RPC callers are rejected.
+    ///
+    /// A manager installed only for IP rate limits (`RpcAuthConfig::rate_limit_only`,
+    /// `required: false`) returns false. Startup installs that manager by default, so
+    /// the public-bind guard must not treat "some manager" as authentication.
+    fn authentication_is_required(&self) -> bool {
+        self.auth_manager
+            .as_ref()
+            .is_some_and(|mgr| mgr.is_authentication_required())
     }
 
     /// Enable marketplace auto-fetch for `loadmodule` (requires blvm-marketplace loaded).
@@ -488,10 +500,11 @@ impl RpcManager {
     ///
     /// Starts TCP server (always) and optionally QUIC server if enabled
     pub async fn start(&mut self) -> Result<()> {
-        // Safety check: refuse to bind a public address without authentication configured.
-        // An unauthenticated RPC server on a public interface exposes stop/invalidateblock/
-        // loadmodule and other destructive methods to the network.
-        if self.auth_manager.is_none()
+        // Safety check: refuse to bind a public address unless authentication is required.
+        // Rate-limit-only mode (`required: false`) is not authentication. Normal startup
+        // installs that manager when `[rpc_auth]` is absent, so the check cannot key off
+        // `auth_manager.is_none()`.
+        if !self.authentication_is_required()
             && !self.server_addr.ip().is_loopback()
             && !self.allow_unauthenticated_rpc
         {
@@ -723,10 +736,8 @@ impl RpcManager {
         // Start REST API server if enabled
         #[cfg(feature = "rest-api")]
         let rest_api_handle = if let Some(rest_api_addr) = self.rest_api_addr {
-            // Mirror the RPC safety check: refuse to expose REST on a public address
-            // without authentication.  REST POST endpoints (broadcast, mempool) are
-            // equally sensitive — an open public REST server is a network hazard.
-            if self.auth_manager.is_none()
+            // Same rule as the RPC bind above: rate-limit-only is not authentication.
+            if !self.authentication_is_required()
                 && !rest_api_addr.ip().is_loopback()
                 && !self.allow_unauthenticated_rpc
             {
@@ -877,5 +888,86 @@ impl RpcManager {
     /// Get mining RPC methods
     pub fn mining(&self) -> &mining::MiningRpc {
         &self.mining_rpc
+    }
+}
+
+#[cfg(test)]
+mod public_bind_guard_tests {
+    use super::*;
+    use crate::config::RpcAuthConfig;
+
+    fn public_addr() -> SocketAddr {
+        "0.0.0.0:0".parse().unwrap()
+    }
+
+    /// Normal startup installs a rate-limit-only manager (`required: false`) when
+    /// `[rpc_auth]` is absent. That manager must not satisfy the public-bind guard.
+    #[tokio::test]
+    async fn rate_limit_only_does_not_satisfy_public_bind_guard() {
+        let mut mgr = RpcManager::new(public_addr());
+        mgr.with_auth_config(RpcAuthConfig::rate_limit_only(50, 5))
+            .await;
+        let err = mgr
+            .start()
+            .await
+            .expect_err("rate-limit-only mode must not allow a non-loopback bind");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("without authentication"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn loopback_rate_limit_only_still_starts() {
+        let mut mgr = RpcManager::new("127.0.0.1:0".parse().unwrap());
+        mgr.with_auth_config(RpcAuthConfig::rate_limit_only(50, 5))
+            .await;
+        mgr.start()
+            .await
+            .expect("loopback rate-limit-only RPC must still start");
+        let _ = mgr.stop();
+    }
+
+    #[tokio::test]
+    async fn public_bind_with_required_auth_still_starts() {
+        let mut mgr = RpcManager::new(public_addr());
+        let mut cfg = RpcAuthConfig::default();
+        assert!(cfg.required);
+        cfg.tokens.push("test-token".to_string());
+        mgr.with_auth_config(cfg).await;
+        mgr.start()
+            .await
+            .expect("required auth must allow a non-loopback bind");
+        let _ = mgr.stop();
+    }
+
+    #[tokio::test]
+    async fn explicit_opt_out_still_allows_public_bind() {
+        let mut mgr = RpcManager::new(public_addr()).allow_unauthenticated_rpc(true);
+        mgr.start()
+            .await
+            .expect("allow_unauthenticated_rpc(true) is the explicit opt-out");
+        let _ = mgr.stop();
+    }
+
+    /// REST uses the same guard. Rate-limit-only must not open a public REST bind.
+    #[cfg(feature = "rest-api")]
+    #[tokio::test]
+    async fn rate_limit_only_does_not_satisfy_public_rest_bind_guard() {
+        let mut mgr = RpcManager::new("127.0.0.1:0".parse().unwrap());
+        mgr.with_auth_config(RpcAuthConfig::rate_limit_only(50, 5))
+            .await;
+        mgr.enable_rest_api(public_addr());
+        let err = mgr
+            .start()
+            .await
+            .expect_err("rate-limit-only mode must not allow a non-loopback REST bind");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("REST API") && msg.contains("without authentication"),
+            "unexpected error: {msg}"
+        );
+        let _ = mgr.stop();
     }
 }
