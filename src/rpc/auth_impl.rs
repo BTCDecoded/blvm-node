@@ -12,7 +12,9 @@ use hyper::HeaderMap;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 use tracing::{debug, warn};
 
 /// Opaque bearer token registered server-side (not a self-describing JWT/HMAC credential).
@@ -52,6 +54,13 @@ pub struct AuthResult {
 }
 
 /// Token bucket rate limiter for RPC requests
+///
+/// Refill is driven by the monotonic [`tokio::time::Instant`] clock, so wall-clock
+/// adjustments (NTP steps, manual clock changes) cannot add or withhold tokens.
+/// Elapsed time is credited exactly in integer arithmetic: each refill adds
+/// `elapsed_ns * rate` to a sub-token remainder (in units of 1e-9 token), whole
+/// tokens are moved into the bucket and the rest is carried, so tokens accrue at
+/// exactly `rate` per second however calls are spaced.
 pub struct RpcRateLimiter {
     /// Current number of tokens available
     tokens: u32,
@@ -59,19 +68,55 @@ pub struct RpcRateLimiter {
     burst_limit: u32,
     /// Tokens per second refill rate
     rate: u32,
-    /// Last refill timestamp (Unix seconds)
-    last_refill: u64,
+    /// Monotonic time of the last refill
+    last_refill: Instant,
+    /// Fractional token carried between refills, in units of 1e-9 token (< 1e9)
+    carry: u64,
 }
+
+const NANOS_PER_SEC: u128 = 1_000_000_000;
 
 impl RpcRateLimiter {
     /// Create a new rate limiter
     pub fn new(burst_limit: u32, rate: u32) -> Self {
-        let now = current_timestamp();
         Self {
             tokens: burst_limit,
             burst_limit,
             rate,
-            last_refill: now,
+            last_refill: Instant::now(),
+            carry: 0,
+        }
+    }
+
+    /// Credit tokens for the time elapsed since the last refill, carrying any fractional
+    /// remainder forward. Never exceeds `burst_limit`.
+    fn refill(&mut self) {
+        let now = Instant::now();
+        let elapsed_ns = now.saturating_duration_since(self.last_refill).as_nanos();
+        self.last_refill = now;
+
+        if self.rate == 0 || self.tokens >= self.burst_limit {
+            // Nothing can be added (no refill, or bucket already full); time spent
+            // here is not banked toward future tokens.
+            self.tokens = self.tokens.min(self.burst_limit);
+            self.carry = 0;
+            return;
+        }
+
+        // u128 cannot overflow: elapsed_ns < 2^94 (Duration max), rate < 2^32, carry < 2^30.
+        let credit = elapsed_ns
+            .saturating_mul(u128::from(self.rate))
+            .saturating_add(u128::from(self.carry));
+        let earned = credit / NANOS_PER_SEC;
+        let room = u128::from(self.burst_limit - self.tokens);
+        if earned >= room {
+            // Bucket fills: excess tokens and the remainder are dropped.
+            self.tokens = self.burst_limit;
+            self.carry = 0;
+        } else {
+            // earned < room <= u32::MAX and the remainder is < 1e9: casts are lossless.
+            self.tokens += earned as u32;
+            self.carry = (credit % NANOS_PER_SEC) as u64;
         }
     }
 
@@ -89,18 +134,7 @@ impl RpcRateLimiter {
             return false;
         }
 
-        let now = current_timestamp();
-
-        // Refill tokens based on elapsed time
-        let elapsed = now.saturating_sub(self.last_refill);
-        if elapsed > 0 {
-            let tokens_to_add = (elapsed as u32).saturating_mul(self.rate);
-            self.tokens = self
-                .tokens
-                .saturating_add(tokens_to_add)
-                .min(self.burst_limit);
-            self.last_refill = now;
-        }
+        self.refill();
 
         if self.tokens >= n {
             self.tokens -= n;
@@ -115,8 +149,9 @@ impl RpcRateLimiter {
         self.tokens
     }
 
-    /// Last refill timestamp (for stale limiter eviction)
-    pub fn last_refill(&self) -> u64 {
+    /// Monotonic time of the last refill, i.e. the last rate-limit check (for stale
+    /// limiter eviction)
+    pub fn last_refill(&self) -> Instant {
         self.last_refill
     }
 }
@@ -618,11 +653,12 @@ impl RpcAuthManager {
 
     /// Clean up rate limiters for users inactive beyond threshold (default: 1 hour)
     pub async fn cleanup_stale_limiters(&self) {
-        const STALE_THRESHOLD_SECS: u64 = 3600; // 1 hour
-        let now = current_timestamp();
+        const STALE_THRESHOLD: Duration = Duration::from_secs(3600); // 1 hour
+        let now = Instant::now();
         let mut limiters = self.rate_limiters.lock().await;
-        limiters
-            .retain(|_, limiter| now.saturating_sub(limiter.last_refill()) < STALE_THRESHOLD_SECS);
+        limiters.retain(|_, limiter| {
+            now.saturating_duration_since(limiter.last_refill()) < STALE_THRESHOLD
+        });
     }
 }
 
@@ -830,5 +866,153 @@ impl AuthFailureTracker {
         }
 
         exceeded
+    }
+}
+
+#[cfg(test)]
+mod rate_limiter_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::time::advance;
+
+    fn exhaust(limiter: &mut RpcRateLimiter) {
+        while limiter.check_and_consume() {}
+        assert_eq!(limiter.tokens_remaining(), 0);
+    }
+
+    /// Regression for the CI flake in `test_rate_limiting_time_window`: refill used whole
+    /// wall-clock Unix seconds, so a short wait that straddled a second boundary was
+    /// credited as a full second. Runs on the real clock on purpose.
+    #[tokio::test]
+    async fn short_wait_across_wall_clock_second_boundary_earns_nothing() {
+        // Line up just before a wall-clock second boundary.
+        loop {
+            let sub_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .subsec_millis();
+            if (900..950).contains(&sub_ms) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut limiter = RpcRateLimiter::new(5, 1);
+        exhaust(&mut limiter);
+        // ~200ms of real time crosses the boundary but is only 0.2 tokens at 1/sec.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !limiter.check_and_consume(),
+            "200ms at 1 token/sec must not refill a token"
+        );
+    }
+
+    /// The limiter follows the monotonic tokio clock, not the wall clock: real (wall)
+    /// time passing while the monotonic clock stands still must not add tokens.
+    #[tokio::test(start_paused = true)]
+    async fn wall_clock_progress_does_not_refill() {
+        let mut limiter = RpcRateLimiter::new(3, 1);
+        exhaust(&mut limiter);
+        std::thread::sleep(Duration::from_millis(1100));
+        assert!(!limiter.check_and_consume());
+        advance(Duration::from_secs(1)).await;
+        assert!(limiter.check_and_consume());
+        assert!(!limiter.check_and_consume());
+    }
+
+    /// Many small advances credit exactly `rate * elapsed` whole tokens, never more.
+    #[tokio::test(start_paused = true)]
+    async fn fractional_carry_never_overcredits() {
+        for rate in [1u32, 3, 7, 10, 999, 1000, 1001] {
+            let mut limiter = RpcRateLimiter::new(u32::MAX, rate);
+            limiter.tokens = 0;
+            for step in 1..=1000u64 {
+                advance(Duration::from_millis(1)).await;
+                limiter.refill();
+                let exact = u64::from(rate) * step / 1000; // floor(rate * step ms)
+                assert_eq!(
+                    u64::from(limiter.tokens_remaining()),
+                    exact,
+                    "rate {rate}/s after {step}ms"
+                );
+            }
+            assert_eq!(limiter.tokens_remaining(), rate, "rate {rate}/s after 1s");
+        }
+    }
+
+    /// Consuming between small advances does not leak or gain tokens either.
+    #[tokio::test(start_paused = true)]
+    async fn carry_with_interleaved_consumption_is_exact() {
+        let mut limiter = RpcRateLimiter::new(1000, 7);
+        exhaust(&mut limiter);
+        let mut granted = 0u32;
+        for _ in 0..10_000 {
+            advance(Duration::from_millis(1)).await;
+            if limiter.check_and_consume() {
+                granted += 1;
+            }
+        }
+        // 10s at 7/sec
+        assert_eq!(granted, 70);
+        assert_eq!(limiter.tokens_remaining(), 0);
+    }
+
+    /// Tokens are clamped to the burst limit no matter how long the limiter idles.
+    #[tokio::test(start_paused = true)]
+    async fn burst_cap_never_exceeded() {
+        for (burst, rate) in [(1u32, 1u32), (5, 100), (100, 10), (10, u32::MAX)] {
+            let mut limiter = RpcRateLimiter::new(burst, rate);
+            exhaust(&mut limiter);
+            for idle in [100u64, 3600, 86_400 * 365] {
+                advance(Duration::from_secs(idle)).await;
+                limiter.refill();
+                assert_eq!(limiter.tokens_remaining(), burst);
+                exhaust(&mut limiter);
+            }
+            // Idle while full: time spent full is not banked beyond the cap.
+            advance(Duration::from_secs(10)).await;
+            limiter.refill();
+            assert_eq!(limiter.tokens_remaining(), burst);
+            assert!(!limiter.check_and_consume_n(burst + 1));
+        }
+    }
+
+    /// Extreme elapsed time and rates neither overflow nor panic.
+    #[tokio::test(start_paused = true)]
+    async fn huge_elapsed_and_rate_do_not_overflow() {
+        let mut limiter = RpcRateLimiter::new(u32::MAX, u32::MAX);
+        assert!(limiter.check_and_consume_n(u32::MAX));
+        assert_eq!(limiter.tokens_remaining(), 0);
+        // ~100 years
+        advance(Duration::from_secs(100 * 365 * 86_400)).await;
+        assert!(limiter.check_and_consume_n(u32::MAX));
+        // Partial refill at maximum rate: 1ns earns floor(u32::MAX / 1e9) = 4 tokens.
+        advance(Duration::from_nanos(1)).await;
+        limiter.refill();
+        assert_eq!(limiter.tokens_remaining(), 4);
+
+        // A limiter last refilled long ago clamps cleanly at maximum rate.
+        let mut old = RpcRateLimiter::new(3, u32::MAX);
+        exhaust(&mut old);
+        advance(Duration::from_secs(10 * 365 * 86_400)).await;
+        assert!(old.check_and_consume());
+        assert_eq!(old.tokens_remaining(), 2);
+    }
+
+    /// Stale-limiter eviction uses the monotonic clock: idle limiters go after an hour,
+    /// active ones stay.
+    #[tokio::test(start_paused = true)]
+    async fn stale_limiters_evicted_on_monotonic_clock() {
+        let auth = RpcAuthManager::with_rate_limits(false, 5, 1);
+        let idle = UserId::Ip("127.0.0.1:1".parse().unwrap());
+        let active = UserId::Ip("127.0.0.1:2".parse().unwrap());
+        assert!(auth.check_rate_limit(&idle).await);
+        assert!(auth.check_rate_limit(&active).await);
+        advance(Duration::from_secs(3599)).await;
+        assert!(auth.check_rate_limit(&active).await);
+        advance(Duration::from_secs(2)).await;
+        auth.cleanup_stale_limiters().await;
+        let limiters = auth.rate_limiters.lock().await;
+        assert!(!limiters.contains_key(&idle));
+        assert!(limiters.contains_key(&active));
     }
 }

@@ -5,9 +5,9 @@
 use blvm_node::rpc::auth::{RpcAuthManager, RpcRateLimiter, UserId};
 use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::time::sleep;
+use tokio::time::advance;
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_rate_limiter_basic_functionality() {
     let mut limiter = RpcRateLimiter::new(10, 5);
 
@@ -22,50 +22,51 @@ async fn test_rate_limiter_basic_functionality() {
     assert_eq!(limiter.tokens_remaining(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_rate_limiter_refill_over_time() {
     let mut limiter = RpcRateLimiter::new(10, 10); // 10 tokens/sec
 
     // Exhaust tokens
     for _ in 0..10 {
-        limiter.check_and_consume();
-    }
-    assert_eq!(limiter.tokens_remaining(), 0);
-
-    // Wait 1 second - should refill
-    sleep(Duration::from_millis(1100)).await;
-
-    // Should have refilled (at least some tokens)
-    // Note: Timing-dependent test, may be flaky
-    let tokens_before = limiter.tokens_remaining();
-    if tokens_before > 0 {
         assert!(limiter.check_and_consume());
-    } else {
-        // If no tokens yet, wait a bit more
-        sleep(Duration::from_millis(200)).await;
-        assert!(limiter.tokens_remaining() > 0 || limiter.check_and_consume());
     }
+    assert!(!limiter.check_and_consume());
+
+    // 999ms at 10/sec earns 9.99 tokens: 9 whole tokens, 99ms carried
+    advance(Duration::from_millis(999)).await;
+    for _ in 0..9 {
+        assert!(limiter.check_and_consume());
+    }
+    assert!(!limiter.check_and_consume());
+
+    // 101ms more plus the 99ms carry is 200ms: exactly 2 tokens
+    advance(Duration::from_millis(101)).await;
+    assert!(limiter.check_and_consume());
+    assert!(limiter.check_and_consume());
+    assert!(!limiter.check_and_consume());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_rate_limiter_burst_limit_cap() {
     let mut limiter = RpcRateLimiter::new(5, 100); // High refill rate, low burst
 
     // Exhaust tokens
     for _ in 0..5 {
-        limiter.check_and_consume();
+        assert!(limiter.check_and_consume());
     }
 
-    // Wait and check - should never exceed burst limit
-    sleep(Duration::from_millis(100)).await;
-    let tokens = limiter.tokens_remaining();
+    // An hour at 100/sec would earn 360000 tokens; the bucket holds 5
+    advance(Duration::from_secs(3600)).await;
+    for _ in 0..5 {
+        assert!(limiter.check_and_consume());
+    }
     assert!(
-        tokens <= 5,
-        "Tokens should not exceed burst limit of 5, got {tokens}"
+        !limiter.check_and_consume(),
+        "Tokens must not exceed burst limit of 5"
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_auth_manager_rate_limit_per_user() {
     let manager = RpcAuthManager::new(false);
 
@@ -104,7 +105,7 @@ async fn test_auth_manager_rate_limit_per_user() {
     assert!(allowed, "User2 should still have tokens");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_auth_manager_rate_limit_per_method() {
     let manager = RpcAuthManager::new(false);
 
@@ -123,7 +124,7 @@ async fn test_auth_manager_rate_limit_per_method() {
     assert!(manager.check_method_rate_limit("cheap_method").await);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_auth_manager_ip_rate_limiting() {
     let manager = RpcAuthManager::new(false);
     let addr1: SocketAddr = "127.0.0.1:8080".parse().unwrap();
@@ -148,39 +149,33 @@ async fn test_auth_manager_ip_rate_limiting() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_auth_manager_rate_limit_recovery() {
     let manager = RpcAuthManager::new(false);
     let user = UserId::Ip("127.0.0.1:8080".parse().unwrap());
 
-    // Exhaust rate limit (IP limit is 50 burst, 5/sec)
-    let mut exhausted = false;
-    for i in 0..60 {
-        if !manager.check_rate_limit(&user).await {
-            exhausted = true;
-            break;
-        }
-        if i >= 49 {
-            // Should be exhausted by now
-            exhausted = true;
-        }
+    // Default limit is 100 burst, 10/sec
+    let mut allowed = 0;
+    while manager.check_rate_limit(&user).await {
+        allowed += 1;
+        assert!(allowed <= 100, "burst exceeded");
     }
+    assert_eq!(allowed, 100);
 
-    // Should be rate limited
-    assert!(!manager.check_rate_limit(&user).await || exhausted);
+    // 99ms at 10/sec is 0.99 tokens: still limited
+    advance(Duration::from_millis(99)).await;
+    assert!(!manager.check_rate_limit(&user).await);
 
-    // Wait for refill
-    sleep(Duration::from_millis(1100)).await;
-
-    // Should recover and allow requests again
-    // Wait a bit more to ensure refill
-    sleep(Duration::from_millis(200)).await;
-    let allowed = manager.check_rate_limit(&user).await;
-    // Should have at least some tokens after refill
-    assert!(allowed, "Rate limit should recover after refill period");
+    // 1ms more completes one token
+    advance(Duration::from_millis(1)).await;
+    assert!(
+        manager.check_rate_limit(&user).await,
+        "Rate limit should recover after refill period"
+    );
+    assert!(!manager.check_rate_limit(&user).await);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_auth_manager_concurrent_rate_limiting() {
     use std::sync::Arc;
     let manager = Arc::new(RpcAuthManager::new(false));
@@ -212,7 +207,7 @@ async fn test_auth_manager_concurrent_rate_limiting() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_rate_limiter_zero_rate() {
     let mut limiter = RpcRateLimiter::new(10, 0); // No refill
 
@@ -222,32 +217,32 @@ async fn test_rate_limiter_zero_rate() {
     }
 
     // Should never refill
-    sleep(Duration::from_millis(1100)).await;
-    assert_eq!(limiter.tokens_remaining(), 0);
+    advance(Duration::from_secs(3600)).await;
     assert!(!limiter.check_and_consume());
+    assert_eq!(limiter.tokens_remaining(), 0);
 }
 
-#[tokio::test]
-#[ignore] // Timing-dependent test, may be flaky
+#[tokio::test(start_paused = true)]
 async fn test_rate_limiter_high_rate() {
     let mut limiter = RpcRateLimiter::new(10, 1000); // Very high refill rate
 
     // Exhaust tokens
     for _ in 0..10 {
-        limiter.check_and_consume();
+        assert!(limiter.check_and_consume());
     }
+    assert!(!limiter.check_and_consume());
 
-    // Should refill quickly (but capped at burst limit)
-    // With 1000 tokens/sec, 100ms should give ~100 tokens, but capped at 10
-    sleep(Duration::from_millis(100)).await;
-    // Refill happens on check_and_consume, so check it
-    let had_tokens = limiter.check_and_consume();
-    // Should have tokens, but not exceed burst limit
-    let tokens = limiter.tokens_remaining();
-    assert!(tokens <= 10, "Should not exceed burst limit of 10");
-    // With such a high rate, should have refilled
-    assert!(
-        had_tokens || tokens >= 8,
-        "Should have refilled (had_tokens: {had_tokens}, remaining: {tokens})"
+    // 1ms at 1000/sec is exactly one token
+    advance(Duration::from_millis(1)).await;
+    assert!(limiter.check_and_consume());
+    assert!(!limiter.check_and_consume());
+
+    // 100ms would earn 100 tokens, capped at the burst of 10
+    advance(Duration::from_millis(100)).await;
+    assert!(limiter.check_and_consume());
+    assert_eq!(
+        limiter.tokens_remaining(),
+        9,
+        "Should not exceed burst limit of 10"
     );
 }

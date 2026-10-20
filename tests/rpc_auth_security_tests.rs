@@ -262,7 +262,7 @@ async fn test_auth_brute_force_protection() {
     // This tests that brute force attempts don't break the system
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_rpc_rate_limiting_without_auth() {
     // Rate-limit-only mode: auth disabled, IP rate limiting applies
     let manager = RpcAuthManager::with_rate_limits(false, 5, 1);
@@ -287,7 +287,7 @@ async fn test_rpc_rate_limiting_without_auth() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_batch_rate_limiting() {
     // Batch consumes min(batch_len, 10) tokens
     let manager = RpcAuthManager::with_rate_limits(false, 5, 1);

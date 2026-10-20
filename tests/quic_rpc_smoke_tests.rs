@@ -112,7 +112,7 @@ async fn h3_json_rpc(
 async fn quic_rpc_rate_limit_rejection() {
     let quinn_addr: SocketAddr = "127.0.0.1:18333".parse().unwrap();
     let placeholder: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let auth_manager = Arc::new(RpcAuthManager::with_rate_limits(false, 2, 1));
+    let auth_manager = Arc::new(RpcAuthManager::with_rate_limits(false, 2, 0)); // no refill: 429 is timing-independent
     let rpc = Arc::new(RpcServer::with_auth(placeholder, auth_manager));
     let server = QuinnRpcServer::new(quinn_addr, rpc);
 
