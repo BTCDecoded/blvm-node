@@ -61,7 +61,7 @@ pub(crate) fn unsolicited_header_meets_required_work(
     else {
         return false;
     };
-    header.bits as u64 == required
+    header.bits == required
         && blvm_protocol::pow::check_proof_of_work(header).unwrap_or(false)
 }
 
@@ -859,7 +859,7 @@ impl NetworkManager {
                         let ancestor = |h: u64| {
                             let hash = storage.blocks().get_hash_by_height(h).ok().flatten()?;
                             let stored = storage.blocks().get_header(&hash).ok().flatten()?;
-                            Some((stored.bits as u64, stored.timestamp))
+                            Some((stored.bits, stored.timestamp))
                         };
                         let mut batch = Vec::new();
                         for header in &headers_msg.headers {
