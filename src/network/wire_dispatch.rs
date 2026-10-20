@@ -20,6 +20,10 @@ use tracing::{debug, info, warn};
 /// Compact-block short ids, `getblocktxn` indexes, and `blocktxn` transactions share this ceiling.
 const MAX_COMPACT_RELAY_ITEMS: usize = 50_000;
 
+/// Bitcoin Core `MAX_LOCATOR_SZ`. The protocol engine's default locator cap is 100,
+/// which would reject a Core locator of 101, so the node applies 101 itself.
+const MAX_LOCATOR_SZ: usize = 101;
+
 /// `fee_sat_per_vb` is satoshis per virtual byte. `min_sat_per_kvb` is the BIP133 rate.
 pub(crate) fn fee_rate_meets_filter(fee_sat_per_vb: u64, min_sat_per_kvb: u64) -> bool {
     fee_sat_per_vb.saturating_mul(1000) >= min_sat_per_kvb
@@ -176,6 +180,21 @@ impl NetworkManager {
                         .await;
                 }
             }
+        }
+
+        // `deserialize_version` allows 10_000 bytes. The 256-byte cap lives in
+        // `NetworkMessageLimits` and is not applied on this path.
+        let max_user_agent = blvm_protocol::NetworkMessageLimits::default().max_user_agent_length;
+        if version_msg.user_agent.len() > max_user_agent {
+            warn!(
+                "Peer {} user agent is {} bytes, above the {} byte limit — disconnecting",
+                peer_addr,
+                version_msg.user_agent.len(),
+                max_user_agent
+            );
+            return self
+                .disconnect_for_protocol_violation(peer_addr, "version user agent too long", true)
+                .await;
         }
 
         let mut pm = self.peer_manager_mutex().lock().await;
@@ -491,6 +510,21 @@ impl NetworkManager {
                 return Ok(());
             }
             ProtocolMessage::GetHeaders(getheaders) => {
+                if getheaders.block_locator_hashes.len() > MAX_LOCATOR_SZ {
+                    warn!(
+                        "getheaders locator length {} exceeds {} from {}",
+                        getheaders.block_locator_hashes.len(),
+                        MAX_LOCATOR_SZ,
+                        peer_addr
+                    );
+                    return self
+                        .disconnect_for_protocol_violation(
+                            peer_addr,
+                            "getheaders locator too large",
+                            true,
+                        )
+                        .await;
+                }
                 if let Some(storage) = self.storage().as_ref() {
                     let max = self.protocol_limits().max_headers_results.max(1);
                     match storage.blocks().build_headers_response(
@@ -642,7 +676,7 @@ impl NetworkManager {
                         .disconnect_for_protocol_violation(
                             peer_addr,
                             "inv message size exceeded",
-                            false,
+                            true,
                         )
                         .await;
                 }
@@ -788,6 +822,18 @@ impl NetworkManager {
                                 self.note_block_announcement(peer_addr).await;
                             }
                         }
+                        // A version, timestamp, prev-hash, or proof-of-work break keeps the
+                        // valid prefix and then drops the peer. An empty batch has nothing
+                        // to reject.
+                        if batch.len() != headers_msg.headers.len() {
+                            return self
+                                .disconnect_for_protocol_violation(
+                                    peer_addr,
+                                    "headers do not connect",
+                                    true,
+                                )
+                                .await;
+                        }
                     }
                 }
                 return Ok(());
@@ -806,12 +852,13 @@ impl NetworkManager {
                         cmpct_msg.compact_block.short_ids.len(),
                         peer_addr
                     );
-                    let _ =
-                        self.peer_tx()
-                            .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
-                                peer_addr,
-                            )));
-                    return Err(anyhow::anyhow!("Invalid compact block: too many short IDs"));
+                    return self
+                        .disconnect_for_protocol_violation(
+                            peer_addr,
+                            "Invalid compact block: too many short IDs",
+                            true,
+                        )
+                        .await;
                 }
                 self.handle_cmpctblock(peer_addr, &cmpct_msg.compact_block)
                     .await?;
@@ -824,12 +871,13 @@ impl NetworkManager {
                         getblocktxn_msg.indices.len(),
                         peer_addr
                     );
-                    let _ =
-                        self.peer_tx()
-                            .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
-                                peer_addr,
-                            )));
-                    return Err(anyhow::anyhow!("GetBlockTxn with too many indices"));
+                    return self
+                        .disconnect_for_protocol_violation(
+                            peer_addr,
+                            "GetBlockTxn with too many indices",
+                            true,
+                        )
+                        .await;
                 }
                 self.handle_getblocktxn(peer_addr, getblocktxn_msg).await?;
                 return Ok(());
@@ -841,12 +889,13 @@ impl NetworkManager {
                         blocktxn_msg.transactions.len(),
                         peer_addr
                     );
-                    let _ =
-                        self.peer_tx()
-                            .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
-                                peer_addr,
-                            )));
-                    return Err(anyhow::anyhow!("BlockTxn with too many transactions"));
+                    return self
+                        .disconnect_for_protocol_violation(
+                            peer_addr,
+                            "BlockTxn with too many transactions",
+                            true,
+                        )
+                        .await;
                 }
                 self.handle_blocktxn_fill(blocktxn_msg)?;
                 return Ok(());
@@ -1629,10 +1678,16 @@ mod plan_wire_locks {
             nonce: 0,
         };
         let msg = ProtocolMessage::Headers(HeadersMessage { headers: vec![bad] });
-        node.manager
+        let err = node
+            .manager
             .dispatch_protocol_message(node.peer, &msg, Vec::new())
             .await
-            .unwrap();
+            .expect_err("a header that fails proof of work disconnects");
+        assert!(err.to_string().contains("headers do not connect"));
+        assert!(
+            !node.manager.is_banned(node.peer),
+            "the wired peer is loopback, so the disconnect is not a ban"
+        );
         assert!(
             node.storage
                 .blocks()

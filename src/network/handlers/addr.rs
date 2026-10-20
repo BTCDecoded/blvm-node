@@ -1,11 +1,9 @@
 //! Address relay handlers (GetAddr, Addr).
 
-use crate::network::NetworkMessage;
 use crate::network::network_manager::NetworkManager;
 use crate::network::protocol::{
     AddrMessage, AddrV2Message, NetworkAddress, ProtocolMessage, ProtocolParser,
 };
-use crate::network::transport::TransportAddr;
 use crate::utils::current_timestamp;
 use anyhow::Result;
 use std::net::SocketAddr;
@@ -79,12 +77,9 @@ impl NetworkManager {
                 max_addr,
                 peer_addr
             );
-            let _ = self
-                .peer_tx()
-                .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
-                    peer_addr,
-                )));
-            return Err(anyhow::anyhow!("addr message size exceeded"));
+            return self
+                .disconnect_for_protocol_violation(peer_addr, "addr message size exceeded", true)
+                .await;
         }
 
         {
@@ -125,12 +120,9 @@ impl NetworkManager {
                 max_addr,
                 peer_addr
             );
-            let _ = self
-                .peer_tx()
-                .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
-                    peer_addr,
-                )));
-            return Err(anyhow::anyhow!("addrv2 message size exceeded"));
+            return self
+                .disconnect_for_protocol_violation(peer_addr, "addrv2 message size exceeded", true)
+                .await;
         }
 
         let legacy: Vec<NetworkAddress> = msg
