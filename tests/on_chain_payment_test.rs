@@ -8,6 +8,7 @@ use blvm_node::payment::processor::PaymentProcessor;
 use blvm_node::payment::state_machine::{PaymentState, PaymentStateMachine};
 use blvm_node::rpc::payment::PaymentRpc;
 use blvm_node::storage::Storage;
+use blvm_node::storage::hashing::hash_to_rpc_hex;
 use blvm_protocol::block::calculate_tx_id;
 use blvm_protocol::payment::PaymentOutput;
 use serde_json::json;
@@ -179,7 +180,7 @@ async fn verify_on_chain_payment_by_tx_chain_only() {
     let result = rpc
         .verify_on_chain_payment_by_tx(&json!([
             "foreign-payment-id",
-            hex::encode(tx_hash),
+            hash_to_rpc_hex(&tx_hash),
             min_amount
         ]))
         .await
@@ -197,7 +198,7 @@ async fn verify_on_chain_payment_by_tx_underpaid() {
     let result = rpc
         .verify_on_chain_payment_by_tx(&json!([
             "foreign-payment-id",
-            hex::encode(tx_hash),
+            hash_to_rpc_hex(&tx_hash),
             u64::MAX
         ]))
         .await
@@ -229,7 +230,7 @@ async fn verify_on_chain_payment_by_tx_local_pr_outputs() {
 
     // Local PR exists but state is RequestCreated — chain path uses BIP70 outputs.
     let result = rpc
-        .verify_on_chain_payment_by_tx(&json!([payment_id, hex::encode(tx_hash), 1u64]))
+        .verify_on_chain_payment_by_tx(&json!([payment_id, hash_to_rpc_hex(&tx_hash), 1u64]))
         .await
         .expect("verify_on_chain_payment_by_tx");
 
