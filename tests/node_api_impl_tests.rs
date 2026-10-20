@@ -156,8 +156,11 @@ async fn test_node_api_fee_estimate_empty_mempool() {
     let (_dir, storage) = storage_with_chain();
     let mempool = Arc::new(MempoolManager::new());
     let api = NodeApiImpl::with_dependencies(storage, None, None, Some(mempool), None);
-    let fee = api.get_fee_estimate(6).await.unwrap();
-    assert_eq!(fee, 1);
+    let err = api.get_fee_estimate(6).await.unwrap_err();
+    assert!(
+        format!("{err:?}").contains("mempool has no fee rates"),
+        "{err:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -341,10 +344,14 @@ async fn test_node_api_get_sync_status_requires_coordinator() {
 async fn test_node_api_subscribe_events_without_manager() {
     let (_dir, storage) = storage_with_chain();
     let api = NodeApiImpl::new(storage);
-    let _rx = api
+    let err = api
         .subscribe_events(vec![blvm_node::module::traits::EventType::NewBlock])
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("event manager is not available"),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]
