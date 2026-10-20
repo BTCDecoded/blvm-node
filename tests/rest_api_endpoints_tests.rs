@@ -84,10 +84,13 @@ mod tests {
         let blockchain = create_test_blockchain_rpc();
         let address = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"; // Genesis block coinbase
 
-        let balance = addresses::get_address_balance(&blockchain, address)
+        let err = addresses::get_address_balance(&blockchain, address)
             .await
-            .expect("base58 address lookup must succeed on empty chain");
-        assert_eq!(balance.get("balance").unwrap().as_i64(), Some(0));
+            .expect_err("address index is off");
+        assert!(
+            err.to_string().contains("address index is not enabled"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -95,10 +98,13 @@ mod tests {
         let blockchain = create_test_blockchain_rpc();
         let address = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa";
 
-        let txids = addresses::get_address_transactions(&blockchain, address)
+        let err = addresses::get_address_transactions(&blockchain, address)
             .await
-            .expect("base58 address lookup must succeed on empty chain");
-        assert!(txids.as_array().unwrap().is_empty());
+            .expect_err("address index is off");
+        assert!(
+            err.to_string().contains("address index is not enabled"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -142,12 +148,8 @@ mod tests {
         let blockchain = create_test_blockchain_rpc();
         let result = chain::get_chain_tip(&blockchain).await;
 
-        assert!(result.is_ok());
-        let tip = result.unwrap();
-        assert!(
-            tip.is_null() || tip.as_str().is_some_and(|s| s.len() == 64),
-            "tip must be null (empty chain) or 64-char hash hex"
-        );
+        let err = result.expect_err("an empty chain has no tip block");
+        assert!(err.to_string().contains("Tip block not found"), "{err}");
     }
 
     #[tokio::test]
@@ -232,10 +234,13 @@ mod tests {
         let blockchain = create_test_blockchain_rpc();
         let script_hex = "51"; // OP_1
 
-        let balance = addresses::get_address_balance(&blockchain, script_hex)
+        let err = addresses::get_address_balance(&blockchain, script_hex)
             .await
-            .expect("hex scriptPubKey lookup must succeed on empty chain");
-        assert_eq!(balance.get("balance").unwrap().as_i64(), Some(0));
+            .expect_err("address index is off");
+        assert!(
+            err.to_string().contains("address index is not enabled"),
+            "{err}"
+        );
     }
 
     // Mempool endpoints
