@@ -45,10 +45,34 @@ impl FileSystemSandbox {
             // But we can optimize by checking prefix first
         }
 
-        // Resolve path to absolute (handles symlinks, relative paths, etc.)
-        let canonical = path.canonicalize().map_err(|e| {
-            ModuleError::OperationError(format!("Failed to canonicalize path {path:?}: {e}"))
-        })?;
+        // A missing final component is a new file. Canonicalize the parent and
+        // join the file name so create can succeed inside the sandbox.
+        let canonical = match path.canonicalize() {
+            Ok(canonical) => canonical,
+            Err(_) => {
+                let parent = path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(path);
+                let parent_canonical = parent.canonicalize().map_err(|e| {
+                    ModuleError::OperationError(format!(
+                        "Failed to canonicalize path {path:?}: {e}"
+                    ))
+                })?;
+                let name = path.file_name().ok_or_else(|| {
+                    ModuleError::OperationError(format!(
+                        "Access denied: path {path:?} has no file name"
+                    ))
+                })?;
+                if name == ".." || name == "." {
+                    return Err(ModuleError::OperationError(format!(
+                        "Access denied: path {path:?} is outside allowed directory {:?}",
+                        self.allowed_path
+                    )));
+                }
+                parent_canonical.join(name)
+            }
+        };
 
         // Check if path is within allowed directory
         if !canonical.starts_with(&self.allowed_path) {

@@ -484,7 +484,7 @@ fn test_chain_state_tip_updates() {
     // Update tip
     let new_tip = valid_block_header();
     let tip_hash = random_hash();
-    chainstate.update_tip(&tip_hash, &new_tip, 1).unwrap();
+    connect_tip(chainstate, &tip_hash, &new_tip, 1);
 
     // Verify tip was updated
     let current_tip = chainstate.get_tip_hash().unwrap().unwrap();
@@ -539,9 +539,7 @@ fn test_chain_state_reorg_handling() {
     // Simulate reorg by updating tip
     let reorg_header = valid_block_header();
     let reorg_hash = random_hash();
-    chainstate
-        .update_tip(&reorg_hash, &reorg_header, 1)
-        .unwrap();
+    connect_tip(chainstate, &reorg_hash, &reorg_header, 1);
 
     // Verify reorg was handled
     let current_height = chainstate.get_height().unwrap().unwrap();
@@ -632,7 +630,7 @@ async fn test_chainstate_work_accumulation() {
 
     // Update tip with second header
     let tip_hash = random_hash();
-    chainstate.update_tip(&tip_hash, &header2, 1).unwrap();
+    connect_tip(&chainstate, &tip_hash, &header2, 1);
 
     // Verify chain info is updated
     let chain_info = chainstate.load_chain_info().unwrap();
@@ -664,7 +662,7 @@ async fn test_chainstate_persistence() {
         chainstate.initialize(&header).unwrap();
 
         let tip_hash = random_hash();
-        chainstate.update_tip(&tip_hash, &header, 100).unwrap();
+        connect_tip(&chainstate, &tip_hash, &header, 100);
     }
 
     // Reopen and verify persistence
@@ -871,9 +869,7 @@ async fn test_storage_integration_workflow() {
 
     // Initialize chain state
     chainstate.initialize(&block.header).unwrap();
-    chainstate
-        .update_tip(&block_hash, &block.header, block_height)
-        .unwrap();
+    connect_tip(&chainstate, &block_hash, &block.header, block_height);
 
     // Index transaction
     let tx = valid_transaction();

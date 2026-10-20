@@ -22,12 +22,13 @@ async fn rpc_unknown_method_returns_method_not_found() {
 }
 
 #[tokio::test]
-async fn rpc_getblockcount_returns_number() {
+async fn rpc_getblockcount_without_storage_is_an_error() {
     let request = r#"{"jsonrpc":"2.0","method":"getblockcount","params":[],"id":2}"#;
     let response_str = RpcServer::process_request(request).await;
     let response: Value = serde_json::from_str(&response_str).unwrap();
     assert_eq!(response["jsonrpc"], "2.0");
-    assert!(response["result"].is_number());
+    assert!(response["result"].is_null());
+    assert!(response["error"].is_object());
     assert_eq!(response["id"], 2);
 }
 

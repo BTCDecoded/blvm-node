@@ -39,6 +39,7 @@ pub async fn get_address_utxos(blockchain: &BlockchainRpc, address: &str) -> Res
         "address": address,
         "balance": info.get("balance"),
         "utxo_count": info.get("utxo_count"),
-        "tx_count": info.get("tx_count")
+        "tx_count": info.get("tx_count"),
+        "utxos": info.get("utxos").cloned().unwrap_or_else(|| json!([]))
     }))
 }

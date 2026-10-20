@@ -859,9 +859,14 @@ impl RpcServer {
                         )
                     }
                     "/health/detailed" => {
-                        // Detailed health report
+                        let status = Self::health_overall_status(&health_value);
+                        let status_code = if Self::health_is_live(status) {
+                            StatusCode::OK
+                        } else {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        };
                         (
-                            StatusCode::OK,
+                            status_code,
                             serde_json::to_string(&health_value)
                                 .unwrap_or_else(|_| "{}".to_string()),
                         )
@@ -1718,13 +1723,19 @@ impl RpcServer {
                     ))
                 }
             }
-            "getdescriptorinfo" | "analyzepsbt" => Err(errors::RpcError::new(
-                errors::RpcErrorCode::ServerError(-32001),
-                format!(
-                    "Method '{method}' requires the blvm-miniscript module to be loaded. \
-                     Load it with: loadmodule \"blvm-miniscript\""
-                ),
-            )),
+            "getdescriptorinfo" | "analyzepsbt" => {
+                let overrides = self.rpc_core_overrides.read().await;
+                if let Some((_, handler)) = overrides.get(method) {
+                    return handler.handle(params).await;
+                }
+                Err(errors::RpcError::new(
+                    errors::RpcErrorCode::ServerError(-32001),
+                    format!(
+                        "Method '{method}' requires the blvm-miniscript module to be loaded. \
+                         Load it with: loadmodule \"blvm-miniscript\""
+                    ),
+                ))
+            }
 
             _ => {
                 // Check core overrides first, then extension endpoints.
@@ -2343,9 +2354,9 @@ mod tests {
         assert_eq!(responses[1]["id"], 2);
         assert_eq!(responses[2]["id"], 3);
 
-        // Verify all are successful
         assert!(responses[0]["result"].is_object());
-        assert!(responses[1]["result"].is_number());
+        assert!(responses[1]["result"].is_null());
+        assert!(responses[1]["error"].is_object());
         assert!(responses[2]["result"].is_object());
     }
 
@@ -2374,10 +2385,9 @@ mod tests {
         assert!(responses[1]["error"].is_object());
         assert_eq!(responses[1]["error"]["code"], -32601);
 
-        // Third request should succeed
         assert_eq!(responses[2]["id"], 3);
-        assert!(responses[2]["result"].is_number());
-        assert!(responses[2]["error"].is_null());
+        assert!(responses[2]["result"].is_null());
+        assert!(responses[2]["error"].is_object());
     }
 
     #[tokio::test]
@@ -2417,9 +2427,9 @@ mod tests {
         assert_eq!(responses[0]["id"], Value::Null);
         assert_eq!(responses[1]["id"], Value::Null);
 
-        // Both should succeed
         assert!(responses[0]["result"].is_object());
-        assert!(responses[1]["result"].is_number());
+        assert!(responses[1]["result"].is_null());
+        assert!(responses[1]["error"].is_object());
     }
 
     /// ckpool-style Basic auth authenticates but is not admin unless password ∈ admin_tokens.

@@ -3483,6 +3483,80 @@ impl NetworkManager {
         Ok(())
     }
 
+    /// Service bits a version message from this node carries before any caller-supplied extras.
+    pub fn advertised_services(&self) -> u64 {
+        use blvm_protocol::bip157::NODE_COMPACT_FILTERS;
+        use blvm_protocol::service_flags::standard;
+
+        // NODE_WITNESS stays set. A pruned node advertises NODE_NETWORK_LIMITED and
+        // leaves NODE_NETWORK clear. An archive node does the opposite.
+        let pruned = self
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.pruning())
+            .map(|pruning_manager| pruning_manager.is_enabled())
+            .unwrap_or(false);
+        let mut services_with_filters = standard::NODE_WITNESS;
+        if pruned {
+            services_with_filters |= standard::NODE_NETWORK_LIMITED;
+        } else {
+            services_with_filters |= standard::NODE_NETWORK;
+        }
+
+        if self.serve_compact_filters {
+            services_with_filters |= NODE_COMPACT_FILTERS;
+        }
+
+        #[cfg(feature = "utxo-commitments")]
+        {
+            services_with_filters |= crate::network::protocol::NODE_UTXO_COMMITMENTS;
+        }
+
+        if self.ban_sharing_active() {
+            services_with_filters |= crate::network::protocol::NODE_BAN_LIST_SHARING;
+        }
+
+        #[cfg(feature = "governance")]
+        if self.governance_config.is_some() {
+            services_with_filters |= crate::network::protocol::NODE_GOVERNANCE;
+        }
+
+        #[cfg(feature = "dandelion")]
+        if self.relay_policies.enable_dandelion {
+            services_with_filters |= crate::network::protocol::NODE_DANDELION;
+        }
+
+        services_with_filters |= crate::network::protocol::NODE_PACKAGE_RELAY;
+        services_with_filters |= crate::network::protocol::NODE_FIBRE;
+        self.apply_history_service_bits(services_with_filters)
+    }
+
+    /// An archive node keeps `NODE_NETWORK`. A pruned node keeps `NODE_NETWORK_LIMITED` and clears the other.
+    fn apply_history_service_bits(&self, services: u64) -> u64 {
+        use blvm_protocol::service_flags::standard;
+        let pruned = self
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.pruning())
+            .map(|pruning_manager| pruning_manager.is_enabled())
+            .unwrap_or(false);
+        if pruned {
+            (services & !standard::NODE_NETWORK) | standard::NODE_NETWORK_LIMITED
+        } else {
+            (services & !standard::NODE_NETWORK_LIMITED) | standard::NODE_NETWORK
+        }
+    }
+
+    /// Relay floor as BTC per kvB. An unset mempool policy is 1 sat/vB.
+    pub fn relay_fee_btc_per_kvb(&self) -> f64 {
+        let sats = self
+            .mempool_manager
+            .as_ref()
+            .map(|pool| pool.min_relay_fee_rate_sat_per_vb())
+            .unwrap_or(1);
+        sats as f64 * 1_000.0 / 100_000_000.0
+    }
+
     /// Create version message with service flags for all supported features.
     ///
     /// Sets service flags based on:
@@ -3507,69 +3581,9 @@ impl NetworkManager {
         start_height: i32,
         relay: bool,
     ) -> crate::network::protocol::VersionMessage {
-        use blvm_protocol::bip157::NODE_COMPACT_FILTERS;
-        use blvm_protocol::service_flags::standard;
-
-        // NODE_WITNESS stays set. A pruned node advertises NODE_NETWORK_LIMITED and
-        // leaves NODE_NETWORK clear. An archive node does the opposite.
-        let pruned = self
-            .storage
-            .as_ref()
-            .and_then(|storage| storage.pruning())
-            .map(|pruning_manager| pruning_manager.is_enabled())
-            .unwrap_or(false);
-        let mut services_with_filters = standard::NODE_WITNESS;
-        if pruned {
-            services_with_filters |= standard::NODE_NETWORK_LIMITED;
-        } else {
-            services_with_filters |= standard::NODE_NETWORK;
-        }
-
-        // Add any additional services passed in (for future extensibility)
-        services_with_filters |= services;
-
-        if self.serve_compact_filters {
-            services_with_filters |= NODE_COMPACT_FILTERS;
-        }
-
-        // UTXO Commitments (if feature enabled)
-        #[cfg(feature = "utxo-commitments")]
-        {
-            services_with_filters |= crate::network::protocol::NODE_UTXO_COMMITMENTS;
-        }
-
-        if self.ban_sharing_active() {
-            services_with_filters |= crate::network::protocol::NODE_BAN_LIST_SHARING;
-        }
-
-        // Governance message relay (if config enabled)
-        #[cfg(feature = "governance")]
-        if self.governance_config.is_some() {
-            services_with_filters |= crate::network::protocol::NODE_GOVERNANCE;
-        }
-
-        #[cfg(feature = "dandelion")]
-        if self.relay_policies.enable_dandelion {
-            services_with_filters |= crate::network::protocol::NODE_DANDELION;
-        }
-
-        // Package Relay (BIP331) - always enabled
-        services_with_filters |= crate::network::protocol::NODE_PACKAGE_RELAY;
-
-        // FIBRE - always enabled
-        services_with_filters |= crate::network::protocol::NODE_FIBRE;
-
-        if pruned {
-            services_with_filters &= !standard::NODE_NETWORK;
-            services_with_filters |= standard::NODE_NETWORK_LIMITED;
-        } else {
-            services_with_filters &= !standard::NODE_NETWORK_LIMITED;
-            services_with_filters |= standard::NODE_NETWORK;
-        }
-
         crate::network::protocol::VersionMessage {
             version,
-            services: services_with_filters,
+            services: self.apply_history_service_bits(self.advertised_services() | services),
             timestamp,
             addr_recv,
             addr_from,

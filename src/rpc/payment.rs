@@ -219,7 +219,7 @@ impl PaymentRpc {
                 json!({
                     "state": "in_mempool",
                     "request_id": request_id,
-                    "tx_hash": hex::encode(tx_hash),
+                    "tx_hash": crate::storage::hashing::hash_to_rpc_hex(tx_hash),
                 })
             }
             PaymentState::Settled {
@@ -232,8 +232,8 @@ impl PaymentRpc {
                 json!({
                     "state": "settled",
                     "request_id": request_id,
-                    "tx_hash": hex::encode(tx_hash),
-                    "block_hash": hex::encode(block_hash),
+                    "tx_hash": crate::storage::hashing::hash_to_rpc_hex(tx_hash),
+                    "block_hash": crate::storage::hashing::hash_to_rpc_hex(block_hash),
                     "confirmation_count": confirmation_count,
                     "safe_for_release": *confirmation_count >= DEFAULT_SAFE_DEPTH,
                 })
@@ -247,7 +247,7 @@ impl PaymentRpc {
                 json!({
                     "state": "reorg_pending",
                     "request_id": request_id,
-                    "tx_hash": hex::encode(tx_hash),
+                    "tx_hash": crate::storage::hashing::hash_to_rpc_hex(tx_hash),
                     "reason": reason,
                 })
             }
@@ -346,7 +346,7 @@ impl PaymentRpc {
                 "verified": false,
                 "state": "tx_mismatch",
                 "amount_sats": amount_sats,
-                "tx_hash": hex::encode(stored),
+                "tx_hash": crate::storage::hashing::hash_to_rpc_hex(&stored),
                 "reason": "transaction hash does not match payment state",
             }),
             PaymentState::Failed { reason, .. } => json!({
@@ -374,7 +374,7 @@ impl PaymentRpc {
                         "verified": false,
                         "state": "tx_mismatch",
                         "amount_sats": amount_sats,
-                        "tx_hash": hex::encode(stored),
+                        "tx_hash": crate::storage::hashing::hash_to_rpc_hex(&stored),
                         "reason": "transaction hash does not match payment state",
                     })
                 }
@@ -511,21 +511,19 @@ impl PaymentRpc {
 
         if let Some(ref storage) = self.storage {
             if let Ok(Some(tx)) = storage.transactions().get_transaction(tx_hash) {
-                let confirmations = storage
-                    .transactions()
-                    .get_metadata(tx_hash)
+                let Some(meta) = storage.transactions().get_metadata(tx_hash).ok().flatten() else {
+                    return Ok(None);
+                };
+                let Some(block_height) = storage
+                    .blocks()
+                    .get_height_by_hash(&meta.block_hash)
                     .ok()
                     .flatten()
-                    .and_then(|meta| {
-                        let block_height = storage
-                            .blocks()
-                            .get_height_by_hash(&meta.block_hash)
-                            .ok()
-                            .flatten()?;
-                        let tip = storage.chain().get_height().ok().flatten().unwrap_or(0);
-                        Some((tip.saturating_sub(block_height) + 1) as u32)
-                    })
-                    .unwrap_or(1);
+                else {
+                    return Ok(None);
+                };
+                let tip = storage.chain().get_height().ok().flatten().unwrap_or(0);
+                let confirmations = (tip.saturating_sub(block_height) + 1) as u32;
                 return Ok(Some((tx, TxChainState::Confirmed { confirmations })));
             }
         }
@@ -552,7 +550,18 @@ impl PaymentRpc {
         })?;
         let output_index = params.get(1).and_then(|v| v.as_u64()).ok_or_else(|| {
             PaymentError::ProcessingError("Missing 'output_index' parameter".to_string())
-        })? as u32;
+        })?;
+        if output_index > u32::MAX as u64 {
+            return Err(PaymentError::ProcessingError(
+                "output_index out of range".to_string(),
+            ));
+        }
+        let output_index = output_index as u32;
+        let expected_script_hex = param_str(params, 3).ok_or_else(|| {
+            PaymentError::ProcessingError("Missing 'expected_script' parameter".to_string())
+        })?;
+        let expected_script = hex::decode(expected_script_hex.trim())
+            .map_err(|e| PaymentError::ProcessingError(format!("Invalid expected_script: {e}")))?;
         let amount_sats = params.get(2).and_then(|v| v.as_u64()).ok_or_else(|| {
             PaymentError::ProcessingError("Missing 'amount_sats' parameter".to_string())
         })?;
@@ -570,7 +579,7 @@ impl PaymentRpc {
 
         #[cfg(not(feature = "ctv"))]
         {
-            let _ = (output_index, amount_sats, proof_bytes);
+            let _ = (output_index, amount_sats, proof_bytes, expected_script);
             Ok(json!({
                 "verified": false,
                 "reason": "CTV feature not enabled on node",
@@ -605,10 +614,17 @@ impl PaymentRpc {
                 }));
             }
 
-            let expected = vec![PaymentOutput {
-                amount: Some(amount_sats),
-                script: template_output.script_pubkey.clone(),
-            }];
+            let mut expected: Vec<PaymentOutput> = proof
+                .transaction_template
+                .outputs
+                .iter()
+                .map(|output| PaymentOutput {
+                    amount: Some(output.value),
+                    script: output.script_pubkey.clone(),
+                })
+                .collect();
+            expected[idx].amount = Some(amount_sats);
+            expected[idx].script = expected_script;
 
             let engine = CovenantEngine::new();
             let verified = engine.verify_covenant_proof(&proof, &expected)?;
@@ -706,9 +722,9 @@ impl PaymentRpc {
             PaymentError::ProcessingError(format!("Invalid withdrawal_script: {}", e))
         })?;
 
-        let config = if params["config"].is_object() {
+        let config = if params.get("config").is_some() && !params["config"].is_null() {
             serde_json::from_value(params["config"].clone())
-                .unwrap_or_else(|_| crate::payment::vault::VaultConfig::default())
+                .map_err(|e| PaymentError::ProcessingError(format!("invalid vault config: {e}")))?
         } else {
             crate::payment::vault::VaultConfig::default()
         };
@@ -808,12 +824,16 @@ impl PaymentRpc {
             PaymentError::ProcessingError(format!("Invalid withdrawal_script: {}", e))
         })?;
 
-        let current_block_height = params["current_block_height"].as_u64().ok_or_else(|| {
-            PaymentError::ProcessingError("current_block_height required".to_string())
-        })?;
+        let current_block_height = self
+            .storage
+            .as_ref()
+            .and_then(|storage| storage.chain().get_height().ok().flatten())
+            .ok_or_else(|| {
+                PaymentError::ProcessingError("node tip is not available".to_string())
+            })?;
 
         let updated_vault_state =
-            vault_engine.withdraw(&vault_state, withdrawal_script, current_block_height)?;
+            vault_engine.withdraw(&vault_state, withdrawal_script, current_block_height, None)?;
 
         Ok(json!({
             "vault_id": updated_vault_state.vault_id,
@@ -923,9 +943,9 @@ impl PaymentRpc {
             initial_participants.push((participant_id, contribution, script));
         }
 
-        let config = if params["config"].is_object() {
+        let config = if params.get("config").is_some() && !params["config"].is_null() {
             serde_json::from_value(params["config"].clone())
-                .unwrap_or_else(|_| crate::payment::pool::PoolConfig::default())
+                .map_err(|e| PaymentError::ProcessingError(format!("invalid pool config: {e}")))?
         } else {
             crate::payment::pool::PoolConfig::default()
         };
@@ -1197,16 +1217,20 @@ impl PaymentRpc {
             outputs.push(PaymentOutput { script, amount });
         }
 
-        let priority_str = params["priority"]
-            .as_str()
-            .unwrap_or("normal")
-            .to_lowercase();
-        let priority = match priority_str.as_str() {
-            "low" => crate::payment::congestion::TransactionPriority::Low,
-            "normal" => crate::payment::congestion::TransactionPriority::Normal,
-            "high" => crate::payment::congestion::TransactionPriority::High,
-            "urgent" => crate::payment::congestion::TransactionPriority::Urgent,
-            _ => crate::payment::congestion::TransactionPriority::Normal,
+        let priority = if let Some(priority_str) = params["priority"].as_str() {
+            match priority_str.to_lowercase().as_str() {
+                "low" => crate::payment::congestion::TransactionPriority::Low,
+                "normal" => crate::payment::congestion::TransactionPriority::Normal,
+                "high" => crate::payment::congestion::TransactionPriority::High,
+                "urgent" => crate::payment::congestion::TransactionPriority::Urgent,
+                other => {
+                    return Err(PaymentError::ProcessingError(format!(
+                        "unknown priority {other}"
+                    )));
+                }
+            }
+        } else {
+            crate::payment::congestion::TransactionPriority::Normal
         };
 
         let deadline = params["deadline"].as_u64();
@@ -1303,11 +1327,8 @@ enum TxChainState {
 }
 
 fn decode_tx_hash(hex_str: &str) -> Result<crate::Hash, PaymentError> {
-    let bytes = hex::decode(hex_str)
-        .map_err(|e| PaymentError::ProcessingError(format!("Invalid tx_hash hex: {e}")))?;
-    bytes
-        .try_into()
-        .map_err(|_| PaymentError::ProcessingError("tx_hash must be 32 bytes".to_string()))
+    crate::storage::hashing::hash_from_rpc_hex(hex_str)
+        .map_err(|e| PaymentError::ProcessingError(format!("Invalid tx_hash hex: {e}")))
 }
 
 fn tx_output_total_sats(tx: &Transaction) -> u64 {
@@ -1332,12 +1353,17 @@ fn transaction_matches_outputs(tx: &Transaction, expected_outputs: &[PaymentOutp
         return false;
     }
 
+    let mut used = vec![false; tx.outputs.len()];
     for expected_output in &expected_tx_outputs {
         let mut found = false;
-        for tx_output in &tx.outputs {
+        for (i, tx_output) in tx.outputs.iter().enumerate() {
+            if used[i] {
+                continue;
+            }
             if tx_output.value == expected_output.value
                 && tx_output.script_pubkey == expected_output.script_pubkey
             {
+                used[i] = true;
                 found = true;
                 break;
             }
@@ -1348,4 +1374,69 @@ fn transaction_matches_outputs(tx: &Transaction, expected_outputs: &[PaymentOutp
     }
 
     true
+}
+
+#[cfg(all(test, feature = "ctv"))]
+mod covenant_proof_tests {
+    use super::*;
+    use crate::payment::covenant::CovenantEngine;
+    use blvm_protocol::payment::PaymentOutput;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn expected_script_selects_one_output_and_a_wide_index_is_an_error() {
+        let engine = CovenantEngine::new();
+        let script_a = vec![0x51];
+        let script_b = hex::decode("0014751e76e8199196d454941c45d1b3a323f1433bd6").unwrap();
+        let proof = engine
+            .create_payment_covenant(
+                "pay",
+                &[
+                    PaymentOutput {
+                        script: script_a.clone(),
+                        amount: Some(51),
+                    },
+                    PaymentOutput {
+                        script: script_b.clone(),
+                        amount: Some(100),
+                    },
+                ],
+                None,
+            )
+            .unwrap();
+        let hex_proof = hex::encode(bincode::serialize(&proof).unwrap());
+        let rpc = PaymentRpc::new();
+        let matched = rpc
+            .verify_covenant_proof(&json!([hex_proof.clone(), 0, 51, hex::encode(&script_a)]))
+            .await
+            .unwrap();
+        assert_eq!(matched["verified"], true);
+
+        let one = engine
+            .create_payment_covenant(
+                "one",
+                &[PaymentOutput {
+                    script: script_a,
+                    amount: Some(51),
+                }],
+                None,
+            )
+            .unwrap();
+        let one_hex = hex::encode(bincode::serialize(&one).unwrap());
+        let missed = rpc
+            .verify_covenant_proof(&json!([one_hex, 0, 51, hex::encode(&script_b)]))
+            .await
+            .unwrap();
+        assert_eq!(missed["verified"], false);
+
+        let wide = rpc
+            .verify_covenant_proof(&json!([
+                hex_proof,
+                4_294_967_296u64,
+                51,
+                hex::encode(script_b)
+            ]))
+            .await;
+        assert!(wide.is_err());
+    }
 }

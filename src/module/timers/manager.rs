@@ -186,6 +186,9 @@ impl TimerManager {
         interval_seconds: u64,
         callback: Arc<dyn TimerCallback>,
     ) -> Result<TimerId, String> {
+        if interval_seconds == 0 {
+            return Err("timer interval must be at least 1 second".to_string());
+        }
         let timer_id = {
             let mut id = self.next_timer_id.lock().await;
             let current = *id;

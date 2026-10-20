@@ -79,10 +79,10 @@ async fn test_vault_complete_lifecycle() {
         .unvault(&vault_state, unvault_script)
         .expect("Unvaulting should succeed");
 
-    assert_eq!(
+    assert!(matches!(
         unvaulted_state.state,
-        blvm_node::payment::vault::VaultLifecycle::Unvaulting
-    );
+        blvm_node::payment::vault::VaultLifecycle::Unvaulted { .. }
+    ));
 
     // Simulate on-chain confirmation of unvault
     let unvault_tx_hash = [0x01; 32];
@@ -104,6 +104,7 @@ async fn test_vault_complete_lifecycle() {
             &unvaulted_state,
             final_withdrawal_script,
             current_block_height,
+            None,
         )
         .expect("Withdrawal should succeed after delay");
 
@@ -147,8 +148,10 @@ async fn test_vault_recovery_path() {
 
     assert_eq!(
         recovered_state.state,
-        blvm_node::payment::vault::VaultLifecycle::Recovered
+        blvm_node::payment::vault::VaultLifecycle::Deposited
     );
+    assert!(recovered_state.recovery_covenant.is_some());
+    assert!(recovered_state.recovery_tx_hash.is_none());
 }
 
 // ============================================================================
@@ -205,7 +208,7 @@ async fn test_pool_complete_workflow() {
         .distribute(&pool_state, distribution)
         .expect("Distribution should succeed");
 
-    assert_eq!(pool_state.total_balance, 30000); // 45000 - 15000
+    assert_eq!(pool_state.total_balance, 30150); // 45000 - 14850; 1% fee stays in the pool
     assert!(covenant_proof.template_hash.len() == 32);
 }
 

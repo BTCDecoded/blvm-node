@@ -13,39 +13,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
 
-/// Convert Bitcoin address to script pubkey
+/// Convert a Bitcoin address string to a script pubkey.
 ///
-/// Handles SegWit (P2WPKH, P2WSH) and Taproot (P2TR) addresses.
-fn address_to_script_pubkey(
-    address: &blvm_protocol::address::BitcoinAddress,
-) -> Result<Vec<u8>, PaymentError> {
-    match (address.witness_version, address.witness_program.len()) {
-        // SegWit v0: P2WPKH (20 bytes) or P2WSH (32 bytes)
-        (0, 20) => {
-            // P2WPKH: OP_0 <20-byte-hash>
-            let mut script = vec![0x00]; // OP_0
-            script.extend_from_slice(&address.witness_program);
-            Ok(script)
-        }
-        (0, 32) => {
-            // P2WSH: OP_0 <32-byte-hash>
-            let mut script = vec![0x00]; // OP_0
-            script.extend_from_slice(&address.witness_program);
-            Ok(script)
-        }
-        // Taproot v1: P2TR (32 bytes)
-        (1, 32) => {
-            // P2TR: OP_1 <32-byte-hash>
-            let mut script = vec![0x51]; // OP_1
-            script.extend_from_slice(&address.witness_program);
-            Ok(script)
-        }
-        _ => Err(PaymentError::ProcessingError(format!(
-            "Unsupported address type: witness_version={}, program_len={}",
-            address.witness_version,
-            address.witness_program.len()
-        ))),
-    }
+/// Uses the RPC writer so v0 and v1 programs include the push-length byte.
+fn address_to_script_pubkey(address: &str) -> Result<Vec<u8>, PaymentError> {
+    crate::rpc::rawtx::address_string_to_script_pubkey(address)
+        .map_err(|e| PaymentError::ProcessingError(e.to_string()))
 }
 
 /// Payment error types
@@ -109,6 +82,47 @@ fn load_payment_store(path: &str) -> HashMap<String, PaymentRequest> {
         }
     }
     store
+}
+
+fn compressed_point(point: &blvm_secp256k1::group::Ge) -> Option<[u8; 33]> {
+    if point.infinity {
+        return None;
+    }
+    let mut affine = *point;
+    affine.x.normalize();
+    affine.y.normalize();
+    let mut x = [0u8; 32];
+    let mut y = [0u8; 32];
+    affine.x.get_b32(&mut x);
+    affine.y.get_b32(&mut y);
+    let mut out = [0u8; 33];
+    out[0] = 0x02 | (y[31] & 1);
+    out[1..].copy_from_slice(&x);
+    Some(out)
+}
+
+fn hmac_sha512(key: &[u8], message: &[u8]) -> [u8; 64] {
+    use sha2::{Digest, Sha512};
+    let mut key_block = [0u8; 128];
+    if key.len() > 128 {
+        key_block[..64].copy_from_slice(&Sha512::digest(key));
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+    let mut inner_pad = [0x36u8; 128];
+    let mut outer_pad = [0x5cu8; 128];
+    for i in 0..128 {
+        inner_pad[i] ^= key_block[i];
+        outer_pad[i] ^= key_block[i];
+    }
+    let mut inner = Sha512::new();
+    inner.update(inner_pad);
+    inner.update(message);
+    let inner = inner.finalize();
+    let mut outer = Sha512::new();
+    outer.update(outer_pad);
+    outer.update(inner);
+    outer.finalize().into()
 }
 
 fn persist_payment_request(dir: &str, payment_id: &str, request: &PaymentRequest) {
@@ -403,6 +417,81 @@ impl PaymentProcessor {
         Ok(())
     }
 
+    /// BIP-47 payment address at `notification_index`. Index 0 is the first payment address.
+    pub(crate) fn derive_bip47_address(
+        &self,
+        payment_code: &str,
+        notification_index: u32,
+    ) -> Result<String, PaymentError> {
+        let Some(scan_hex) = self.config.bip47_scan_key.as_deref() else {
+            return Err(PaymentError::ProcessingError(
+                "BIP-47 scan key is not configured".to_string(),
+            ));
+        };
+        let scan_vec = hex::decode(scan_hex.trim())
+            .map_err(|_| PaymentError::ProcessingError("invalid BIP-47 scan key".to_string()))?;
+        let scan_bytes: [u8; 32] = scan_vec
+            .try_into()
+            .map_err(|_| PaymentError::ProcessingError("invalid BIP-47 scan key".to_string()))?;
+        let payload = crate::rpc::rawtx::base58check_decode(payment_code).ok_or_else(|| {
+            PaymentError::ProcessingError("invalid BIP-47 payment code".to_string())
+        })?;
+        if payload.len() != 81 || payload[0] != 0x47 || payload[1] != 0x01 {
+            return Err(PaymentError::ProcessingError(
+                "invalid BIP-47 payment code".to_string(),
+            ));
+        }
+        let pubkey_bytes: [u8; 33] = payload[3..36].try_into().expect("33-byte pubkey");
+        let chain_code: [u8; 32] = payload[36..68].try_into().expect("32-byte chain code");
+        let payment_point =
+            blvm_secp256k1::ecdsa::ge_from_compressed(&pubkey_bytes).ok_or_else(|| {
+                PaymentError::ProcessingError("invalid BIP-47 payment code".to_string())
+            })?;
+        let mut scan = blvm_secp256k1::scalar::Scalar::zero();
+        if scan.set_b32(&scan_bytes) || scan.is_zero() {
+            return Err(PaymentError::ProcessingError(
+                "invalid BIP-47 scan key".to_string(),
+            ));
+        }
+        let mut shared_j = blvm_secp256k1::group::Gej::default();
+        blvm_secp256k1::ecmult_const(&mut shared_j, &payment_point, &scan);
+        let mut shared = blvm_secp256k1::group::Ge::default();
+        shared.set_gej_var(&shared_j);
+        let shared_bytes = compressed_point(&shared).ok_or_else(|| {
+            PaymentError::ProcessingError("invalid BIP-47 payment code".to_string())
+        })?;
+        let mut mac_message = Vec::with_capacity(37);
+        mac_message.extend_from_slice(&shared_bytes);
+        mac_message.extend_from_slice(&notification_index.to_be_bytes());
+        let mac = hmac_sha512(&chain_code, &mac_message);
+        let mut blind_bytes = [0u8; 32];
+        blind_bytes.copy_from_slice(&mac[..32]);
+        let mut blind = blvm_secp256k1::scalar::Scalar::zero();
+        if blind.set_b32(&blind_bytes) || blind.is_zero() {
+            return Err(PaymentError::ProcessingError(
+                "invalid BIP-47 payment code".to_string(),
+            ));
+        }
+        let mut blind_g = blvm_secp256k1::group::Gej::default();
+        blvm_secp256k1::ecmult_gen_const(&mut blind_g, &blind);
+        let mut sum = blvm_secp256k1::group::Gej::default();
+        sum.add_ge_var(&blind_g, &payment_point);
+        let mut payment = blvm_secp256k1::group::Ge::default();
+        payment.set_gej_var(&sum);
+        let payment_pub = compressed_point(&payment).ok_or_else(|| {
+            PaymentError::ProcessingError("invalid BIP-47 payment code".to_string())
+        })?;
+        let hash = crate::storage::hashing::hash160(&payment_pub);
+        let version = match self.config.network.as_deref() {
+            Some("testnet") | Some("regtest") | Some("signet") => 0x6f,
+            _ => 0x00,
+        };
+        let mut address_payload = Vec::with_capacity(21);
+        address_payload.push(version);
+        address_payload.extend_from_slice(&hash);
+        Ok(crate::rpc::rawtx::base58check_encode(&address_payload))
+    }
+
     /// Create module payment request (75/15/10 split)
     ///
     /// Payment split:
@@ -436,7 +525,6 @@ impl PaymentProcessor {
         merchant_key: Option<&[u8; 32]>,
     ) -> Result<PaymentRequest, PaymentError> {
         use crate::module::security::signing::ModuleSigner;
-        use blvm_protocol::address::BitcoinAddress;
 
         if !self.config.module_payments_enabled {
             return Err(PaymentError::ProcessingError(
@@ -459,36 +547,32 @@ impl PaymentProcessor {
             PaymentError::ProcessingError("Payment required but price not specified".to_string())
         })?;
 
-        // BIP47 payment code address derivation
-        // Derives a unique payment address from a payment code for privacy
-        fn derive_bip47_address(
-            _payment_code: &str,
-            _notification_index: u32,
-        ) -> Result<String, PaymentError> {
-            // BIP47 requires node sender payment code + bip47 crate (PublicCode, ECDH). Use legacy fallback until integrated.
-            Err(PaymentError::ProcessingError(
-                "BIP47 not yet implemented. Provide legacy address (author_address/commons_address) as fallback.".to_string(),
-            ))
-        }
+        let resolve_payment_code = |code: &str,
+                                    legacy: &Option<String>|
+         -> Result<String, PaymentError> {
+            match self.derive_bip47_address(code, 0) {
+                Ok(addr) => Ok(addr),
+                Err(PaymentError::ProcessingError(msg)) if msg.starts_with("invalid BIP-47") => {
+                    Err(PaymentError::ProcessingError(msg))
+                }
+                Err(_) => legacy.clone().ok_or_else(|| {
+                    PaymentError::ProcessingError(
+                        "BIP47 payment code provided but derivation failed, and legacy address not provided"
+                            .to_string(),
+                    )
+                }),
+            }
+        };
 
         // Prefer payment codes (BIP47) over fixed addresses for privacy
         // Payment codes generate unique addresses per payment, avoiding address reuse
         let author_address_str = if let Some(ref payment_code) = payment.author_payment_code {
-            // Attempt BIP47 derivation (notification index 0 for first payment)
-            match derive_bip47_address(payment_code, 0) {
+            match resolve_payment_code(payment_code, &payment.author_address) {
                 Ok(addr) => {
                     info!("Derived BIP47 address for author payment: {}", addr);
                     addr
                 }
-                Err(_) => {
-                    // Fall back to legacy address if BIP47 not fully implemented
-                    warn!("BIP47 derivation failed, falling back to legacy address");
-                    payment.author_address.as_ref().ok_or_else(|| {
-                        PaymentError::ProcessingError(
-                            "BIP47 payment code provided but derivation failed, and legacy address not provided".to_string(),
-                        )
-                    })?.to_string()
-                }
+                Err(err) => return Err(err),
             }
         } else if let Some(ref addr) = payment.author_address {
             addr.to_string()
@@ -500,21 +584,12 @@ impl PaymentProcessor {
         };
 
         let commons_address_str = if let Some(ref payment_code) = payment.commons_payment_code {
-            // Attempt BIP47 derivation (notification index 0 for first payment)
-            match derive_bip47_address(payment_code, 0) {
+            match resolve_payment_code(payment_code, &payment.commons_address) {
                 Ok(addr) => {
                     info!("Derived BIP47 address for commons payment: {}", addr);
                     addr
                 }
-                Err(_) => {
-                    // Fall back to legacy address if BIP47 not fully implemented
-                    warn!("BIP47 derivation failed, falling back to legacy address");
-                    payment.commons_address.as_ref().ok_or_else(|| {
-                        PaymentError::ProcessingError(
-                            "BIP47 payment code provided but derivation failed, and legacy address not provided".to_string(),
-                        )
-                    })?.to_string()
-                }
+                Err(err) => return Err(err),
             }
         } else if let Some(ref addr) = payment.commons_address {
             addr.to_string()
@@ -567,49 +642,39 @@ impl PaymentProcessor {
             ));
         }
 
-        // Decode addresses to script pubkeys
-        let author_address = BitcoinAddress::decode(&author_address_str).map_err(|e| {
-            PaymentError::ProcessingError(format!("Invalid author address format: {e:?}"))
-        })?;
-
-        let marketplace_address = BitcoinAddress::decode(&commons_address_str).map_err(|e| {
-            PaymentError::ProcessingError(format!("Invalid marketplace address format: {e:?}"))
-        })?;
-
-        // Convert addresses to script pubkeys
-        // For SegWit (v0) and Taproot (v1), we need to create the appropriate script
-        let author_script = address_to_script_pubkey(&author_address)?;
-        let marketplace_script = address_to_script_pubkey(&marketplace_address)?;
-        // Calculate split: 75% author, 15% marketplace module developer, 10% node
-        // Note: The 15% goes to marketplace module developer (Commons developers), not "Commons governance"
+        let author_script = address_to_script_pubkey(&author_address_str)?;
+        let marketplace_script = address_to_script_pubkey(&commons_address_str)?;
+        // 75% author, 15% marketplace, remainder to the node so the outputs sum to price_sats.
         let author_amount = (price_sats * 75) / 100;
         let marketplace_amount = (price_sats * 15) / 100;
-        let node_amount = (price_sats * 10) / 100;
+        let node_amount = price_sats
+            .saturating_sub(author_amount)
+            .saturating_sub(marketplace_amount);
 
-        // Verify total (should equal price_sats, accounting for rounding)
-        let total = author_amount + marketplace_amount + node_amount;
-        if total > price_sats {
-            warn!(
-                "Payment split exceeds price: {} > {} (rounding error)",
-                total, price_sats
-            );
-        }
-
-        // Create outputs
-        let outputs = vec![
-            PaymentOutput {
+        let mut outputs = Vec::new();
+        if author_amount > 0 {
+            outputs.push(PaymentOutput {
                 script: author_script,
                 amount: Some(author_amount),
-            },
-            PaymentOutput {
+            });
+        }
+        if marketplace_amount > 0 {
+            outputs.push(PaymentOutput {
                 script: marketplace_script,
                 amount: Some(marketplace_amount),
-            },
-            PaymentOutput {
+            });
+        }
+        if node_amount > 0 {
+            outputs.push(PaymentOutput {
                 script: node_script,
                 amount: Some(node_amount),
-            },
-        ];
+            });
+        }
+        if outputs.is_empty() {
+            return Err(PaymentError::ProcessingError(
+                "Payment price produced no outputs".to_string(),
+            ));
+        }
 
         // Include module info in merchant_data (for encryption/decryption)
         let merchant_data = Some(
@@ -634,5 +699,92 @@ impl PaymentProcessor {
 
         self.create_payment_request(outputs, merchant_data, merchant_key)
             .await
+    }
+}
+
+#[cfg(test)]
+mod bip47_address {
+    use super::compressed_point;
+    use crate::config::PaymentConfig;
+    use crate::payment::processor::PaymentProcessor;
+
+    fn scalar_point(secret: [u8; 32]) -> [u8; 33] {
+        let mut scalar = blvm_secp256k1::scalar::Scalar::zero();
+        assert!(!scalar.set_b32(&secret));
+        let mut jacobian = blvm_secp256k1::group::Gej::default();
+        blvm_secp256k1::ecmult_gen_const(&mut jacobian, &scalar);
+        let mut point = blvm_secp256k1::group::Ge::default();
+        point.set_gej_var(&jacobian);
+        compressed_point(&point).unwrap()
+    }
+
+    fn payment_code(pubkey: &[u8; 33], chain: &[u8; 32]) -> String {
+        let mut body = vec![0x47, 0x01, 0x00];
+        body.extend_from_slice(pubkey);
+        body.extend_from_slice(chain);
+        body.extend_from_slice(&[0u8; 13]);
+        crate::rpc::rawtx::base58check_encode(&body)
+    }
+
+    #[test]
+    fn index_zero_address_follows_the_payment_code_and_scan_key() {
+        let payment_secret = {
+            let mut bytes = [0u8; 32];
+            bytes[31] = 2;
+            bytes
+        };
+        let scan_secret = {
+            let mut bytes = [0u8; 32];
+            bytes[31] = 3;
+            bytes
+        };
+        let chain = [0x11u8; 32];
+        let pubkey = scalar_point(payment_secret);
+        let code = payment_code(&pubkey, &chain);
+        let mut config = PaymentConfig::default();
+        config.bip47_scan_key = Some(hex::encode(scan_secret));
+        let processor = PaymentProcessor::new(config).unwrap();
+        let address = processor.derive_bip47_address(&code, 0).unwrap();
+        let again = processor.derive_bip47_address(&code, 0).unwrap();
+        assert_eq!(address, again);
+        let other_index = processor.derive_bip47_address(&code, 1).unwrap();
+        assert_ne!(address, other_index);
+
+        let decoded = crate::rpc::rawtx::base58check_decode(&address).unwrap();
+        assert_eq!(decoded.len(), 21);
+        assert_eq!(decoded[0], 0x00);
+        let hashed_code = crate::storage::hashing::hash160(code.as_bytes());
+        assert_ne!(&decoded[1..], hashed_code.as_slice());
+
+        let payment_point = blvm_secp256k1::ecdsa::ge_from_compressed(&pubkey).unwrap();
+        let mut scan = blvm_secp256k1::scalar::Scalar::zero();
+        assert!(!scan.set_b32(&scan_secret));
+        let mut shared_j = blvm_secp256k1::group::Gej::default();
+        blvm_secp256k1::ecmult_const(&mut shared_j, &payment_point, &scan);
+        let mut shared = blvm_secp256k1::group::Ge::default();
+        shared.set_gej_var(&shared_j);
+        let shared_bytes = compressed_point(&shared).unwrap();
+        let mut message = shared_bytes.to_vec();
+        message.extend_from_slice(&0u32.to_be_bytes());
+        let mac = super::hmac_sha512(&chain, &message);
+        let mut blind_bytes = [0u8; 32];
+        blind_bytes.copy_from_slice(&mac[..32]);
+        let mut blind = blvm_secp256k1::scalar::Scalar::zero();
+        assert!(!blind.set_b32(&blind_bytes));
+        let mut blind_g = blvm_secp256k1::group::Gej::default();
+        blvm_secp256k1::ecmult_gen_const(&mut blind_g, &blind);
+        let mut sum = blvm_secp256k1::group::Gej::default();
+        sum.add_ge_var(&blind_g, &payment_point);
+        let mut derived = blvm_secp256k1::group::Ge::default();
+        derived.set_gej_var(&sum);
+        let derived_pub = compressed_point(&derived).unwrap();
+        let expect = crate::storage::hashing::hash160(&derived_pub);
+        assert_eq!(&decoded[1..], expect.as_slice());
+
+        assert!(processor.derive_bip47_address("not-a-code", 0).is_err());
+        let mut bare = PaymentConfig::default();
+        bare.bip47_scan_key = None;
+        let closed = PaymentProcessor::new(bare).unwrap();
+        assert!(closed.derive_bip47_address(&code, 0).is_err());
     }
 }

@@ -190,7 +190,9 @@ async fn test_loadtxoutset_rpc() {
     let snapshot_path = dir.path().join("utxo_snapshot_200.dat");
     let path_str = snapshot_path.to_string_lossy().to_string();
 
-    let rpc = BlockchainRpc::new();
+    let store_dir = tempdir().unwrap();
+    let storage = std::sync::Arc::new(blvm_node::storage::Storage::new(store_dir.path()).unwrap());
+    let rpc = BlockchainRpc::with_dependencies(storage);
     let params = json!([path_str]);
     let result = rpc.load_txout_set(&params).await.unwrap();
 
@@ -198,4 +200,11 @@ async fn test_loadtxoutset_rpc() {
     assert_eq!(result["height"], 200);
     assert_eq!(result["txout_count"], 1);
     assert!(result.get("utxo_hash").is_some());
+
+    let info = rpc.get_txoutset_info().await.unwrap();
+    assert_eq!(info["txouts"], 1);
+    assert_eq!(
+        info["bestblock"],
+        blvm_node::storage::hashing::hash_to_rpc_hex(&block_hash)
+    );
 }

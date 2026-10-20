@@ -53,7 +53,7 @@ pub async fn get_added_node_info(
     let params = if let Some(n) = node {
         json!([n, dns])
     } else {
-        json!([dns])
+        json!([])
     };
     let info = network.getaddednodeinfo(&params).await?;
     Ok(info)
@@ -105,6 +105,17 @@ pub async fn set_network_active(network: &NetworkRpc, state: bool) -> Result<Val
     Ok(result)
 }
 
+/// Apply `state` when the body has one. A missing field leaves the current flag.
+pub async fn set_network_active_body(network: &NetworkRpc, body: &Value) -> Result<Value> {
+    match body.get("state").and_then(|v| v.as_bool()) {
+        Some(state) => set_network_active(network, state).await,
+        None => {
+            let info = network.get_network_info().await?;
+            Ok(json!(info["networkactive"]))
+        }
+    }
+}
+
 /// Set ban
 pub async fn set_ban(
     network: &NetworkRpc,
@@ -113,6 +124,9 @@ pub async fn set_ban(
     bantime: Option<u64>,
     absolute: Option<bool>,
 ) -> Result<Value> {
+    if absolute.is_some() && bantime.is_none() {
+        anyhow::bail!("setban: absolute requires bantime");
+    }
     let mut params = json!([subnet, command]);
     if let Some(bt) = bantime {
         params.as_array_mut().unwrap().push(json!(bt));

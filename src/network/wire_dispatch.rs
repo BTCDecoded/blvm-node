@@ -1615,6 +1615,10 @@ mod plan_wire_locks {
             bits: 0x207fffff,
             nonce: 3,
         };
+        node.storage
+            .chain()
+            .cache_block_chainwork(&tip.prev_block_hash, &tip, 0)
+            .unwrap();
         node.storage.chain().update_tip(&tip_hash, &tip, 5).unwrap();
         let bad = BlockHeader {
             version: 1,

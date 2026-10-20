@@ -29,6 +29,68 @@ thread_local! {
     static CACHED_UPTIME: ThreadLocalTimedCache<u64> = ThreadLocalTimedCache::new();
 }
 
+const HELP_COMMANDS: &[&str] = &[
+    "getblockchaininfo",
+    "getblock",
+    "getblockhash",
+    "getblockheader",
+    "getbestblockhash",
+    "getblockcount",
+    "getdifficulty",
+    "gettxoutsetinfo",
+    "loadtxoutset",
+    "verifychain",
+    "getrawtransaction",
+    "sendrawtransaction",
+    "testmempoolaccept",
+    "decoderawtransaction",
+    "gettxout",
+    "gettxoutproof",
+    "verifytxoutproof",
+    "getmempoolinfo",
+    "getrawmempool",
+    "savemempool",
+    "getnetworkinfo",
+    "getpeerinfo",
+    "getconnectioncount",
+    "ping",
+    "addnode",
+    "disconnectnode",
+    "getnettotals",
+    "clearbanned",
+    "setban",
+    "listbanned",
+    "getmininginfo",
+    "getblocktemplate",
+    "generatetoaddress",
+    "submitblock",
+    "estimatesmartfee",
+    "stop",
+    "uptime",
+    "getmemoryinfo",
+    "getrpcinfo",
+    "help",
+    "logging",
+    "loadmodule",
+    "unloadmodule",
+    "reloadmodule",
+    "listmodules",
+    "getmoduleclispecs",
+    "runmodulecli",
+];
+
+fn memory_stats_value(used: u64, free: u64, total: u64, available: u64) -> Value {
+    json!({
+        "used": used,
+        "free": free,
+        "total": total,
+        "available": available,
+        "locked": {
+            "locked": 0
+        }
+    })
+}
+
 /// Memory stats from /proc/meminfo (Linux fallback when sysinfo not available)
 #[cfg(all(not(feature = "sysinfo"), target_os = "linux"))]
 struct ProcMemStats {
@@ -236,15 +298,8 @@ impl ControlRpc {
                             let used_memory = system.used_memory();
                             let free_memory = system.free_memory();
                             let available_memory = system.available_memory();
-                            let value = json!({
-                                "locked": {
-                                    "used": used_memory,
-                                    "free": free_memory,
-                                    "total": total_memory,
-                                    "available": available_memory,
-                                    "locked": 0,
-                                }
-                            });
+                            let value =
+                                memory_stats_value(used_memory, free_memory, total_memory, available_memory);
                             std::cell::RefCell::new((system, Instant::now(), value))
                         };
                     }
@@ -263,15 +318,12 @@ impl ControlRpc {
                             let used_memory = system.used_memory();
                             let free_memory = system.free_memory();
                             let available_memory = system.available_memory();
-                            let value = json!({
-                                "locked": {
-                                    "used": used_memory,
-                                    "free": free_memory,
-                                    "total": total_memory,
-                                    "available": available_memory,
-                                    "locked": 0,
-                                }
-                            });
+                            let value = memory_stats_value(
+                                used_memory,
+                                free_memory,
+                                total_memory,
+                                available_memory,
+                            );
                             *last_refresh = Instant::now();
                             *cached_value = value.clone();
                             Ok(value.clone())
@@ -287,27 +339,18 @@ impl ControlRpc {
                     #[cfg(target_os = "linux")]
                     {
                         if let Ok(stats) = read_proc_meminfo() {
-                            return Ok(json!({
-                                "locked": {
-                                    "used": stats.used,
-                                    "free": stats.free,
-                                    "total": stats.total,
-                                    "available": stats.available,
-                                    "locked": 0,
-                                }
-                            }));
+                            return Ok(memory_stats_value(
+                                stats.used,
+                                stats.free,
+                                stats.total,
+                                stats.available,
+                            ));
                         }
                     }
-                    Ok(json!({
-                        "locked": {
-                            "used": 0,
-                            "free": 0,
-                            "total": 0,
-                            "available": 0,
-                            "locked": 0,
-                        },
-                        "note": "Memory statistics unavailable (sysinfo feature not enabled)"
-                    }))
+                    let mut value = memory_stats_value(0, 0, 0, 0);
+                    value["note"] =
+                        json!("Memory statistics unavailable (sysinfo feature not enabled)");
+                    Ok(value)
                 }
             }
             "mallocinfo" => {
@@ -664,7 +707,10 @@ impl ControlRpc {
                 "runmodulecli" => {
                     "Run a module CLI subcommand.\n\nArguments:\n1. module_name (string, required) CLI name from getmoduleclispecs\n2. subcommand (string, required) Subcommand name\n3. ...args (strings, optional) Arguments for the subcommand\n\nResult:\n{ \"stdout\": \"...\", \"stderr\": \"...\", \"exit_code\": 0 }\n\nExamples:\n> bitcoin-cli runmodulecli \"sync-policy\" \"list\""
                 }
-                _ => {
+                other => {
+                    if HELP_COMMANDS.contains(&other) {
+                        return Ok(json!(format!("{other}\n\nReturns the {other} result.")));
+                    }
                     return Err(RpcError::invalid_params(format!(
                         "Unknown command: {command}"
                     )));
@@ -673,57 +719,7 @@ impl ControlRpc {
             Ok(json!(help_text.to_string()))
         } else {
             // No command specified, return list of all commands
-            let commands = vec![
-                "getblockchaininfo",
-                "getblock",
-                "getblockhash",
-                "getblockheader",
-                "getbestblockhash",
-                "getblockcount",
-                "getdifficulty",
-                "gettxoutsetinfo",
-                "loadtxoutset",
-                "verifychain",
-                "getrawtransaction",
-                "sendrawtransaction",
-                "testmempoolaccept",
-                "decoderawtransaction",
-                "gettxout",
-                "gettxoutproof",
-                "verifytxoutproof",
-                "getmempoolinfo",
-                "getrawmempool",
-                "savemempool",
-                "getnetworkinfo",
-                "getpeerinfo",
-                "getconnectioncount",
-                "ping",
-                "addnode",
-                "disconnectnode",
-                "getnettotals",
-                "clearbanned",
-                "setban",
-                "listbanned",
-                "getmininginfo",
-                "getblocktemplate",
-                "generatetoaddress",
-                "submitblock",
-                "estimatesmartfee",
-                "stop",
-                "uptime",
-                "getmemoryinfo",
-                "getrpcinfo",
-                "help",
-                "logging",
-                "loadmodule",
-                "unloadmodule",
-                "reloadmodule",
-                "listmodules",
-                "getmoduleclispecs",
-                "runmodulecli",
-            ];
-
-            Ok(json!(commands.join("\n")))
+            Ok(json!(HELP_COMMANDS.join("\n")))
         }
     }
 
@@ -769,9 +765,8 @@ impl ControlRpc {
         let current_filter = env_or_default("RUST_LOG", "info");
 
         // Determine if debug logging is active based on filter
-        let active = current_filter.contains("debug")
-            || current_filter.contains("trace")
-            || !exclude.contains(&"all".to_string());
+        let _ = exclude;
+        let active = current_filter.contains("debug") || current_filter.contains("trace");
 
         Ok(json!({
             "active": active,
@@ -786,17 +781,17 @@ impl ControlRpc {
     pub async fn gethealth(&self, _params: &Value) -> RpcResult<Value> {
         debug!("RPC: gethealth");
 
-        let checker = HealthChecker::new();
+        let checker = HealthChecker::new().with_uptime(self.start_time.elapsed().as_secs());
         let network_healthy = self
             .network_manager
             .as_ref()
             .map(|nm| nm.is_network_active())
-            .unwrap_or(true);
+            .unwrap_or(false);
         let storage_healthy = self
             .storage
             .as_ref()
             .and_then(|s| s.check_storage_bounds().ok())
-            .unwrap_or(true);
+            .unwrap_or(false);
 
         let (network_metrics, storage_metrics) = if let Some(ref metrics) = self.metrics {
             let collected = metrics.collect();
@@ -841,5 +836,48 @@ impl ControlRpc {
 impl Default for ControlRpc {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod help_health_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn help_logging_health_and_memory_follow_the_locks() {
+        unsafe {
+            std::env::set_var("RUST_LOG", "info");
+        }
+        let rpc = ControlRpc::new();
+        let help = rpc.help(&json!(["getblock"])).await.unwrap();
+        let text = help.as_str().unwrap();
+        assert!(text.contains("getblock"));
+        assert!(!text.contains("Unknown command"));
+
+        let quiet = rpc.logging(&json!([])).await.unwrap();
+        assert_eq!(quiet["active"], false);
+        let net_only = rpc.logging(&json!([[], ["net"]])).await.unwrap();
+        assert_eq!(net_only["active"], false);
+        let excluded = rpc.logging(&json!([[], ["all"]])).await.unwrap();
+        assert_eq!(excluded["active"], false);
+
+        let health = rpc.gethealth(&json!([])).await.unwrap();
+        let uptime = rpc.uptime(&json!([])).await.unwrap();
+        assert_eq!(health["uptime_seconds"], uptime);
+        let storage = health["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|component| component["component"] == "storage")
+            .unwrap();
+        assert_ne!(storage["status"], "Healthy");
+
+        let memory = rpc.getmemoryinfo(&json!(["stats"])).await.unwrap();
+        assert!(memory.get("used").is_some());
+        assert_eq!(memory["locked"]["locked"], 0);
+        assert!(memory["locked"].get("used").is_none());
+        assert!(memory.get("chunks_used").is_none());
+        assert_eq!(rpc.getmemoryinfo(&json!(["mallocinfo"])).await.unwrap(), "");
     }
 }

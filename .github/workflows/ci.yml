@@ -30,6 +30,9 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
   CARGO_INCREMENTAL: '0'
+  # The runner image has a distro rustc on PATH and no rustup. The installer
+  # refuses that unless this is set, which fails the job before compile.
+  RUSTUP_INIT_SKIP_PATH_CHECK: 'yes'
   # Linker flags set per-run in setup (mold / working lld / default bfd). Do not hardcode -fuse-ld=lld:
   # stale lld packages (e.g. libLLVM.so.19.1) break all builds on upgraded runners.
   # Parent of per-run dirs: .../<run_id>/target and .../<run_id>/tmp.

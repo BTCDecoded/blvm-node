@@ -202,8 +202,7 @@ fn output_is_dust(output: &blvm_protocol::TransactionOutput) -> bool {
     } else {
         5
     };
-    let spend = if blvm_protocol::witness::extract_witness_version(&output.script_pubkey).is_some()
-    {
+    let spend = if blvm_protocol::witness::is_any_witness_program(output.script_pubkey.as_ref()) {
         32 + 4 + 1 + (107 / 4) + 4
     } else {
         32 + 4 + 1 + 107 + 4
@@ -1430,6 +1429,30 @@ impl MempoolManager {
         }
     }
 
+    /// Dry-run admission against `utxo_set`. Does not insert the transaction.
+    ///
+    /// `Ok(fee_satoshis)` means the prevouts are present and the outputs are not dust.
+    /// `Err` is the reject reason. The fee is zero on a reject.
+    pub fn preview_accept(
+        &self,
+        tx: &Transaction,
+        utxo_set: &UtxoSet,
+    ) -> Result<u64, &'static str> {
+        if tx.inputs.is_empty() || tx.outputs.is_empty() {
+            return Err("bad-txns-vin-empty");
+        }
+        if tx.outputs.iter().any(output_is_dust) {
+            return Err("dust");
+        }
+        let missing = tx.inputs.iter().any(|input| {
+            utxo_set.get(&input.prevout).is_none() && !self.mempool_creates(&input.prevout)
+        });
+        if missing {
+            return Err("missing-inputs");
+        }
+        Ok(self.calculate_transaction_fee(tx, utxo_set))
+    }
+
     /// Add transaction to mempool
     /// Uses interior mutability so it can be called with Arc<MempoolManager> (re-broadcast, sendrawtransaction)
     pub fn add_transaction(&self, tx: Transaction) -> Result<bool> {
@@ -2139,6 +2162,25 @@ impl MempoolManager {
         }
     }
 
+    /// Fee rates for the pooled transactions. Looks up those transactions' prevouts.
+    /// An empty pool returns before any UTXO database read.
+    pub fn fee_rates_for_storage(&self, storage: Option<&crate::storage::Storage>) -> Vec<u64> {
+        if self.size() == 0 {
+            return Vec::new();
+        }
+        let mut utxo_set = UtxoSet::default();
+        if let Some(storage) = storage {
+            for tx in self.get_transactions() {
+                for input in &tx.inputs {
+                    if let Ok(Some(utxo)) = storage.utxos().get_utxo(&input.prevout) {
+                        utxo_set.insert(input.prevout, std::sync::Arc::new(utxo));
+                    }
+                }
+            }
+        }
+        self.fee_rates_sat_vb(&utxo_set)
+    }
+
     /// Fee rates (sat/vB) for mempool transactions after refreshing the fee index.
     pub fn fee_rates_sat_vb(&self, utxo_set: &UtxoSet) -> Vec<u64> {
         self.update_fee_index(utxo_set);
@@ -2603,6 +2645,22 @@ impl MempoolManager {
 
         file.sync_all()?;
         Ok(())
+    }
+
+    /// Mempool byte cap from `max_mempool_mb`. An unset policy uses the default of 300 MiB.
+    pub(crate) fn max_mempool_bytes(&self) -> u64 {
+        self.policy_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_default()
+            .max_mempool_mb
+            .saturating_mul(1_048_576)
+    }
+
+    /// Relay floor as BTC per kvB. Rate 1 sat/vB is 0.00001.
+    pub(crate) fn min_relay_fee_btc_per_kvb(&self) -> f64 {
+        self.min_relay_fee_rate_sat_per_vb() as f64 * 1_000.0 / 100_000_000.0
     }
 
     /// Configured relay floor in satoshis per virtual byte. An unset policy uses the default of 1.

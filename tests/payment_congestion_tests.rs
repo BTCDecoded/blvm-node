@@ -165,7 +165,26 @@ fn test_add_transaction_batch_full() {
     );
 }
 
-// remove_transaction_from_batch is not implemented — no dedicated test yet.
+#[test]
+fn remove_one_transaction_leaves_the_other() {
+    let mut manager = create_test_congestion_manager();
+    let batch_id = "drop_one";
+    manager.create_batch(batch_id, Some(10));
+    manager
+        .add_to_batch(batch_id, create_test_pending_transaction("tx_1", 10000))
+        .unwrap();
+    manager
+        .add_to_batch(batch_id, create_test_pending_transaction("tx_2", 20000))
+        .unwrap();
+
+    manager.remove_from_batch(batch_id, "tx_1").unwrap();
+    let batch = manager.get_batch(batch_id).unwrap();
+    assert_eq!(batch.transactions.len(), 1);
+    assert_eq!(batch.transactions[0].tx_id, "tx_2");
+
+    let missing = manager.remove_from_batch(batch_id, "tx_1");
+    assert!(missing.is_err());
+}
 
 /// Test broadcast batch
 #[test]
@@ -272,4 +291,83 @@ fn test_adjust_fee_rate() {
     // Without mempool manager, it will fail
     // This test is skipped for unit tests without mempool manager
     // Integration tests will cover this functionality
+}
+
+#[test]
+fn one_normal_transaction_is_not_ready_to_broadcast() {
+    let mut manager = create_test_congestion_manager();
+    manager.create_batch("hold", Some(5));
+    let mut tx = create_test_pending_transaction("one", 1000);
+    tx.deadline = Some(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3_600,
+    );
+    manager.add_to_batch("hold", tx).unwrap();
+    manager.broadcast_batch("hold").unwrap();
+    let batch = manager.get_batch("hold").unwrap();
+    assert!(!batch.ready_to_broadcast);
+    assert!(batch.broadcast_at.is_none());
+}
+
+#[test]
+fn empty_pool_does_not_report_the_minimum_as_a_measured_rate() {
+    use blvm_node::node::mempool::MempoolManager;
+
+    let mempool = Arc::new(MempoolManager::new());
+    let mut manager = CongestionManager::new(
+        Arc::new(CovenantEngine::new()),
+        Some(mempool),
+        None,
+        BatchConfig::default(),
+    );
+    let metrics = manager.check_congestion().unwrap();
+    assert_eq!(metrics.mempool_size, 0);
+    assert_eq!(metrics.avg_fee_rate, 0);
+    assert_eq!(metrics.median_fee_rate, 0);
+    assert_ne!(metrics.estimated_blocks, 1);
+}
+
+#[test]
+fn an_urgent_batch_is_stored_in_the_mempool() {
+    use blvm_node::node::mempool::MempoolManager;
+    use blvm_protocol::opcodes::OP_1;
+    use blvm_protocol::{OutPoint, UTXO, UtxoSet};
+
+    let mempool = Arc::new(MempoolManager::new());
+    let mut policy = blvm_node::config::mempool::MempoolPolicyConfig::default();
+    policy.min_tx_fee = 0;
+    mempool.set_policy_config(Some(policy));
+    let funding = OutPoint {
+        hash: [0u8; 32],
+        index: 0,
+    };
+    let utxo = UTXO {
+        value: 100_000,
+        script_pubkey: vec![OP_1].into(),
+        height: 1,
+        is_coinbase: false,
+    };
+    let mut set = UtxoSet::default();
+    set.insert(funding, Arc::new(utxo));
+    mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set)));
+
+    let mut manager = CongestionManager::new(
+        Arc::new(CovenantEngine::new()),
+        Some(Arc::clone(&mempool)),
+        None,
+        BatchConfig::default(),
+    );
+    manager.create_batch("go", Some(5));
+    let mut tx = create_test_pending_transaction("urgent-tx", 1_000);
+    tx.priority = TransactionPriority::Urgent;
+    tx.outputs[0].script = vec![OP_1];
+    manager.add_to_batch("go", tx).unwrap();
+    manager.broadcast_batch("go").unwrap();
+    let batch = manager.get_batch("go").unwrap();
+    assert!(batch.ready_to_broadcast);
+    assert!(batch.broadcast_at.is_some());
+    assert_eq!(mempool.size(), 1);
 }

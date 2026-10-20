@@ -203,7 +203,7 @@ fn test_distribute_pool() {
 
     assert!(result.is_ok(), "Distribution should succeed");
     let (new_state, covenant_proof) = result.unwrap();
-    assert_eq!(new_state.total_balance, 30000); // 45000 - 15000
+    assert_eq!(new_state.total_balance, 30150); // 45000 - 14850; 1% fee stays in the pool
     assert!(covenant_proof.template_hash.len() == 32);
 
     // Check participant balances updated
@@ -212,14 +212,14 @@ fn test_distribute_pool() {
         .iter()
         .find(|p| p.participant_id == "participant_1")
         .unwrap();
-    assert_eq!(p1.balance, 5000); // 10000 - 5000
+    assert_eq!(p1.balance, 5050); // 10000 - 4950 net
 
     let p2 = new_state
         .participants
         .iter()
         .find(|p| p.participant_id == "participant_2")
         .unwrap();
-    assert_eq!(p2.balance, 10000); // 20000 - 10000
+    assert_eq!(p2.balance, 10100); // 20000 - 9900 net
 }
 
 /// Test distribute fails when amount exceeds balance

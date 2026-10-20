@@ -232,7 +232,7 @@ impl SettlementMonitor {
         let transactions = mempool_manager.get_transactions();
         for tx in transactions {
             if self.transaction_matches_outputs(&tx, expected_outputs) {
-                let tx_hash = crate::network::txhash::calculate_txid(&tx);
+                let tx_hash = blvm_protocol::block::calculate_tx_id(&tx);
                 #[cfg(feature = "ctv")]
                 if let Some(ref cache) = self.tx_cache {
                     cache.store(tx_hash, tx.clone());
@@ -401,13 +401,18 @@ impl SettlementMonitor {
             return false;
         }
 
-        // Check if all expected outputs are present (order-independent)
+        // Each expected output consumes one transaction output.
+        let mut used = vec![false; tx.outputs.len()];
         for expected_output in &expected_tx_outputs {
             let mut found = false;
-            for tx_output in &tx.outputs {
+            for (i, tx_output) in tx.outputs.iter().enumerate() {
+                if used[i] {
+                    continue;
+                }
                 if tx_output.value == expected_output.value
                     && tx_output.script_pubkey == expected_output.script_pubkey
                 {
+                    used[i] = true;
                     found = true;
                     break;
                 }

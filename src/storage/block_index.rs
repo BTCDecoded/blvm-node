@@ -143,6 +143,18 @@ impl BlockIndex {
         Ok(())
     }
 
+    /// Clear an invalid index status so the block can be the tip again.
+    pub fn clear_invalid_status(&self, hash: &Hash) -> Result<()> {
+        if let Some(mut entry) = self.get(hash)? {
+            if entry.status == BlockIndexStatus::Invalid {
+                entry.status = BlockIndexStatus::Valid;
+                let data = bincode::serialize(&entry)?;
+                self.entries.insert(hash.as_slice(), &data)?;
+            }
+        }
+        Ok(())
+    }
+
     /// All indexed blocks that are chain tips (no other indexed block lists them as parent).
     pub fn chain_tips(&self) -> Result<Vec<(Hash, BlockIndexEntry)>> {
         let mut all: Vec<(Hash, BlockIndexEntry)> = Vec::new();

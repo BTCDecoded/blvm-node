@@ -185,25 +185,32 @@ async fn add_to_batch(
         );
     }
 
-    let priority_str = body
-        .get("priority")
-        .and_then(|p| p.as_str())
-        .unwrap_or("normal");
-
-    let priority = match priority_str.to_lowercase().as_str() {
-        "urgent" => TransactionPriority::Urgent,
-        "high" => TransactionPriority::High,
-        "low" => TransactionPriority::Low,
-        _ => TransactionPriority::Normal,
+    let priority = match body.get("priority").and_then(|p| p.as_str()) {
+        None | Some("normal") => TransactionPriority::Normal,
+        Some("urgent") => TransactionPriority::Urgent,
+        Some("high") => TransactionPriority::High,
+        Some("low") => TransactionPriority::Low,
+        Some(other) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                &format!("unknown priority {other}"),
+                request_id,
+            );
+        }
     };
 
     let deadline = body.get("deadline").and_then(|d| d.as_u64());
 
-    let tx_id = body
-        .get("tx_id")
-        .and_then(|id| id.as_str())
-        .unwrap_or("unknown")
-        .to_string();
+    let Some(tx_id) = body.get("tx_id").and_then(|id| id.as_str()) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "tx_id is required",
+            request_id,
+        );
+    };
+    let tx_id = tx_id.to_string();
 
     let created_at = current_timestamp();
 

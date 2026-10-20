@@ -713,6 +713,9 @@ impl TxIndex {
             return Ok(());
         }
         let mut spends = self.spend_entries(&address_hash)?;
+        if spends.iter().any(|(hash, _)| hash == tx_hash) {
+            return Ok(());
+        }
         spends.push((*tx_hash, value));
         let data = bincode::serialize(&spends)?;
         self.tree_insert_encoded(&self.address_input_index, &address_hash, &data)?;
@@ -1014,5 +1017,19 @@ mod tests {
                 .unwrap();
             assert!(wrapped.is_empty());
         }
+    }
+
+    #[test]
+    fn a_second_spend_record_does_not_add_the_value_again() {
+        let (_dir, index) = open_index(IndexingConfig {
+            enable_address_index: true,
+            strategy: IndexingStrategy::Eager,
+            ..Default::default()
+        });
+        let script = vec![0x51];
+        let tx_hash = [0x44u8; 32];
+        index.note_spend(&script, 50_000, &tx_hash).unwrap();
+        index.note_spend(&script, 50_000, &tx_hash).unwrap();
+        assert_eq!(index.spent_value_for_script(&script).unwrap(), 50_000);
     }
 }

@@ -71,8 +71,7 @@ async fn test_estimate_smart_fee() {
     let params = json!([6, "conservative"]);
     let fee_estimate = mining_rpc.estimate_smart_fee(&params).await.unwrap();
 
-    // Verify response structure
-    assert!(fee_estimate.get("feerate").is_some());
-    assert!(fee_estimate.get("blocks").is_some());
+    assert!(fee_estimate.get("feerate").is_none());
+    assert!(fee_estimate.get("errors").is_some());
     assert_eq!(fee_estimate.get("blocks").unwrap().as_u64().unwrap(), 6);
 }

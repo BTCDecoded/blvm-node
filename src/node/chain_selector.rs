@@ -96,7 +96,12 @@ mod tests {
             .insert(&second, 1, &parent, BlockIndexStatus::Valid)
             .unwrap();
 
-        storage.chain().update_tip(&tip, &header(), 1).unwrap();
+        let tip_header = header();
+        storage
+            .chain()
+            .cache_block_chainwork(&tip_header.prev_block_hash, &tip_header, 0)
+            .unwrap();
+        storage.chain().update_tip(&tip, &tip_header, 1).unwrap();
         storage.chain().store_chainwork(&first, work).unwrap();
         storage.chain().store_chainwork(&second, work).unwrap();
         storage

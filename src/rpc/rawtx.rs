@@ -32,7 +32,7 @@ use tracing::{debug, warn};
 ///
 /// Returns the decoded payload (without the 4-byte checksum suffix).
 /// Returns `None` if the input is not valid Base58 or the checksum does not match.
-fn base58check_decode(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn base58check_decode(s: &str) -> Option<Vec<u8>> {
     const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
     // Count leading '1's (each encodes a leading zero byte).
@@ -69,6 +69,37 @@ fn base58check_decode(s: &str) -> Option<Vec<u8>> {
         return None;
     }
     Some(payload.to_vec())
+}
+
+pub(crate) fn base58check_encode(payload: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let hash1 = Sha256::digest(payload);
+    let hash2 = Sha256::digest(hash1);
+    let mut data = payload.to_vec();
+    data.extend_from_slice(&hash2[..4]);
+    let mut zeros = 0usize;
+    while zeros < data.len() && data[zeros] == 0 {
+        zeros += 1;
+    }
+    let mut digits = vec![0u8];
+    for byte in &data[zeros..] {
+        let mut carry = *byte as u32;
+        for digit in digits.iter_mut() {
+            carry += (*digit as u32) * 256;
+            *digit = (carry % 58) as u8;
+            carry /= 58;
+        }
+        while carry > 0 {
+            digits.push((carry % 58) as u8);
+            carry /= 58;
+        }
+    }
+    let mut out = "1".repeat(zeros);
+    for digit in digits.iter().rev() {
+        out.push(ALPHABET[*digit as usize] as char);
+    }
+    out
 }
 
 /// Decode a Bitcoin address to `script_pubkey` (Bech32/Bech32m and legacy Base58Check).
@@ -122,24 +153,24 @@ pub(crate) fn address_string_to_script_pubkey(address: &str) -> Result<Vec<u8>, 
         let hash: &[u8; 20] = decoded[1..21]
             .try_into()
             .expect("slice length checked above");
-        match version {
-            0x00 => {
-                let mut script = vec![OP_DUP, OP_HASH160, PUSH_20_BYTES];
-                script.extend_from_slice(hash);
-                script.extend_from_slice(&[OP_EQUALVERIFY, OP_CHECKSIG]);
-                Ok(script)
-            }
-            0x05 => {
-                let mut script = vec![OP_HASH160, PUSH_20_BYTES];
-                script.extend_from_slice(hash);
-                script.push(OP_EQUAL);
-                Ok(script)
-            }
-            _ => Err(RpcError::invalid_address_format(
+        let p2pkh = matches!(version, 0x00 | 0x6f);
+        let p2sh = matches!(version, 0x05 | 0xc4);
+        if p2pkh {
+            let mut script = vec![OP_DUP, OP_HASH160, PUSH_20_BYTES];
+            script.extend_from_slice(hash);
+            script.extend_from_slice(&[OP_EQUALVERIFY, OP_CHECKSIG]);
+            Ok(script)
+        } else if p2sh {
+            let mut script = vec![OP_HASH160, PUSH_20_BYTES];
+            script.extend_from_slice(hash);
+            script.push(OP_EQUAL);
+            Ok(script)
+        } else {
+            Err(RpcError::invalid_address_format(
                 address,
-                Some("Base58Check version must be 0x00 (P2PKH) or 0x05 (P2SH)"),
+                Some("Base58Check version is not a P2PKH or P2SH version for this network"),
                 None,
-            )),
+            ))
         }
     }
 }
@@ -515,6 +546,19 @@ impl RawTxRpc {
             None
         };
 
+        let mempool = self
+            .mempool
+            .clone()
+            .ok_or_else(|| RpcError::internal_error("mempool is not available"))?;
+        let utxo_set = if let Some(storage) = &self.storage {
+            storage
+                .utxos()
+                .get_all_utxos()
+                .map_err(|e| RpcError::internal_error(format!("UTXO lookup failed: {e}")))?
+        } else {
+            blvm_protocol::UtxoSet::default()
+        };
+
         // Process each transaction
         let mut results = Vec::new();
 
@@ -543,15 +587,24 @@ impl RawTxRpc {
             let consensus = ConsensusProof::new();
             let validation_result = consensus.validate_transaction(tx);
 
-            let allowed = matches!(
+            let consensus_ok = matches!(
                 validation_result,
                 Ok(blvm_protocol::ValidationResult::Valid)
             );
+            let (fee_satoshis, admission_reason) = match mempool.preview_accept(tx, &utxo_set) {
+                Ok(fee) => (fee, None),
+                Err(reason) => (0, Some(reason.to_string())),
+            };
+            let allowed = consensus_ok && admission_reason.is_none();
             let reject_reason = if !allowed {
-                match validation_result {
-                    Ok(blvm_protocol::ValidationResult::Invalid(reason)) => Some(reason),
-                    Err(e) => Some(format!("Validation error: {e}")),
-                    _ => None,
+                if !consensus_ok {
+                    match validation_result {
+                        Ok(blvm_protocol::ValidationResult::Invalid(reason)) => Some(reason),
+                        Err(e) => Some(format!("Validation error: {e}")),
+                        _ => Some("rejected".to_string()),
+                    }
+                } else {
+                    admission_reason
                 }
             } else {
                 None
@@ -567,19 +620,7 @@ impl RawTxRpc {
                 Self::calculate_segwit_sizes(tx, witness_arg);
             let _ = (base_size, total_size, weight);
 
-            // Calculate fee using mempool manager if available
-            let fee_satoshis = if let Some(ref mempool) = self.mempool {
-                if let Some(ref storage) = self.storage {
-                    let utxo_set = storage.utxos().get_all_utxos().unwrap_or_default();
-                    mempool.calculate_transaction_fee(tx, &utxo_set)
-                } else {
-                    1000 // Default 1000 satoshis if no storage
-                }
-            } else {
-                1000 // Default 1000 satoshis if no mempool
-            };
-
-            let fee_btc = fee_satoshis as f64 / 100_000_000.0; // Convert to BTC
+            let fee_btc = fee_satoshis as f64 / 100_000_000.0;
 
             // Calculate effective fee rate (satoshis per kvB)
             // effective-feerate = (fee in satoshis) / (vsize in bytes) * 1000
@@ -879,6 +920,32 @@ impl RawTxRpc {
         let tx_hex = Self::serialize_transaction_with_witness(tx, witnesses);
 
         if verbose {
+            let vin = tx
+                .inputs
+                .iter()
+                .enumerate()
+                .map(|(i, input)| {
+                    let txinwitness: Vec<String> = witnesses
+                        .and_then(|stacks| stacks.get(i))
+                        .map(|stack| {
+                            stack
+                                .iter()
+                                .map(|item| hex::encode(item.as_slice()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    json!({
+                        "txid": Self::rpc_txid(&input.prevout.hash),
+                        "vout": input.prevout.index,
+                        "scriptSig": {
+                            "asm": "",
+                            "hex": hex::encode(&input.script_sig)
+                        },
+                        "txinwitness": txinwitness,
+                        "sequence": input.sequence
+                    })
+                })
+                .collect::<Vec<_>>();
             Ok(json!({
                 "txid": txid_hex,
                 "hash": hash_hex,
@@ -887,15 +954,7 @@ impl RawTxRpc {
                 "vsize": vsize,
                 "weight": weight,
                 "locktime": tx.lock_time,
-                "vin": tx.inputs.iter().map(|input| json!({
-                    "txid": Self::rpc_txid(&input.prevout.hash),
-                    "vout": input.prevout.index,
-                    "scriptSig": {
-                        "asm": "",
-                        "hex": hex::encode(&input.script_sig)
-                    },
-                    "sequence": input.sequence
-                })).collect::<Vec<_>>(),
+                "vin": vin,
                 "vout": tx.outputs.iter().enumerate().map(|(i, output)| json!({
                     "value": output.value as f64 / 100_000_000.0,
                     "n": i,
@@ -903,7 +962,7 @@ impl RawTxRpc {
                         "asm": "",
                         "hex": hex::encode(&output.script_pubkey),
                         "reqSigs": 1,
-                        "type": "pubkeyhash",
+                        "type": script_pubkey_type(output.script_pubkey.as_ref()),
                         "addresses": []
                     }
                 })).collect::<Vec<_>>(),
@@ -938,10 +997,12 @@ impl RawTxRpc {
 
         if let Some(ref storage) = self.storage {
             if let Ok(Some(tx)) = storage.transactions().get_transaction(&txid_array) {
-                let witnesses = self
+                let block_witness = Self::block_witness_for_tx(storage, &txid_array);
+                let mempool_witness = self
                     .mempool
                     .as_ref()
                     .and_then(|m| m.get_transaction_witnesses(&txid_array));
+                let witnesses = block_witness.or(mempool_witness);
                 Self::format_getrawtransaction_response(&tx, witnesses.as_deref(), verbose)
             } else if let Some((block_hash, height)) =
                 crate::module::pipeline::try_lookup_block_for_txids(&[txid.to_string()])
@@ -992,6 +1053,11 @@ impl RawTxRpc {
             .get(1)
             .and_then(|p| p.as_u64())
             .ok_or_else(|| RpcError::invalid_params("Missing n parameter"))?;
+        if n > u32::MAX as u64 {
+            return Err(RpcError::invalid_params(
+                "n does not fit in 4 bytes".to_string(),
+            ));
+        }
 
         let include_mempool = param_bool_default(params, 2, true);
 
@@ -1097,15 +1163,14 @@ impl RawTxRpc {
                         "coinbase": utxo.is_coinbase
                     }))
                 }
-                Ok(Ok(Ok(None))) | Ok(Ok(Err(_))) | Ok(Err(_)) => {
-                    // UTXO not found or error - return null (normal case)
-                    Ok(Value::Null)
-                }
-                Err(_) => {
-                    // Timeout - log and return null (graceful degradation)
-                    warn!("Timeout getting UTXO from storage");
-                    Ok(Value::Null)
-                }
+                Ok(Ok(Ok(None))) => Ok(Value::Null),
+                Ok(Ok(Err(e))) => Err(RpcError::internal_error(format!("UTXO lookup failed: {e}"))),
+                Ok(Err(e)) => Err(RpcError::internal_error(format!(
+                    "UTXO lookup task failed: {e}"
+                ))),
+                Err(_) => Err(RpcError::internal_error(
+                    "Timeout getting UTXO from storage".to_string(),
+                )),
             }
         } else {
             Ok(json!(null))
@@ -1271,13 +1336,8 @@ impl RawTxRpc {
 
             let header_hash = block_hash_from_header(&merkle_block.header);
             if let Some(blockhash_str) = blockhash_opt {
-                let blockhash_bytes = hex::decode(blockhash_str)
+                let expected = crate::storage::hashing::hash_from_rpc_hex(blockhash_str)
                     .map_err(|e| RpcError::invalid_params(format!("Invalid blockhash: {e}")))?;
-                if blockhash_bytes.len() != 32 {
-                    return Err(RpcError::invalid_params("Invalid blockhash length"));
-                }
-                let mut expected = [0u8; 32];
-                expected.copy_from_slice(&blockhash_bytes);
                 if expected != header_hash {
                     return Ok(json!([]));
                 }
@@ -1301,7 +1361,7 @@ impl RawTxRpc {
                 return Ok(json!([]));
             }
 
-            let txids: Vec<String> = matched.into_iter().map(hex::encode).collect();
+            let txids: Vec<String> = matched.iter().map(Self::rpc_txid).collect();
             Ok(json!(txids))
         } else {
             Err(RpcError::invalid_params(
@@ -1360,7 +1420,7 @@ impl RawTxRpc {
                         "scriptPubKey": {
                             "asm": hex::encode(&output.script_pubkey),
                             "hex": hex::encode(&output.script_pubkey),
-                            "type": "nonstandard" // Would need script analysis
+                            "type": script_pubkey_type(output.script_pubkey.as_ref())
                         }
                     })).collect::<Vec<_>>(),
                     "hex": if include_hex { hex::encode(&wire.bytes) } else { "".to_string() },
@@ -1437,7 +1497,7 @@ impl RawTxRpc {
                         "scriptPubKey": {
                             "asm": hex::encode(&output.script_pubkey),
                             "hex": hex::encode(&output.script_pubkey),
-                            "type": "nonstandard"
+                            "type": script_pubkey_type(output.script_pubkey.as_ref())
                         }
                     })).collect::<Vec<_>>(),
                     "hex": if include_hex { hex::encode(&wire.bytes) } else { "".to_string() },
@@ -1456,6 +1516,30 @@ impl RawTxRpc {
             false, // Not in mempool
             Some("Transaction not found in mempool or blockchain"),
         ))
+    }
+
+    fn block_witness_for_tx(
+        storage: &Storage,
+        txid: &blvm_protocol::Hash,
+    ) -> Option<Vec<blvm_protocol::segwit::Witness>> {
+        use blvm_protocol::block::calculate_tx_id;
+        let block_hash = storage
+            .transactions()
+            .get_metadata(txid)
+            .ok()
+            .flatten()?
+            .block_hash;
+        let block = storage.blocks().get_block(&block_hash).ok().flatten()?;
+        let index = block
+            .transactions
+            .iter()
+            .position(|stored| calculate_tx_id(stored) == *txid)?;
+        storage
+            .blocks()
+            .get_witness(&block_hash)
+            .ok()
+            .flatten()
+            .and_then(|all| all.get(index).cloned())
     }
 
     fn rpc_txid(hash: &[u8; 32]) -> String {
@@ -1524,6 +1608,11 @@ impl RawTxRpc {
         let locktime = param_u64_default(params, 2, 0);
         let replaceable = param_bool_default(params, 3, true);
         let version = param_u64_default(params, 4, 2);
+        if version > u32::MAX as u64 {
+            return Err(RpcError::invalid_params(
+                "version does not fit in 4 bytes".to_string(),
+            ));
+        }
 
         // Build transaction inputs
         use blvm_protocol::OutPoint;
@@ -1557,10 +1646,20 @@ impl RawTxRpc {
                 .get("vout")
                 .and_then(|v| v.as_u64())
                 .ok_or_else(|| RpcError::invalid_params(format!("Input {idx} missing 'vout'")))?;
+            if vout > u32::MAX as u64 {
+                return Err(RpcError::invalid_params(format!(
+                    "Input {idx} vout does not fit in 4 bytes"
+                )));
+            }
 
             // Sequence: use provided value, or set based on RBF
             let sequence = if let Some(seq_val) = input_obj.get("sequence").and_then(|v| v.as_u64())
             {
+                if seq_val > u32::MAX as u64 {
+                    return Err(RpcError::invalid_params(format!(
+                        "Input {idx} sequence does not fit in 4 bytes"
+                    )));
+                }
                 seq_val as u32
             } else if replaceable {
                 0xFFFFFFFD // MAX_BIP125_RBF_SEQUENCE
@@ -1653,10 +1752,9 @@ impl RawTxRpc {
                         RpcError::invalid_params(format!("Output {idx} 'address' must be string"))
                     })?;
 
-                    // Get amount from the same object (key-value pair)
                     let amount = output_obj
-                        .values()
-                        .find_map(|v| {
+                        .get("amount")
+                        .and_then(|v| {
                             v.as_f64()
                                 .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
                         })
@@ -2016,6 +2114,10 @@ mod createraw_locks {
             nonce: 1,
         };
         storage.chain().initialize(&header).unwrap();
+        storage
+            .chain()
+            .cache_block_chainwork(&header.prev_block_hash, &header, 0)
+            .unwrap();
         let tip = storage.chain().get_tip_hash().unwrap().unwrap();
         storage.chain().update_tip(&tip, &header, 2000).unwrap();
         let created = OutPoint {
@@ -2185,5 +2287,53 @@ mod createraw_locks {
             .unwrap();
         assert_eq!(decoded["vin"][0]["txinwitness"][0], "51");
         assert_eq!(decoded["vout"][0]["scriptPubKey"]["type"], "nulldata");
+    }
+
+    fn base58check(payload: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        let hash1 = Sha256::digest(payload);
+        let hash2 = Sha256::digest(hash1);
+        let mut data = payload.to_vec();
+        data.extend_from_slice(&hash2[..4]);
+        let mut zeros = 0usize;
+        while zeros < data.len() && data[zeros] == 0 {
+            zeros += 1;
+        }
+        let mut digits = vec![0u8];
+        for byte in &data[zeros..] {
+            let mut carry = *byte as u32;
+            for digit in digits.iter_mut() {
+                carry += (*digit as u32) * 256;
+                *digit = (carry % 58) as u8;
+                carry /= 58;
+            }
+            while carry > 0 {
+                digits.push((carry % 58) as u8);
+                carry /= 58;
+            }
+        }
+        let mut out = "1".repeat(zeros);
+        for digit in digits.iter().rev() {
+            out.push(ALPHABET[*digit as usize] as char);
+        }
+        out
+    }
+
+    #[test]
+    fn testnet_p2pkh_and_regtest_p2sh_become_scripts() {
+        use blvm_protocol::opcodes::{OP_DUP, OP_EQUAL, OP_HASH160};
+        let mut p2pkh = vec![0x6f];
+        p2pkh.extend_from_slice(&[0x11; 20]);
+        let script = address_string_to_script_pubkey(&base58check(&p2pkh)).unwrap();
+        assert_eq!(script[0], OP_DUP);
+        assert_eq!(&script[3..23], &[0x11; 20]);
+
+        let mut p2sh = vec![0xc4];
+        p2sh.extend_from_slice(&[0x22; 20]);
+        let script = address_string_to_script_pubkey(&base58check(&p2sh)).unwrap();
+        assert_eq!(script[0], OP_HASH160);
+        assert_eq!(*script.last().unwrap(), OP_EQUAL);
+        assert_eq!(&script[2..22], &[0x22; 20]);
     }
 }

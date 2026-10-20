@@ -142,8 +142,9 @@ async fn test_rpc_control_edge_cases() {
 
     let params_invalid = json!([{"invalid": "params"}]);
     let logging = control.logging(&params_invalid).await.expect("logging");
-    assert_eq!(logging["active"], true);
-    assert!(logging["current_filter"].is_string());
+    let filter = logging["current_filter"].as_str().expect("filter");
+    let expect_active = filter.contains("debug") || filter.contains("trace");
+    assert_eq!(logging["active"], expect_active);
 }
 
 #[tokio::test]

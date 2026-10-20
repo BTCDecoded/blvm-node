@@ -458,8 +458,14 @@ impl PoolEngine {
 
             let mut total_distributed = 0u64;
             let mut distribution_outputs = Vec::new();
-            let distribution_clone = distribution.clone();
 
+            if pool_state.config.pool_fee_percent > 100 {
+                return Err(PaymentError::ProcessingError(
+                    "pool_fee_percent above 100".to_string(),
+                ));
+            }
+
+            let mut net_payments = Vec::new();
             for (participant_id, amount) in &distribution {
                 let participant = pool_state
                     .participants
@@ -472,7 +478,7 @@ impl PoolEngine {
                         ))
                     })?;
 
-                // Apply pool fee
+                // Apply pool fee. The fee stays in the participant balance.
                 let fee_amount = (*amount as u64 * pool_state.config.pool_fee_percent as u64) / 100;
                 let net_amount = *amount - fee_amount;
 
@@ -480,6 +486,7 @@ impl PoolEngine {
                     script: participant.script_pubkey.clone(),
                     amount: Some(net_amount),
                 });
+                net_payments.push((participant_id.clone(), net_amount));
 
                 total_distributed += *amount;
             }
@@ -500,13 +507,13 @@ impl PoolEngine {
 
             // Update pool state (reduce balances)
             let mut new_state = pool_state.clone();
-            for (participant_id, amount) in distribution_clone {
+            for (participant_id, net_amount) in net_payments {
                 if let Some(participant) = new_state
                     .participants
                     .iter_mut()
                     .find(|p| p.participant_id == participant_id)
                 {
-                    participant.balance = participant.balance.saturating_sub(amount);
+                    participant.balance = participant.balance.saturating_sub(net_amount);
                 }
             }
             new_state.total_balance = new_state.participants.iter().map(|p| p.balance).sum();
@@ -599,11 +606,11 @@ impl PoolEngine {
                 .iter_mut()
                 .find(|p| p.participant_id == participant_id)
             {
-                p.balance -= exit_amount;
+                p.balance = p.balance.saturating_sub(exit_amount);
             }
 
-            // Remove participant if balance is zero
-            new_participants.retain(|p| p.balance >= pool_state.config.min_balance);
+            // A remainder below min_balance stays in the pool until a later exit pays it.
+            new_participants.retain(|p| p.balance > 0);
 
             let mut new_state = pool_state.clone();
             new_state.participants = new_participants;

@@ -82,6 +82,12 @@ pub struct NodeApiImpl {
     module_router: Option<Arc<crate::module::inter_module::router::ModuleRouter>>,
     /// Current module ID (for API registration)
     current_module_id_for_api: Option<String>,
+    /// Health a module reported for itself. This is what `get_module_health` returns.
+    reported_health: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, crate::module::process::monitor::ModuleHealth>,
+        >,
+    >,
 }
 
 impl NodeApiImpl {
@@ -113,6 +119,7 @@ impl NodeApiImpl {
             module_api_registry: None,
             module_router: None,
             current_module_id_for_api: None,
+            reported_health: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -147,6 +154,7 @@ impl NodeApiImpl {
             module_api_registry: None,
             module_router: None,
             current_module_id_for_api: None,
+            reported_health: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -184,6 +192,7 @@ impl NodeApiImpl {
             module_api_registry: None,
             module_router: None,
             current_module_id_for_api: None,
+            reported_health: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -375,7 +384,7 @@ impl NodeApiImpl {
         coinbase_outputs: Option<Vec<(i64, Vec<u8>)>>,
         declared_txids: Option<&[Hash]>,
     ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError> {
-        let height = self
+        let tip_height = self
             .storage
             .chain()
             .get_height()
@@ -383,6 +392,7 @@ impl NodeApiImpl {
             .ok_or_else(|| {
                 ModuleError::OperationError(module_error_msg::CHAIN_NOT_INITIALIZED.to_string())
             })?;
+        let height = tip_height.saturating_add(1);
 
         let prev_header = self
             .storage
@@ -396,7 +406,7 @@ impl NodeApiImpl {
         let prev_headers = self
             .storage
             .blocks()
-            .headers_back_from(height, 2016)
+            .headers_back_from(tip_height, 2016)
             .unwrap_or_default();
 
         let mempool_manager = self.mempool_manager.as_ref().ok_or_else(|| {
@@ -411,13 +421,19 @@ impl NodeApiImpl {
             .map_err(|e| ModuleError::op_err("Failed to get UTXO set", e))?;
 
         let coinbase_script_bytes = coinbase_script.unwrap_or_default();
-        let address_bytes = coinbase_address
-            .map(|a| {
-                a.strip_prefix("hex:")
-                    .map(|h| hex::decode(h).unwrap_or_default())
-                    .unwrap_or_else(|| a.into_bytes())
-            })
-            .unwrap_or_default();
+        let address_bytes = match coinbase_address {
+            None => Vec::new(),
+            Some(a) => {
+                if let Some(h) = a.strip_prefix("hex:") {
+                    hex::decode(h).map_err(|e| {
+                        ModuleError::OperationError(format!("invalid coinbase hex: {e}"))
+                    })?
+                } else {
+                    crate::rpc::rawtx::address_string_to_script_pubkey(&a)
+                        .map_err(|e| ModuleError::OperationError(e.to_string()))?
+                }
+            }
+        };
 
         let outputs: Vec<(i64, Vec<u8>)> = match coinbase_outputs {
             Some(outs) if !outs.is_empty() => outs,
@@ -614,23 +630,15 @@ impl NodeAPI for NodeApiImpl {
         event_types: Vec<EventType>,
     ) -> Result<mpsc::Receiver<ModuleMessage>, ModuleError> {
         // Create event subscription channel
+        let (Some(event_manager), Some(module_id)) = (&self.event_manager, &self.module_id) else {
+            return Err(ModuleError::OperationError(
+                "event manager is not available".to_string(),
+            ));
+        };
         let (tx, rx) = mpsc::channel(100);
-
-        // Integrate with event manager if available
-        if let (Some(event_manager), Some(module_id)) = (&self.event_manager, &self.module_id) {
-            // Register module with event manager
-            event_manager
-                .subscribe_module(module_id.clone(), event_types, tx)
-                .await?;
-        } else {
-            // Event manager not available - return empty receiver
-            // This can happen if NodeAPI is used without event manager setup
-            // (e.g., in tests or direct API usage)
-            tracing::debug!(
-                "Event manager not available for subscribe_events - returning empty receiver"
-            );
-        }
-
+        event_manager
+            .subscribe_module(module_id.clone(), event_types, tx)
+            .await?;
         Ok(rx)
     }
 
@@ -675,10 +683,7 @@ impl NodeAPI for NodeApiImpl {
         // Calculate total size and fees
         let size_bytes: usize = transactions
             .iter()
-            .map(|tx| {
-                // Approximate size: serialize to get actual size
-                bincode::serialize(tx).map(|bytes| bytes.len()).unwrap_or(0)
-            })
+            .map(|tx| blvm_protocol::serialization::serialize_transaction(tx).len())
             .sum();
 
         // Calculate total fee from transactions. Confirmed inputs come from
@@ -725,34 +730,20 @@ impl NodeAPI for NodeApiImpl {
         })?;
 
         let peer_count = network.peer_count();
+        let wire = network.get_network_stats().await;
 
-        // Get network hash rate from storage (if available)
         let hash_rate = tokio::task::spawn_blocking({
             let storage = Arc::clone(&self.storage);
-            move || {
-                // Try to get network hashrate from chain state cache
-                if let Ok(Some(chain_info)) = storage.chain().load_chain_info() {
-                    // Calculate approximate hash rate from difficulty
-                    // Hash rate = difficulty * 2^32 / 600 (seconds per block)
-                    let difficulty =
-                        blvm_protocol::pow::difficulty_from_bits(chain_info.tip_header.bits)
-                            .unwrap_or(1.0);
-                    difficulty * 4294967296.0 / 600.0
-                } else {
-                    0.0
-                }
-            }
+            move || hash_rate_from_tip(&storage)
         })
         .await
         .map_err(|e| ModuleError::op_err("Task join error", e))?;
 
-        // Network stats don't track bytes sent/received at this level
-        // These would need to be tracked by NetworkManager
         Ok(NetworkStats {
             peer_count,
             hash_rate,
-            bytes_sent: 0,
-            bytes_received: 0,
+            bytes_sent: wire.bytes_sent,
+            bytes_received: wire.bytes_received,
         })
     }
 
@@ -812,9 +803,9 @@ impl NodeAPI for NodeApiImpl {
             move || {
                 // Get tip header to calculate difficulty
                 let difficulty = if let Ok(Some(tip_header)) = storage.chain().get_tip_header() {
-                    blvm_protocol::pow::difficulty_from_bits(tip_header.bits).unwrap_or(1.0) as u32
+                    blvm_protocol::pow::difficulty_from_bits(tip_header.bits).unwrap_or(1.0)
                 } else {
-                    0
+                    0.0
                 };
 
                 // Get chain work for tip
@@ -922,9 +913,10 @@ impl NodeAPI for NodeApiImpl {
                         Ok(Some(PaymentState {
                             payment_id: request_id,
                             status: "pending".to_string(),
-                            amount_sats: 0, // Amount not available in this state
+                            amount_sats: 0,
                             tx_hash: None,
                             confirmations: None,
+                            reason: None,
                         }))
                     }
                     crate::payment::state_machine::PaymentState::ProofCreated {
@@ -940,6 +932,7 @@ impl NodeAPI for NodeApiImpl {
                         amount_sats: 0,
                         tx_hash: None,
                         confirmations: None,
+                        reason: None,
                     })),
                     crate::payment::state_machine::PaymentState::InMempool {
                         request_id,
@@ -950,40 +943,45 @@ impl NodeAPI for NodeApiImpl {
                         amount_sats: 0,
                         tx_hash: Some(tx_hash),
                         confirmations: Some(0),
+                        reason: None,
                     })),
                     crate::payment::state_machine::PaymentState::Settled {
                         request_id,
                         tx_hash,
                         confirmation_count,
+                        expected_outputs,
                         ..
                     } => Ok(Some(PaymentState {
                         payment_id: request_id,
                         status: "confirmed".to_string(),
-                        amount_sats: 0,
+                        amount_sats: payment_output_sum(expected_outputs.as_ref()),
                         tx_hash: Some(tx_hash),
                         confirmations: Some(confirmation_count),
+                        reason: None,
                     })),
                     crate::payment::state_machine::PaymentState::ReorgPending {
                         request_id,
                         tx_hash,
+                        expected_outputs,
                         ..
                     } => Ok(Some(PaymentState {
                         payment_id: request_id,
                         status: "reorg_pending".to_string(),
-                        amount_sats: 0,
+                        amount_sats: payment_output_sum(expected_outputs.as_ref()),
                         tx_hash: Some(tx_hash),
                         confirmations: Some(0),
+                        reason: None,
                     })),
-                    crate::payment::state_machine::PaymentState::Failed {
-                        request_id,
-                        reason: _,
-                    } => Ok(Some(PaymentState {
-                        payment_id: request_id,
-                        status: "failed".to_string(),
-                        amount_sats: 0,
-                        tx_hash: None,
-                        confirmations: None,
-                    })),
+                    crate::payment::state_machine::PaymentState::Failed { request_id, reason } => {
+                        Ok(Some(PaymentState {
+                            payment_id: request_id,
+                            status: "failed".to_string(),
+                            amount_sats: 0,
+                            tx_hash: None,
+                            confirmations: None,
+                            reason: Some(reason),
+                        }))
+                    }
                 }
             }
             Err(_) => Ok(None), // Payment not found
@@ -1000,6 +998,11 @@ impl NodeAPI for NodeApiImpl {
     }
 
     async fn get_fee_estimate(&self, target_blocks: u32) -> Result<u64, ModuleError> {
+        if target_blocks == 0 {
+            return Err(ModuleError::OperationError(
+                "target_blocks must be at least 1".to_string(),
+            ));
+        }
         // Check hooks for cached value first
         if let Some(hook_mgr) = &self.hook_manager {
             let hooks = hook_mgr.read().await;
@@ -1020,15 +1023,16 @@ impl NodeAPI for NodeApiImpl {
         let mempool = Arc::clone(mempool);
         let storage = Arc::clone(&self.storage);
         let fee_rates = tokio::task::spawn_blocking(move || {
-            let utxo_set = storage.utxos().load_utxo_set().unwrap_or_default();
-            mempool.fee_rates_sat_vb(&utxo_set)
+            mempool.fee_rates_for_storage(Some(storage.as_ref()))
         })
         .await
         .map_err(|e| ModuleError::op_err("Task join error", e))?;
 
         let mut fee_rates = fee_rates;
         if fee_rates.is_empty() {
-            return Ok(1);
+            return Err(ModuleError::OperationError(
+                "mempool has no fee rates".to_string(),
+            ));
         }
 
         // Sort fee rates and find the rate needed for target_blocks confirmation
@@ -1954,6 +1958,15 @@ impl NodeAPI for NodeApiImpl {
         let module_name = module_id.split('_').next().unwrap_or(module_id);
 
         // Get module state
+        if let Ok(reported) = self.reported_health.lock() {
+            if let Some(health) = reported
+                .get(module_id)
+                .or_else(|| reported.get(module_name))
+            {
+                return Ok(Some(health.clone()));
+            }
+        }
+
         let state = manager.get_module_state(module_name).await;
 
         // Convert ModuleState to ModuleHealth
@@ -1961,9 +1974,9 @@ impl NodeAPI for NodeApiImpl {
             Some(ModuleState::Running) => {
                 Ok(Some(crate::module::process::monitor::ModuleHealth::Healthy))
             }
-            Some(ModuleState::Initializing) => {
-                Ok(Some(crate::module::process::monitor::ModuleHealth::Healthy))
-            }
+            Some(ModuleState::Initializing) => Ok(Some(
+                crate::module::process::monitor::ModuleHealth::Unresponsive,
+            )),
             Some(ModuleState::Stopped) => Ok(Some(
                 crate::module::process::monitor::ModuleHealth::Unresponsive,
             )),
@@ -2244,9 +2257,9 @@ impl NodeAPI for NodeApiImpl {
             }
         };
 
-        // Serialize block to hex using bincode (same as RPC submitblock)
-        let block_bytes = bincode::serialize(&block)
-            .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
+        let witnesses = vec![Vec::new(); block.transactions.len()];
+        let block_bytes =
+            blvm_protocol::serialization::serialize_block_with_witnesses(&block, &witnesses, true);
         let block_hex = hex::encode(block_bytes);
 
         // Build params
@@ -2297,9 +2310,41 @@ impl NodeAPI for NodeApiImpl {
 
         // Health reporting is handled by ModuleProcessMonitor automatically
         // This method allows modules to self-report additional health information
-        debug!("Module {} reported health: {:?}", module_id, health);
+        self.reported_health
+            .lock()
+            .map_err(|e| ModuleError::OperationError(format!("health report lock: {e}")))?
+            .insert(module_id, health);
         Ok(())
     }
+}
+
+fn payment_output_sum(outputs: Option<&Vec<blvm_protocol::payment::PaymentOutput>>) -> u64 {
+    outputs
+        .into_iter()
+        .flatten()
+        .map(|output| output.amount.unwrap_or(0))
+        .fold(0u64, u64::saturating_add)
+}
+
+/// Hash rate from the tip difficulty and the seconds since the previous block.
+fn hash_rate_from_tip(storage: &crate::storage::Storage) -> f64 {
+    let Ok(Some(header)) = storage.chain().get_tip_header() else {
+        return 0.0;
+    };
+    let difficulty = blvm_protocol::pow::difficulty_from_bits(header.bits).unwrap_or(1.0);
+    let height = storage.chain().get_height().ok().flatten().unwrap_or(0);
+    let mut interval = 600u64;
+    if height >= 1 {
+        if let Ok(Some(prev_hash)) = storage.blocks().get_hash_by_height(height - 1) {
+            if let Ok(Some(prev)) = storage.blocks().get_header(&prev_hash) {
+                let dt = header.timestamp.saturating_sub(prev.timestamp);
+                if dt > 0 {
+                    interval = dt;
+                }
+            }
+        }
+    }
+    difficulty * 4_294_967_296.0 / interval as f64
 }
 
 // Safety: NodeApiImpl is safe to share across threads (Sync) because internal mutable state
@@ -2411,5 +2456,16 @@ mod mempool_size_tests {
         let size = api.get_mempool_size().await.unwrap();
         assert_eq!(size.transaction_count, 3);
         assert_eq!(size.total_fee_sats, 25_000);
+    }
+
+    #[tokio::test]
+    async fn empty_pool_and_target_zero_are_not_a_fee_estimate() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
+        let api = NodeApiImpl::with_dependencies(storage, None, None, Some(mempool), None);
+        assert!(api.get_fee_estimate(0).await.is_err());
+        assert!(api.get_fee_estimate(1).await.is_err());
+        assert!(api.get_fee_estimate(100).await.is_err());
     }
 }

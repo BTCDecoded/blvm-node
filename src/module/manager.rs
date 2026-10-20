@@ -728,6 +728,8 @@ impl ModuleManager {
                         .register_cli_spec(module_name.to_string(), cli_spec)
                         .await;
                 }
+                #[cfg(not(unix))]
+                let _ = cli_spec;
                 let loaded_modules = self.event_manager.loaded_modules();
                 let mut loaded = loaded_modules.lock().await;
                 let timestamp = crate::utils::current_timestamp();

@@ -182,7 +182,7 @@ proptest! {
             bits: 0x1d00ffff,
             nonce: 0,
         };
-        storage.chain().update_tip(&tip_hash, &tip_header, height).unwrap();
+        connect_tip(storage.chain(), &tip_hash, &tip_header, height);
 
         // Get template
         let params = serde_json::json!([]);
@@ -231,7 +231,7 @@ proptest! {
             bits: 0x1d00ffff,
             nonce: 0,
         };
-        storage.chain().update_tip(&tip_hash, &tip_header, height).unwrap();
+        connect_tip(storage.chain(), &tip_hash, &tip_header, height);
 
         // Get template
         let params = serde_json::json!([]);
@@ -277,7 +277,7 @@ proptest! {
             bits: 0x1d00ffff,
             nonce: 0,
         };
-        storage.chain().update_tip(&tip_hash, &tip_header, height).unwrap();
+        connect_tip(storage.chain(), &tip_hash, &tip_header, height);
 
         let params = serde_json::json!([]);
         let result = rt.block_on(mining.get_block_template(&params));
@@ -325,7 +325,7 @@ proptest! {
             bits: 0x1d00ffff,
             nonce: 0,
         };
-        storage.chain().update_tip(&tip_hash, &tip_header, height).unwrap();
+        connect_tip(storage.chain(), &tip_hash, &tip_header, height);
 
         let params = serde_json::json!([]);
         let result = rt.block_on(mining.get_block_template(&params));
@@ -376,7 +376,7 @@ proptest! {
             bits: 0x1d00ffff,
             nonce: 0,
         };
-        storage.chain().update_tip(&tip_hash, &tip_header, height).unwrap();
+        connect_tip(storage.chain(), &tip_hash, &tip_header, height);
 
         let params = serde_json::json!([]);
         let result = rt.block_on(mining.get_block_template(&params));

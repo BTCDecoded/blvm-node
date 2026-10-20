@@ -134,11 +134,7 @@ async fn test_getmempoolentry_missing_tx_errors() {
 async fn test_getrawmempool_without_mempool_verbose_fallback() {
     let rpc = MempoolRpc::new();
     let map = rpc.getrawmempool(&json!([true])).await.unwrap();
-    assert!(
-        map.as_object()
-            .unwrap()
-            .contains_key("0000000000000000000000000000000000000000000000000000000000000000")
-    );
+    assert!(map.as_object().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -176,4 +172,93 @@ async fn test_savemempool_without_mempool_errors() {
 async fn test_getmempoolentry_invalid_hex_errors() {
     let (_dir, _mempool, rpc, _txid) = rpc_with_mempool();
     assert!(rpc.getmempoolentry(&json!(["not-hex"])).await.is_err());
+}
+
+fn spend(prev: [u8; 32]) -> blvm_protocol::Transaction {
+    let mut tx = valid_transaction();
+    tx.inputs[0].prevout.hash = prev;
+    tx.inputs[0].prevout.index = 0;
+    tx.inputs[0].sequence = 0xfffffffd;
+    // Bare OP_TRUE so a child script_sig of OP_1 can spend the in-pool parent.
+    tx.outputs[0].script_pubkey = vec![0x51].into();
+    tx.outputs[0].value = 1_000;
+    tx
+}
+
+#[tokio::test]
+async fn test_ancestor_and_descendant_walks_and_signed_fee_delta() {
+    use blvm_protocol::block::calculate_tx_id;
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
+    let mempool = Arc::new(MempoolManager::new());
+    let mut policy = blvm_node::config::mempool::MempoolPolicyConfig::default();
+    policy.max_mempool_mb = 1;
+    policy.min_relay_fee_rate = 5;
+    mempool.set_policy_config(Some(policy));
+
+    let a = spend([0x11; 32]);
+    let a_hash = calculate_tx_id(&a);
+    let b = spend(a_hash);
+    let b_hash = calculate_tx_id(&b);
+    let c = spend(b_hash);
+    assert!(mempool.add_transaction(a).unwrap());
+    assert!(mempool.add_transaction(b).unwrap());
+    assert!(mempool.add_transaction(c.clone()).unwrap());
+    let c_hash = calculate_tx_id(&c);
+    storage
+        .utxos()
+        .add_utxo(
+            &blvm_node::OutPoint {
+                hash: [0x11; 32],
+                index: 0,
+            },
+            &blvm_node::UTXO {
+                value: 2_000,
+                script_pubkey: vec![0x51].into(),
+                height: 1,
+                is_coinbase: false,
+            },
+        )
+        .unwrap();
+    let rpc = MempoolRpc::with_dependencies(mempool.clone(), storage);
+    let a_rpc = blvm_node::storage::hashing::hash_to_rpc_hex(&a_hash);
+    let c_rpc = blvm_node::storage::hashing::hash_to_rpc_hex(&c_hash);
+    let descendants = rpc.getmempooldescendants(&json!([a_rpc])).await.unwrap();
+    let names: Vec<&str> = descendants
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(names.contains(&blvm_node::storage::hashing::hash_to_rpc_hex(&b_hash).as_str()));
+    assert!(names.contains(&c_rpc.as_str()));
+    let ancestors = rpc.getmempoolancestors(&json!([c_rpc])).await.unwrap();
+    let ancestor_names: Vec<&str> = ancestors
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(ancestor_names.contains(&a_rpc.as_str()));
+    assert!(
+        ancestor_names.contains(&blvm_node::storage::hashing::hash_to_rpc_hex(&b_hash).as_str())
+    );
+
+    let entry = rpc.getmempoolentry(&json!([a_rpc])).await.unwrap();
+    let verbose = rpc.getrawmempool(&json!([true])).await.unwrap();
+    assert_eq!(entry["descendantcount"], 3);
+    assert_eq!(verbose[&a_rpc]["descendantcount"], 3);
+    assert_eq!(entry["time"], verbose[&a_rpc]["time"]);
+    assert_eq!(entry["bip125-replaceable"], true);
+    assert_eq!(verbose[&a_rpc]["bip125-replaceable"], true);
+
+    mempool.prioritise_transaction(&a_hash, -1000);
+    let entry = rpc.getmempoolentry(&json!([a_rpc])).await.unwrap();
+    let verbose = rpc.getrawmempool(&json!([true])).await.unwrap();
+    assert_eq!(entry["modifiedfee"].as_f64().unwrap(), 0.0);
+    assert_eq!(verbose[&a_rpc]["modifiedfee"].as_f64().unwrap(), 0.0);
+
+    let info = rpc.getmempoolinfo(&json!([])).await.unwrap();
+    assert_eq!(info["maxmempool"].as_u64(), Some(1_048_576));
+    assert!((info["minrelaytxfee"].as_f64().unwrap() - 0.00005).abs() < 1e-12);
 }

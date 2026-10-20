@@ -202,3 +202,49 @@ fn test_store_chain_info_roundtrip() {
     assert_eq!(loaded.height, 5);
     assert_eq!(loaded.tip_hash, tip);
 }
+
+#[test]
+fn test_missing_parent_chainwork_is_an_error() {
+    let temp_db = common::TempDb::new().unwrap();
+    let chain = &temp_db.chain_state;
+    let mut header = create_test_header(1_700_000_000, [0x11; 32]);
+    header.bits = 0x0300ffff;
+    header.prev_block_hash = [0x99; 32];
+    let hash = [0x55u8; 32];
+    assert!(chain.index_connected_block(&hash, &header, 1).is_err());
+    assert!(chain.get_chainwork(&hash).unwrap().is_none());
+    assert!(chain.get_work(&hash).unwrap().is_none());
+
+    let batch_hash = [0x56u8; 32];
+    assert!(
+        chain
+            .index_connected_blocks_batch(&[(&batch_hash, &header, 1)])
+            .is_err()
+    );
+    assert!(chain.get_chainwork(&batch_hash).unwrap().is_none());
+}
+
+#[test]
+fn test_child_chainwork_is_parent_plus_block_work() {
+    let temp_db = common::TempDb::new().unwrap();
+    let chain = &temp_db.chain_state;
+    let mut parent = create_test_header(1_700_000_000, [0x11; 32]);
+    parent.bits = 0x0300ffff;
+    parent.prev_block_hash = [0u8; 32];
+    let parent_hash = [0x44u8; 32];
+    chain
+        .cache_block_chainwork(&parent_hash, &parent, 0)
+        .unwrap();
+    let parent_work = chain.get_chainwork(&parent_hash).unwrap().unwrap();
+
+    let mut child = parent.clone();
+    child.prev_block_hash = parent_hash;
+    child.nonce = 2;
+    let child_hash = [0x45u8; 32];
+    chain.index_connected_block(&child_hash, &child, 1).unwrap();
+    let block_work = blvm_consensus::reorganization::work_for_bits(child.bits).unwrap();
+    assert_eq!(
+        chain.get_chainwork(&child_hash).unwrap().unwrap(),
+        parent_work.saturating_add(block_work)
+    );
+}
