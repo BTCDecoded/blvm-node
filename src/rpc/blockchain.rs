@@ -264,18 +264,31 @@ impl BlockchainRpc {
         storage_timeout_from_config(self.request_timeouts.as_ref())
     }
 
-    /// Get chain name from protocol version
+    /// Chain name from the protocol, else the network stored with the chain.
     fn get_chain_name(&self) -> &str {
-        self.protocol
-            .as_ref()
-            .map(|p| match p.get_protocol_version() {
+        if let Some(ref p) = self.protocol {
+            return match p.get_protocol_version() {
                 blvm_protocol::ProtocolVersion::BitcoinV1 => "mainnet",
                 blvm_protocol::ProtocolVersion::Testnet3 => "testnet",
                 blvm_protocol::ProtocolVersion::Regtest => "regtest",
                 blvm_protocol::ProtocolVersion::Signet => "signet",
                 blvm_protocol::ProtocolVersion::Testnet4 => "testnet4",
-            })
-            .unwrap_or("regtest") // Default fallback
+            };
+        }
+        // Production RPC servers build BlockchainRpc without a protocol (rpc/mod.rs), so fall
+        // back to the network stored with the chain, as core_chain_field does.
+        if let Some(ref storage) = self.storage {
+            if let Ok(Some(info)) = storage.chain().load_chain_info() {
+                return match info.chain_params.network.as_str() {
+                    "testnet" => "testnet",
+                    "testnet4" => "testnet4",
+                    "regtest" => "regtest",
+                    "signet" => "signet",
+                    _ => "mainnet",
+                };
+            }
+        }
+        "regtest" // No protocol and no stored chain
     }
 
     fn witness_address_on_this_chain(
@@ -289,6 +302,16 @@ impl BlockchainRpc {
                 matches!(chain, "testnet" | "testnet4" | "signet")
             }
             Network::Regtest => chain == "regtest",
+        }
+    }
+
+    /// Base58Check version byte: 0x00/0x05 are mainnet; 0x6f/0xc4 are shared by
+    /// testnet, testnet4, signet and regtest.
+    fn base58_address_on_this_chain(version: u8, chain: &str) -> bool {
+        match version {
+            0x00 | 0x05 => chain == "mainnet",
+            0x6f | 0xc4 => matches!(chain, "testnet" | "testnet4" | "signet" | "regtest"),
+            _ => false,
         }
     }
 
@@ -2370,6 +2393,16 @@ impl BlockchainRpc {
         }
 
         if let Ok(script_pubkey) = address_string_to_script_pubkey(&address) {
+            let version =
+                crate::rpc::rawtx::base58check_decode(&address).and_then(|d| d.first().copied());
+            if !version
+                .is_some_and(|v| Self::base58_address_on_this_chain(v, self.get_chain_name()))
+            {
+                return Ok(json!({
+                    "isvalid": false,
+                    "address": address,
+                }));
+            }
             let is_p2sh = address.starts_with('3') || address.starts_with('2');
             let script_type = if is_p2sh { "scripthash" } else { "pubkeyhash" };
             return Ok(json!({
