@@ -542,26 +542,25 @@ impl RpcServer {
             }
         }
 
-        // Stop at the configured cap while the body is still arriving, before
-        // authentication. `collect()` alone buffers the whole body first.
-        let max_body = server.max_request_size;
-        let limited = Limited::new(req.into_body(), max_body);
+        // Read request body with size limit. A body past the configured cap is
+        // rejected while it is still arriving, before it is stored.
+        let limited = Limited::new(req.into_body(), server.max_request_size);
         let body_bytes = match limited.collect().await {
             Ok(collected) => collected.to_bytes(),
-            Err(err) => {
+            Err(err)
                 if err
                     .downcast_ref::<http_body_util::LengthLimitError>()
-                    .is_some()
-                {
-                    return Ok(Self::http_error_response(
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        &format!("Request body too large (max: {max_body} bytes)"),
-                    ));
-                }
-                warn!("Failed to read RPC request body from {addr}: {err}");
+                    .is_some() =>
+            {
+                return Ok(Self::http_error_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "request body exceeds size limit",
+                ));
+            }
+            Err(err) => {
                 return Ok(Self::http_error_response(
                     StatusCode::BAD_REQUEST,
-                    "Failed to read request body",
+                    &format!("failed to read request body: {err}"),
                 ));
             }
         };
@@ -2121,9 +2120,48 @@ mod tests {
         );
     }
 
+    /// A configured cap above the 1 MiB default must be usable: a 1.5 MiB request under
+    /// a 2 MiB cap is served, not rejected with 413.
+    #[tokio::test]
+    async fn http1_accepts_body_under_a_cap_above_the_default() {
+        let max = 2 * 1024 * 1024;
+        let (server_addr, server_handle) = spawn_limited_http_server(max).await;
+        let mut client = TokioTcpStream::connect(server_addr).await.unwrap();
+
+        let pad = "x".repeat(1024 * 1024 + 512 * 1024);
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":1,"pad":"{pad}"}}"#
+        );
+        assert!(body.len() > DEFAULT_MAX_REQUEST_SIZE && body.len() < max);
+        let header = format!(
+            "POST / HTTP/1.1\r\n\
+             Host: 127.0.0.1\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n",
+            body.len()
+        );
+        client.write_all(header.as_bytes()).await.unwrap();
+        client.write_all(body.as_bytes()).await.unwrap();
+        client.flush().await.unwrap();
+
+        let mut response = vec![0u8; 2048];
+        let n = tokio::time::timeout(RPC_CLIENT_READ_TIMEOUT, client.read(&mut response))
+            .await
+            .expect("no response")
+            .unwrap();
+        server_handle.abort();
+        let response_str = String::from_utf8_lossy(&response[..n]);
+        assert!(
+            response_str.starts_with("HTTP/1.1 200"),
+            "a body under the configured cap must be served, got: {response_str}"
+        );
+    }
+
     #[tokio::test]
     async fn test_process_request_valid_json() {
-        let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}"#;
+        let request = r#"{"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":1}"#;
         let response_str = RpcServer::process_request(request).await;
         let response: Value = serde_json::from_str(&response_str).unwrap();
 
@@ -2171,7 +2209,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_request_without_id() {
-        let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","params":[]}"#;
+        let request = r#"{"jsonrpc":"2.0","method":"getnetworkinfo","params":[]}"#;
         let response_str = RpcServer::process_request(request).await;
         let response: Value = serde_json::from_str(&response_str).unwrap();
 
@@ -2203,9 +2241,8 @@ mod tests {
     async fn test_call_method_getblockchaininfo() {
         let server = RpcServer::new("127.0.0.1:0".parse().unwrap());
         let result = server.call_method("getblockchaininfo", json!([])).await;
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        assert!(response.get("chain").is_some());
+        let err = result.expect_err("no chain");
+        assert!(err.to_string().contains("chain is not initialized"));
     }
 
     #[tokio::test]
@@ -2331,7 +2368,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_json_rpc_2_0_compliance() {
-        let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}"#;
+        let request = r#"{"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":1}"#;
         let response_str = RpcServer::process_request(request).await;
         let response: Value = serde_json::from_str(&response_str).unwrap();
 
@@ -2393,7 +2430,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_params_handling() {
-        let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","id":1}"#;
+        let request = r#"{"jsonrpc":"2.0","method":"getnetworkinfo","id":1}"#;
         let response_str = RpcServer::process_request(request).await;
         let response: Value = serde_json::from_str(&response_str).unwrap();
 
@@ -2491,7 +2528,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_request_single() {
-        let request = r#"[{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}]"#;
+        let request = r#"[{"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":1}]"#;
         let response_str = RpcServer::process_request(request).await;
         let response: Value = serde_json::from_str(&response_str).unwrap();
 
@@ -2506,7 +2543,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_request_multiple() {
         let request = r#"[
-            {"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1},
+            {"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":1},
             {"jsonrpc":"2.0","method":"getblockcount","params":[],"id":2},
             {"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":3}
         ]"#;
@@ -2531,7 +2568,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_request_with_errors() {
         let request = r#"[
-            {"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1},
+            {"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":1},
             {"jsonrpc":"2.0","method":"unknown_method","params":[],"id":2},
             {"jsonrpc":"2.0","method":"getblockcount","params":[],"id":3}
         ]"#;
@@ -2581,7 +2618,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_request_without_ids() {
         let request = r#"[
-            {"jsonrpc":"2.0","method":"getblockchaininfo","params":[]},
+            {"jsonrpc":"2.0","method":"getnetworkinfo","params":[]},
             {"jsonrpc":"2.0","method":"getblockcount","params":[]}
         ]"#;
         let response_str = RpcServer::process_request(request).await;

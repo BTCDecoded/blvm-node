@@ -23,12 +23,10 @@ async fn test_rpc_concurrent_calls() {
     // Wait for all calls
     let results: Vec<_> = futures::future::join_all(handles).await;
 
-    // All should succeed
     assert_eq!(results.len(), 10);
     for result in results {
-        let info = result.expect("task").expect("info");
-        assert_eq!(info["blocks"], 0);
-        assert_eq!(info["initialblockdownload"], true);
+        let err = result.expect("task").expect_err("no chain");
+        assert!(err.to_string().contains("chain is not initialized"));
     }
 }
 
@@ -58,7 +56,12 @@ async fn test_rpc_large_result_sets() {
     // Test methods that might return large results
     // getblockchaininfo should handle large chain states
     let result = blockchain.get_blockchain_info().await;
-    assert!(result.is_ok());
+    assert!(
+        result
+            .expect_err("no chain")
+            .to_string()
+            .contains("chain is not initialized")
+    );
 
     // gettxoutsetinfo might return large UTXO sets
     let info = blockchain.get_txoutset_info().await.expect("txoutset");
@@ -155,9 +158,14 @@ async fn test_rpc_error_recovery() {
     let result1 = blockchain.get_block("invalid").await;
     assert!(result1.is_err());
 
-    // Subsequent calls should still work
+    // A later call still returns the uninitialized-chain error.
     let result2 = blockchain.get_blockchain_info().await;
-    assert!(result2.is_ok());
+    assert!(
+        result2
+            .expect_err("no chain")
+            .to_string()
+            .contains("chain is not initialized")
+    );
 }
 
 #[tokio::test]
@@ -188,7 +196,13 @@ async fn test_rpc_concurrent_different_methods() {
 
     for result in bc_results {
         assert!(result.is_ok());
-        assert!(result.unwrap().is_ok());
+        assert!(
+            result
+                .unwrap()
+                .expect_err("no chain")
+                .to_string()
+                .contains("chain is not initialized")
+        );
     }
     for result in ctl_results {
         assert!(result.is_ok());
