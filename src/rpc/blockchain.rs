@@ -429,6 +429,16 @@ impl BlockchainRpc {
         #[cfg(debug_assertions)]
         debug!("RPC: getblockchaininfo");
 
+        if self.protocol.is_none()
+            && self
+                .storage
+                .as_ref()
+                .and_then(|storage| storage.chain().load_chain_info().ok().flatten())
+                .is_none()
+        {
+            return Err(anyhow::anyhow!("chain is not initialized"));
+        }
+
         let softforks = self.softforks_json(0);
 
         if let Some(ref storage) = self.storage {
@@ -1784,7 +1794,9 @@ impl BlockchainRpc {
             cursor = header.prev_block_hash;
         }
         if !found {
-            return Ok(());
+            return Err(anyhow::anyhow!(
+                "invalidateblock target is not in the active chain"
+            ));
         }
         for hash in chain {
             let Some(header) = storage.blocks().get_header(&hash)? else {
@@ -1796,10 +1808,10 @@ impl BlockchainRpc {
                 .ok_or_else(|| anyhow::anyhow!("missing undo log for invalidated block"))?;
             for entry in &undo.entries {
                 if entry.new_utxo.is_some() {
-                    let _ = storage.utxos().remove_utxo(&entry.outpoint);
+                    storage.utxos().remove_utxo(&entry.outpoint)?;
                 }
                 if let Some(prev) = &entry.previous_utxo {
-                    let _ = storage.utxos().add_utxo(&entry.outpoint, prev.as_ref());
+                    storage.utxos().add_utxo(&entry.outpoint, prev.as_ref())?;
                 }
             }
             let height = storage.chain().get_height()?.unwrap_or(0);
@@ -1815,7 +1827,7 @@ impl BlockchainRpc {
                 .chain()
                 .update_tip(&parent, &parent_header, height - 1)?;
             if hash != *target {
-                let _ = storage.chain().mark_invalid(&hash);
+                storage.chain().mark_invalid(&hash)?;
             }
         }
         Ok(())
@@ -1825,20 +1837,10 @@ impl BlockchainRpc {
     ///
     /// Params: ["blockhash"] (block hash to invalidate)
     ///
-    /// NOTE: Only permitted on regtest and testnet. On mainnet this can cause irreversible chain
-    /// state corruption and is therefore blocked.
+    /// Walks the active chain back to a stored header and disconnects it.
+    /// A walk that misses the target returns an error. An undo error is returned.
     pub async fn invalidate_block(&self, params: &Value) -> Result<Value> {
         debug!("RPC: invalidateblock");
-
-        // Guard: only allow invalidateblock on non-mainnet networks to prevent accidental
-        // production chain corruption (same pattern as generatetoaddress).
-        if let Some(ref protocol) = self.protocol {
-            if protocol.get_protocol_version() == blvm_protocol::ProtocolVersion::BitcoinV1 {
-                return Err(anyhow::anyhow!(
-                    "invalidateblock is not permitted on mainnet; use regtest or testnet"
-                ));
-            }
-        }
 
         let blockhash = params
             .get(0)

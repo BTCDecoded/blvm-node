@@ -4,7 +4,7 @@
 #
 # CLI/ENV `--network` / `BLVM_NETWORK` override `protocol_version` at runtime.
 
-listen_addr = "0.0.0.0:18333"
+listen_addr = "127.0.0.1:18333"
 transport_preference = "tcponly"
 
 [storage]

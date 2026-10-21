@@ -38,8 +38,6 @@ struct MempoolPool {
     tx_witnesses: HashMap<Hash, Vec<Witness>>,
     /// Sigop-adjusted virtual size recorded at accept time.
     adjusted_vsize: HashMap<Hash, u64>,
-    /// Sum of witness-inclusive wire sizes. Kept in step with insert and remove.
-    usage_bytes: u64,
     spent_outputs: HashSet<OutPoint>,
     /// Spender txid for each outpoint the pool is spending.
     spenders: HashMap<OutPoint, Hash>,
@@ -347,6 +345,25 @@ fn descendant_closure(map: &HashMap<Hash, HashSet<Hash>>, root: &Hash) -> HashSe
     out
 }
 
+/// Bytes the cap charges for a transaction: its full serialization, witness included
+/// (BIP144 marker and flag, the per-input item count and each item's length prefix).
+/// Without witness data, or with only empty stacks, that is the stripped serialization.
+fn accounted_tx_bytes(tx: &Transaction, witnesses: Option<&[Witness]>) -> u64 {
+    use blvm_protocol::serialization::transaction::{
+        serialize_transaction, serialize_transaction_with_witness,
+    };
+    let stripped = || serialize_transaction(tx).len() as u64;
+    let Some(stacks) = witnesses else {
+        return stripped();
+    };
+    if stacks.len() != tx.inputs.len() || stacks.iter().all(|stack| stack.is_empty()) {
+        return stripped();
+    }
+    serialize_transaction_with_witness(tx, stacks)
+        .map(|bytes| bytes.len() as u64)
+        .unwrap_or_else(|_| stripped())
+}
+
 impl MempoolManager {
     /// Create a new mempool manager
     pub fn new() -> Self {
@@ -355,7 +372,6 @@ impl MempoolManager {
                 transactions: HashMap::new(),
                 tx_witnesses: HashMap::new(),
                 adjusted_vsize: HashMap::new(),
-                usage_bytes: 0,
                 spent_outputs: HashSet::new(),
                 spenders: HashMap::new(),
             }),
@@ -387,7 +403,6 @@ impl MempoolManager {
                 transactions: HashMap::new(),
                 tx_witnesses: HashMap::new(),
                 adjusted_vsize: HashMap::new(),
-                usage_bytes: 0,
                 spent_outputs: HashSet::new(),
                 spenders: HashMap::new(),
             }),
@@ -690,16 +705,13 @@ impl MempoolManager {
         }
 
         // Check mempool size limits and evict if necessary
-        self.enforce_mempool_limits()?;
+        self.enforce_mempool_limits().await?;
 
         Ok(())
     }
 
-    /// Enforce mempool size limits by evicting transactions if necessary.
-    ///
-    /// Callers that insert a transaction use this before reporting acceptance, so a
-    /// spend that does not fit is not left in the pool until the maintenance tick.
-    fn enforce_mempool_limits(&self) -> Result<()> {
+    /// Enforce mempool size limits by evicting transactions if necessary
+    async fn enforce_mempool_limits(&self) -> Result<()> {
         let policy = self
             .policy_config
             .read()
@@ -750,22 +762,26 @@ impl MempoolManager {
 
         match &policy.eviction_strategy {
             crate::config::EvictionStrategy::LowestFeeRate => {
-                self.evict_lowest_fee_rate(target_bytes, target_tx_count)?;
+                self.evict_lowest_fee_rate(target_bytes, target_tx_count)
+                    .await?;
             }
             crate::config::EvictionStrategy::OldestFirst => {
-                self.evict_oldest_first(target_bytes, target_tx_count)?;
+                self.evict_oldest_first(target_bytes, target_tx_count)
+                    .await?;
             }
             crate::config::EvictionStrategy::LargestFirst => {
-                self.evict_largest_first(target_bytes, target_tx_count)?;
+                self.evict_largest_first(target_bytes, target_tx_count)
+                    .await?;
             }
             crate::config::EvictionStrategy::NoDescendantsFirst => {
-                self.evict_no_descendants_first(target_bytes, target_tx_count)?;
+                self.evict_no_descendants_first(target_bytes, target_tx_count)
+                    .await?;
             }
             crate::config::EvictionStrategy::Hybrid => {
-                self.evict_hybrid(target_bytes, target_tx_count)?;
+                self.evict_hybrid(target_bytes, target_tx_count).await?;
             }
             crate::config::EvictionStrategy::SpamFirst => {
-                self.evict_spam_first(target_bytes, target_tx_count)?;
+                self.evict_spam_first(target_bytes, target_tx_count).await?;
             }
         }
 
@@ -802,26 +818,15 @@ impl MempoolManager {
             .unwrap_or(0)
     }
 
-    /// Wire size of one transaction. Non-empty witness stacks use the segwit encoding.
-    fn transaction_usage_bytes(tx: &Transaction, witnesses: Option<&[Witness]>) -> u64 {
-        use blvm_protocol::serialization::transaction::{
-            serialize_transaction, serialize_transaction_with_witness,
-        };
-
-        let Some(stacks) = witnesses else {
-            return serialize_transaction(tx).len() as u64;
-        };
-        if stacks.len() != tx.inputs.len() || stacks.iter().all(|stack| stack.is_empty()) {
-            return serialize_transaction(tx).len() as u64;
-        }
-        serialize_transaction_with_witness(tx, stacks)
-            .map(|bytes| bytes.len() as u64)
-            .unwrap_or_else(|_| serialize_transaction(tx).len() as u64)
-    }
-
-    /// Witness-inclusive wire size of every pooled transaction, in bytes.
+    /// Serialized size of every pooled transaction, in bytes, including witness stacks.
     fn mempool_size_bytes(&self) -> u64 {
-        self.pool_lock().usage_bytes
+        let pool = self.pool_lock();
+        pool.transactions
+            .iter()
+            .map(|(hash, tx)| {
+                accounted_tx_bytes(tx, pool.tx_witnesses.get(hash).map(|w| w.as_slice()))
+            })
+            .sum()
     }
 
     /// Calculate current mempool size in MB
@@ -838,17 +843,18 @@ impl MempoolManager {
         let mut bytes = 0u64;
         let mut count = 0usize;
         for id in package {
-            let usage = {
+            let (tx, wits) = {
                 let pool = self.pool_lock();
-                pool.transactions.get(&id).map(|tx| {
-                    Self::transaction_usage_bytes(tx, pool.tx_witnesses.get(&id).map(Vec::as_slice))
-                })
+                (
+                    pool.transactions.get(&id).cloned(),
+                    pool.tx_witnesses.get(&id).cloned(),
+                )
             };
-            let Some(usage) = usage else {
+            let Some(tx) = tx else {
                 continue;
             };
+            bytes += accounted_tx_bytes(&tx, wits.as_deref());
             if self.remove_transaction(&id) {
-                bytes += usage;
                 count += 1;
             }
         }
@@ -889,7 +895,7 @@ impl MempoolManager {
     }
 
     /// Evict transactions with lowest fee rate
-    fn evict_lowest_fee_rate(&self, target_bytes: u64, target_tx_count: usize) -> Result<()> {
+    async fn evict_lowest_fee_rate(&self, target_bytes: u64, target_tx_count: usize) -> Result<()> {
         self.evict_ordered(
             self.hashes_by_ascending_fee(),
             target_bytes,
@@ -899,7 +905,7 @@ impl MempoolManager {
     }
 
     /// Evict oldest transactions first (FIFO)
-    fn evict_oldest_first(&self, target_bytes: u64, target_tx_count: usize) -> Result<()> {
+    async fn evict_oldest_first(&self, target_bytes: u64, target_tx_count: usize) -> Result<()> {
         let mut tx_ages: Vec<(Hash, u64)> = {
             let timestamps = self.tx_timestamps.read().unwrap_or_else(|e| e.into_inner());
             self.pool_lock()
@@ -915,22 +921,15 @@ impl MempoolManager {
     }
 
     /// Evict largest transactions first
-    fn evict_largest_first(&self, target_bytes: u64, target_tx_count: usize) -> Result<()> {
-        let mut tx_sizes: Vec<(Hash, u64)> = {
-            let pool = self.pool_lock();
-            pool.transactions
-                .iter()
-                .map(|(hash, tx)| {
-                    (
-                        *hash,
-                        Self::transaction_usage_bytes(
-                            tx,
-                            pool.tx_witnesses.get(hash).map(Vec::as_slice),
-                        ),
-                    )
-                })
-                .collect()
-        };
+    async fn evict_largest_first(&self, target_bytes: u64, target_tx_count: usize) -> Result<()> {
+        use blvm_protocol::serialization::transaction::serialize_transaction;
+
+        let mut tx_sizes: Vec<(Hash, usize)> = self
+            .pool_lock()
+            .transactions
+            .iter()
+            .map(|(hash, tx)| (*hash, serialize_transaction(tx).len()))
+            .collect();
         tx_sizes.sort_by_key(|(_, size)| std::cmp::Reverse(*size));
         let order = tx_sizes.into_iter().map(|(hash, _)| hash).collect();
         self.evict_ordered(order, target_bytes, target_tx_count);
@@ -938,7 +937,11 @@ impl MempoolManager {
     }
 
     /// Evict transactions with no descendants first, then whole packages if still over the cap.
-    fn evict_no_descendants_first(&self, target_bytes: u64, target_tx_count: usize) -> Result<()> {
+    async fn evict_no_descendants_first(
+        &self,
+        target_bytes: u64,
+        target_tx_count: usize,
+    ) -> Result<()> {
         let mut childless: Vec<(Hash, u64)> = {
             let descendants = self
                 .tx_descendants
@@ -980,7 +983,7 @@ impl MempoolManager {
     }
 
     /// Hybrid eviction: combine fee rate and age
-    fn evict_hybrid(&self, target_bytes: u64, target_tx_count: usize) -> Result<()> {
+    async fn evict_hybrid(&self, target_bytes: u64, target_tx_count: usize) -> Result<()> {
         let current_time = Self::current_timestamp();
         let mut tx_scores: Vec<(Hash, u64)> = {
             let timestamps = self.tx_timestamps.read().unwrap_or_else(|e| e.into_inner());
@@ -1011,7 +1014,7 @@ impl MempoolManager {
     }
 
     /// Evict spam transactions first (when mempool is full)
-    fn evict_spam_first(&self, target_bytes: u64, target_tx_count: usize) -> Result<()> {
+    async fn evict_spam_first(&self, target_bytes: u64, target_tx_count: usize) -> Result<()> {
         use blvm_protocol::spam_filter::SpamFilter;
 
         let spam_filter = SpamFilter::new();
@@ -1542,6 +1545,25 @@ impl MempoolManager {
             return Ok(false);
         }
 
+        let incoming = accounted_tx_bytes(&tx, witnesses.as_deref());
+        let cap_bytes = self
+            .policy_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|policy| policy.max_mempool_mb)
+            .unwrap_or(300)
+            .saturating_mul(1_048_576);
+        if incoming > cap_bytes {
+            warn!(
+                "Transaction {} rejected: mempool byte cap ({} > {})",
+                hex::encode(tx_hash),
+                incoming,
+                cap_bytes
+            );
+            return Ok(false);
+        }
+
         // Policy checks (min fee, spam filter).
         let effective_policy = self
             .policy_config
@@ -1841,11 +1863,6 @@ impl MempoolManager {
             if let Some(wits) = witnesses {
                 pool.tx_witnesses.insert(tx_hash, wits);
             }
-            let usage = Self::transaction_usage_bytes(
-                &tx,
-                pool.tx_witnesses.get(&tx_hash).map(Vec::as_slice),
-            );
-            pool.usage_bytes = pool.usage_bytes.saturating_add(usage);
             for input in &tx.inputs {
                 pool.spent_outputs.insert(input.prevout);
                 pool.spenders.insert(input.prevout, tx_hash);
@@ -1890,13 +1907,6 @@ impl MempoolManager {
             .or_default()
             .push(tx_hash);
         self.invalidate_fee_ranking();
-
-        // Count witness bytes now. Evict before the added event so a transaction
-        // that does not fit is not announced.
-        self.enforce_mempool_limits()?;
-        if !self.pool_lock().transactions.contains_key(&tx_hash) {
-            return Ok(false);
-        }
 
         // Publish mempool transaction added event
         if let Some(ref event_pub) = *self
@@ -2598,9 +2608,6 @@ impl MempoolManager {
             let Some(tx) = pool.transactions.remove(hash) else {
                 return false;
             };
-            let usage =
-                Self::transaction_usage_bytes(&tx, pool.tx_witnesses.get(hash).map(Vec::as_slice));
-            pool.usage_bytes = pool.usage_bytes.saturating_sub(usage);
             pool.tx_witnesses.remove(hash);
             pool.adjusted_vsize.remove(hash);
             for input in &tx.inputs {
@@ -2712,7 +2719,6 @@ impl MempoolManager {
             pool.transactions.clear();
             pool.spent_outputs.clear();
             pool.spenders.clear();
-            pool.usage_bytes = 0;
             (n,)
         };
         self.mempool
@@ -3087,6 +3093,92 @@ mod tests {
             2_000,
         ))));
         assert!(mempool.add_transaction(legacy_empty_script()).unwrap());
+    }
+
+    /// The cap charges the exact BIP144 serialization: stripped bytes plus marker and
+    /// flag, the item count, and a length prefix per item (not just the item bytes).
+    #[test]
+    fn accounted_bytes_are_the_exact_witness_serialization() {
+        use super::accounted_tx_bytes;
+        use blvm_protocol::segwit::Witness;
+        use blvm_protocol::serialization::transaction::serialize_transaction_with_witness;
+        let tx = Transaction {
+            version: 2,
+            inputs: vec![blvm_protocol::TransactionInput {
+                prevout: blvm_protocol::OutPoint {
+                    hash: [7; 32],
+                    index: 0,
+                },
+                script_sig: vec![],
+                sequence: 0xffff_fffd,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 1_000,
+                script_pubkey: vec![0x51],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        // P2WPKH-shaped stack: 72-byte signature, 33-byte pubkey.
+        let stacks: Vec<Witness> = vec![vec![vec![0x30; 72], vec![0x02; 33]]];
+        let stripped = serialize_transaction(&tx).len() as u64;
+        let full = serialize_transaction_with_witness(&tx, &stacks)
+            .unwrap()
+            .len() as u64;
+        // marker+flag 2, item count 1, (1 + 72), (1 + 33)
+        assert_eq!(full, stripped + 2 + 1 + 73 + 34);
+        assert_eq!(accounted_tx_bytes(&tx, Some(&stacks)), full);
+        assert_eq!(accounted_tx_bytes(&tx, None), stripped);
+        assert_eq!(accounted_tx_bytes(&tx, Some(&[Vec::new()])), stripped);
+    }
+
+    #[test]
+    fn mempool_cap_counts_witness_bytes_and_rejects_at_insert() {
+        use std::sync::Arc;
+
+        use crate::config::MempoolPolicyConfig;
+        use blvm_protocol::opcodes::{OP_0, OP_1, PUSH_32_BYTES};
+        use blvm_protocol::segwit::Witness;
+        use sha2::{Digest, Sha256};
+
+        let witness_script = vec![OP_1];
+        let script_hash = Sha256::digest(&witness_script);
+        let mut script_pubkey = vec![OP_0, PUSH_32_BYTES];
+        script_pubkey.extend_from_slice(&script_hash);
+        let witness: Vec<Witness> = vec![vec![witness_script.clone()]];
+
+        let mut tx = legacy_empty_script();
+        tx.outputs[0].value = 50_000;
+        tx.outputs[0].script_pubkey = vec![OP_1];
+
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded(
+            script_pubkey.clone(),
+            100_000,
+        ))));
+        let mut policy = MempoolPolicyConfig::default();
+        policy.max_mempool_mb = 1;
+        mempool.set_policy_config(Some(policy));
+        assert!(
+            mempool
+                .add_transaction_with_witness(tx.clone(), Some(witness))
+                .unwrap()
+        );
+        let base = serialize_transaction(&tx).len() as u64;
+        assert!(mempool.mempool_size_bytes() >= base + witness_script.len() as u64);
+
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded(
+            script_pubkey,
+            100_000,
+        ))));
+        let mut policy = MempoolPolicyConfig::default();
+        policy.max_mempool_mb = 1;
+        mempool.set_policy_config(Some(policy));
+        let big: Vec<Witness> = vec![vec![witness_script, vec![7u8; 1_100_000]]];
+        assert!(!mempool.add_transaction_with_witness(tx, Some(big)).unwrap());
+        assert_eq!(mempool.size(), 0);
     }
 
     #[test]
@@ -4836,11 +4928,7 @@ mod tests {
                 "tx {index} admitted"
             );
         }
-        let bytes_at_insert = mempool.mempool_size_bytes();
-        assert!(
-            bytes_at_insert <= 1_048_576,
-            "pool is {bytes_at_insert} bytes at insert"
-        );
+        assert!(mempool.mempool_size_bytes() > 1_048_576);
         mempool.process_once().await.unwrap();
         let bytes = mempool.mempool_size_bytes();
         assert!(bytes <= 1_048_576, "pool is {bytes} bytes");
@@ -4884,9 +4972,8 @@ mod tests {
         };
         child.outputs[0].value = 100_000;
         child.outputs[0].script_pubkey = vec![OP_1];
-        // The child pushes the pool over the count cap. Eviction removes the
-        // cheaper parent and this child with it, so the insert does not stay.
-        assert!(!mempool.add_transaction(child.clone()).unwrap());
+        assert!(mempool.add_transaction(child.clone()).unwrap());
+        mempool.process_once().await.unwrap();
         assert!(mempool.get_transaction(&calculate_tx_id(&parent)).is_none());
         assert!(mempool.get_transaction(&calculate_tx_id(&child)).is_none());
     }
@@ -4919,90 +5006,6 @@ mod tests {
         mempool.process_once().await.unwrap();
         assert!(mempool.get_transaction(&calculate_tx_id(&old)).is_none());
         assert!(mempool.get_transaction(&calculate_tx_id(&young)).is_some());
-    }
-
-    /// Witness bytes count toward `max_mempool_mb`, and the cap is applied when the
-    /// transaction is inserted. Maintenance (`process_once`) is not required.
-    #[tokio::test]
-    async fn mempool_byte_cap_counts_witness_bytes_at_insert() {
-        use blvm_protocol::opcodes::{OP_0, OP_1, OP_DROP, PUSH_32_BYTES};
-        use blvm_protocol::segwit::Witness;
-        use sha2::{Digest, Sha256};
-
-        let mut policy = open_policy();
-        policy.max_mempool_mb = 1;
-        let mempool = MempoolManager::new();
-        mempool.set_policy_config(Some(policy));
-
-        // P2WSH: drop 180 witness items, then push true. Clean-stack policy leaves one
-        // item. Each item is 520 bytes, so one spend stays under the 101 kvB ancestor
-        // cap. Fourteen of them exceed 1 MiB only when the witness is counted.
-        let mut witness_script = vec![OP_DROP; 180];
-        witness_script.push(OP_1);
-        let program = Sha256::digest(&witness_script);
-        let mut script_pubkey = vec![OP_0, PUSH_32_BYTES];
-        script_pubkey.extend_from_slice(&program);
-        let mut stack_template: Witness = vec![vec![0x11u8; 520]; 180];
-        stack_template.push(witness_script);
-
-        let count = 14u32;
-        let mut utxo_set = blvm_protocol::UtxoSet::default();
-        for index in 0..count {
-            let mut prev = [0u8; 32];
-            prev[..4].copy_from_slice(&index.to_le_bytes());
-            utxo_set.insert(
-                OutPoint {
-                    hash: prev,
-                    index: 0,
-                },
-                std::sync::Arc::new(blvm_protocol::UTXO {
-                    value: 100_000,
-                    script_pubkey: script_pubkey.clone().into(),
-                    height: 1,
-                    is_coinbase: false,
-                }),
-            );
-        }
-        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(utxo_set)));
-
-        let mut accepted = 0usize;
-        for index in 0..count {
-            let mut prev = [0u8; 32];
-            prev[..4].copy_from_slice(&index.to_le_bytes());
-            let mut tx = legacy_empty_script();
-            tx.inputs[0].prevout.hash = prev;
-            tx.outputs[0].value = 90_000;
-            tx.outputs[0].script_pubkey = vec![OP_1];
-            if mempool
-                .add_transaction_with_witness(tx, Some(vec![stack_template.clone()]))
-                .unwrap()
-            {
-                accepted += 1;
-            }
-        }
-
-        let accounted = mempool.mempool_size_bytes();
-        let stripped: u64 = mempool
-            .get_transactions()
-            .iter()
-            .map(|tx| serialize_transaction(tx).len() as u64)
-            .sum();
-        assert!(
-            accepted > 0,
-            "a witness spend under the ancestor cap should enter the pool"
-        );
-        assert!(
-            accounted > stripped,
-            "accounted {accounted} bytes equals stripped {stripped}; witness is ignored"
-        );
-        assert!(
-            accounted <= 1_048_576,
-            "pool is {accounted} bytes at insert, before process_once"
-        );
-        assert!(
-            mempool.size() < count as usize,
-            "all {count} witness transactions stayed; accepted {accepted}"
-        );
     }
 
     #[tokio::test]
