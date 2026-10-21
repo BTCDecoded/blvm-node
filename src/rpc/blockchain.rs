@@ -2367,11 +2367,11 @@ impl BlockchainRpc {
         use blvm_protocol::address::BitcoinAddress;
 
         if let Ok(decoded) = BitcoinAddress::decode(&address) {
-            // Check the network whenever the chain is known; with no protocol and no stored
-            // chain (e.g. `BlockchainRpc::new()`) there is nothing to compare against.
+            // Fail closed: with no protocol and no stored chain (e.g. a fresh datadir before the
+            // genesis chain_info is written) the node's network is unknown, so no address is valid.
             if self
                 .known_chain_name()
-                .is_some_and(|chain| !Self::witness_address_on_this_chain(decoded.network, chain))
+                .is_none_or(|chain| !Self::witness_address_on_this_chain(decoded.network, chain))
             {
                 return Ok(json!({
                     "isvalid": false,
@@ -2407,7 +2407,8 @@ impl BlockchainRpc {
         if let Ok(script_pubkey) = address_string_to_script_pubkey(&address) {
             let version =
                 crate::rpc::rawtx::base58check_decode(&address).and_then(|d| d.first().copied());
-            if self.known_chain_name().is_some_and(|chain| {
+            // Fail closed on an unknown chain, as for witness addresses above.
+            if self.known_chain_name().is_none_or(|chain| {
                 !version.is_some_and(|v| Self::base58_address_on_this_chain(v, chain))
             }) {
                 return Ok(json!({

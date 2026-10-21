@@ -141,3 +141,30 @@ async fn rv_q4_testnet4() {
         &[TB1, TB1P, TM, T2],
     );
 }
+
+/// rv_w1 (Review's probe on blvm-node#30 @ cafc63c): production construction (storage, no
+/// protocol) on a fresh datadir whose chain_info is not yet written. node/mod.rs starts RPC
+/// before it writes the genesis chain_info, so the chain is unknown; validateaddress must fail
+/// closed and report no network's address as valid.
+#[tokio::test]
+async fn rv_w1_uninitialized_datadir_production_construction() {
+    let dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(dir.path()).unwrap());
+    assert!(storage.chain().load_chain_info().unwrap().is_none());
+    let rpc = BlockchainRpc::with_dependencies(storage);
+    let mut out = vec![];
+    for a in [BC1, BC1P, TB1, TB1P, BCRT1, M1, M3, TM, T2] {
+        let r = rpc.validate_address(&json!([a])).await;
+        out.push((a, r.ok().and_then(|r| r["isvalid"].as_bool())));
+    }
+    eprintln!("RV_W1 uninit storage: {out:?}");
+    let accepted: Vec<_> = out
+        .iter()
+        .filter(|(_, v)| *v == Some(true))
+        .map(|(a, _)| *a)
+        .collect();
+    assert!(
+        accepted.is_empty(),
+        "accepted with unknown chain: {accepted:?}"
+    );
+}
