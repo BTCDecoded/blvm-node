@@ -1177,17 +1177,14 @@ impl MiningRpc {
                 "submitblock: storage is required to connect the block".to_string(),
             )
         })?;
-        // No tip means no chain to connect to; say so before the parent lookup does.
-        if storage
-            .chain()
-            .get_tip_hash()
-            .map_err(|e| RpcError::internal_error(format!("Failed to get chain tip: {e}")))?
-            .is_none()
-        {
-            return Err(RpcError::internal_error(
+        let tip_height = storage.chain().get_height().map_err(|e| {
+            RpcError::internal_error(format!("submitblock: failed to read chain height: {e}"))
+        })?;
+        let Some(tip_height) = tip_height else {
+            return Err(RpcError::invalid_params(
                 "submitblock: chain not initialized (no tip)".to_string(),
             ));
-        }
+        };
         let parent_hash = block.header.prev_block_hash;
         let parent_stored = storage
             .blocks()
