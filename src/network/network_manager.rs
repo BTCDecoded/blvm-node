@@ -2633,7 +2633,16 @@ impl NetworkManager {
 
         let parsed = {
             let t0 = std::time::Instant::now();
-            let parsed = ProtocolParser::parse_message(&data)?;
+            let parsed =
+                match ProtocolParser::parse_message(&data) {
+                    Ok(parsed) => parsed,
+                    Err(err) => {
+                        let _ = self.peer_tx().send(NetworkMessage::PeerDisconnected(
+                            TransportAddr::Tcp(peer_addr),
+                        ));
+                        return Err(err);
+                    }
+                };
             if matches!(parsed, ProtocolMessage::Block(_)) {
                 crate::node::parallel_ibd::note_block_parse(t0.elapsed().as_millis() as u64, false);
             }

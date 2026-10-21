@@ -3,7 +3,7 @@
 # Precedence: CLI > ENV > config file > defaults
 
 transport_preference = "tcponly"
-listen_addr = "0.0.0.0:8333"
+listen_addr = "127.0.0.1:8333"
 protocol_version = "BitcoinV1"
 # max_outbound_peers = 100
 
