@@ -207,12 +207,28 @@ impl Node {
                 .as_ref()
                 .map(|bv| bv.assume_valid_height)
                 .unwrap_or(0);
-            if let Some(ref bv) = config.block_validation {
-                if std::env::var("BLVM_ASSUME_VALID_HEIGHT").is_err() {
-                    consensus_config.block_validation.assume_valid_height = bv.assume_valid_height;
-                    consensus_config.block_validation.assume_valid_hash = bv.assume_valid_hash;
-                }
-            }
+            let network_name = match self.protocol_version {
+                ProtocolVersion::BitcoinV1 => "mainnet",
+                ProtocolVersion::Testnet3 => "testnet3",
+                ProtocolVersion::Testnet4 => "testnet4",
+                ProtocolVersion::Signet => "signet",
+                ProtocolVersion::Regtest => "regtest",
+            };
+            let custom_signet = self.protocol_version == ProtocolVersion::Signet
+                && config
+                    .signet_challenge
+                    .as_deref()
+                    .is_some_and(|h| !h.trim().is_empty());
+            let resolved = crate::config::resolve_assume_valid(
+                network_name,
+                custom_signet,
+                config.block_validation.as_ref(),
+                assume_valid_from_env
+                    .then_some(consensus_config.block_validation.assume_valid_height),
+            );
+            consensus_config.block_validation.assume_valid_height = resolved.height;
+            consensus_config.block_validation.assume_valid_hash = resolved.hash;
+            consensus_config.block_validation.n_minimum_chain_work = resolved.min_chain_work;
             let height = consensus_config.block_validation.assume_valid_height;
             let hash = consensus_config.block_validation.assume_valid_hash;
             blvm_protocol::consensus_config::init_consensus_config(consensus_config);
@@ -228,8 +244,8 @@ impl Node {
             if height > 0 {
                 let hash_s = hash.map(hex::encode).unwrap_or_else(|| "none".to_string());
                 info!(
-                    "Consensus assume-valid: height={} hash={} source={} (blocks before this height may skip script checks per network policy)",
-                    height, hash_s, source
+                    "Consensus assume-valid: height={} hash={} min_chain_work={:#x} source={} (blocks before this height may skip script checks per network policy)",
+                    height, hash_s, resolved.min_chain_work, source
                 );
             } else {
                 info!(
