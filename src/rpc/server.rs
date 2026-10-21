@@ -6,7 +6,7 @@
 use crate::utils::new_request_id;
 use anyhow::Result;
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -542,9 +542,29 @@ impl RpcServer {
             }
         }
 
-        // Read request body with size limit
-        let body = req.collect().await?;
-        let body_bytes = body.to_bytes();
+        // Stop at the configured cap while the body is still arriving, before
+        // authentication. `collect()` alone buffers the whole body first.
+        let max_body = server.max_request_size;
+        let limited = Limited::new(req.into_body(), max_body);
+        let body_bytes = match limited.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(err) => {
+                if err
+                    .downcast_ref::<http_body_util::LengthLimitError>()
+                    .is_some()
+                {
+                    return Ok(Self::http_error_response(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        &format!("Request body too large (max: {max_body} bytes)"),
+                    ));
+                }
+                warn!("Failed to read RPC request body from {addr}: {err}");
+                return Ok(Self::http_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Failed to read request body",
+                ));
+            }
+        };
 
         // Parse JSON body
         let json_body = match std::str::from_utf8(&body_bytes) {
@@ -2022,6 +2042,83 @@ mod tests {
         assert!(response_str.contains("\"result\""));
 
         server_handle.abort();
+    }
+
+    /// Spawn the HTTP/1 handler on an ephemeral port with a custom body cap.
+    async fn spawn_limited_http_server(
+        max_request_size: usize,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+        let (blockchain, network, mempool, mining, rawtx, control) = RpcServer::default_handlers();
+        let server = Arc::new(RpcServer::from_components(
+            server_addr,
+            blockchain,
+            network,
+            mempool,
+            mining,
+            rawtx,
+            control,
+            None,
+            None,
+            None,
+            max_request_size,
+            10,
+        ));
+        let handle = tokio::spawn(async move {
+            while let Ok((stream, addr)) = listener.accept().await {
+                let server_clone = Arc::clone(&server);
+                tokio::spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let service = service_fn(move |req| {
+                        RpcServer::handle_http_request_with_server(
+                            Arc::clone(&server_clone),
+                            req,
+                            addr,
+                        )
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+        tokio::time::sleep(RPC_SERVER_STARTUP_WAIT).await;
+        (server_addr, handle)
+    }
+
+    /// The cap must apply while the body is still arriving. A client that declares
+    /// a multi-megabyte body and sends only one byte past the cap must get 413
+    /// without the server waiting for the rest.
+    #[tokio::test]
+    async fn http1_rejects_oversized_body_before_the_remainder_is_sent() {
+        let max = 1024usize;
+        let (server_addr, server_handle) = spawn_limited_http_server(max).await;
+        let mut client = TokioTcpStream::connect(server_addr).await.unwrap();
+
+        let declared = 8 * 1024 * 1024;
+        let header = format!(
+            "POST / HTTP/1.1\r\n\
+             Host: 127.0.0.1\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {declared}\r\n\
+             Connection: close\r\n\
+             \r\n"
+        );
+        client.write_all(header.as_bytes()).await.unwrap();
+        client.write_all(&vec![b'x'; max + 1]).await.unwrap();
+        client.flush().await.unwrap();
+
+        let mut response = vec![0u8; 2048];
+        let read = tokio::time::timeout(RPC_CLIENT_READ_TIMEOUT, client.read(&mut response)).await;
+        server_handle.abort();
+
+        let n = read
+            .expect("server read the body without a size limit and waited for the rest")
+            .unwrap();
+        let response_str = String::from_utf8_lossy(&response[..n]);
+        assert!(
+            response_str.contains("413"),
+            "expected 413 before the remaining body, got: {response_str}"
+        );
     }
 
     #[tokio::test]
