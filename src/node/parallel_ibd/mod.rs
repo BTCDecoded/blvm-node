@@ -10148,6 +10148,7 @@ impl ParallelIBD {
         context.ibd_block_outputs = ibd_block_outputs;
         context.sequence_prev_mtp = Some(blockstore.sequence_prev_mtp_lookup());
         context.difficulty_ancestor = Some(blockstore.difficulty_ancestor_lookup());
+        context.assume_valid_ancestor = Some(blockstore.assume_valid_ancestor_lookup());
         let owned_utxo = if ibd_utxo_lookup.is_some() {
             UtxoSet::default()
         } else {

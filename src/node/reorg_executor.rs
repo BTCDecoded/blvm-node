@@ -280,6 +280,7 @@ pub fn try_activate_heavier_fork(
             );
             ctx.sequence_prev_mtp = Some(mtp_store.sequence_prev_mtp_lookup());
             ctx.difficulty_ancestor = Some(difficulty_store.difficulty_ancestor_lookup());
+            ctx.assume_valid_ancestor = Some(difficulty_store.assume_valid_ancestor_lookup());
             ctx
         };
 
