@@ -178,9 +178,19 @@ async fn linear_chain_control() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Higher-work fork: after importing the fork branch, the active tip follows the heavier chain.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn higher_work_fork_from_mid_chain() -> anyhow::Result<()> {
+/// Main chain `1..=12` on `storage_main`, and the wire blocks of a heavier fork that
+/// diverges at height 5 (not yet imported).
+struct ForkFixture {
+    _dirs: (TempDir, TempDir),
+    protocol: BitcoinProtocolEngine,
+    storage_main: Arc<Storage>,
+    main_utxo: UtxoSet,
+    main_tip: blvm_protocol::Hash,
+    fork_tip: blvm_protocol::Hash,
+    fork_wires: Vec<(u64, Vec<u8>)>,
+}
+
+fn build_fork() -> anyhow::Result<ForkFixture> {
     let protocol = BitcoinProtocolEngine::new(ProtocolVersion::Regtest)?;
     let genesis_header = protocol.get_network_params().genesis_block.header.clone();
     let consensus = ConsensusProof::new();
@@ -254,9 +264,7 @@ async fn higher_work_fork_from_mid_chain() -> anyhow::Result<()> {
         "fork must carry more cumulative chainwork (fork={fork_work:?}, main={main_work:?})"
     );
 
-    // Import fork branch blocks onto the main node (side chain until the fork wins on work).
-    let mut replay_utxo = main_utxo.clone();
-    let mut replay_coord = SyncCoordinator::new();
+    let mut fork_wires = Vec::new();
     for connect_height in FORK_DIVERGE_HEIGHT..=FORK_TIP_HEIGHT {
         let fork_hash = storage_fork
             .blocks()
@@ -264,27 +272,81 @@ async fn higher_work_fork_from_mid_chain() -> anyhow::Result<()> {
             .unwrap();
         let fork_block = storage_fork.blocks().get_block(&fork_hash)?.unwrap();
         let wire = serialize_block_with_witnesses(&fork_block, &witnesses_for(&fork_block), true);
-        let accepted = replay_coord.process_block(
-            storage_main.blocks().as_ref(),
-            &protocol,
-            Some(&storage_main),
-            &wire,
-            connect_height,
-            &mut replay_utxo,
-            None,
-            None,
-        )?;
-        assert!(
-            accepted,
-            "fork block at height {connect_height} must be accepted"
-        );
+        fork_wires.push((connect_height, wire));
     }
-
-    assert_eq!(
-        storage_main.chain().get_tip_hash()?.unwrap(),
+    Ok(ForkFixture {
+        _dirs: (main_dir, fork_dir),
+        protocol,
+        storage_main,
+        main_utxo,
+        main_tip,
         fork_tip,
+        fork_wires,
+    })
+}
+
+/// Import the fork's blocks onto the main node; returns how many were accepted.
+fn import_fork(f: &ForkFixture) -> usize {
+    let mut replay_utxo = f.main_utxo.clone();
+    let mut replay_coord = SyncCoordinator::new();
+    f.fork_wires
+        .iter()
+        .filter(|(connect_height, wire)| {
+            matches!(
+                replay_coord.process_block(
+                    f.storage_main.blocks().as_ref(),
+                    &f.protocol,
+                    Some(&f.storage_main),
+                    wire,
+                    *connect_height,
+                    &mut replay_utxo,
+                    None,
+                    None,
+                ),
+                Ok(true)
+            )
+        })
+        .count()
+}
+
+/// Higher-work fork: after importing the fork branch, the active tip follows the heavier chain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn higher_work_fork_from_mid_chain() -> anyhow::Result<()> {
+    let f = build_fork()?;
+    assert_eq!(
+        import_fork(&f),
+        f.fork_wires.len(),
+        "every fork block must be accepted"
+    );
+    assert_eq!(
+        f.storage_main.chain().get_tip_hash()?.unwrap(),
+        f.fork_tip,
         "active tip must follow the heavier fork after reorg"
     );
+    Ok(())
+}
 
+/// A node synced by the old parallel IBD has empty undo logs. A reorg over those blocks
+/// would restore nothing and leave the UTXO set wrong, so it must be refused: the node
+/// stays on its chain with its UTXO set intact.
+#[cfg(feature = "production")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn heavier_fork_over_empty_undo_logs_is_refused() -> anyhow::Result<()> {
+    let f = build_fork()?;
+    let blocks = f.storage_main.blocks();
+    for h in FORK_DIVERGE_HEIGHT..=MAIN_TIP_HEIGHT {
+        let hash = blocks.get_hash_by_height(h)?.unwrap();
+        blocks.store_undo_log(&hash, &blvm_consensus::reorganization::BlockUndoLog::new())?;
+    }
+    let utxo_before = f.storage_main.utxos().get_all_utxos()?;
+
+    import_fork(&f);
+
+    assert_eq!(
+        f.storage_main.chain().get_tip_hash()?.unwrap(),
+        f.main_tip,
+        "reorg over empty undo logs must be refused"
+    );
+    assert_eq!(f.storage_main.utxos().get_all_utxos()?, utxo_before);
     Ok(())
 }
