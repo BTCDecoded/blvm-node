@@ -266,29 +266,34 @@ impl BlockchainRpc {
 
     /// Chain name from the protocol, else the network stored with the chain.
     fn get_chain_name(&self) -> &str {
+        self.known_chain_name().unwrap_or("regtest") // No protocol and no stored chain
+    }
+
+    /// The node's chain, if a protocol is configured or a network is stored with the chain.
+    fn known_chain_name(&self) -> Option<&'static str> {
         if let Some(ref p) = self.protocol {
-            return match p.get_protocol_version() {
+            return Some(match p.get_protocol_version() {
                 blvm_protocol::ProtocolVersion::BitcoinV1 => "mainnet",
                 blvm_protocol::ProtocolVersion::Testnet3 => "testnet",
                 blvm_protocol::ProtocolVersion::Regtest => "regtest",
                 blvm_protocol::ProtocolVersion::Signet => "signet",
                 blvm_protocol::ProtocolVersion::Testnet4 => "testnet4",
-            };
+            });
         }
         // Production RPC servers build BlockchainRpc without a protocol (rpc/mod.rs), so fall
         // back to the network stored with the chain, as core_chain_field does.
         if let Some(ref storage) = self.storage {
             if let Ok(Some(info)) = storage.chain().load_chain_info() {
-                return match info.chain_params.network.as_str() {
+                return Some(match info.chain_params.network.as_str() {
                     "testnet" => "testnet",
                     "testnet4" => "testnet4",
                     "regtest" => "regtest",
                     "signet" => "signet",
                     _ => "mainnet",
-                };
+                });
             }
         }
-        "regtest" // No protocol and no stored chain
+        None
     }
 
     fn witness_address_on_this_chain(
@@ -2362,8 +2367,11 @@ impl BlockchainRpc {
         use blvm_protocol::address::BitcoinAddress;
 
         if let Ok(decoded) = BitcoinAddress::decode(&address) {
-            if self.protocol.is_some()
-                && !Self::witness_address_on_this_chain(decoded.network, self.get_chain_name())
+            // Check the network whenever the chain is known; with no protocol and no stored
+            // chain (e.g. `BlockchainRpc::new()`) there is nothing to compare against.
+            if self
+                .known_chain_name()
+                .is_some_and(|chain| !Self::witness_address_on_this_chain(decoded.network, chain))
             {
                 return Ok(json!({
                     "isvalid": false,
@@ -2399,9 +2407,9 @@ impl BlockchainRpc {
         if let Ok(script_pubkey) = address_string_to_script_pubkey(&address) {
             let version =
                 crate::rpc::rawtx::base58check_decode(&address).and_then(|d| d.first().copied());
-            if !version
-                .is_some_and(|v| Self::base58_address_on_this_chain(v, self.get_chain_name()))
-            {
+            if self.known_chain_name().is_some_and(|chain| {
+                !version.is_some_and(|v| Self::base58_address_on_this_chain(v, chain))
+            }) {
                 return Ok(json!({
                     "isvalid": false,
                     "address": address,
