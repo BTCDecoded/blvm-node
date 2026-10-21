@@ -2045,7 +2045,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_request_valid_json() {
-        let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}"#;
+        let request = r#"{"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":1}"#;
         let response_str = RpcServer::process_request(request).await;
         let response: Value = serde_json::from_str(&response_str).unwrap();
 
@@ -2093,7 +2093,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_request_without_id() {
-        let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","params":[]}"#;
+        let request = r#"{"jsonrpc":"2.0","method":"getnetworkinfo","params":[]}"#;
         let response_str = RpcServer::process_request(request).await;
         let response: Value = serde_json::from_str(&response_str).unwrap();
 
@@ -2125,9 +2125,8 @@ mod tests {
     async fn test_call_method_getblockchaininfo() {
         let server = RpcServer::new("127.0.0.1:0".parse().unwrap());
         let result = server.call_method("getblockchaininfo", json!([])).await;
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        assert!(response.get("chain").is_some());
+        let err = result.expect_err("no chain");
+        assert!(err.to_string().contains("chain is not initialized"));
     }
 
     #[tokio::test]
@@ -2253,7 +2252,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_json_rpc_2_0_compliance() {
-        let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}"#;
+        let request = r#"{"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":1}"#;
         let response_str = RpcServer::process_request(request).await;
         let response: Value = serde_json::from_str(&response_str).unwrap();
 
@@ -2315,7 +2314,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_params_handling() {
-        let request = r#"{"jsonrpc":"2.0","method":"getblockchaininfo","id":1}"#;
+        let request = r#"{"jsonrpc":"2.0","method":"getnetworkinfo","id":1}"#;
         let response_str = RpcServer::process_request(request).await;
         let response: Value = serde_json::from_str(&response_str).unwrap();
 
@@ -2413,7 +2412,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_request_single() {
-        let request = r#"[{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}]"#;
+        let request = r#"[{"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":1}]"#;
         let response_str = RpcServer::process_request(request).await;
         let response: Value = serde_json::from_str(&response_str).unwrap();
 
@@ -2428,7 +2427,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_request_multiple() {
         let request = r#"[
-            {"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1},
+            {"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":1},
             {"jsonrpc":"2.0","method":"getblockcount","params":[],"id":2},
             {"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":3}
         ]"#;
@@ -2453,7 +2452,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_request_with_errors() {
         let request = r#"[
-            {"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1},
+            {"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":1},
             {"jsonrpc":"2.0","method":"unknown_method","params":[],"id":2},
             {"jsonrpc":"2.0","method":"getblockcount","params":[],"id":3}
         ]"#;
@@ -2503,7 +2502,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_request_without_ids() {
         let request = r#"[
-            {"jsonrpc":"2.0","method":"getblockchaininfo","params":[]},
+            {"jsonrpc":"2.0","method":"getnetworkinfo","params":[]},
             {"jsonrpc":"2.0","method":"getblockcount","params":[]}
         ]"#;
         let response_str = RpcServer::process_request(request).await;

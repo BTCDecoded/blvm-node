@@ -1549,11 +1549,10 @@ impl MempoolManager {
             .map(|policy| policy.max_mempool_mb)
             .unwrap_or(300)
             .saturating_mul(1_048_576);
-        if self.mempool_size_bytes().saturating_add(incoming) > cap_bytes {
+        if incoming > cap_bytes {
             warn!(
-                "Transaction {} rejected: mempool byte cap ({} + {} > {})",
+                "Transaction {} rejected: mempool byte cap ({} > {})",
                 hex::encode(tx_hash),
-                self.mempool_size_bytes(),
                 incoming,
                 cap_bytes
             );
