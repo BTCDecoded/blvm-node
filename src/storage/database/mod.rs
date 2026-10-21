@@ -1880,7 +1880,7 @@ pub mod rocksdb_impl {
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or_else(|| {
-                        rocksdb_block_cache_mb(
+                        super::rocksdb_block_cache_mb(
                             storage_config.map(|s| s.dbcache_mb).unwrap_or(0),
                             default_block_cache,
                         )
