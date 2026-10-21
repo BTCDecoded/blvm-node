@@ -701,14 +701,121 @@ pub fn parse_signet_challenge_hex(hex_str: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Bitcoin Core chainparams `defaultAssumeValid` and `nMinimumChainWork` for one network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkAssumeValid {
+    /// Height of the assume-valid block; 0 turns the skip off.
+    pub height: u64,
+    /// Hash of that block in internal (little-endian) byte order.
+    pub hash: Option<[u8; 32]>,
+    /// Scripts are skipped only when the best header chain has at least this much work.
+    pub min_chain_work: u128,
+}
+
+/// Display (RPC) hex to internal byte order, at compile time.
+const fn hash_from_display(hex: &str) -> [u8; 32] {
+    const fn nibble(c: u8) -> u8 {
+        match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            _ => panic!("hash must be lowercase hex"),
+        }
+    }
+    let b = hex.as_bytes();
+    assert!(b.len() == 64, "hash must be 64 hex digits");
+    let mut out = [0u8; 32];
+    let mut i = 0;
+    while i < 32 {
+        out[31 - i] = (nibble(b[2 * i]) << 4) | nibble(b[2 * i + 1]);
+        i += 1;
+    }
+    out
+}
+
+/// Values from Bitcoin Core v31.1 `src/kernel/chainparams.cpp`.
+const CORE_MAINNET: NetworkAssumeValid = NetworkAssumeValid {
+    height: 938_343,
+    hash: Some(hash_from_display(
+        "00000000000000000000ccebd6d74d9194d8dcdc1d177c478e094bfad51ba5ac",
+    )),
+    min_chain_work: 0x0001_1287_50f8_2f4c_3661_53a3_a030,
+};
+const CORE_TESTNET3: NetworkAssumeValid = NetworkAssumeValid {
+    height: 4_842_348,
+    hash: Some(hash_from_display(
+        "000000007a61e4230b28ac5cb6b5e5a0130de37ac1faf2f8987d2fa6505b67f4",
+    )),
+    min_chain_work: 0x17dd_e1c6_49f3_708d_14b6,
+};
+/// Core sets testnet4 assume-valid at 123613; BLVM keeps full verification there and
+/// takes only Core's minimum work.
+const CORE_TESTNET4: NetworkAssumeValid = NetworkAssumeValid {
+    height: 0,
+    hash: None,
+    min_chain_work: 0x09a0_fe15_d017_7d08_6304,
+};
+/// Default signet only. A custom signet challenge has no assume-valid in Core.
+const CORE_SIGNET: NetworkAssumeValid = NetworkAssumeValid {
+    height: 293_175,
+    hash: Some(hash_from_display(
+        "00000008414aab61092ef93f1aacc54cf9e9f16af29ddad493b908a01ff5c329",
+    )),
+    min_chain_work: 0x0b46_3ea0_a4b8,
+};
+const NO_ASSUME_VALID: NetworkAssumeValid = NetworkAssumeValid {
+    height: 0,
+    hash: None,
+    min_chain_work: 0,
+};
+
+/// Per-network assume-valid anchor and minimum chain work (Core v31.1 chainparams).
+pub fn core_assume_valid_for_network(network: &str) -> NetworkAssumeValid {
+    match network.to_lowercase().as_str() {
+        "mainnet" | "bitcoinv1" => CORE_MAINNET,
+        "testnet" | "testnet3" => CORE_TESTNET3,
+        "testnet4" => CORE_TESTNET4,
+        "signet" => CORE_SIGNET,
+        _ => NO_ASSUME_VALID, // Regtest and unknown: validate all
+    }
+}
+
 /// Per-network default assume-valid height (Core chainparams defaultAssumeValid)
 pub fn default_assume_valid_height_for_network(network: &str) -> u64 {
-    match network.to_lowercase().as_str() {
-        "mainnet" | "bitcoinv1" => 912_683,  // Core mainnet default
-        "testnet" | "testnet3" => 4_550_000, // Core testnet default
-        "testnet4" => 0,                     // full verification; no assume-valid skip
-        "signet" => 267_665,                 // Core signet default
-        _ => 0,                              // Regtest and unknown: validate all
+    core_assume_valid_for_network(network).height
+}
+
+/// Assume-valid settings handed to consensus at startup.
+///
+/// Minimum work always comes from the network: without it any header chain, however
+/// little work it has, would skip scripts below the height. The height comes from the
+/// env override, then the config file, then the network. A configured height that
+/// equals the network's keeps the network's hash, so the `blvm` binary's height-only
+/// seed does not drop the anchor.
+pub fn resolve_assume_valid(
+    network: &str,
+    custom_signet: bool,
+    file: Option<&BlockValidationNodeConfig>,
+    env_height: Option<u64>,
+) -> NetworkAssumeValid {
+    let net = if custom_signet {
+        NO_ASSUME_VALID
+    } else {
+        core_assume_valid_for_network(network)
+    };
+    let hash_for = |height: u64| if height == net.height { net.hash } else { None };
+    let (height, hash) = match (env_height, file) {
+        (Some(h), _) => (h, hash_for(h)),
+        (None, Some(bv)) => (
+            bv.assume_valid_height,
+            bv.assume_valid_hash
+                .or_else(|| hash_for(bv.assume_valid_height)),
+        ),
+        (None, None) => (net.height, net.hash),
+    };
+    NetworkAssumeValid {
+        height,
+        hash,
+        min_chain_work: net.min_chain_work,
     }
 }
 
