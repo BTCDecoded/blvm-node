@@ -55,6 +55,9 @@ pub(crate) mod parse_offload;
 mod peer_connections;
 mod startup;
 mod wire_dispatch;
+
+#[cfg(test)]
+mod message_bans;
 // Payment Protocol (BIP70) - P2P handlers
 pub mod bip70_handler;
 
