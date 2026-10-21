@@ -252,6 +252,16 @@ async fn test_verify_chain_with_spends_returns_true() {
     );
 }
 
+/// Grind the nonce until the header meets its regtest target (about two tries).
+/// Connect checks proof of work, so verifychain replays need real headers.
+fn mine_regtest(mut header: blvm_protocol::BlockHeader) -> blvm_protocol::BlockHeader {
+    header.bits = 0x207fffff;
+    while !blvm_protocol::pow::check_proof_of_work(&header).unwrap() {
+        header.nonce += 1;
+    }
+    header
+}
+
 /// Test that verifychain level 4 works correctly with undo logs.
 /// Level 4 requires undo logs to rewind the UTXO set before replaying blocks.
 /// This test uses coinbase-only blocks to verify undo log rewind mechanics
@@ -286,7 +296,7 @@ async fn test_verify_chain_level4_with_undo_logs() {
         lock_time: 0,
     };
 
-    let genesis_header = blvm_protocol::BlockHeader {
+    let genesis_header = mine_regtest(blvm_protocol::BlockHeader {
         version: 0x20000000, // BIP9 version bits (required for regtest consensus)
         prev_block_hash: [0u8; 32],
         merkle_root: blvm_protocol::mining::calculate_merkle_root(&[genesis_coinbase.clone()])
@@ -294,7 +304,7 @@ async fn test_verify_chain_level4_with_undo_logs() {
         timestamp: 1_231_006_505,
         bits: 0x0f00ffff,
         nonce: 1,
-    };
+    });
 
     let genesis_block = blvm_node::Block {
         header: genesis_header.clone(),
@@ -374,14 +384,14 @@ async fn test_verify_chain_level4_with_undo_logs() {
     let block1_txs = vec![block1_coinbase.clone()];
     let block1_merkle = blvm_protocol::mining::calculate_merkle_root(&block1_txs).unwrap();
 
-    let block1_header = blvm_protocol::BlockHeader {
+    let block1_header = mine_regtest(blvm_protocol::BlockHeader {
         version: 0x20000000, // BIP9 version bits (required for regtest consensus)
         prev_block_hash: genesis_hash,
         merkle_root: block1_merkle,
         timestamp: 1_231_006_605,
         bits: 0x0f00ffff,
         nonce: 2,
-    };
+    });
 
     let block1 = blvm_node::Block {
         header: block1_header.clone(),
