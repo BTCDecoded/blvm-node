@@ -9,6 +9,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::NetworkMessage;
+use super::protocol::{BitcoinFramingViolation, ProtocolParser};
+use super::raw_frame::{RawFrame, RawRxPermit};
 use super::transport::{TransportAddr, TransportConnection};
 use crate::utils::current_timestamp;
 
@@ -90,6 +92,50 @@ pub struct Peer {
 fn next_peer_id() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+fn socket_for_raw(addr: &TransportAddr) -> SocketAddr {
+    match addr {
+        TransportAddr::Tcp(sock) => *sock,
+        #[cfg(feature = "quinn")]
+        TransportAddr::Quinn(sock) => *sock,
+        #[cfg(feature = "iroh")]
+        TransportAddr::Iroh(_) => SocketAddr::from(([0, 0, 0, 0], 0)),
+    }
+}
+
+fn send_raw(
+    tx: &mpsc::UnboundedSender<NetworkMessage>,
+    bytes: Vec<u8>,
+    addr: SocketAddr,
+    permit: RawRxPermit,
+) {
+    if tx
+        .send(NetworkMessage::RawMessageReceived(
+            RawFrame::new(bytes, permit),
+            addr,
+        ))
+        .is_ok()
+    {
+        crate::network::parse_offload::note_peer_rx_enqueue();
+    }
+}
+
+/// Queue a 24-byte notice, then drop the peer. The payload is not queued.
+fn signal_framing(
+    tx: &mpsc::UnboundedSender<NetworkMessage>,
+    transport: &TransportAddr,
+    violation: BitcoinFramingViolation,
+    magic_header: Option<[u8; 24]>,
+) {
+    let notice = match violation {
+        BitcoinFramingViolation::Checksum => ProtocolParser::checksum_violation_notice().to_vec(),
+        BitcoinFramingViolation::Magic => magic_header
+            .unwrap_or_else(ProtocolParser::bad_magic_notice)
+            .to_vec(),
+    };
+    send_raw(tx, notice, socket_for_raw(transport), RawRxPermit::none());
+    let _ = tx.send(NetworkMessage::PeerDisconnected(transport.clone()));
 }
 
 impl Peer {
@@ -177,6 +223,7 @@ impl Peer {
 
         // Clone for reader task
         let conn_read = Arc::clone(&conn);
+        let rx_budget = RawRxPermit::budget(crate::network::protocol::MAX_PROTOCOL_MESSAGE_LENGTH);
 
         // Spawn read task - this task owns its locked access while reading
         let read_task = tokio::spawn(async move {
@@ -206,23 +253,54 @@ impl Peer {
                             data.len(),
                             transport_addr_clone
                         );
-                        let peer_addr = match &transport_addr_clone {
-                            super::transport::TransportAddr::Tcp(sock) => *sock,
-                            #[cfg(feature = "quinn")]
-                            super::transport::TransportAddr::Quinn(sock) => *sock,
-                            #[cfg(feature = "iroh")]
-                            super::transport::TransportAddr::Iroh(_) => {
-                                std::net::SocketAddr::from(([0, 0, 0, 0], 0))
-                            }
-                        };
-                        if message_tx_clone
-                            .send(NetworkMessage::RawMessageReceived(data, peer_addr))
-                            .is_ok()
-                        {
-                            crate::network::parse_offload::note_peer_rx_enqueue();
+                        if let Some(violation) = ProtocolParser::bitcoin_framing_violation(&data) {
+                            signal_framing(
+                                &message_tx_clone,
+                                &transport_addr_clone,
+                                violation,
+                                None,
+                            );
+                            break;
                         }
+                        let Some(permit) = RawRxPermit::acquire(&rx_budget, data.len()).await
+                        else {
+                            warn!(
+                                "Inbound frame from {:?} exceeds the per-peer queue budget ({} bytes)",
+                                transport_addr_clone,
+                                data.len()
+                            );
+                            let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
+                                transport_addr_clone.clone(),
+                            ));
+                            break;
+                        };
+                        send_raw(
+                            &message_tx_clone,
+                            data,
+                            socket_for_raw(&transport_addr_clone),
+                            permit,
+                        );
                     }
                     Err(e) => {
+                        let text = e.to_string();
+                        if text.contains("bitcoin framing: bad checksum") {
+                            signal_framing(
+                                &message_tx_clone,
+                                &transport_addr_clone,
+                                BitcoinFramingViolation::Checksum,
+                                None,
+                            );
+                            break;
+                        }
+                        if text.contains("bitcoin framing: bad network magic") {
+                            signal_framing(
+                                &message_tx_clone,
+                                &transport_addr_clone,
+                                BitcoinFramingViolation::Magic,
+                                None,
+                            );
+                            break;
+                        }
                         warn!("Peer read error for {:?}: {}", transport_addr_clone, e);
                         // CRITICAL: Send PeerDisconnected on read error
                         let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
@@ -346,6 +424,7 @@ impl Peer {
         let transport_addr_write = transport_addr.clone();
         let message_tx_clone = message_tx.clone();
         let message_tx_write = message_tx.clone();
+        let rx_budget = RawRxPermit::budget(max_message_length);
 
         // Spawn read task - owns the reader half exclusively
         let read_task = tokio::spawn(async move {
@@ -369,65 +448,89 @@ impl Peer {
                     }
                 }
 
+                if ProtocolParser::header_rejects_payload(&header) {
+                    signal_framing(
+                        &message_tx_clone,
+                        &transport_addr_clone,
+                        BitcoinFramingViolation::Magic,
+                        Some(header),
+                    );
+                    break;
+                }
+
                 // Extract payload length from bytes 16-19 (little-endian)
                 let payload_len =
                     u32::from_le_bytes([header[16], header[17], header[18], header[19]]) as usize;
 
                 // Read payload if any
                 let max_payload = max_message_length.saturating_sub(24);
+                if payload_len > max_payload {
+                    warn!(
+                        "Peer {:?} sent oversized message: {} bytes",
+                        transport_addr_clone, payload_len
+                    );
+                    // CRITICAL: Send PeerDisconnected on oversized message
+                    let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
+                        transport_addr_clone.clone(),
+                    ));
+                    break;
+                }
+
+                let frame_len = 24 + payload_len;
+                let Some(permit) = RawRxPermit::acquire(&rx_budget, frame_len).await else {
+                    warn!(
+                        "Per-peer receive queue is full for {:?} ({} bytes waiting)",
+                        transport_addr_clone, frame_len
+                    );
+                    let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
+                        transport_addr_clone.clone(),
+                    ));
+                    break;
+                };
+
                 let data = if payload_len > 0 {
-                    if payload_len > max_payload {
+                    let mut payload = vec![0u8; payload_len];
+                    if let Err(e) = reader.read_exact(&mut payload).await {
+                        drop(permit);
                         warn!(
-                            "Peer {:?} sent oversized message: {} bytes",
-                            transport_addr_clone, payload_len
+                            "Peer read payload error for {:?}: {}",
+                            transport_addr_clone, e
                         );
-                        // CRITICAL: Send PeerDisconnected on oversized message
+                        // CRITICAL: Send PeerDisconnected on payload read error
                         let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
                             transport_addr_clone.clone(),
                         ));
                         break;
                     }
-                    let mut payload = vec![0u8; payload_len];
-                    match reader.read_exact(&mut payload).await {
-                        Ok(_) => {
-                            let mut data = header.to_vec();
-                            data.extend_from_slice(&payload);
-                            data
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Peer read payload error for {:?}: {}",
-                                transport_addr_clone, e
-                            );
-                            // CRITICAL: Send PeerDisconnected on payload read error
-                            let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
-                                transport_addr_clone.clone(),
-                            ));
-                            break;
-                        }
-                    }
+                    let mut data = header.to_vec();
+                    data.extend_from_slice(&payload);
+                    data
                 } else {
                     header.to_vec()
                 };
+
+                if let Some(violation) = ProtocolParser::bitcoin_framing_violation(&data) {
+                    drop(permit);
+                    signal_framing(
+                        &message_tx_clone,
+                        &transport_addr_clone,
+                        violation,
+                        Some(header),
+                    );
+                    break;
+                }
 
                 debug!(
                     "Received {} bytes from {:?}",
                     data.len(),
                     transport_addr_clone
                 );
-                let peer_socket = match &transport_addr_clone {
-                    TransportAddr::Tcp(sock) => *sock,
-                    #[cfg(feature = "quinn")]
-                    TransportAddr::Quinn(sock) => *sock,
-                    #[cfg(feature = "iroh")]
-                    TransportAddr::Iroh(_) => std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
-                };
-                if message_tx_clone
-                    .send(NetworkMessage::RawMessageReceived(data, peer_socket))
-                    .is_ok()
-                {
-                    crate::network::parse_offload::note_peer_rx_enqueue();
-                }
+                send_raw(
+                    &message_tx_clone,
+                    data,
+                    socket_for_raw(&transport_addr_clone),
+                    permit,
+                );
             }
         });
 

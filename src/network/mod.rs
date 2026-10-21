@@ -26,6 +26,7 @@ pub mod peer_scoring;
 pub mod protocol;
 pub mod protocol_adapter;
 pub mod protocol_extensions;
+mod raw_frame;
 pub mod relay;
 pub mod replay_protection;
 pub mod tcp_transport;
@@ -74,6 +75,7 @@ pub use connection_manager::{ConnectionManager, NetworkIO};
 pub use ibd_pin::{ibd_peers_pinned, ibd_pin_contains, ibd_pin_peers, parse_ibd_pin_peers};
 pub use network_manager::NetworkManager;
 pub use peer_manager::{PeerByteRateLimiter, PeerManager, PeerRateLimiter};
+pub use raw_frame::RawFrame;
 pub use transport::{TransportAddr, TransportPreference};
 
 /// Network message types (central enum for network layer)
@@ -94,8 +96,9 @@ pub enum NetworkMessage {
     GetFilteredBlockReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
     #[cfg(feature = "stratum-v2")]
     StratumV2MessageReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
-    // Raw message received from peer (needs processing)
-    RawMessageReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    // Raw message received from peer (needs processing).
+    // The frame holds a per-peer byte permit until it is dropped.
+    RawMessageReceived(RawFrame, SocketAddr), // (data, peer_addr)
     // Headers response (for IBD)
     HeadersReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
     // BIP157 Block Filter messages
