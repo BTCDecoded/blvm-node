@@ -739,3 +739,22 @@ fn test_transport_preference_config_variants() {
         assert!(pref.allows_iroh());
     }
 }
+
+#[test]
+fn rpc_auth_only_file_keeps_the_auth_block() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("auth.toml");
+    std::fs::write(
+        &path,
+        "[rpc_auth]\nusername = \"miner\"\npassword = \"secret\"\n",
+    )
+    .unwrap();
+    let config = NodeConfig::from_file(&path).unwrap();
+    let auth = config.rpc_auth.expect("rpc_auth");
+    assert_eq!(auth.username.as_deref(), Some("miner"));
+    assert_eq!(auth.password.as_deref(), Some("secret"));
+
+    let broken = temp_dir.path().join("broken.toml");
+    std::fs::write(&broken, "listen_addr = [\n").unwrap();
+    assert!(NodeConfig::from_file(&broken).is_err());
+}

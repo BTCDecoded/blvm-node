@@ -667,19 +667,29 @@ pub(crate) fn map_size_mb_for_existing_file(file_mb: usize, free_mb: u64) -> usi
 }
 
 /// Available disk space in MiB for the filesystem containing `path`
-/// (or "." if `path` is None).  Returns 0 on error.
+/// (or "." if `path` is None). A path that does not exist yet is stated through
+/// the nearest existing parent. A failed stat returns 0, and the caller uses
+/// the 48 GiB floor.
 ///
 /// Uses `statvfs(2)` on Linux/Unix (via the `libc` crate which is a default feature).
-/// Falls back to 0 on platforms where it is unavailable, which causes the caller to
-/// use the 48 GiB floor.
 fn disk_free_mb_for_path(path: Option<&std::path::Path>) -> u64 {
     #[cfg(all(target_os = "linux", feature = "libc"))]
     {
         use std::ffi::CString;
         use std::mem::MaybeUninit;
-        let raw_path = path
-            .map(|p| p.as_os_str().as_encoded_bytes())
-            .unwrap_or(b".");
+        use std::path::PathBuf;
+        let mut candidate = path
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        while !candidate.as_os_str().is_empty() && !candidate.exists() {
+            if !candidate.pop() {
+                break;
+            }
+        }
+        if candidate.as_os_str().is_empty() {
+            candidate = PathBuf::from(".");
+        }
+        let raw_path = candidate.as_os_str().as_encoded_bytes();
         let c_path = match CString::new(raw_path) {
             Ok(s) => s,
             Err(_) => return 0,
@@ -1231,7 +1241,17 @@ impl BatchWriter for Heed3BatchWriter {
 
 #[cfg(test)]
 mod map_size_tests {
-    use super::{disk_based_map_size_mb, map_size_mb_for_existing_file};
+    use super::{disk_based_map_size_mb, disk_free_mb_for_path, map_size_mb_for_existing_file};
+
+    #[test]
+    fn missing_path_uses_an_existing_parent() {
+        let parent = std::env::temp_dir();
+        let missing = parent.join("blvm-heed3-missing-map-dir");
+        let parent_free = disk_free_mb_for_path(Some(&parent));
+        let missing_free = disk_free_mb_for_path(Some(&missing));
+        assert!(parent_free > 0);
+        assert_eq!(missing_free, parent_free);
+    }
 
     #[test]
     fn failed_disk_probe_uses_the_48gib_floor() {

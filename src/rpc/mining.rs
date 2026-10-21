@@ -1218,7 +1218,6 @@ impl MiningRpc {
                 "submitblock: protocol engine is required to connect the block".to_string(),
             )
         })?;
-        let tip_height = self.get_current_height()?.unwrap_or(0);
         let connect_height = tip_height.saturating_add(1);
         let mut utxo = self.get_utxo_set()?;
         let mut coord = SyncCoordinator::new();

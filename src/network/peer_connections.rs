@@ -56,6 +56,7 @@ impl NetworkManager {
             "mainnet" => dns_seeds::MAINNET_DNS_SEEDS,
             "testnet" => dns_seeds::TESTNET_DNS_SEEDS,
             "testnet4" => dns_seeds::TESTNET4_DNS_SEEDS,
+            "signet" => dns_seeds::SIGNET_DNS_SEEDS,
             _ => {
                 warn!("Unknown network: {}, skipping DNS seed discovery", network);
                 return Ok(());
