@@ -7,10 +7,7 @@ async fn getblockchaininfo_softforks_contains_expected_keys() {
     let response_str = RpcServer::process_request(request).await;
     let response: Value = serde_json::from_str(&response_str).unwrap();
     let message = response["error"]["message"].as_str().unwrap_or("");
-    assert!(
-        message.contains("chain is not initialized"),
-        "{response}"
-    );
+    assert!(message.contains("chain is not initialized"), "{response}");
 }
 
 #[tokio::test]
