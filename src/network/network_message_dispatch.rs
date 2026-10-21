@@ -43,6 +43,7 @@ pub(crate) async fn handle_network_message(
             handle_peer_disconnected(nm, addr).await;
         }
         NetworkMessage::RawMessageReceived(data, peer_addr) => {
+            let data = data.into_vec();
             ignore_error(
                 || nm.handle_incoming_wire_tcp(peer_addr, data),
                 &format!("Error processing raw message from {peer_addr}"),
@@ -603,9 +604,12 @@ mod tests {
     async fn raw_message_received_invalid_wire_is_noop() {
         let nm = manager();
         let addr: SocketAddr = "127.0.0.1:18339".parse().unwrap();
-        handle_network_message(&nm, NetworkMessage::RawMessageReceived(vec![0xff], addr))
-            .await
-            .unwrap();
+        handle_network_message(
+            &nm,
+            NetworkMessage::RawMessageReceived(vec![0xff].into(), addr),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

@@ -2437,6 +2437,7 @@ impl NetworkManager {
             }
             NetworkMessage::RawMessageReceived(data, peer_addr) => {
                 // Process raw message - this will handle Version messages and send VerAck
+                let data = data.into_vec();
                 if let Err(e) = self.handle_incoming_wire_tcp(peer_addr, data).await {
                     debug!("Error processing raw message from {}: {}", peer_addr, e);
                 }
@@ -2566,7 +2567,7 @@ impl NetworkManager {
 
         // Check for mesh packet magic bytes (0x4D, 0x45, 0x53, 0x48 = "MESH")
         // Mesh packets are handled separately and routed to mesh module
-        if data.len() >= 4 && data[0..4] == [0x4D, 0x45, 0x53, 0x48] {
+        if data.len() >= 4 && data[0..4] == crate::network::protocol::MESH_PACKET_MAGIC {
             debug!(
                 "Detected mesh packet from {}: {} bytes",
                 peer_addr,
@@ -2622,6 +2623,12 @@ impl NetworkManager {
                 self.cancel_block_request_force(peer_addr, hash);
                 return Ok(());
             }
+        }
+
+        if let Some(violation) = ProtocolParser::bitcoin_framing_violation(&data) {
+            return self
+                .disconnect_for_protocol_violation(peer_addr, violation.reason(), true)
+                .await;
         }
 
         let parsed = {

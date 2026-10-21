@@ -36,6 +36,25 @@ pub(crate) static ACTIVE_MAGIC: std::sync::atomic::AtomicU32 =
 /// Maximum protocol message size (32MB)
 pub const MAX_PROTOCOL_MESSAGE_LENGTH: usize = 32 * 1024 * 1024;
 
+/// Mesh packets share the Bitcoin socket and are not a Bitcoin magic mismatch.
+pub(crate) const MESH_PACKET_MAGIC: [u8; 4] = [0x4D, 0x45, 0x53, 0x48];
+
+/// Bitcoin header/checksum failure that must drop the peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BitcoinFramingViolation {
+    Magic,
+    Checksum,
+}
+
+impl BitcoinFramingViolation {
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::Magic => "bitcoin framing: bad network magic",
+            Self::Checksum => "bitcoin framing: bad checksum",
+        }
+    }
+}
+
 /// Maximum addresses in an addr message (MAX_ADDR_TO_SEND)
 pub const MAX_ADDR_TO_SEND: usize = 1000;
 
@@ -982,6 +1001,77 @@ impl ProtocolParser {
         } else {
             ("mainnet", 8333)
         }
+    }
+
+    pub(crate) fn active_magic_bytes() -> [u8; 4] {
+        ACTIVE_MAGIC
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .to_le_bytes()
+    }
+
+    /// Mesh (and Stratum, when that feature is on) are demuxed before Bitcoin parse.
+    pub(crate) fn header_is_overlay(header: &[u8]) -> bool {
+        if header.len() >= 4 && header[0..4] == MESH_PACKET_MAGIC {
+            return true;
+        }
+        #[cfg(feature = "stratum-v2")]
+        if header.len() >= 6 && Self::stratum_header(header) {
+            return true;
+        }
+        false
+    }
+
+    #[cfg(feature = "stratum-v2")]
+    fn stratum_header(header: &[u8]) -> bool {
+        let length_prefix = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+        if !(6..=1024 * 1024).contains(&length_prefix) {
+            return false;
+        }
+        let tag = u16::from_le_bytes([header[4], header[5]]);
+        (1..=3).contains(&tag)
+            || (0x0010..=0x0012).contains(&tag)
+            || (0x0020..=0x0021).contains(&tag)
+            || (0x0030..=0x0032).contains(&tag)
+    }
+
+    /// Wrong Bitcoin magic: do not allocate the claimed payload.
+    pub(crate) fn header_rejects_payload(header: &[u8; 24]) -> bool {
+        !Self::header_is_overlay(header) && header[0..4] != Self::active_magic_bytes()
+    }
+
+    /// Magic or checksum failure on a buffer the reader already has.
+    /// Short frames and unknown commands are not violations here.
+    pub(crate) fn bitcoin_framing_violation(data: &[u8]) -> Option<BitcoinFramingViolation> {
+        if data.len() < 24 || Self::header_is_overlay(&data[..24]) {
+            return None;
+        }
+        if data[0..4] != Self::active_magic_bytes() {
+            return Some(BitcoinFramingViolation::Magic);
+        }
+        let payload_len = u32::from_le_bytes([data[16], data[17], data[18], data[19]]) as usize;
+        if data.len() < 24 + payload_len {
+            return None;
+        }
+        let payload = &data[24..24 + payload_len];
+        if Self::calculate_checksum(payload) != data[20..24] {
+            return Some(BitcoinFramingViolation::Checksum);
+        }
+        None
+    }
+
+    /// 24-byte stand-in so a checksum failure can be banned without the payload.
+    pub(crate) fn checksum_violation_notice() -> [u8; 24] {
+        let mut header = [0u8; 24];
+        header[0..4].copy_from_slice(&Self::active_magic_bytes());
+        header[4..10].copy_from_slice(b"verack");
+        header
+    }
+
+    pub(crate) fn bad_magic_notice() -> [u8; 24] {
+        let mut header = [0u8; 24];
+        header[0..4].copy_from_slice(b"BAD!");
+        header[4..8].copy_from_slice(b"ping");
+        header
     }
 
     /// Parse a raw message into a protocol message
