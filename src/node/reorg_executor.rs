@@ -228,6 +228,24 @@ pub fn try_activate_heavier_fork(
         return Ok(false);
     }
 
+    // current_chain[0] is the common ancestor; every later block is disconnected and needs
+    // usable undo data (nodes synced before the parallel-IBD undo fix have empty logs).
+    let to_disconnect: Vec<(u64, Hash)> = current_chain
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(i, block)| {
+            let height = active_height - (current_chain.len() - 1 - i) as u64;
+            (height, blockstore.get_block_hash(block))
+        })
+        .collect();
+    if let Err(e) =
+        crate::node::undo_check::ensure_disconnect_undo_usable(blockstore, &to_disconnect)
+    {
+        tracing::error!("{e}");
+        return Err(e);
+    }
+
     let mut new_chain = new_chain;
     let mut new_witnesses = witnesses_for_chain(blockstore, storage, &new_chain, protocol)?;
     for (block, witnesses) in new_chain.iter_mut().zip(new_witnesses.iter_mut()) {

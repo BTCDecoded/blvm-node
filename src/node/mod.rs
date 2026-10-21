@@ -21,6 +21,8 @@ pub mod reorg_executor;
 pub mod run_loop;
 pub mod subsystems;
 pub mod sync;
+#[cfg(feature = "production")]
+pub mod undo_check;
 
 use anyhow::Result;
 use hex;
@@ -472,6 +474,11 @@ impl Node {
                 warn!("{}", warning);
             }
         }
+
+        // Undo data written by the pre-fix parallel IBD is empty; tell the operator now
+        // rather than at the first reorg (which will be refused).
+        #[cfg(feature = "production")]
+        crate::node::undo_check::check_recent_undo_at_startup(&self.storage);
 
         // Sequential startup in this task: wire RPC auth/events/modules, then start RPC and subsystems.
 
