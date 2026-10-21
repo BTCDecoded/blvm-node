@@ -21,10 +21,14 @@ async fn test_rpc_manager_creation() {
 async fn test_blockchain_rpc() {
     let blockchain = blockchain::BlockchainRpc::new();
 
-    // Test getblockchaininfo
-    let info = blockchain.get_blockchain_info().await.unwrap();
-    assert!(info.get("chain").is_some());
-    assert!(info.get("blocks").is_some());
+    // Before a chain is loaded, getblockchaininfo reports no network name.
+    let info = blockchain.get_blockchain_info().await;
+    assert!(info.is_err());
+    assert!(
+        info.unwrap_err()
+            .to_string()
+            .contains("chain is not initialized")
+    );
 
     // Test getblock (may fail if storage not set up - that's expected)
     let block_result = blockchain
@@ -194,21 +198,11 @@ async fn test_rpc_error_response_formatting() {
 async fn test_blockchain_rpc_getblockchaininfo() {
     let blockchain = blockchain::BlockchainRpc::new();
 
-    // Test getblockchaininfo
-    let info = blockchain.get_blockchain_info().await.unwrap();
-
-    // Verify required fields
-    assert!(info.get("chain").is_some());
-    assert!(info.get("blocks").is_some());
-    assert!(info.get("headers").is_some());
-    assert!(info.get("bestblockhash").is_some());
-    assert!(info.get("difficulty").is_some());
-    assert!(info.get("mediantime").is_some());
-    assert!(info.get("verificationprogress").is_some());
-    assert!(info.get("initialblockdownload").is_some());
-    assert!(info.get("chainwork").is_some());
-    assert!(info.get("size_on_disk").is_some());
-    assert!(info.get("pruned").is_some());
+    let err = blockchain
+        .get_blockchain_info()
+        .await
+        .expect_err("no chain");
+    assert!(err.to_string().contains("chain is not initialized"));
 }
 
 #[tokio::test]
@@ -534,8 +528,12 @@ async fn test_rpc_concurrent_requests() {
 
     let results = futures::future::join_all(futures).await;
 
-    // All requests should succeed
     for result in results {
-        assert!(result.is_ok());
+        assert!(
+            result
+                .expect_err("no chain")
+                .to_string()
+                .contains("chain is not initialized")
+        );
     }
 }

@@ -45,6 +45,12 @@ pub const TESTNET4_DNS_SEEDS: &[&str] = &[
     "seed.testnet4.wiz.biz",
 ];
 
+/// Signet DNS seeds. Signet listens on port 38333.
+pub const SIGNET_DNS_SEEDS: &[&str] = &[
+    "seed.signet.bitcoin.sprovoost.nl",
+    "seed.signet.achownodes.xyz",
+];
+
 /// Testnet DNS seeds
 pub const TESTNET_DNS_SEEDS: &[&str] = &[
     "testnet-seed.bitcoin.jonasschnelli.ch",

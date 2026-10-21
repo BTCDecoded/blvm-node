@@ -6,7 +6,7 @@
 use crate::utils::new_request_id;
 use anyhow::Result;
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -542,9 +542,28 @@ impl RpcServer {
             }
         }
 
-        // Read request body with size limit
-        let body = req.collect().await?;
-        let body_bytes = body.to_bytes();
+        // Read request body with size limit. A body past the cap is rejected
+        // before it is stored.
+        let limited = Limited::new(req.into_body(), DEFAULT_MAX_REQUEST_SIZE);
+        let body_bytes = match limited.collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(err)
+                if err
+                    .downcast_ref::<http_body_util::LengthLimitError>()
+                    .is_some() =>
+            {
+                return Ok(Self::http_error_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "request body exceeds size limit",
+                ));
+            }
+            Err(err) => {
+                return Ok(Self::http_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("failed to read request body: {err}"),
+                ));
+            }
+        };
 
         // Parse JSON body
         let json_body = match std::str::from_utf8(&body_bytes) {

@@ -2,11 +2,11 @@
 # This configuration enables incremental pruning during IBD with UTXO commitments
 
 transport_preference = "tcponly"
-listen_addr = "0.0.0.0:8333"
+listen_addr = "127.0.0.1:8333"
 protocol_version = "BitcoinV1"
 
-# Try this host early at startup (TOOLS.md LAN Core). IBD download filtering uses [ibd].preferred_peers / BLVM_IBD_PEERS.
-persistent_peers = ["192.168.2.100:8333"]
+# Name a peer here to dial it at startup. IBD download filtering uses [ibd].preferred_peers / BLVM_IBD_PEERS.
+persistent_peers = []
 
 [storage]
 data_dir = "~/.local/share/blvm-mainnet"
@@ -39,7 +39,7 @@ min_blocks_to_keep = 144
 chunk_size = 16
 download_timeout_secs = 30
 mode = "parallel"
-preferred_peers = ["192.168.2.100:8333"]
+preferred_peers = []
 # max_ahead_blocks = 512
 # fifo: minimal per-block eviction overhead during IBD (dynamic can cost noticeably early chain)
 eviction = "fifo"

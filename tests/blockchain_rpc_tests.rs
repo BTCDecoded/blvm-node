@@ -12,6 +12,14 @@ fn chain_from_state(v: &Value) -> String {
     v["chain"].as_str().unwrap().to_string()
 }
 
+fn meet_easy_pow(header: &mut blvm_protocol::BlockHeader) {
+    header.bits = 0x207f_ffff;
+    header.nonce = 0;
+    while !blvm_consensus::pow::check_proof_of_work(header).unwrap_or(false) {
+        header.nonce = header.nonce.wrapping_add(1);
+    }
+}
+
 #[tokio::test]
 async fn test_get_chain_name_with_protocol() {
     // `getblockchainstate` includes `chain` from the same logic as internal get_chain_name.
@@ -83,15 +91,16 @@ async fn test_verify_chain_with_spends_returns_true() {
         lock_time: 0,
     };
 
-    let genesis_header = blvm_protocol::BlockHeader {
+    let mut genesis_header = blvm_protocol::BlockHeader {
         version: 1,
         prev_block_hash: [0u8; 32],
         merkle_root: blvm_protocol::mining::calculate_merkle_root(&[genesis_coinbase.clone()])
             .unwrap(),
         timestamp: 1_231_006_505,
-        bits: 0x0f00ffff,
-        nonce: 1,
+        bits: 0x207fffff,
+        nonce: 0,
     };
+    meet_easy_pow(&mut genesis_header);
 
     let genesis_block = blvm_node::Block {
         header: genesis_header.clone(),
@@ -158,14 +167,15 @@ async fn test_verify_chain_with_spends_returns_true() {
     let block1_txs = vec![block1_coinbase.clone(), spend_tx.clone()];
     let block1_merkle = blvm_protocol::mining::calculate_merkle_root(&block1_txs).unwrap();
 
-    let block1_header = blvm_protocol::BlockHeader {
+    let mut block1_header = blvm_protocol::BlockHeader {
         version: 1,
         prev_block_hash: genesis_hash,
         merkle_root: block1_merkle,
         timestamp: 1_231_006_605,
-        bits: 0x0f00ffff,
-        nonce: 2,
+        bits: 0x207fffff,
+        nonce: 0,
     };
+    meet_easy_pow(&mut block1_header);
 
     let block1 = blvm_node::Block {
         header: block1_header.clone(),
@@ -286,15 +296,16 @@ async fn test_verify_chain_level4_with_undo_logs() {
         lock_time: 0,
     };
 
-    let genesis_header = blvm_protocol::BlockHeader {
+    let mut genesis_header = blvm_protocol::BlockHeader {
         version: 0x20000000, // BIP9 version bits (required for regtest consensus)
         prev_block_hash: [0u8; 32],
         merkle_root: blvm_protocol::mining::calculate_merkle_root(&[genesis_coinbase.clone()])
             .unwrap(),
         timestamp: 1_231_006_505,
-        bits: 0x0f00ffff,
-        nonce: 1,
+        bits: 0x207fffff,
+        nonce: 0,
     };
+    meet_easy_pow(&mut genesis_header);
 
     let genesis_block = blvm_node::Block {
         header: genesis_header.clone(),
@@ -374,14 +385,15 @@ async fn test_verify_chain_level4_with_undo_logs() {
     let block1_txs = vec![block1_coinbase.clone()];
     let block1_merkle = blvm_protocol::mining::calculate_merkle_root(&block1_txs).unwrap();
 
-    let block1_header = blvm_protocol::BlockHeader {
+    let mut block1_header = blvm_protocol::BlockHeader {
         version: 0x20000000, // BIP9 version bits (required for regtest consensus)
         prev_block_hash: genesis_hash,
         merkle_root: block1_merkle,
         timestamp: 1_231_006_605,
-        bits: 0x0f00ffff,
-        nonce: 2,
+        bits: 0x207fffff,
+        nonce: 0,
     };
+    meet_easy_pow(&mut block1_header);
 
     let block1 = blvm_node::Block {
         header: block1_header.clone(),

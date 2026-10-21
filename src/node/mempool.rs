@@ -345,6 +345,20 @@ fn descendant_closure(map: &HashMap<Hash, HashSet<Hash>>, root: &Hash) -> HashSe
     out
 }
 
+/// Base serialization plus every witness stack item. The cap uses this size.
+fn accounted_tx_bytes(tx: &Transaction, witnesses: Option<&[Witness]>) -> u64 {
+    use blvm_protocol::serialization::transaction::serialize_transaction;
+    let mut n = serialize_transaction(tx).len() as u64;
+    if let Some(stacks) = witnesses {
+        for stack in stacks {
+            for item in stack {
+                n = n.saturating_add(item.len() as u64);
+            }
+        }
+    }
+    n
+}
+
 impl MempoolManager {
     /// Create a new mempool manager
     pub fn new() -> Self {
@@ -799,14 +813,14 @@ impl MempoolManager {
             .unwrap_or(0)
     }
 
-    /// Serialized size of every pooled transaction, in bytes.
+    /// Serialized size of every pooled transaction, in bytes, including witness stacks.
     fn mempool_size_bytes(&self) -> u64 {
-        use blvm_protocol::serialization::transaction::serialize_transaction;
-
-        self.pool_lock()
-            .transactions
-            .values()
-            .map(|tx| serialize_transaction(tx).len() as u64)
+        let pool = self.pool_lock();
+        pool.transactions
+            .iter()
+            .map(|(hash, tx)| {
+                accounted_tx_bytes(tx, pool.tx_witnesses.get(hash).map(|w| w.as_slice()))
+            })
             .sum()
     }
 
@@ -817,8 +831,6 @@ impl MempoolManager {
 
     /// Remove `hash` and its in-mempool descendants. Returns bytes and count removed.
     fn evict_with_descendants(&self, hash: &Hash) -> (u64, usize) {
-        use blvm_protocol::serialization::transaction::serialize_transaction;
-
         if !self.pool_lock().transactions.contains_key(hash) {
             return (0, 0);
         }
@@ -826,11 +838,17 @@ impl MempoolManager {
         let mut bytes = 0u64;
         let mut count = 0usize;
         for id in package {
-            let tx = self.pool_lock().transactions.get(&id).cloned();
+            let (tx, wits) = {
+                let pool = self.pool_lock();
+                (
+                    pool.transactions.get(&id).cloned(),
+                    pool.tx_witnesses.get(&id).cloned(),
+                )
+            };
             let Some(tx) = tx else {
                 continue;
             };
-            bytes += serialize_transaction(&tx).len() as u64;
+            bytes += accounted_tx_bytes(&tx, wits.as_deref());
             if self.remove_transaction(&id) {
                 count += 1;
             }
@@ -1518,6 +1536,26 @@ impl MempoolManager {
                 hex::encode(tx_hash),
                 tx.inputs.len(),
                 tx.outputs.len()
+            );
+            return Ok(false);
+        }
+
+        let incoming = accounted_tx_bytes(&tx, witnesses.as_deref());
+        let cap_bytes = self
+            .policy_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|policy| policy.max_mempool_mb)
+            .unwrap_or(300)
+            .saturating_mul(1_048_576);
+        if self.mempool_size_bytes().saturating_add(incoming) > cap_bytes {
+            warn!(
+                "Transaction {} rejected: mempool byte cap ({} + {} > {})",
+                hex::encode(tx_hash),
+                self.mempool_size_bytes(),
+                incoming,
+                cap_bytes
             );
             return Ok(false);
         }
@@ -3051,6 +3089,54 @@ mod tests {
             2_000,
         ))));
         assert!(mempool.add_transaction(legacy_empty_script()).unwrap());
+    }
+
+    #[test]
+    fn mempool_cap_counts_witness_bytes_and_rejects_at_insert() {
+        use std::sync::Arc;
+
+        use crate::config::MempoolPolicyConfig;
+        use blvm_protocol::opcodes::{OP_0, OP_1, PUSH_32_BYTES};
+        use blvm_protocol::segwit::Witness;
+        use sha2::{Digest, Sha256};
+
+        let witness_script = vec![OP_1];
+        let script_hash = Sha256::digest(&witness_script);
+        let mut script_pubkey = vec![OP_0, PUSH_32_BYTES];
+        script_pubkey.extend_from_slice(&script_hash);
+        let witness: Vec<Witness> = vec![vec![witness_script.clone()]];
+
+        let mut tx = legacy_empty_script();
+        tx.outputs[0].value = 50_000;
+        tx.outputs[0].script_pubkey = vec![OP_1];
+
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded(
+            script_pubkey.clone(),
+            100_000,
+        ))));
+        let mut policy = MempoolPolicyConfig::default();
+        policy.max_mempool_mb = 1;
+        mempool.set_policy_config(Some(policy));
+        assert!(
+            mempool
+                .add_transaction_with_witness(tx.clone(), Some(witness))
+                .unwrap()
+        );
+        let base = serialize_transaction(&tx).len() as u64;
+        assert!(mempool.mempool_size_bytes() >= base + witness_script.len() as u64);
+
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded(
+            script_pubkey,
+            100_000,
+        ))));
+        let mut policy = MempoolPolicyConfig::default();
+        policy.max_mempool_mb = 1;
+        mempool.set_policy_config(Some(policy));
+        let big: Vec<Witness> = vec![vec![witness_script, vec![7u8; 1_100_000]]];
+        assert!(!mempool.add_transaction_with_witness(tx, Some(big)).unwrap());
+        assert_eq!(mempool.size(), 0);
     }
 
     #[test]
