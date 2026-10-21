@@ -2337,7 +2337,9 @@ impl BlockchainRpc {
         use blvm_protocol::address::BitcoinAddress;
 
         if let Ok(decoded) = BitcoinAddress::decode(&address) {
-            if !Self::witness_address_on_this_chain(decoded.network, self.get_chain_name()) {
+            if self.protocol.is_some()
+                && !Self::witness_address_on_this_chain(decoded.network, self.get_chain_name())
+            {
                 return Ok(json!({
                     "isvalid": false,
                     "address": address,
