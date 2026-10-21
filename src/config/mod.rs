@@ -839,6 +839,7 @@ fn default_modules_option() -> Option<ModuleConfig> {
 
 /// Node configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NodeConfig {
     /// Network listening address
     pub listen_addr: Option<SocketAddr>,

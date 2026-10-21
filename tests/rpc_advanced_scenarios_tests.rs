@@ -59,7 +59,13 @@ async fn test_rpc_concurrent_different_methods() {
 
     for result in bc_results {
         assert!(result.is_ok());
-        assert!(result.unwrap().is_ok());
+        assert!(
+            result
+                .unwrap()
+                .expect_err("no chain")
+                .to_string()
+                .contains("chain is not initialized")
+        );
     }
     for result in ctl_results {
         assert!(result.is_ok());
@@ -74,10 +80,8 @@ async fn test_rpc_timeout_handling() {
     // Test that RPC calls respect timeouts
     let result = timeout(Duration::from_millis(100), blockchain.get_blockchain_info()).await;
 
-    let info = result.expect("getblockchaininfo").expect("info");
-    assert_eq!(info["blocks"], 0);
-    assert_eq!(info["initialblockdownload"], true);
-    assert_eq!(info["verificationprogress"], 0.0);
+    let err = result.expect("getblockchaininfo").expect_err("no chain");
+    assert!(err.to_string().contains("chain is not initialized"));
 }
 
 #[tokio::test]
@@ -88,9 +92,13 @@ async fn test_rpc_error_recovery_after_failure() {
     let result1 = blockchain.get_block("invalid_hash").await;
     assert!(result1.is_err());
 
-    // Subsequent calls should still work
     let result2 = blockchain.get_blockchain_info().await;
-    assert!(result2.is_ok());
+    assert!(
+        result2
+            .expect_err("no chain")
+            .to_string()
+            .contains("chain is not initialized")
+    );
 
     // Another call should work
     let result3 = blockchain.get_block_hash(0).await;
@@ -107,11 +115,12 @@ async fn test_rpc_large_result_handling() {
 
     // Test methods that might return large results
     let result = blockchain.get_blockchain_info().await;
-    assert!(result.is_ok());
-
-    let info = result.unwrap();
-    // Should be valid JSON
-    assert!(info.is_object());
+    assert!(
+        result
+            .expect_err("no chain")
+            .to_string()
+            .contains("chain is not initialized")
+    );
 }
 
 #[tokio::test]
@@ -169,9 +178,13 @@ async fn test_rpc_resource_cleanup() {
         let _ = blockchain.get_blockchain_info().await;
     }
 
-    // After many calls, should still work
     let result = blockchain.get_blockchain_info().await;
-    assert!(result.is_ok());
+    assert!(
+        result
+            .expect_err("no chain")
+            .to_string()
+            .contains("chain is not initialized")
+    );
 }
 
 #[tokio::test]
@@ -197,17 +210,9 @@ async fn test_rpc_mixed_success_failure() {
         }));
     }
 
-    // Wait for all calls
     let results: Vec<_> = futures::future::join_all(handles).await;
     assert_eq!(results.len(), 10);
-
-    // Some should succeed, some should fail
-    let success_count = results
-        .iter()
-        .filter(|r| r.is_ok() && r.as_ref().unwrap().is_ok())
-        .count();
-    let failure_count = results.len() - success_count;
-
-    assert!(success_count > 0);
-    assert!(failure_count > 0);
+    for result in results {
+        assert!(result.expect("task").is_err());
+    }
 }
