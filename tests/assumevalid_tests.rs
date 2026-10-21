@@ -126,9 +126,10 @@ fn test_assume_valid_anchors_match_core_v31_1() {
     assert_eq!((reg.height, reg.hash, reg.min_chain_work), (0, None, 0));
 }
 
-/// The `blvm` binary seeds `[block_validation]` with the network height and no hash.
-/// That seed must keep the anchor and the minimum work; before, it reached consensus
-/// as height 912683, hash none, minimum work 0.
+/// A `[block_validation]` that gives only the network's default height and no hash (what
+/// the `blvm` binary seeded before blvm 19da720, and what old config files still say) must
+/// keep the anchor and the minimum work; before, it reached consensus as height 912683,
+/// hash none, minimum work 0.
 #[test]
 fn test_binary_height_seed_keeps_hash_and_minimum_work() {
     let main = core_assume_valid_for_network("mainnet");
