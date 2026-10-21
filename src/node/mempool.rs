@@ -15,6 +15,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
+/// Bitcoin Core `MAX_STANDARD_TX_WEIGHT` (`MAX_BLOCK_WEIGHT / 10`).
+///
+/// The ancestor and descendant caps are package limits. This is the single-transaction limit.
+const MAX_STANDARD_TX_WEIGHT: u64 = (blvm_protocol::constants::MAX_BLOCK_WEIGHT / 10) as u64;
+
 /// RBF tracking information for a transaction
 #[derive(Debug, Clone)]
 struct RbfTracking {
@@ -1638,7 +1643,17 @@ impl MempoolManager {
             );
             return Ok(false);
         }
-
+        let weight = blvm_protocol::segwit::transaction_weight_from_stacks(&tx, witness_ref)
+            .unwrap_or(u64::MAX);
+        if weight > MAX_STANDARD_TX_WEIGHT {
+            warn!(
+                "Transaction {} rejected: weight {} exceeds standard limit {}",
+                hex::encode(tx_hash),
+                weight,
+                MAX_STANDARD_TX_WEIGHT
+            );
+            return Ok(false);
+        }
         let mut fee_rate_sat_vb = 0u64;
         let mut fee_sats = 0u64;
         if utxo_wired {
@@ -4878,6 +4893,69 @@ mod tests {
         mempool.process_once().await.unwrap();
         assert!(mempool.get_transaction(&calculate_tx_id(&old)).is_none());
         assert!(mempool.get_transaction(&calculate_tx_id(&young)).is_some());
+    }
+
+    /// Legacy transaction whose stripped serialization is exactly `stripped_len` bytes.
+    ///
+    /// The payload sits in an `OP_RETURN` so the spend script stays empty.
+    fn legacy_of_stripped_len(stripped_len: usize) -> Transaction {
+        const OP_RETURN: u8 = 0x6a;
+        let mut tx = legacy_empty_script();
+        tx.outputs[0].value = 0;
+        tx.outputs[0].script_pubkey = vec![OP_RETURN];
+        for _ in 0..8 {
+            let have = serialize_transaction(&tx).len();
+            if have == stripped_len {
+                return tx;
+            }
+            let script = &mut tx.outputs[0].script_pubkey;
+            if have < stripped_len {
+                script.resize(script.len() + (stripped_len - have), 0);
+            } else {
+                let extra = have - stripped_len;
+                assert!(script.len() > extra + 1);
+                script.truncate(script.len() - extra);
+            }
+        }
+        assert_eq!(serialize_transaction(&tx).len(), stripped_len);
+        tx
+    }
+
+    #[test]
+    fn mempool_rejects_tx_heavier_than_standard_weight() {
+        use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::segwit::transaction_weight_from_stacks;
+
+        let policy = crate::config::MempoolPolicyConfig::default();
+        assert!(!policy.reject_spam_in_mempool);
+        assert_eq!(policy.max_ancestor_size, 101_000);
+        assert_eq!(super::MAX_STANDARD_TX_WEIGHT, 400_000);
+
+        let at_limit = legacy_of_stripped_len(100_000);
+        let over = legacy_of_stripped_len(100_001);
+        assert_eq!(
+            transaction_weight_from_stacks(&at_limit, None).unwrap(),
+            400_000
+        );
+        let over_weight = transaction_weight_from_stacks(&over, None).unwrap();
+        assert_eq!(over_weight, 400_004);
+        assert!(over_weight.div_ceil(4) <= policy.max_ancestor_size);
+
+        let admit = |tx: Transaction| {
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(policy.clone()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                vec![OP_1],
+                50_000_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+
+        assert!(admit(at_limit), "weight 400_000 stays standard");
+        assert!(
+            !admit(over),
+            "weight 400_004 fits the 101_000 vB ancestor cap and is over the standard weight"
+        );
     }
 
     #[tokio::test]
