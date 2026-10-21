@@ -826,6 +826,24 @@ impl BlockStore {
         })
     }
 
+    /// Ancestry of the configured assume-valid block on the stored header tree (Core:
+    /// `assumevalid->GetAncestor(height)`), for the assume-valid script skip.
+    ///
+    /// The ancestry is built once by walking `prev_block_hash` back from the assume-valid
+    /// header, so it is exactly that block's chain, whatever else the height index holds.
+    /// Until the assume-valid header is stored the lookup returns `None` (scripts are
+    /// verified) and retries on the next call.
+    pub fn assume_valid_ancestor_lookup(&self) -> blvm_consensus::block::AssumeValidAncestor {
+        let store = self.clone();
+        std::sync::Arc::new(move |height| {
+            let av_hash = blvm_consensus::config::get_assume_valid_hash()?;
+            let av_height = blvm_consensus::block::get_assume_valid_height();
+            assume_valid_ancestry(&store, av_hash, av_height)?
+                .get(usize::try_from(height).ok()?)
+                .copied()
+        })
+    }
+
     /// Oldest-to-newest headers ending at `end_height`, at most `count` blocks.
     ///
     /// Stops at the first missing header so the slice stays a contiguous suffix
@@ -1420,6 +1438,35 @@ impl BlockStore {
             None => Ok(None),
         }
     }
+}
+
+/// Hashes of the assume-valid block's chain indexed by height, cached per process.
+fn assume_valid_ancestry(
+    store: &BlockStore,
+    av_hash: Hash,
+    av_height: u64,
+) -> Option<Arc<Vec<Hash>>> {
+    type Cached = Option<(Hash, u64, Arc<Vec<Hash>>)>;
+    static CACHE: std::sync::Mutex<Cached> = std::sync::Mutex::new(None);
+    let mut cache = CACHE.lock().ok()?;
+    if let Some((hash, height, chain)) = cache.as_ref() {
+        if *hash == av_hash && *height == av_height {
+            return Some(Arc::clone(chain));
+        }
+    }
+    // Not synced to the assume-valid header yet: cheap miss, no allocation.
+    store.get_header(&av_hash).ok()??;
+    let mut chain = vec![[0u8; 32]; usize::try_from(av_height).ok()? + 1];
+    let mut hash = av_hash;
+    for h in (0..=av_height).rev() {
+        chain[h as usize] = hash;
+        if h > 0 {
+            hash = store.get_header(&hash).ok()??.prev_block_hash;
+        }
+    }
+    let chain = Arc::new(chain);
+    *cache = Some((av_hash, av_height, Arc::clone(&chain)));
+    Some(chain)
 }
 
 #[cfg(test)]

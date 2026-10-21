@@ -364,6 +364,7 @@ pub fn validate_block_with_context_and_undo(
         protocol.connect_block_validation_context(recent_headers.as_deref(), network_time);
     consensus_ctx.sequence_prev_mtp = Some(blockstore.sequence_prev_mtp_lookup());
     consensus_ctx.difficulty_ancestor = Some(blockstore.difficulty_ancestor_lookup());
+    consensus_ctx.assume_valid_ancestor = Some(blockstore.assume_valid_ancestor_lookup());
     let owned_utxo = std::mem::take(utxo_set);
     let (result, new_utxo_set, undo_log) =
         blvm_consensus::block::connect_block(block, witnesses, owned_utxo, height, &consensus_ctx)?;
