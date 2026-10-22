@@ -1211,7 +1211,8 @@ fn test_witness_compression_roundtrip() {
         .build();
 
     let block_hash = blockstore.get_block_hash(&block);
-    let witnesses = vec![vec![vec![0x01, 0x02, 0x03, 0x04, 0x05]]]; // Single witness stack
+    // One transaction -> one input -> witness stack with a single item.
+    let witnesses: Vec<Vec<Witness>> = vec![vec![vec![vec![0x01, 0x02, 0x03, 0x04, 0x05]]]];
 
     // Store witness
     blockstore.store_witness(&block_hash, &witnesses).unwrap();
@@ -1298,12 +1299,12 @@ fn test_utxo_compression_auto_detection() {
             index: i,
         };
         let utxo = UTXO {
-            value: 1000000 * (i + 1),
+            value: 1000000 * (i64::from(i) + 1),
             script_pubkey: p2pkh_script(random_hash20()).into(),
             height: 0,
             is_coinbase: false,
         };
-        utxo_set.insert(outpoint, utxo);
+        utxo_set.insert(outpoint, Arc::new(utxo));
     }
 
     utxostore.store_utxo_set(&utxo_set).unwrap();

@@ -17,6 +17,7 @@ use blvm_node::rpc::rest::pool::handle_pool_request;
 #[cfg(feature = "rest-api")]
 use blvm_node::rpc::rest::vault::handle_vault_request;
 use blvm_node::storage::Storage;
+use blvm_node::utils::new_request_id;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use http_body_util::Full;
@@ -24,7 +25,6 @@ use hyper::{Method, Response, StatusCode};
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
-use uuid::Uuid;
 
 /// Helper to create test payment state machine
 fn create_test_state_machine() -> Arc<PaymentStateMachine> {
@@ -73,7 +73,7 @@ async fn extract_response_body(
 #[tokio::test]
 async fn test_rest_create_vault() {
     let (state_machine, _temp_dir) = create_test_state_machine_with_storage();
-    let request_id = Uuid::new_v4().to_string();
+    let request_id = new_request_id();
     let body = Some(json!({
         "vault_id": "test_vault_rest_1",
         "deposit_amount": 100000,
@@ -98,7 +98,7 @@ async fn test_rest_create_vault() {
 #[tokio::test]
 async fn test_rest_create_vault_missing_fields() {
     let (state_machine, _temp_dir) = create_test_state_machine_with_storage();
-    let request_id = Uuid::new_v4().to_string();
+    let request_id = new_request_id();
     let body = Some(json!({
         "vault_id": "test_vault_rest_2"
         // Missing deposit_amount and withdrawal_script
@@ -120,18 +120,22 @@ async fn test_rest_create_vault_missing_fields() {
 #[tokio::test]
 async fn test_rest_unvault_vault() {
     let (state_machine, _temp_dir) = create_test_state_machine_with_storage();
-    let request_id = Uuid::new_v4().to_string();
+    let request_id = new_request_id();
 
     // First create vault
     let create_body = Some(json!({
         "vault_id": "test_vault_rest_3",
         "deposit_amount": 100000,
         "withdrawal_script": "5176a914000000000000000000000000000000000000000087",
+        // VaultConfig has no serde defaults, so a partial config is rejected with 400.
         "config": {
+            "withdrawal_delay_blocks": 144,
+            "recovery_script": null,
+            "max_withdrawal": null,
             "require_unvault": true
         }
     }));
-    handle_vault_request(
+    let create_response = handle_vault_request(
         Arc::clone(&state_machine),
         &Method::POST,
         "/api/v1/vaults",
@@ -139,6 +143,7 @@ async fn test_rest_unvault_vault() {
         request_id.clone(),
     )
     .await;
+    assert_eq!(create_response.status(), StatusCode::OK);
 
     // Then unvault
     let unvault_body = Some(json!({
@@ -163,7 +168,7 @@ async fn test_rest_unvault_vault() {
 #[tokio::test]
 async fn test_rest_get_vault_state() {
     let (state_machine, _temp_dir) = create_test_state_machine_with_storage();
-    let request_id = Uuid::new_v4().to_string();
+    let request_id = new_request_id();
 
     // Create vault
     let create_body = Some(json!({
@@ -203,7 +208,7 @@ async fn test_rest_get_vault_state() {
 #[tokio::test]
 async fn test_rest_create_pool() {
     let (state_machine, _temp_dir) = create_test_state_machine_with_storage();
-    let request_id = Uuid::new_v4().to_string();
+    let request_id = new_request_id();
     let body = Some(json!({
         "pool_id": "test_pool_rest_1",
         "initial_participants": [
@@ -238,7 +243,7 @@ async fn test_rest_create_pool() {
 #[tokio::test]
 async fn test_rest_join_pool() {
     let (state_machine, _temp_dir) = create_test_state_machine_with_storage();
-    let request_id = Uuid::new_v4().to_string();
+    let request_id = new_request_id();
 
     // Create pool
     let create_body = Some(json!({
@@ -285,7 +290,7 @@ async fn test_rest_join_pool() {
 #[tokio::test]
 async fn test_rest_get_pool_state() {
     let (state_machine, _temp_dir) = create_test_state_machine_with_storage();
-    let request_id = Uuid::new_v4().to_string();
+    let request_id = new_request_id();
 
     // Create pool
     let create_body = Some(json!({
@@ -330,7 +335,7 @@ async fn test_rest_get_pool_state() {
 #[tokio::test]
 async fn test_rest_create_batch() {
     let (state_machine, _temp_dir) = create_test_state_machine_with_storage();
-    let request_id = Uuid::new_v4().to_string();
+    let request_id = new_request_id();
     let body = Some(json!({
         "batch_id": "test_batch_rest_1",
         "target_fee_rate": 10
@@ -354,7 +359,7 @@ async fn test_rest_create_batch() {
 #[tokio::test]
 async fn test_rest_get_batch_state() {
     let (state_machine, _temp_dir) = create_test_state_machine_with_storage();
-    let request_id = Uuid::new_v4().to_string();
+    let request_id = new_request_id();
 
     // Create batch
     let create_body = Some(json!({
@@ -388,7 +393,7 @@ async fn test_rest_get_batch_state() {
 #[tokio::test]
 async fn test_rest_get_congestion_metrics() {
     let (state_machine, _temp_dir) = create_test_state_machine_with_storage();
-    let request_id = Uuid::new_v4().to_string();
+    let request_id = new_request_id();
 
     // Note: get_congestion_metrics requires mempool manager
     // Without mempool, it will return an error

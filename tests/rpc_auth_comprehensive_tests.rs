@@ -59,8 +59,8 @@ fn test_rate_limiter_consume_token() {
     assert_eq!(limiter.tokens_remaining(), 9);
 }
 
-#[test]
-fn test_rate_limiter_exhaust_tokens() {
+#[tokio::test(start_paused = true)]
+async fn test_rate_limiter_exhaust_tokens() {
     let mut limiter = RpcRateLimiter::new(3, 1);
 
     // Consume all tokens
@@ -73,33 +73,39 @@ fn test_rate_limiter_exhaust_tokens() {
     assert!(!limiter.check_and_consume());
 }
 
-#[test]
-fn test_rate_limiter_refill() {
+#[tokio::test(start_paused = true)]
+async fn test_rate_limiter_refill() {
     let mut limiter = RpcRateLimiter::new(10, 2);
 
     // Exhaust tokens
     for _ in 0..10 {
-        limiter.check_and_consume();
+        assert!(limiter.check_and_consume());
     }
     assert_eq!(limiter.tokens_remaining(), 0);
 
-    // Wait for refill (simulate by manipulating time)
-    // Note: In real tests, we'd use a time mock, but for now we test the logic
-    // The refill happens based on elapsed time, so we can't easily test without mocks
-    // This test verifies the basic structure works
+    // 2/sec: one token every 500ms
+    tokio::time::advance(std::time::Duration::from_millis(499)).await;
+    assert!(!limiter.check_and_consume());
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    assert!(limiter.check_and_consume());
+    assert!(!limiter.check_and_consume());
 }
 
-#[test]
-fn test_rate_limiter_burst_limit() {
+#[tokio::test(start_paused = true)]
+async fn test_rate_limiter_burst_limit() {
     let mut limiter = RpcRateLimiter::new(5, 10);
 
-    // Should not exceed burst limit even with high refill rate
-    for _ in 0..10 {
-        limiter.check_and_consume();
+    for _ in 0..5 {
+        assert!(limiter.check_and_consume());
     }
+    assert!(!limiter.check_and_consume());
 
-    // After exhausting, refill should cap at burst_limit
-    // This is tested implicitly - the limiter should never exceed burst_limit
+    // A long idle period refills to the burst limit and no further
+    tokio::time::advance(std::time::Duration::from_secs(86_400)).await;
+    for _ in 0..5 {
+        assert!(limiter.check_and_consume());
+    }
+    assert!(!limiter.check_and_consume());
 }
 
 #[tokio::test]
@@ -201,7 +207,7 @@ async fn test_auth_manager_add_certificate() {
     assert!(result.user_id.is_some());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_auth_manager_set_user_rate_limit() {
     let manager = RpcAuthManager::new(false);
     let token_str = "token".to_string();
@@ -228,7 +234,7 @@ async fn test_auth_manager_set_user_rate_limit() {
     assert!(!manager.check_rate_limit(&user_id).await);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_auth_manager_set_method_rate_limit() {
     let manager = RpcAuthManager::new(false);
 

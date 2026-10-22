@@ -1,7 +1,8 @@
 //! Mining RPC methods
 //!
 //! Implements mining-related JSON-RPC methods for block template generation and mining.
-//! Uses formally verified blvm-consensus mining functions.
+//! Uses the blvm-consensus mining functions, which are covered by tests. They are not
+//! formally verified: see [`docs/VERIFICATION.md`](https://github.com/BTCDecoded/blvm-consensus/blob/main/docs/VERIFICATION.md) in blvm-consensus.
 
 use crate::network::NetworkManager;
 use crate::node::event_publisher::EventPublisher;

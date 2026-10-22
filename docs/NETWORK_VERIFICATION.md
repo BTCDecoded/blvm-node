@@ -1,14 +1,14 @@
-# Network Protocol Formal Verification
+# Network Protocol Spec-Lock Checks
 
 ## Overview
 
-This document describes formal verification of Bitcoin P2P protocol message parsing, serialization, and processing. Verification uses **blvm-spec-lock** (Z3-based) for consensus code and Dandelion (Section 10.6).
+This document describes the spec-lock checks on Bitcoin P2P protocol message parsing, serialization, and processing. Functions are annotated with `#[spec_locked]` and Z3-checked by **blvm-spec-lock** (consensus code and Dandelion, Section 10.6). An annotated, Z3-checked function is not formally verified: in blvm-consensus only 3 of 182 anchors are mutation-validated (see [`docs/VERIFICATION.md`](https://github.com/BTCDecoded/blvm-consensus/blob/main/docs/VERIFICATION.md)).
 
 ## Verification Status
 
 ### blvm-spec-lock (Orange Paper)
 
-- **Dandelion (10.6)** – ✅ Verified in `src/network/dandelion.rs` via `#[spec_locked("10.6")]`
+- **Dandelion (10.6)** – annotated and Z3-checked in `src/network/dandelion.rs` via `#[spec_locked("10.6")]`
 - **Protocol parsing (10.1)** – ✅ Covered: parse_message, calculate_checksum (protocol-verification feature, enabled by default)
 
 ### Planned spec-lock coverage
@@ -35,7 +35,7 @@ cargo spec-lock verify --crate-path . \
 
 ### CI
 
-Formal verification runs via **blvm-spec-lock** in **`.github/workflows/ci.yml`** (**verify** job): installs **`cargo-spec-lock`** from crates.io, runs **`verify`** on the published **blvm-consensus** sources and again on **blvm-node** (merged **`F_*`** gate + Rust rows; **`formula_registry`** in **`spec_lock_*_verify.json`**). Report shape and **`jq`**: **`blvm-spec-lock`** **`docs/VERIFY_JSON.md`**.
+Spec-lock checks run via **blvm-spec-lock** in **`.github/workflows/ci.yml`** (**verify** job): installs **`cargo-spec-lock`** from crates.io, runs **`verify`** on the published **blvm-consensus** sources and again on **blvm-node** (merged **`F_*`** gate + Rust rows; **`formula_registry`** in **`spec_lock_*_verify.json`**). Report shape and **`jq`**: **`blvm-spec-lock`** **`docs/VERIFY_JSON.md`**.
 
 ## References
 

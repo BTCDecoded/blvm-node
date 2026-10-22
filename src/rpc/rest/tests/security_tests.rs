@@ -8,7 +8,7 @@
 
 use crate::rpc::auth::{RpcAuthManager, UserId};
 use std::net::SocketAddr;
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, advance};
 
 // Test strategy: we test security logic (auth, rate limit, validation) without starting the server.
 
@@ -54,7 +54,7 @@ async fn test_rest_api_auth_optional() {
 }
 
 /// Test rate limiting with endpoint information
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_rest_api_rate_limiting_with_endpoint() {
     let auth = RpcAuthManager::with_rate_limits(false, 5, 1); // 5 burst, 1/sec
     let user_id = UserId::Ip("127.0.0.1:8080".parse().unwrap());
@@ -80,7 +80,7 @@ async fn test_rest_api_rate_limiting_with_endpoint() {
 }
 
 /// Test IP-based rate limiting for unauthenticated requests
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_rest_api_ip_rate_limiting() {
     let auth = RpcAuthManager::with_rate_limits(false, 5, 1); // 5 burst, 1/sec
     let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
@@ -244,7 +244,7 @@ async fn test_rest_oversized_body_returns_error() {
 }
 
 /// Test that rate limiting respects time windows
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_rate_limiting_time_window() {
     let auth = RpcAuthManager::with_rate_limits(false, 5, 1); // 5 burst, 1/sec
     let user_id = UserId::Ip("127.0.0.1:8080".parse().unwrap());
@@ -257,10 +257,12 @@ async fn test_rate_limiting_time_window() {
     // Should be rate limited immediately
     assert!(!auth.check_rate_limit(&user_id).await);
 
-    // Wait 2 seconds (should refill 2 tokens)
-    sleep(Duration::from_secs(2)).await;
+    // Just under one second: no whole token earned yet
+    advance(Duration::from_millis(999)).await;
+    assert!(!auth.check_rate_limit(&user_id).await);
 
-    // Should now allow 2 more requests
+    // 2 seconds in total refill exactly 2 tokens
+    advance(Duration::from_millis(1001)).await;
     assert!(auth.check_rate_limit(&user_id).await);
     assert!(auth.check_rate_limit(&user_id).await);
     assert!(!auth.check_rate_limit(&user_id).await);

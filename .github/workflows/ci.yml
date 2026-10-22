@@ -96,15 +96,17 @@ jobs:
             if [ ! -d "$BUILD_ROOT" ]; then
               return 0
             fi
-            echo "=== Purging sibling run dirs (keeping $RUN_ID only) ==="
+            # Other runs share this runner: never delete a sibling touched in the last 60 min.
+            echo "=== Purging sibling run dirs idle >60 min (keeping $RUN_ID) ==="
             find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
               -not -name "$RUN_ID" \
+              -mmin +60 \
               -exec rm -rf {} + 2>/dev/null || true
           }
 
-          # Critical: disk almost full — drop every other job's tree so this run can proceed.
+          # Critical: disk almost full — drop other runs' idle trees so this run can proceed.
           if [ -n "$AVAIL" ] && [ "$AVAIL" -lt "$CRIT_FREE" ]; then
-            echo "⚠️  CRITICAL: $AVAIL bytes free — evicting all sibling per-run trees under $BUILD_ROOT"
+            echo "⚠️  CRITICAL: $AVAIL bytes free — evicting idle sibling per-run trees under $BUILD_ROOT"
             purge_siblings
           fi
 
@@ -117,12 +119,12 @@ jobs:
           if [ -d "$BUILD_ROOT" ]; then
             find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
               -not -name "$RUN_ID" \
-              -mmin +30 \
+              -mmin +60 \
               -exec rm -rf {} + 2>/dev/null || true
             USED=$(du -sb "$BUILD_ROOT" 2>/dev/null | cut -f1 || echo 0)
             # 35 GiB cap on total retained build junk for this repo
             if [ "$USED" -gt $((35 * 1024 * 1024 * 1024)) ]; then
-              echo "⚠️  gh-blvm-node-build >35 GiB — evicting all dirs except $RUN_ID"
+              echo "⚠️  gh-blvm-node-build >35 GiB — evicting idle dirs except $RUN_ID"
               purge_siblings
             fi
           fi
@@ -303,9 +305,10 @@ jobs:
           BUILD_ROOT="${BLVM_RUNNER_DATA_ROOT}"
           RUN_ID="${{ github.run_id }}"
           if [ -d "$BUILD_ROOT" ]; then
-            echo "=== Purging sibling run dirs under $BUILD_ROOT (keeping $RUN_ID only) ==="
+            echo "=== Purging sibling run dirs under $BUILD_ROOT idle >60 min (keeping $RUN_ID) ==="
             find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
               -not -name "$RUN_ID" \
+              -mmin +60 \
               -exec rm -rf {} + 2>/dev/null || true
           fi
 
@@ -442,9 +445,10 @@ jobs:
             find "$TARGET/debug" -maxdepth 1 -type f -executable ! -name "*.so" ! -name "*.rlib" ! -name "*.d" \
               -delete 2>/dev/null || true
           fi
-          # Remove ALL run dirs except the current one — no mtime guard, stale dirs eat 10s of GB.
+          # Remove other run dirs idle >60 min; younger ones may belong to a concurrent run on this runner.
           find "${BLVM_RUNNER_DATA_ROOT}" -mindepth 1 -maxdepth 1 -type d \
             -not -name "${{ github.run_id }}" \
+            -mmin +60 \
             -exec rm -rf {} + 2>/dev/null || true
 
       - name: Save Cargo cache
@@ -882,9 +886,10 @@ jobs:
           BUILD_ROOT="${BLVM_RUNNER_DATA_ROOT}"
           RUN_ID="${{ github.run_id }}"
           if [ -d "$BUILD_ROOT" ]; then
-            echo "=== Purging sibling run dirs under $BUILD_ROOT (keeping $RUN_ID only) ==="
+            echo "=== Purging sibling run dirs under $BUILD_ROOT idle >60 min (keeping $RUN_ID) ==="
             find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
               -not -name "$RUN_ID" \
+              -mmin +60 \
               -exec rm -rf {} + 2>/dev/null || true
           fi
 
@@ -1073,11 +1078,47 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/cargo"
           echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
 
+      # Build runs last on a host that test/clippy/docs/fuzz may already have filled.
+      # Free space before restoring the target cache, and skip that restore when
+      # space is still short (run 39430830510 hit ENOSPC during restore + unpack).
+      - name: Low-disk guard before cache restore
+        id: disk
+        run: |
+          df -h / "${{ github.workspace }}" /mnt/data 2>/dev/null || true
+          CARGO_TEMP="${RUNNER_TEMP}/cargo"
+          if [ -d "$CARGO_TEMP" ]; then
+            rm -rf "$CARGO_TEMP/registry/src" "$CARGO_TEMP/git/checkouts" 2>/dev/null || true
+          fi
+          BUILD_ROOT="${BLVM_RUNNER_DATA_ROOT}"
+          RUN_ID="${{ github.run_id }}"
+          if [ -d "$BUILD_ROOT" ]; then
+            find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
+              -not -name "$RUN_ID" \
+              -mmin +60 \
+              -exec rm -rf {} + 2>/dev/null || true
+          fi
+          rm -rf fuzz/target 2>/dev/null || true
+          AVAIL=$(df -B1 "${{ github.workspace }}" | tail -1 | awk '{print $4}')
+          MIN_FREE=$((20 * 1024 * 1024 * 1024))
+          if [ -n "$AVAIL" ] && [ "$AVAIL" -lt "$MIN_FREE" ]; then
+            echo "::warning::Only $AVAIL bytes free; skipping target cache restore (cold build)"
+            echo "restore-target=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "restore-target=true" >> "$GITHUB_OUTPUT"
+          fi
+          df -h "${{ github.workspace }}" || true
+
+      - name: Prune runner caches
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: prune
+
       - name: Cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
           operation: bind-env
           cache-key: ${{ needs.setup.outputs.cache-key }}
+          include-target: ${{ steps.disk.outputs.restore-target }}
 
       - name: Restore Cargo cache
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
@@ -1700,9 +1741,7 @@ jobs:
             echo "Removing $RUN_DIR ($(du -sh "$RUN_DIR" 2>/dev/null | cut -f1))"
             rm -rf "$RUN_DIR"
           fi
-          # Belt-and-suspenders: also remove any other leftover run dirs
-          find "${BLVM_RUNNER_DATA_ROOT}" -mindepth 1 -maxdepth 1 -type d \
-            -exec rm -rf {} + 2>/dev/null || true
+          # Only this run's dir: concurrent runs on this runner still need theirs.
           # Clean fuzz temp dir
           rm -rf ${{ github.workspace }}/.build/gh-fuzz-blvm-node 2>/dev/null || true
           echo "=== disk after teardown ==="

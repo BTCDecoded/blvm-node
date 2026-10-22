@@ -26,4 +26,11 @@ ignore = [
     "RUSTSEC-2026-0340",
     "RUSTSEC-2026-0341",
     "RUSTSEC-2026-0342",
+    # webpki-roots / webpki-root-certs 0.26.11 (distrusted emSign root). Both 0.26.11 crates are shims that
+    # re-export the 1.x crates, which resolve to patched 1.0.10; no 0.26.x release is marked patched.
+    # Paths: iroh 0.95.1 -> rustls-platform-verifier 0.5.3 -> webpki-root-certs 0.26.11 (0383);
+    # tidesdb 0.6.7 [build-dep] -> ureq 2.12.1 -> webpki-roots 0.26.11 (0381).
+    # Exit: iroh bump past rustls-platform-verifier 0.5 and tidesdb off ureq 2. Revisit by 2027-01-20.
+    "RUSTSEC-2026-0381",
+    "RUSTSEC-2026-0383",
 ]

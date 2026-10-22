@@ -1540,7 +1540,7 @@ pub(crate) mod redb_impl {
 // RocksDB implementation
 #[cfg(feature = "rocksdb")]
 pub mod rocksdb_impl {
-    use super::{BatchWriter, Database, Tree};
+    use super::{BatchWriter, Database, Tree, rocksdb_block_cache_mb};
     use anyhow::Result;
     use rocksdb::{
         BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, DB,
