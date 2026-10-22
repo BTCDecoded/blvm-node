@@ -1676,11 +1676,11 @@ pub(crate) fn test_reset_tip_stage() {
 mod tests {
     use super::*;
 
-    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static L: OnceLock<Mutex<()>> = OnceLock::new();
-        L.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+    /// Same process-wide guard as [`test_tip_atomics_lock`]: these tests mutate the
+    /// shared tip-stage atomics, so a module-local mutex would still let them interleave
+    /// with tests in other modules (and with tests here that take the shared guard).
+    fn test_lock() -> crate::ibd_test_lock::Guard {
+        test_tip_atomics_lock()
     }
 
     fn reset_tracker() {
