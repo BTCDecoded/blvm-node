@@ -26,7 +26,8 @@ pub const BITCOIN_MAGIC_MAINNET: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
 pub const BITCOIN_MAGIC_TESTNET: [u8; 4] = [0x0b, 0x11, 0x09, 0x07];
 pub const BITCOIN_MAGIC_REGTEST: [u8; 4] = [0xfa, 0xbf, 0xb5, 0xda];
 pub const BITCOIN_MAGIC_TESTNET4: [u8; 4] = [0x1c, 0x16, 0x3f, 0x28];
-pub const BITCOIN_MAGIC_SIGNET: [u8; 4] = [0x0f, 0x1b, 0xf2, 0xe1];
+/// Default public signet: first 4 bytes of SHA256d(Core's default signet challenge).
+pub const BITCOIN_MAGIC_SIGNET: [u8; 4] = [0x0a, 0x03, 0xcf, 0x40];
 
 /// Active network magic (LE u32). Set once at node startup via `ProtocolParser::set_network_magic`.
 /// Defaults to mainnet magic so that unit tests that do not call `set_network_magic` still work.
@@ -971,6 +972,11 @@ impl ProtocolParser {
         let magic = ACTIVE_MAGIC
             .load(std::sync::atomic::Ordering::Relaxed)
             .to_le_bytes();
+        Self::dns_seed_network_for(magic)
+    }
+
+    /// DNS seed name + default P2P port for the given network magic.
+    pub(crate) fn dns_seed_network_for(magic: [u8; 4]) -> (&'static str, u16) {
         if magic == BITCOIN_MAGIC_TESTNET {
             ("testnet", 18333)
         } else if magic == BITCOIN_MAGIC_TESTNET4 {
@@ -1955,5 +1961,25 @@ mod tests {
         assert_eq!(msg.version, 70016);
         assert_eq!(msg.block_locator_hashes, vec![[0x11; 32]]);
         assert_eq!(msg.hash_stop, [0x22; 32]);
+    }
+
+    #[test]
+    fn signet_magic_matches_protocol_and_maps_to_signet_seeds() {
+        use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+
+        assert_eq!(super::BITCOIN_MAGIC_SIGNET, [0x0a, 0x03, 0xcf, 0x40]);
+        // Node startup sets ACTIVE_MAGIC from the protocol engine's params.
+        let engine = BitcoinProtocolEngine::new(ProtocolVersion::Signet).unwrap();
+        let magic = engine.get_network_params().magic_bytes;
+        assert_eq!(magic, super::BITCOIN_MAGIC_SIGNET);
+        assert_eq!(
+            ProtocolParser::dns_seed_network_for(magic),
+            ("signet", 38333)
+        );
+        assert_eq!(
+            ProtocolParser::dns_seed_network_for([0x0f, 0x1b, 0xf2, 0xe1]),
+            ("mainnet", 8333),
+            "stale pre-protocol#7 signet magic must not map to signet"
+        );
     }
 }
