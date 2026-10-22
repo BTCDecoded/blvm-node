@@ -1433,6 +1433,45 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       
+      # Commit the [package] version bump back to main (same commit message as blvm-consensus).
+      # Only after a successful publish, and only the [package] version line: the release
+      # Cargo.toml on disk also has crates.io dependency pins and a stripped [patch.crates-io],
+      # which must not land on main. The working tree is left untouched (publish already ran).
+      - name: Commit Cargo.toml version bump
+        if: steps.publish.outputs.published == 'true'
+        env:
+          REPO_ACCESS_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git show HEAD:Cargo.toml | awk -v ver="$VERSION" '
+            /^\[package\]/ { in_package = 1; print; next }
+            /^\[/ { in_package = 0 }
+            in_package && /^version = / {
+              print "version = \"" ver "\""
+              next
+            }
+            { print }
+          ' > "${RUNNER_TEMP}/Cargo.toml.bump"
+          BLOB=$(git hash-object -w "${RUNNER_TEMP}/Cargo.toml.bump")
+          git update-index --cacheinfo "100644,${BLOB},Cargo.toml"
+
+          if git diff --cached --quiet; then
+            echo "No version change to commit in Cargo.toml"
+            exit 0
+          fi
+          git commit -m "Bump version to ${VERSION} for release [skip ci]" || true
+
+          if [ -n "${REPO_ACCESS_TOKEN}" ]; then
+            git config --local --unset-all 'http.https://github.com/.extraheader' 2>/dev/null || true
+            git remote set-url origin "https://x-access-token:${REPO_ACCESS_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            git -c credential.helper= push origin HEAD:${{ github.ref }} || true
+          else
+            echo "⚠️  REPO_ACCESS_TOKEN not set, skipping push"
+          fi
+      
       - name: Verify published crate is available
         if: |
           env.CARGO_REGISTRY_TOKEN != '' &&
