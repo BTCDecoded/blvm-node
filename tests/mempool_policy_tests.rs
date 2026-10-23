@@ -289,9 +289,11 @@ fn ancestor_limit_uses_sigop_adjusted_vsize() {
     let mut admit = MempoolPolicyConfig::default();
     admit.require_standard = false;
     mempool.set_policy_config(Some(admit));
-    assert!(mempool
-        .add_transaction_with_witness(parent.clone(), Some(witness))
-        .unwrap());
+    assert!(
+        mempool
+            .add_transaction_with_witness(parent.clone(), Some(witness))
+            .unwrap()
+    );
 
     let child = tx_with_script_sig(
         blvm_protocol::OutPoint {

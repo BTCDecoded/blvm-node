@@ -655,16 +655,18 @@ async fn test_getchaintxstats_cumulative_txcount() {
 }
 
 #[tokio::test]
-async fn test_blockchain_state_stays_in_initial_download_at_height_one() {
+async fn test_blockchain_state_is_caught_up_when_headers_match_the_tip() {
     let (_dir, storage, rpc) = rpc_with_chain();
     let state = rpc.get_blockchain_state().await.unwrap();
-    assert_ne!(state["verificationprogress"].as_f64(), Some(1.0));
-    assert_eq!(state["initialblockdownload"].as_bool(), Some(true));
+    assert_eq!(state["verificationprogress"].as_f64(), Some(1.0));
+    assert_eq!(state["initialblockdownload"].as_bool(), Some(false));
     assert_eq!(
         state["pruned"].as_bool(),
         Some(storage.is_pruning_enabled())
     );
     let info = rpc.get_blockchain_info().await.unwrap();
+    assert_eq!(info["initialblockdownload"].as_bool(), Some(false));
+    assert_eq!(info["verificationprogress"].as_f64(), Some(1.0));
     assert_eq!(state["mediantime"], info["mediantime"]);
 }
 

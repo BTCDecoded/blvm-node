@@ -85,8 +85,7 @@ fn flatten_toml_to_string_map(value: &toml::Value) -> HashMap<String, String> {
 }
 
 /// GitHub raw URL for the monorepo’s `registry/modules.json` (module name → `repo`; `module.toml` URL is conventional unless overridden).
-pub const DEFAULT_MODULE_REGISTRY_INDEX_URL: &str =
-    "https://raw.githubusercontent.com/BTCDecoded/blvm/4bf2d067cf34f0adbbe327bda2fb58fb3c8396f3/registry/modules.json";
+pub const DEFAULT_MODULE_REGISTRY_INDEX_URL: &str = "https://raw.githubusercontent.com/BTCDecoded/blvm/4bf2d067cf34f0adbbe327bda2fb58fb3c8396f3/registry/modules.json";
 
 fn default_module_registry_url() -> Option<String> {
     Some(DEFAULT_MODULE_REGISTRY_INDEX_URL.to_string())
@@ -243,15 +242,12 @@ pub struct ModuleConfig {
     pub enabled: bool,
 
     /// Directory containing module binaries
-    #[serde(default = "default_modules_dir")]
     pub modules_dir: String,
 
     /// Directory for module data (state, configs)
-    #[serde(default = "default_modules_data_dir")]
     pub data_dir: String,
 
     /// Directory for IPC sockets
-    #[serde(default = "default_modules_socket_dir")]
     pub socket_dir: String,
 
     /// Enabled modules and optional version constraints (empty = auto-discover all on disk).
@@ -260,6 +256,8 @@ pub struct ModuleConfig {
     /// ```toml
     /// [modules]
     /// blvm-miniscript = "0.1.*"
+    /// blvm-wallet-index = "0.1.*"
+    /// blvm-payment = "0.1.*"
     /// ```
     ///
     /// When a module also needs spawn overrides (`[modules.blvm-zmq]`), put the pin in that
@@ -316,18 +314,6 @@ pub(crate) fn default_true() -> bool {
 
 pub(crate) fn default_false() -> bool {
     false
-}
-
-fn default_modules_dir() -> String {
-    "modules".to_string()
-}
-
-fn default_modules_data_dir() -> String {
-    "data/modules".to_string()
-}
-
-fn default_modules_socket_dir() -> String {
-    "data/modules/sockets".to_string()
 }
 
 impl<'de> Deserialize<'de> for ModuleConfig {

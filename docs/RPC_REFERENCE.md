@@ -46,8 +46,8 @@ Returns blockchain state information.
   "bestblockhash": "0000...",
   "difficulty": 4.656542373906925e-10,
   "mediantime": 1234567890,
-  "verificationprogress": 0.0,
-  "initialblockdownload": true,
+  "verificationprogress": 1.0,
+  "initialblockdownload": false,
   "chainwork": "0000...",
   "size_on_disk": 1234567890,
   "pruned": false,
@@ -57,7 +57,7 @@ Returns blockchain state information.
 }
 ```
 
-`verificationprogress` is `0.0` and `initialblockdownload` is `true` on every object this method builds, including after the tip moves. `pruneheight` is `0` when no prune height is stored. The method also returns `softforks`.
+`initialblockdownload` is true while the connected chain is behind the stored header tip, or while no header height is stored. `verificationprogress` is connected height divided by that header tip while the chain has not passed it, and `1.0` when both are zero. `pruneheight` is `0` when no prune height is stored. The method also returns `softforks`.
 
 ---
 

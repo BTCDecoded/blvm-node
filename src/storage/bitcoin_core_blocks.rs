@@ -442,6 +442,16 @@ impl BitcoinCoreBlockReader {
 
     /// Read a block from the block files by hash
     pub fn read_block(&self, hash: &Hash) -> Result<Option<Block>> {
+        let Some(block_data) = self.read_block_payload(hash)? else {
+            return Ok(None);
+        };
+        let (block, _witnesses) = deserialize_block_with_witnesses(&block_data)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize block: {}", e))?;
+        Ok(Some(block))
+    }
+
+    /// Wire bytes of one block from the block files, without decoding them.
+    pub(crate) fn read_block_payload(&self, hash: &Hash) -> Result<Option<Vec<u8>>> {
         let index = self.get_index()?;
 
         let location = match index.get(hash) {
@@ -470,10 +480,7 @@ impl BitcoinCoreBlockReader {
             )
         })?;
 
-        let (block, _witnesses) = deserialize_block_with_witnesses(&block_data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize block: {}", e))?;
-
-        Ok(Some(block))
+        Ok(Some(block_data))
     }
 
     /// Check if a block exists in the block files

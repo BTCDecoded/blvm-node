@@ -496,23 +496,6 @@ impl AddressDatabase {
         }
     }
 
-    /// Evict oldest address (SocketAddr only)
-    ///
-    /// Deprecated: Use evict_oldest_unified() instead for proper cross-map eviction.
-    #[deprecated(note = "Use evict_oldest_unified() instead")]
-    fn evict_oldest(&mut self) {
-        self.evict_oldest_unified();
-    }
-
-    /// Evict oldest Iroh address
-    ///
-    /// Deprecated: Use evict_oldest_unified() instead for proper cross-map eviction.
-    #[cfg(feature = "iroh")]
-    #[deprecated(note = "Use evict_oldest_unified() instead")]
-    fn evict_oldest_iroh(&mut self) {
-        self.evict_oldest_unified();
-    }
-
     /// Convert NetworkAddress to SocketAddr
     ///
     /// Note: This is public for use in NetworkManager when connecting to peers.

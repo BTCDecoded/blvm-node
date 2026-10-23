@@ -6,10 +6,11 @@ use crate::config::{MempoolPolicyConfig, RbfConfig};
 use crate::node::event_publisher::EventPublisher;
 use anyhow::Result;
 use blvm_protocol::mempool::{
-    has_conflict_with_tx, replacement_checks_with_witness, signals_rbf, Mempool,
+    Mempool, has_conflict_with_tx, replacement_checks_with_witness, signals_rbf,
 };
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::{Block, Hash, OutPoint, Transaction, TransactionOutput, UtxoSet};
+use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
@@ -54,10 +55,6 @@ pub struct MempoolManager {
     /// When None, RBF fee checks fall back to zero-fee comparisons and replacement is
     /// rejected. Callers should wire this to the node's live UTXO set.
     utxo_set_arc: RwLock<Option<Arc<tokio::sync::Mutex<UtxoSet>>>>,
-    /// Event callback for mempool events (optional)
-    /// Called when transactions are added/removed from mempool
-    #[allow(dead_code)]
-    event_callback: Option<Box<dyn Fn(Hash, String, usize) + Send + Sync>>,
     /// Sorted index by fee rate (descending) - Reverse<u64> for descending order
     /// Maps fee_rate -> Vec<Hash> (multiple transactions can have same fee rate)
     /// Uses RwLock for interior mutability to allow &self methods
@@ -126,22 +123,25 @@ fn is_p2sh_script(script: &[u8]) -> bool {
 }
 
 /// Last push in a push-only script, which is the redeem script of a P2SH spend.
-fn last_script_push(script: &[u8]) -> Option<Vec<u8>> {
+///
+/// `OP_0` and the small numeric opcodes have an empty payload. A non-push opcode
+/// rejects the script. The returned slice borrows `script`.
+fn last_script_push(script: &[u8]) -> Option<&[u8]> {
     use blvm_protocol::opcodes::{
-        OP_0, OP_1, OP_16, OP_1NEGATE, OP_PUSHDATA1, OP_PUSHDATA2, OP_PUSHDATA4,
+        OP_0, OP_1, OP_1NEGATE, OP_16, OP_PUSHDATA1, OP_PUSHDATA2, OP_PUSHDATA4,
     };
     let mut i = 0;
     let mut last = None;
     while i < script.len() {
         let opcode = script[i];
-        let (advance, data) = if opcode == OP_0 {
-            (1, Vec::new())
+        let (advance, data): (usize, &[u8]) = if opcode == OP_0 {
+            (1, &[])
         } else if opcode > OP_0 && opcode < OP_PUSHDATA1 {
             let len = opcode as usize;
             if i + 1 + len > script.len() {
                 return None;
             }
-            (1 + len, script[i + 1..i + 1 + len].to_vec())
+            (1 + len, &script[i + 1..i + 1 + len])
         } else if opcode == OP_PUSHDATA1 {
             if i + 1 >= script.len() {
                 return None;
@@ -150,7 +150,7 @@ fn last_script_push(script: &[u8]) -> Option<Vec<u8>> {
             if i + 2 + len > script.len() {
                 return None;
             }
-            (2 + len, script[i + 2..i + 2 + len].to_vec())
+            (2 + len, &script[i + 2..i + 2 + len])
         } else if opcode == OP_PUSHDATA2 {
             if i + 2 >= script.len() {
                 return None;
@@ -159,7 +159,7 @@ fn last_script_push(script: &[u8]) -> Option<Vec<u8>> {
             if i + 3 + len > script.len() {
                 return None;
             }
-            (3 + len, script[i + 3..i + 3 + len].to_vec())
+            (3 + len, &script[i + 3..i + 3 + len])
         } else if opcode == OP_PUSHDATA4 {
             if i + 4 >= script.len() {
                 return None;
@@ -170,9 +170,9 @@ fn last_script_push(script: &[u8]) -> Option<Vec<u8>> {
             if i + 5 + len > script.len() {
                 return None;
             }
-            (5 + len, script[i + 5..i + 5 + len].to_vec())
+            (5 + len, &script[i + 5..i + 5 + len])
         } else if opcode == OP_1NEGATE || (OP_1..=OP_16).contains(&opcode) {
-            (1, Vec::new())
+            (1, &[])
         } else {
             return None;
         };
@@ -193,7 +193,7 @@ fn p2sh_redeem_is_witness_program(script_pubkey: &[u8], script_sig: &[u8]) -> bo
     let Some(redeem) = last_script_push(script_sig) else {
         return false;
     };
-    script_needs_witness_verification(&redeem)
+    script_needs_witness_verification(redeem)
 }
 
 /// BIP141 standard transaction weight. A relay transaction above this is non-standard.
@@ -268,16 +268,23 @@ fn output_is_dust(output: &blvm_protocol::TransactionOutput) -> bool {
 ///
 /// `prevouts` is one entry per input. A missing entry was not in the snapshot and
 /// was not created by a transaction already in the pool.
+/// Value and script for one spent output. A UTXO script is borrowed. A mempool
+/// parent script is owned because the pool lock ends before script checks run.
+struct InputPrevout<'a> {
+    value: i64,
+    script: Cow<'a, [u8]>,
+}
+
 fn consensus_checks_reject(
     tx: &Transaction,
     witnesses: Option<&[Witness]>,
-    prevouts: &[Option<TransactionOutput>],
+    prevouts: &[Option<InputPrevout<'_>>],
 ) -> bool {
+    use blvm_protocol::ValidationResult;
     use blvm_protocol::block::calculate_script_flags_for_block_network;
-    use blvm_protocol::script::verify_script_with_context;
+    use blvm_protocol::script::{SigVersion, verify_script_with_context_full};
     use blvm_protocol::transaction::{check_transaction, is_coinbase};
     use blvm_protocol::types::Network;
-    use blvm_protocol::ValidationResult;
 
     const MEMPOOL_POLICY_HEIGHT: u64 = 1_000_000;
 
@@ -299,9 +306,9 @@ fn consensus_checks_reject(
     let needs_witness_flags = tx.inputs.iter().enumerate().any(|(i, input)| {
         prevouts
             .get(i)
-            .and_then(|output| output.as_ref())
-            .is_some_and(|output| {
-                let script = output.script_pubkey.as_slice();
+            .and_then(|prevout| prevout.as_ref())
+            .is_some_and(|prevout| {
+                let script = prevout.script.as_ref();
                 script_needs_witness_verification(script)
                     || p2sh_redeem_is_witness_program(script, &input.script_sig)
             })
@@ -315,31 +322,49 @@ fn consensus_checks_reject(
         MEMPOOL_POLICY_HEIGHT,
         Network::Mainnet,
     ) | SCRIPT_VERIFY_MINIMALDATA;
-    let sighash_prevouts: Vec<TransactionOutput> = prevouts
-        .iter()
-        .map(|output| {
-            output.clone().unwrap_or(TransactionOutput {
-                value: 0,
-                script_pubkey: Vec::new(),
-            })
-        })
-        .collect();
+    let mut prevout_values = Vec::with_capacity(prevouts.len());
+    let mut prevout_scripts: Vec<&[u8]> = Vec::with_capacity(prevouts.len());
+    for prevout in prevouts {
+        match prevout {
+            Some(prevout) => {
+                prevout_values.push(prevout.value);
+                prevout_scripts.push(prevout.script.as_ref());
+            }
+            None => {
+                prevout_values.push(0);
+                prevout_scripts.push(&[]);
+            }
+        }
+    }
 
     for (i, input) in tx.inputs.iter().enumerate() {
-        let Some(output) = prevouts.get(i).and_then(|output| output.as_ref()) else {
+        let Some(prevout) = prevouts.get(i).and_then(|prevout| prevout.as_ref()) else {
             continue;
         };
         let witness = witnesses.and_then(|stacks| stacks.get(i));
-        let Ok(true) = verify_script_with_context(
+        let Ok(true) = verify_script_with_context_full(
             &input.script_sig,
-            output.script_pubkey.as_ref(),
+            prevout.script.as_ref(),
             witness,
             flags,
             tx,
             i,
-            &sighash_prevouts,
+            &prevout_values,
+            &prevout_scripts,
             Some(MEMPOOL_POLICY_HEIGHT),
+            None,
             Network::Mainnet,
+            SigVersion::Base,
+            #[cfg(feature = "production")]
+            None,
+            None,
+            #[cfg(feature = "production")]
+            None,
+            #[cfg(feature = "production")]
+            None,
+            #[cfg(feature = "production")]
+            None,
+            None,
         ) else {
             return true;
         };
@@ -414,7 +439,6 @@ impl MempoolManager {
             }),
             mempool: RwLock::new(Mempool::new()),
             utxo_set_arc: RwLock::new(None),
-            event_callback: None,
             fee_index: RwLock::new(BTreeMap::new()),
             fee_cache: RwLock::new(HashMap::new()),
             fee_basis: RwLock::new(HashMap::new()),
@@ -455,7 +479,6 @@ impl MempoolManager {
             }),
             mempool: RwLock::new(Mempool::new()),
             utxo_set_arc: RwLock::new(None),
-            event_callback: None,
             fee_index: RwLock::new(BTreeMap::new()),
             fee_cache: RwLock::new(HashMap::new()),
             fee_basis: RwLock::new(HashMap::new()),
@@ -531,25 +554,28 @@ impl MempoolManager {
 
     /// Script and value for each input. The snapshot wins. Otherwise use the
     /// output a transaction already in the pool created.
-    fn script_prevouts(
+    fn script_prevouts<'a>(
         &self,
         tx: &Transaction,
-        utxo_set: &UtxoSet,
-    ) -> Vec<Option<TransactionOutput>> {
+        utxo_set: &'a UtxoSet,
+    ) -> Vec<Option<InputPrevout<'a>>> {
         let pool = self.pool_lock();
         tx.inputs
             .iter()
             .map(|input| {
                 if let Some(utxo) = utxo_set.get(&input.prevout) {
-                    Some(TransactionOutput {
+                    Some(InputPrevout {
                         value: utxo.value,
-                        script_pubkey: utxo.script_pubkey.as_ref().to_vec(),
+                        script: Cow::Borrowed(utxo.script_pubkey.as_ref()),
                     })
                 } else {
                     pool.transactions
                         .get(&input.prevout.hash)
                         .and_then(|parent| parent.outputs.get(input.prevout.index as usize))
-                        .cloned()
+                        .map(|output| InputPrevout {
+                            value: output.value,
+                            script: Cow::Owned(output.script_pubkey.clone()),
+                        })
                 }
             })
             .collect()
@@ -874,11 +900,6 @@ impl MempoolManager {
                 accounted_tx_bytes(tx, pool.tx_witnesses.get(hash).map(|w| w.as_slice()))
             })
             .sum()
-    }
-
-    /// Calculate current mempool size in MB
-    fn calculate_mempool_size_mb(&self) -> u64 {
-        self.mempool_size_bytes() / 1_048_576
     }
 
     /// Remove `hash` and its in-mempool descendants. Returns bytes and count removed.
@@ -2421,10 +2442,10 @@ impl MempoolManager {
         witnesses: Option<&[Witness]>,
         utxo_set: &UtxoSet,
     ) -> (u64, u64) {
-        use blvm_protocol::mempool::{sigop_adjusted_vsize, DEFAULT_BYTES_PER_SIGOP};
+        use blvm_protocol::UTXO;
+        use blvm_protocol::mempool::{DEFAULT_BYTES_PER_SIGOP, sigop_adjusted_vsize};
         use blvm_protocol::script::flags::SEGWIT_STANDARD_FLAGS;
         use blvm_protocol::sigop::get_transaction_sigop_cost_with_utxos;
-        use blvm_protocol::UTXO;
 
         let (bytes_per_sigop, count_sigops) = {
             let policy = self.policy_config.read().unwrap_or_else(|e| e.into_inner());
@@ -2520,19 +2541,6 @@ impl MempoolManager {
         } else {
             (base_size as u64).saturating_mul(4)
         }
-    }
-
-    /// Virtual size for fee-rate and RBF comparisons (vbytes).
-    fn transaction_virtual_size(&self, tx: &Transaction, tx_hash: &Hash) -> usize {
-        use blvm_protocol::segwit::transaction_weight_from_stacks;
-        use blvm_protocol::witness::weight_to_vsize;
-
-        if let Some(witnesses) = self.get_transaction_witnesses(tx_hash) {
-            if let Ok(weight) = transaction_weight_from_stacks(tx, Some(witnesses.as_slice())) {
-                return weight_to_vsize(weight) as usize;
-            }
-        }
-        self.estimate_transaction_size(tx)
     }
 
     /// Estimate transaction size in vbytes.
@@ -3172,9 +3180,11 @@ mod tests {
 
         let mempool = MempoolManager::new();
         let tx = legacy_empty_script();
-        assert!(!mempool
-            .add_transaction_with_witness(tx, Some(Vec::new()))
-            .unwrap());
+        assert!(
+            !mempool
+                .add_transaction_with_witness(tx, Some(Vec::new()))
+                .unwrap()
+        );
 
         let mempool = MempoolManager::new();
         mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
@@ -3219,9 +3229,11 @@ mod tests {
         policy.require_standard = false;
         policy.max_mempool_mb = 1;
         mempool.set_policy_config(Some(policy));
-        assert!(mempool
-            .add_transaction_with_witness(tx.clone(), Some(witness))
-            .unwrap());
+        assert!(
+            mempool
+                .add_transaction_with_witness(tx.clone(), Some(witness))
+                .unwrap()
+        );
         let base = serialize_transaction(&tx).len() as u64;
         assert!(mempool.mempool_size_bytes() >= base + witness_script.len() as u64);
 
@@ -3303,9 +3315,11 @@ mod tests {
             .into(),
             lock_time: 0,
         };
-        assert!(!mempool
-            .add_transaction_with_witness(tx.clone(), Some(vec![vec![]]))
-            .unwrap());
+        assert!(
+            !mempool
+                .add_transaction_with_witness(tx.clone(), Some(vec![vec![]]))
+                .unwrap()
+        );
         assert!(mempool.get_transaction(&calculate_tx_id(&tx)).is_none());
     }
 
@@ -3380,9 +3394,11 @@ mod tests {
         let txid = calculate_tx_id(&tx);
         set.remove(&second);
         let ranked = mempool.get_prioritized_transactions(10, &set);
-        assert!(ranked
-            .iter()
-            .all(|ranked_tx| calculate_tx_id(ranked_tx) != txid));
+        assert!(
+            ranked
+                .iter()
+                .all(|ranked_tx| calculate_tx_id(ranked_tx) != txid)
+        );
         assert!(mempool.cached_fee_basis(&txid).is_none());
     }
 
@@ -3823,9 +3839,9 @@ mod tests {
     fn mempool_rejects_a_prevout_sum_above_max_money() {
         use std::sync::Arc;
 
+        use blvm_protocol::UTXO;
         use blvm_protocol::constants::MAX_MONEY;
         use blvm_protocol::opcodes::OP_1;
-        use blvm_protocol::UTXO;
 
         let mut policy = crate::config::MempoolPolicyConfig::default();
         policy.require_standard = false;
@@ -4013,10 +4029,10 @@ mod tests {
 
         use crate::config::MempoolPolicyConfig;
         use crate::node::miner::{MempoolProvider, TransactionSelector};
+        use blvm_protocol::TransactionInput;
         use blvm_protocol::block::calculate_tx_id;
         use blvm_protocol::constants::SEQUENCE_FINAL;
         use blvm_protocol::opcodes::OP_1;
-        use blvm_protocol::TransactionInput;
 
         let mut policy = MempoolPolicyConfig::default();
         policy.require_standard = false;
@@ -4305,13 +4321,17 @@ mod tests {
         assert!(mempool.add_transaction(unrelated.clone()).unwrap());
 
         mempool.remove_for_connected_block(&[confirmed.clone()]);
-        assert!(mempool
-            .get_transaction(&calculate_tx_id(&confirmed))
-            .is_none());
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&confirmed))
+                .is_none()
+        );
         assert!(mempool.get_transaction(&calculate_tx_id(&child)).is_some());
-        assert!(mempool
-            .get_transaction(&calculate_tx_id(&unrelated))
-            .is_some());
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&unrelated))
+                .is_some()
+        );
 
         let mempool = MempoolManager::new();
         mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded(
@@ -4333,12 +4353,16 @@ mod tests {
         let mut in_block = conflict.clone();
         in_block.outputs[0].value = 70_000;
         mempool.remove_for_connected_block(&[in_block]);
-        assert!(mempool
-            .get_transaction(&calculate_tx_id(&conflict))
-            .is_none());
-        assert!(mempool
-            .get_transaction(&calculate_tx_id(&conflict_child))
-            .is_none());
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&conflict))
+                .is_none()
+        );
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&conflict_child))
+                .is_none()
+        );
         assert_eq!(mempool.size(), 0);
     }
 
@@ -4425,18 +4449,26 @@ mod tests {
             &after,
         );
 
-        assert!(mempool
-            .get_transaction(&calculate_tx_id(&conflict))
-            .is_none());
-        assert!(mempool
-            .get_transaction(&calculate_tx_id(&conflict_child))
-            .is_none());
-        assert!(mempool
-            .get_transaction(&calculate_tx_id(&resurrected))
-            .is_some());
-        assert!(mempool
-            .get_transaction(&calculate_tx_id(&resurrected_child))
-            .is_some());
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&conflict))
+                .is_none()
+        );
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&conflict_child))
+                .is_none()
+        );
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&resurrected))
+                .is_some()
+        );
+        assert!(
+            mempool
+                .get_transaction(&calculate_tx_id(&resurrected_child))
+                .is_some()
+        );
         assert_eq!(mempool.size(), 2);
     }
 
@@ -4539,9 +4571,11 @@ mod tests {
         assert!(!mempool.add_transaction(spend.clone()).unwrap());
 
         let witness: Vec<Witness> = vec![vec![witness_script]];
-        assert!(mempool
-            .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
-            .unwrap());
+        assert!(
+            mempool
+                .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
+                .unwrap()
+        );
         assert_eq!(
             mempool.get_transaction_witnesses(&calculate_tx_id(&spend)),
             Some(witness)
@@ -4617,9 +4651,11 @@ mod tests {
         assert!(!mempool.add_transaction(spend.clone()).unwrap());
 
         let witness: Vec<Witness> = vec![vec![witness_script]];
-        assert!(mempool
-            .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
-            .unwrap());
+        assert!(
+            mempool
+                .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
+                .unwrap()
+        );
         assert_eq!(
             mempool.get_transaction_witnesses(&calculate_tx_id(&spend)),
             Some(witness)
@@ -4662,9 +4698,11 @@ mod tests {
         assert!(!mempool.add_transaction(child.clone()).unwrap());
 
         let witness: Vec<Witness> = vec![vec![witness_script]];
-        assert!(mempool
-            .add_transaction_with_witness(child.clone(), Some(witness.clone()))
-            .unwrap());
+        assert!(
+            mempool
+                .add_transaction_with_witness(child.clone(), Some(witness.clone()))
+                .unwrap()
+        );
         assert_eq!(
             mempool.get_transaction_witnesses(&calculate_tx_id(&child)),
             Some(witness)

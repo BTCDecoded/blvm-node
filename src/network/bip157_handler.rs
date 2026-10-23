@@ -39,52 +39,59 @@ pub fn handle_getcfilters(
         for height in start_height..=current_height.min(start_height + 2000) {
             // Get block hash by height, then get block
             if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(height as u64) {
-                if let Ok(Some(block)) = storage.blocks().get_block(&block_hash) {
-                    // Calculate block hash properly (80 bytes total)
-                    // CRITICAL: Must use 4-byte types for version/timestamp/bits/nonce (Bitcoin wire format)
-                    use crate::storage::hashing::double_sha256;
-                    let mut header_data = Vec::with_capacity(80);
-                    header_data.extend_from_slice(&(block.header.version as i32).to_le_bytes()); // 4 bytes
-                    header_data.extend_from_slice(&block.header.prev_block_hash); // 32 bytes
-                    header_data.extend_from_slice(&block.header.merkle_root); // 32 bytes
-                    header_data.extend_from_slice(&(block.header.timestamp as u32).to_le_bytes()); // 4 bytes
-                    header_data.extend_from_slice(&(block.header.bits as u32).to_le_bytes()); // 4 bytes
-                    header_data.extend_from_slice(&(block.header.nonce as u32).to_le_bytes()); // 4 bytes
-                    let calculated_hash = double_sha256(&header_data);
-
-                    // Check if this is the stop hash
-                    if calculated_hash == request.stop_hash {
-                        found_stop = true;
-                        stop_height = height;
+                // The height index stores the wire block id used to save the block.
+                let filter = if let Some(cached) = filter_service.get_filter(&block_hash) {
+                    let body_present = storage.blocks().has_block(&block_hash).unwrap_or(false);
+                    if !body_present
+                        && storage
+                            .blocks()
+                            .get_block(&block_hash)
+                            .ok()
+                            .flatten()
+                            .is_none()
+                    {
+                        continue;
                     }
+                    cached
+                } else if let Ok(Some(outputs)) =
+                    storage.blocks().output_scripts_and_prev_hash(&block_hash)
+                {
+                    #[cfg(feature = "production")]
+                    let spent = storage
+                        .blocks()
+                        .spent_script_spans(&block_hash)
+                        .unwrap_or_default();
+                    #[cfg(not(feature = "production"))]
+                    let spent = crate::storage::blockstore::ScriptSpans::default();
+                    let scripts = crate::storage::blockstore::output_and_spent_slices(
+                        &outputs.scripts,
+                        &spent,
+                    );
 
-                    // Try to get cached filter
-                    let filter = if let Some(cached) = filter_service.get_filter(&calculated_hash) {
-                        cached
-                    } else {
-                        let mut prev_scripts = Vec::new();
-                        #[cfg(feature = "production")]
-                        if let Ok(Some(undo)) = storage.blocks().get_undo_log(&calculated_hash) {
-                            for entry in &undo.entries {
-                                if let Some(prev) = &entry.previous_utxo {
-                                    prev_scripts.push(prev.script_pubkey.as_ref().to_vec());
-                                }
-                            }
-                        }
+                    filter_service.generate_and_cache_filter_for_scripts(
+                        scripts,
+                        &[],
+                        block_hash,
+                        height,
+                    )?
+                } else {
+                    continue;
+                };
 
-                        filter_service.generate_and_cache_filter(&block, &prev_scripts, height)?
-                    };
+                if block_hash == request.stop_hash {
+                    found_stop = true;
+                    stop_height = height;
+                }
 
-                    responses.push(ProtocolMessage::Cfilter(CfilterMessage {
-                        filter_type: 0,
-                        block_hash: calculated_hash,
-                        filter_data: filter.filter_data,
-                        num_elements: filter.num_elements,
-                    }));
+                responses.push(ProtocolMessage::Cfilter(CfilterMessage {
+                    filter_type: 0,
+                    block_hash,
+                    filter_data: filter.filter_data,
+                    num_elements: filter.num_elements,
+                }));
 
-                    if found_stop {
-                        break;
-                    }
+                if found_stop {
+                    break;
                 }
             }
         }

@@ -29,6 +29,8 @@ pub struct PaymentRpc {
     state_machine: Option<Arc<PaymentStateMachine>>,
     mempool: Option<Arc<MempoolManager>>,
     storage: Option<Arc<Storage>>,
+    /// Chain read used when this process does not hold mempool or storage.
+    lookup: Option<Arc<dyn PaymentTxLookup>>,
 }
 
 impl Default for PaymentRpc {
@@ -44,6 +46,7 @@ impl PaymentRpc {
             state_machine: None,
             mempool: None,
             storage: None,
+            lookup: None,
         }
     }
 
@@ -53,7 +56,14 @@ impl PaymentRpc {
             state_machine: Some(state_machine),
             mempool: None,
             storage: None,
+            lookup: None,
         }
+    }
+
+    /// Resolve `verifyonchainpaymentbytx` through this lookup instead of node storage.
+    pub fn with_tx_lookup(mut self, lookup: Arc<dyn PaymentTxLookup>) -> Self {
+        self.lookup = Some(lookup);
+        self
     }
 
     /// Attach mempool + storage for chain-level path-3 verify (`verifyonchainpaymentbytx`).
@@ -526,6 +536,14 @@ impl PaymentRpc {
                 let confirmations = (tip.saturating_sub(block_height) + 1) as u32;
                 return Ok(Some((tx, TxChainState::Confirmed { confirmations })));
             }
+        }
+
+        if let Some(lookup) = &self.lookup {
+            return match lookup.find_tx(tx_hash).await? {
+                Some((tx, true)) => Ok(Some((tx, TxChainState::InMempool))),
+                Some((tx, false)) => Ok(Some((tx, TxChainState::Confirmed { confirmations: 1 }))),
+                None => Ok(None),
+            };
         }
 
         if self.mempool.is_none() && self.storage.is_none() {
@@ -1318,6 +1336,13 @@ impl PaymentRpc {
             "ready_to_broadcast": true,
         }))
     }
+}
+
+/// Read one transaction for `verifyonchainpaymentbytx` without opening node storage.
+/// `in_mempool` is true when the transaction is not in a block yet.
+#[async_trait::async_trait]
+pub trait PaymentTxLookup: Send + Sync {
+    async fn find_tx(&self, hash: &Hash) -> Result<Option<(Transaction, bool)>, PaymentError>;
 }
 
 #[derive(Debug, Clone, Copy)]

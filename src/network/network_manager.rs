@@ -3301,11 +3301,6 @@ impl NetworkManager {
         &self.event_publisher
     }
 
-    #[cfg(feature = "governance")]
-    pub(crate) fn governance_config(&self) -> &Option<crate::config::GovernanceConfig> {
-        &self.governance_config
-    }
-
     pub(crate) fn ibd_protection(&self) -> &Arc<super::ibd_protection::IbdProtectionManager> {
         &self.ibd_protection
     }
@@ -3342,10 +3337,6 @@ impl NetworkManager {
         &self,
     ) -> &Arc<Mutex<HashMap<SocketAddr, PeerByteRateLimiter>>> {
         &self.peer_tx_byte_rate_limiters
-    }
-
-    pub(crate) fn peer_spam_violations(&self) -> &Arc<Mutex<HashMap<SocketAddr, usize>>> {
-        &self.peer_spam_violations
     }
 
     pub(crate) fn tcp_transport(&self) -> &TcpTransport {

@@ -492,16 +492,21 @@ impl Node {
         // Apply RPC auth config before starting RPC server
         if let Some(ref config) = self.config {
             if let Some(ref rpc_auth) = config.rpc_auth {
-                self.rpc.with_auth_config(rpc_auth.clone()).await;
+                self.rpc
+                    .apply_auth_config(rpc_auth.clone(), Some(&self.data_dir))
+                    .await?;
                 info!("[START_COMPONENTS] RPC auth config applied (tokens/certs from rpc_auth)");
             } else if config.rpc_rate_limit_when_auth_disabled() {
                 let burst = config.rpc_ip_rate_limit_burst();
                 let rate = config.rpc_ip_rate_limit_rate();
                 self.rpc
-                    .with_auth_config(RpcAuthConfig::rate_limit_only(burst, rate))
-                    .await;
+                    .apply_auth_config(
+                        RpcAuthConfig::rate_limit_only(burst, rate),
+                        Some(&self.data_dir),
+                    )
+                    .await?;
                 info!(
-                    "[START_COMPONENTS] RPC rate-limit-only mode applied (burst={}, rate={})",
+                    "[START_COMPONENTS] RPC cookie auth applied (burst={}, rate={})",
                     burst, rate
                 );
             }

@@ -1374,9 +1374,7 @@ impl MiningCoordinator {
         utxo_set: &blvm_protocol::UtxoSet,
     ) -> Result<Vec<Vec<Witness>>> {
         use blvm_consensus::transaction::is_coinbase;
-        use blvm_consensus::witness::{
-            extract_witness_program, extract_witness_version, validate_witness_program_length,
-        };
+        use blvm_consensus::witness::is_standard_witness_program;
         use blvm_protocol::block::calculate_tx_id;
 
         block
@@ -1401,15 +1399,7 @@ impl MiningCoordinator {
 
                 let spends_witness_utxo = tx.inputs.iter().any(|input| {
                     utxo_set.get(&input.prevout).is_some_and(|utxo| {
-                        let script = utxo.script_pubkey.as_ref().to_vec();
-                        extract_witness_version(&script)
-                            .and_then(|version| {
-                                extract_witness_program(&script, version)
-                                    .map(|program| (version, program))
-                            })
-                            .is_some_and(|(version, program)| {
-                                validate_witness_program_length(&program, version)
-                            })
+                        is_standard_witness_program(utxo.script_pubkey.as_ref())
                     })
                 });
                 if self.mempool.get_transaction(&txid).is_some() && spends_witness_utxo {

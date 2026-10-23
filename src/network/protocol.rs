@@ -18,6 +18,7 @@ use blvm_protocol::wire::{
 };
 use blvm_protocol::{Block, BlockHeader, Hash, Transaction};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 pub use blvm_protocol::network::{AddrV2Message, RejectMessage};
 
@@ -616,8 +617,8 @@ pub struct CfilterMessage {
     pub filter_type: u8,
     /// Block hash
     pub block_hash: Hash,
-    /// Compact block filter data
-    pub filter_data: Vec<u8>,
+    /// Compact block filter data. Outbound filters share the cached bytes.
+    pub filter_data: Arc<Vec<u8>>,
     /// Number of elements in filter
     pub num_elements: u32,
 }
@@ -1501,7 +1502,7 @@ impl ProtocolParser {
             ProtocolMessage::FilteredBlock(msg) => (cmd::FILTEREDBLOCK, bincode::serialize(msg)?),
             // Block Filtering (BIP157)
             ProtocolMessage::GetCfilters(msg) => (cmd::GETCFILTERS, encode_filter_request(msg)),
-            ProtocolMessage::Cfilter(msg) => (cmd::CFILTER, encode_cfilter(msg)?),
+            ProtocolMessage::Cfilter(msg) => return Ok(frame_cfilter(msg)),
             ProtocolMessage::GetCfheaders(msg) => (
                 cmd::GETCFHEADERS,
                 encode_filter_request(&GetCfiltersMessage {
@@ -1715,19 +1716,76 @@ fn decode_cfilter(payload: &[u8]) -> anyhow::Result<CfilterMessage> {
     Ok(CfilterMessage {
         filter_type: payload[0],
         block_hash,
-        filter_data: payload[start..start + len].to_vec(),
+        filter_data: Arc::new(payload[start..start + len].to_vec()),
         num_elements: 0,
     })
 }
 
-fn encode_cfilter(msg: &CfilterMessage) -> anyhow::Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    buf.push(msg.filter_type);
-    buf.extend_from_slice(&msg.block_hash);
-    blvm_protocol::varint::write_varint(&mut buf, msg.filter_data.len() as u64)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    buf.extend_from_slice(&msg.filter_data);
-    Ok(buf)
+/// One framed `cfilter`. The filter bytes are copied into the frame once.
+fn frame_cfilter(msg: &CfilterMessage) -> Vec<u8> {
+    let (varint, varint_len) = cfilter_len_varint(msg.filter_data.len() as u64);
+    let payload_len = 1 + 32 + varint_len + msg.filter_data.len();
+    let checksum = cfilter_checksum(
+        msg.filter_type,
+        &msg.block_hash,
+        &varint[..varint_len],
+        msg.filter_data.as_slice(),
+    );
+
+    let mut message = Vec::with_capacity(24 + payload_len);
+    let active_magic = ACTIVE_MAGIC.load(std::sync::atomic::Ordering::Relaxed);
+    message.extend_from_slice(&active_magic.to_le_bytes());
+    let mut command_bytes = [0u8; 12];
+    let command = cmd::CFILTER;
+    command_bytes[..command.len()].copy_from_slice(command.as_bytes());
+    message.extend_from_slice(&command_bytes);
+    message.extend_from_slice(&(payload_len as u32).to_le_bytes());
+    message.extend_from_slice(&checksum);
+    message.push(msg.filter_type);
+    message.extend_from_slice(&msg.block_hash);
+    message.extend_from_slice(&varint[..varint_len]);
+    message.extend_from_slice(msg.filter_data.as_slice());
+    message
+}
+
+fn cfilter_len_varint(len: u64) -> ([u8; 9], usize) {
+    let mut buf = [0u8; 9];
+    let n = match len {
+        0..=0xfc => {
+            buf[0] = len as u8;
+            1
+        }
+        0xfd..=0xffff => {
+            buf[0] = 0xfd;
+            buf[1..3].copy_from_slice(&(len as u16).to_le_bytes());
+            3
+        }
+        0x10000..=0xffff_ffff => {
+            buf[0] = 0xfe;
+            buf[1..5].copy_from_slice(&(len as u32).to_le_bytes());
+            5
+        }
+        _ => {
+            buf[0] = 0xff;
+            buf[1..9].copy_from_slice(&len.to_le_bytes());
+            9
+        }
+    };
+    (buf, n)
+}
+
+fn cfilter_checksum(filter_type: u8, block_hash: &[u8; 32], varint: &[u8], filter: &[u8]) -> [u8; 4] {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update([filter_type]);
+    hasher.update(block_hash);
+    hasher.update(varint);
+    hasher.update(filter);
+    let second = Sha256::digest(hasher.finalize());
+    let mut checksum = [0u8; 4];
+    checksum.copy_from_slice(&second[..4]);
+    checksum
 }
 
 fn decode_cfheaders(payload: &[u8]) -> anyhow::Result<CfheadersMessage> {
@@ -1932,6 +1990,7 @@ mod tests {
     #[test]
     fn filter_lock_getcfilters_and_cfilter_use_wire_bytes() {
         use super::{CfilterMessage, GetCfiltersMessage, ProtocolMessage, ProtocolParser};
+        use std::sync::Arc;
 
         let stop = [0xab; 32];
         let request = GetCfiltersMessage {
@@ -1955,7 +2014,7 @@ mod tests {
         let reply = CfilterMessage {
             filter_type: 0,
             block_hash: stop,
-            filter_data: vec![0x09, 0x08, 0x07],
+            filter_data: Arc::new(vec![0x09, 0x08, 0x07]),
             num_elements: 3,
         };
         let framed = ProtocolParser::serialize_message(&ProtocolMessage::Cfilter(reply)).unwrap();
@@ -1967,7 +2026,7 @@ mod tests {
         assert_eq!(&payload[34..], &[0x09, 0x08, 0x07]);
         match ProtocolParser::parse_message(&framed).unwrap() {
             ProtocolMessage::Cfilter(parsed) => {
-                assert_eq!(parsed.filter_data, vec![0x09, 0x08, 0x07]);
+                assert_eq!(parsed.filter_data.as_slice(), &[0x09, 0x08, 0x07]);
                 assert_eq!(parsed.block_hash, stop);
             }
             other => panic!("expected cfilter, got {other:?}"),

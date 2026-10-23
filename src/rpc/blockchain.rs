@@ -18,11 +18,28 @@ use crate::utils::{
 };
 use anyhow::Result;
 use serde_json::{Number, Value, json};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
 const ZERO_HASH_STR: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// `initialblockdownload` and `verificationprogress` from chain height versus stored headers.
+///
+/// `None` means no header height is stored (`node_is_in_ibd`). Progress is chain/headers while
+/// the chain has not passed that tip, `1.0` when both sides are zero, and `0.0` otherwise.
+pub(crate) fn ibd_sync_fields(chain_height: u64, header_height: Option<u64>) -> (bool, f64) {
+    let in_ibd = crate::node::run_loop::node_is_in_ibd(chain_height, header_height);
+    let progress = match header_height {
+        Some(headers) if headers > 0 && chain_height <= headers => {
+            chain_height as f64 / headers as f64
+        }
+        Some(0) if chain_height == 0 => 1.0,
+        _ => 0.0,
+    };
+    (in_ibd, progress)
+}
 
 fn non_coinbase_fee_sats(
     block: &blvm_protocol::Block,
@@ -83,42 +100,19 @@ fn encode_hash32_rpc(hash: &[u8; 32]) -> String {
     crate::storage::hashing::hash_to_rpc_hex(hash)
 }
 
-fn spent_scripts_from_undo(storage: &Storage, hash: &blvm_protocol::Hash) -> Vec<Vec<u8>> {
-    let mut scripts = Vec::new();
-    #[cfg(feature = "production")]
-    if let Ok(Some(undo)) = storage.blocks().get_undo_log(hash) {
-        for entry in &undo.entries {
-            if let Some(prev) = &entry.previous_utxo {
-                scripts.push(prev.script_pubkey.as_ref().to_vec());
-            }
-        }
-    }
-    #[cfg(not(feature = "production"))]
-    let _ = (storage, hash);
-    scripts
-}
-
-fn previous_filter_header(
-    storage: &Storage,
-    header: &blvm_protocol::BlockHeader,
-) -> Result<[u8; 32]> {
-    if header.prev_block_hash == [0u8; 32] {
+fn previous_filter_header(storage: &Storage, prev_block_hash: &[u8; 32]) -> Result<[u8; 32]> {
+    if *prev_block_hash == [0u8; 32] {
         return Ok([0u8; 32]);
     }
-    match storage
-        .blocks()
-        .get_filter_header(&header.prev_block_hash)?
-    {
+    match storage.blocks().get_filter_header(prev_block_hash)? {
         Some(prev) => Ok(prev),
         None => Err(anyhow::anyhow!("parent filter header is absent")),
     }
 }
 
 fn chain_filter_header(filter: &[u8], prev: &[u8; 32]) -> [u8; 32] {
-    let mut buf = Vec::with_capacity(filter.len() + 32);
-    buf.extend_from_slice(filter);
-    buf.extend_from_slice(prev);
-    crate::storage::hashing::double_sha256(&buf)
+    let filter_hash = blvm_protocol::bip157::hash256(filter);
+    blvm_protocol::bip157::hash256_concat(&filter_hash, prev)
 }
 
 fn require_address_index(storage: &Storage, method: &str) -> Result<()> {
@@ -471,12 +465,9 @@ impl BlockchainRpc {
 
         if let Some(ref storage) = self.storage {
             let (best_hash, height) = storage.chain().get_tip_hash_and_height()?;
-            let header_height = storage
-                .blocks()
-                .highest_stored_height()
-                .ok()
-                .flatten()
-                .unwrap_or(height);
+            let stored_headers = storage.blocks().highest_stored_height().ok().flatten();
+            let header_height = stored_headers.unwrap_or(height);
+            let (in_ibd, verification_progress) = ibd_sync_fields(height, stored_headers);
             let softforks = self.softforks_json(height);
 
             let best_hash_hex = CACHED_TIP_HASH_HEX.with(|c| {
@@ -510,8 +501,8 @@ impl BlockchainRpc {
                 "bestblockhash": best_hash_hex,
                 "difficulty": difficulty,
                 "mediantime": mediantime,
-                "verificationprogress": 0.0,
-                "initialblockdownload": true,
+                "verificationprogress": verification_progress,
+                "initialblockdownload": in_ibd,
                 "chainwork": chainwork_hex,
                 "size_on_disk": if let Some(ref storage) = self.storage {
                     storage.disk_size().unwrap_or(0)
@@ -549,6 +540,7 @@ impl BlockchainRpc {
             tracing::debug!(
                 "getblockchaininfo called but storage not available, returning default values"
             );
+            let (in_ibd, verification_progress) = ibd_sync_fields(0, None);
             Ok(json!({
                 "chain": self.core_chain_field(),
                 "blocks": 0,
@@ -556,8 +548,8 @@ impl BlockchainRpc {
                 "bestblockhash": "0000000000000000000000000000000000000000000000000000000000000000",
                 "difficulty": 1.0,
                 "mediantime": 1231006505,
-                "verificationprogress": 0.0,
-                "initialblockdownload": true,
+                "verificationprogress": verification_progress,
+                "initialblockdownload": in_ibd,
                 "chainwork": "0000000000000000000000000000000000000000000000000000000000000000",
                 "size_on_disk": 0,
                 "pruned": false,
@@ -1806,8 +1798,12 @@ impl BlockchainRpc {
         };
         let mut chain = Vec::new();
         let mut cursor = tip;
+        let mut seen = HashSet::new();
         let mut found = false;
-        for _ in 0..100_000 {
+        loop {
+            if !seen.insert(cursor) {
+                break;
+            }
             chain.push(cursor);
             if cursor == *target {
                 found = true;
@@ -1827,9 +1823,10 @@ impl BlockchainRpc {
             ));
         }
         for hash in chain {
-            let Some(header) = storage.blocks().get_header(&hash)? else {
-                break;
-            };
+            let header = storage
+                .blocks()
+                .get_header(&hash)?
+                .ok_or_else(|| anyhow::anyhow!("missing header for invalidated block"))?;
             let undo = storage
                 .blocks()
                 .get_undo_log(&hash)?
@@ -1844,13 +1841,19 @@ impl BlockchainRpc {
             }
             let height = storage.chain().get_height()?.unwrap_or(0);
             if height == 0 {
-                break;
+                if hash == *target {
+                    break;
+                }
+                return Err(anyhow::anyhow!(
+                    "invalidateblock stopped at genesis before the target"
+                ));
             }
             storage.blocks().clear_height_index(height)?;
             let parent = header.prev_block_hash;
-            let Some(parent_header) = storage.blocks().get_header(&parent)? else {
-                break;
-            };
+            let parent_header = storage
+                .blocks()
+                .get_header(&parent)?
+                .ok_or_else(|| anyhow::anyhow!("missing parent header for invalidated block"))?;
             storage
                 .chain()
                 .update_tip(&parent, &parent_header, height - 1)?;
@@ -2125,27 +2128,35 @@ impl BlockchainRpc {
             decode_hash32(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
 
         if let Some(ref storage) = self.storage {
-            // Get block from storage
-            if let Ok(Some(block)) = storage.blocks().get_block(&hash) {
-                // Get filter service from network manager (if available)
-                // For now, generate filter directly
-                use blvm_protocol::bip158::build_block_filter;
-
-                let previous_scripts = spent_scripts_from_undo(storage, &hash);
-                match build_block_filter(&block.transactions, &previous_scripts) {
-                    Ok(filter) => {
-                        let prev_header = previous_filter_header(storage, &block.header)?;
-                        let header = chain_filter_header(&filter.filter_data, &prev_header);
-                        storage.blocks().store_filter_header(&hash, &header)?;
-                        Ok(json!({
-                            "filter": hex::encode(&filter.filter_data),
-                            "header": hex::encode(header),
-                        }))
-                    }
-                    Err(e) => Err(anyhow::anyhow!("Failed to build filter: {}", e)),
+            let Some(outputs) = storage
+                .blocks()
+                .output_scripts_and_prev_hash(&hash)
+                .ok()
+                .flatten()
+            else {
+                return Err(BlockNotFoundError::new("").into());
+            };
+            #[cfg(feature = "production")]
+            let spent = storage.blocks().spent_script_spans(&hash).unwrap_or_default();
+            #[cfg(not(feature = "production"))]
+            let spent = crate::storage::blockstore::ScriptSpans::default();
+            let scripts = crate::storage::blockstore::output_and_spent_slices(
+                &outputs.scripts,
+                &spent,
+            );
+            let prev_block_hash = outputs.prev_hash;
+            match blvm_protocol::bip158::build_block_filter_output_scripts(scripts, &[]) {
+                Ok(filter) => {
+                    let prev_header = previous_filter_header(storage, &prev_block_hash)?;
+                    let header =
+                        chain_filter_header(filter.filter_data.as_slice(), &prev_header);
+                    storage.blocks().store_filter_header(&hash, &header)?;
+                    Ok(json!({
+                        "filter": hex::encode(filter.filter_data.as_slice()),
+                        "header": hex::encode(header),
+                    }))
                 }
-            } else {
-                Err(BlockNotFoundError::new("").into())
+                Err(e) => Err(anyhow::anyhow!("Failed to build filter: {}", e)),
             }
         } else {
             // Graceful degradation: return informative error instead of failing silently
@@ -2308,11 +2319,9 @@ impl BlockchainRpc {
                 .map(Self::format_chainwork)
                 .unwrap_or_else(|| ZERO_HASH_STR.to_string());
 
-            let headers = storage
-                .blocks()
-                .highest_stored_height()?
-                .unwrap_or(height)
-                .max(height);
+            let stored_headers = storage.blocks().highest_stored_height()?;
+            let headers = stored_headers.unwrap_or(height).max(height);
+            let (in_ibd, verification_progress) = ibd_sync_fields(height, stored_headers);
             let mediantime = self.median_time_through_height(storage, height, tip_header.timestamp);
             Ok(json!({
                 "chain": self.get_chain_name(),
@@ -2321,8 +2330,8 @@ impl BlockchainRpc {
                 "bestblockhash": encode_hash32_rpc(&tip_hash),
                 "difficulty": difficulty,
                 "mediantime": mediantime,
-                "verificationprogress": 0.0,
-                "initialblockdownload": true,
+                "verificationprogress": verification_progress,
+                "initialblockdownload": in_ibd,
                 "chainwork": chainwork,
                 "size_on_disk": storage.disk_size().unwrap_or(0),
                 "pruned": storage.is_pruning_enabled(),
@@ -2330,6 +2339,7 @@ impl BlockchainRpc {
                 "warnings": ""
             }))
         } else {
+            let (in_ibd, verification_progress) = ibd_sync_fields(0, None);
             Ok(json!({
                 "chain": "regtest",
                 "blocks": 0,
@@ -2337,8 +2347,8 @@ impl BlockchainRpc {
                 "bestblockhash": ZERO_HASH_STR,
                 "difficulty": 1.0,
                 "mediantime": 0,
-                "verificationprogress": 0.0,
-                "initialblockdownload": true,
+                "verificationprogress": verification_progress,
+                "initialblockdownload": in_ibd,
                 "chainwork": ZERO_HASH_STR,
                 "size_on_disk": 0,
                 "pruned": false,
@@ -2950,9 +2960,16 @@ mod block_stats_tests {
         assert!(match_filter(&built, &script));
         assert_eq!(
             result["filter"].as_str().unwrap(),
-            hex::encode(&built.filter_data)
+            hex::encode(built.filter_data.as_slice())
         );
         assert_ne!(result["header"].as_str().unwrap(), &"0".repeat(64));
+        let filter_hash = crate::storage::hashing::double_sha256(built.filter_data.as_slice());
+        let mut chained = [0u8; 64];
+        chained[..32].copy_from_slice(&filter_hash);
+        let expected = hex::encode(crate::storage::hashing::double_sha256(&chained));
+        assert_eq!(result["header"].as_str().unwrap(), expected);
+        let peer = blvm_protocol::bip157::FilterHeader::new(&built, None);
+        assert_eq!(result["header"].as_str().unwrap(), hex::encode(peer.header_hash()));
 
         let rpc = BlockchainRpc::with_dependencies(Arc::clone(&storage));
         let before = rpc.get_index_info(&json!([])).await.unwrap();
@@ -3244,6 +3261,73 @@ mod block_stats_tests {
     }
 
     #[tokio::test]
+    async fn invalidate_below_the_tip_disconnects_the_descendant() {
+        use blvm_consensus::reorganization::BlockUndoLog;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let genesis = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            timestamp: 1_600_000_000,
+            bits: 0,
+            nonce: 1,
+        };
+        storage.chain().initialize(&genesis).unwrap();
+        let genesis_hash = storage.chain().get_tip_hash().unwrap().unwrap();
+        storage
+            .blocks()
+            .store_header(&genesis_hash, &genesis)
+            .unwrap();
+
+        let mut prev = genesis_hash;
+        let mut child_hash = genesis_hash;
+        for (height, nonce) in [(1u64, 2u64), (2, 3)] {
+            let block = Block {
+                header: BlockHeader {
+                    version: 1,
+                    prev_block_hash: prev,
+                    merkle_root: [0u8; 32],
+                    timestamp: 1_600_000_000 + height,
+                    bits: 0,
+                    nonce,
+                },
+                transactions: vec![tx_with_output(50_000)].into_boxed_slice(),
+            };
+            let hash = storage.blocks().get_block_hash(&block);
+            storage.blocks().store_block(&block).unwrap();
+            storage.blocks().store_header(&hash, &block.header).unwrap();
+            storage.blocks().store_height(height, &hash).unwrap();
+            storage
+                .blocks()
+                .store_undo_log(&hash, &BlockUndoLog::new())
+                .unwrap();
+            storage
+                .chain()
+                .update_tip(&hash, &block.header, height)
+                .unwrap();
+            if height == 1 {
+                child_hash = hash;
+            }
+            prev = hash;
+        }
+
+        BlockchainRpc::with_dependencies(Arc::clone(&storage))
+            .invalidate_block(&json!([crate::storage::hashing::hash_to_rpc_hex(
+                &child_hash
+            )]))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage.chain().get_tip_hash().unwrap().unwrap(),
+            genesis_hash
+        );
+        assert_eq!(storage.chain().get_height().unwrap().unwrap(), 0);
+    }
+
+    #[tokio::test]
     async fn reconsider_clears_the_mark_and_leaves_the_tip() {
         let temp = tempfile::TempDir::new().unwrap();
         let storage = Arc::new(Storage::new(temp.path()).unwrap());
@@ -3405,14 +3489,16 @@ mod block_stats_tests {
             .chain()
             .initialize_with_params(&header, params)
             .unwrap();
+        let genesis_hash = storage.chain().get_tip_hash().unwrap().unwrap();
+        storage.blocks().store_height(0, &genesis_hash).unwrap();
         let rpc = BlockchainRpc::with_dependencies_and_protocol(
             Arc::clone(&storage),
             Arc::clone(&protocol),
         );
         let info = rpc.get_blockchain_info().await.unwrap();
         assert_eq!(info["chain"], "signet");
-        assert_eq!(info["initialblockdownload"], true);
-        assert_eq!(info["verificationprogress"].as_f64(), Some(0.0));
+        assert_eq!(info["initialblockdownload"], false);
+        assert_eq!(info["verificationprogress"].as_f64(), Some(1.0));
         assert_eq!(info["softforks"]["segwit"]["active"], false);
         assert_eq!(info["softforks"]["segwit"]["height"], 1);
 
@@ -3420,6 +3506,9 @@ mod block_stats_tests {
         let mut child = header.clone();
         child.prev_block_hash = tip;
         storage.chain().update_tip(&tip, &child, 1).unwrap();
+        let activated = storage.chain().get_tip_hash().unwrap().unwrap();
+        storage.blocks().store_height(1, &activated).unwrap();
+        storage.blocks().store_height(2, &[0x22; 32]).unwrap();
         let at_activation = rpc.get_blockchain_info().await.unwrap();
         assert_eq!(at_activation["chain"], "signet");
         assert_eq!(at_activation["initialblockdownload"], true);
@@ -3434,6 +3523,50 @@ mod block_stats_tests {
             .unwrap();
         assert_eq!(named["chain"], "testnet4");
         assert_eq!(named["initialblockdownload"], true);
+    }
+
+    #[tokio::test]
+    async fn blockchain_info_progress_is_chain_over_stored_headers() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let header = blvm_protocol::BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            timestamp: 1_231_006_505,
+            bits: 0x1d00ffff,
+            nonce: 0,
+        };
+        storage.chain().initialize(&header).unwrap();
+        let mut prev = storage.chain().get_tip_hash().unwrap().unwrap();
+        for height in 1..=3 {
+            let mut child = header.clone();
+            child.prev_block_hash = prev;
+            child.nonce = height;
+            storage.chain().update_tip(&prev, &child, height).unwrap();
+            prev = storage.chain().get_tip_hash().unwrap().unwrap();
+        }
+        for height in 0..=5 {
+            storage
+                .blocks()
+                .store_height(height, &[height as u8; 32])
+                .unwrap();
+        }
+        let info = BlockchainRpc::with_dependencies(Arc::clone(&storage))
+            .get_blockchain_info()
+            .await
+            .unwrap();
+        assert_eq!(info["blocks"], 3);
+        assert_eq!(info["headers"], 5);
+        assert_eq!(info["initialblockdownload"], true);
+        assert_eq!(info["verificationprogress"].as_f64(), Some(3.0 / 5.0));
+
+        let state = BlockchainRpc::with_dependencies(storage)
+            .get_blockchain_state()
+            .await
+            .unwrap();
+        assert_eq!(state["initialblockdownload"], true);
+        assert_eq!(state["verificationprogress"].as_f64(), Some(3.0 / 5.0));
     }
 }
 

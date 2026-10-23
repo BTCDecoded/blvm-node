@@ -36,16 +36,6 @@ pub struct Peer {
     /// Connection quality score (0.0-1.0, higher is better)
     /// Based on uptime, message success rate, latency
     quality_score: f64,
-    /// Successful message exchanges
-    successful_exchanges: u64,
-    /// Failed message exchanges
-    failed_exchanges: u64,
-    /// Average response time (milliseconds)
-    avg_response_time_ms: f64,
-    /// Last successful block received (Unix timestamp)
-    last_block_received: Option<u64>,
-    /// Last successful transaction received (Unix timestamp)
-    last_tx_received: Option<u64>,
     /// Service flags from version message (indicates peer capabilities)
     /// Used to filter peers by capabilities (e.g., NODE_GOVERNANCE)
     services: u64,
@@ -153,11 +143,6 @@ impl Peer {
             bytes_sent: 0,
             bytes_recv: 0,
             quality_score: 0.5,
-            successful_exchanges: 0,
-            failed_exchanges: 0,
-            avg_response_time_ms: 0.0,
-            last_block_received: None,
-            last_tx_received: None,
             services: 0,
             version: 70015,
             user_agent: Some("/test-peer/".to_string()),
@@ -322,14 +307,9 @@ impl Peer {
             bytes_sent: 0,
             bytes_recv: 0,
             quality_score: 0.5, // Start with neutral score
-            successful_exchanges: 0,
-            failed_exchanges: 0,
-            avg_response_time_ms: 0.0,
-            last_block_received: None,
-            last_tx_received: None,
-            services: 0, // Service flags from version message (set when version received)
-            version: 0,  // Protocol version from version message (set when version received)
-            user_agent: None, // User agent from version message (set when version received)
+            services: 0,        // Service flags from version message (set when version received)
+            version: 0,         // Protocol version from version message (set when version received)
+            user_agent: None,   // User agent from version message (set when version received)
             start_height: 0, // Best block height from version message (set when version received)
             version_time: None,
             is_outbound: false, // Default to false, should be set by caller
@@ -517,11 +497,6 @@ impl Peer {
             bytes_sent: 0,
             bytes_recv: 0,
             quality_score: 0.5,
-            successful_exchanges: 0,
-            failed_exchanges: 0,
-            avg_response_time_ms: 0.0,
-            last_block_received: None,
-            last_tx_received: None,
             services: 0,
             version: 0,
             user_agent: None,

@@ -71,6 +71,8 @@ pub struct RpcManager {
     rest_api_shutdown_tx: Option<mpsc::UnboundedSender<()>>,
     /// RPC authentication manager (optional)
     auth_manager: Option<Arc<auth::RpcAuthManager>>,
+    /// `.cookie` path this process created. `stop` unlinks only this path.
+    rpc_cookie_path: Option<std::path::PathBuf>,
     /// Node shutdown callback (optional)
     node_shutdown: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
     /// Metrics collector (optional)
@@ -112,6 +114,42 @@ pub struct RpcManager {
     marketplace_fetch_enabled: bool,
 }
 
+const RPC_COOKIE_USER: &str = "__cookie__";
+
+/// Write `{datadir}/.cookie` as `__cookie__:<hex>` mode `0600` when no password is set.
+/// A configured password leaves the directory untouched and returns `None`.
+fn install_rpc_cookie(
+    datadir: &std::path::Path,
+    auth: &mut RpcAuthConfig,
+) -> Result<Option<std::path::PathBuf>> {
+    if auth.password.is_some() {
+        return Ok(None);
+    }
+    let mut secret = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
+    let password = hex::encode(secret);
+    let path = datadir.join(".cookie");
+    write_cookie_file(&path, &format!("{RPC_COOKIE_USER}:{password}"))?;
+    auth.username = Some(RPC_COOKIE_USER.to_string());
+    auth.password = Some(password);
+    auth.required = true;
+    Ok(Some(path))
+}
+
+fn write_cookie_file(path: &std::path::Path, contents: &str) -> Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(contents.as_bytes())?;
+    Ok(())
+}
+
 impl RpcManager {
     /// Create a new RPC manager with TCP only (standard compatible)
     pub fn new(server_addr: SocketAddr) -> Self {
@@ -139,6 +177,7 @@ impl RpcManager {
             #[cfg(feature = "rest-api")]
             rest_api_shutdown_tx: None,
             auth_manager: None,
+            rpc_cookie_path: None,
             allow_unauthenticated_rpc: false,
             marketplace_fetch_enabled: false,
             node_shutdown: None,
@@ -218,9 +257,28 @@ impl RpcManager {
         self
     }
 
-    /// Set RPC authentication configuration
+    /// Set RPC authentication configuration. Does not write a cookie.
     pub async fn with_auth_config(&mut self, auth_config: RpcAuthConfig) {
+        self.apply_auth_config(auth_config, None)
+            .await
+            .expect("RPC auth without a datadir does not write a cookie");
+    }
+
+    /// Apply RPC auth. When `datadir` is set and no password is configured, write
+    /// `{datadir}/.cookie` and use it as the HTTP Basic pair.
+    pub async fn apply_auth_config(
+        &mut self,
+        mut auth_config: RpcAuthConfig,
+        datadir: Option<&std::path::Path>,
+    ) -> Result<()> {
+        if let Some(dir) = datadir {
+            if let Some(path) = install_rpc_cookie(dir, &mut auth_config)? {
+                info!("RPC cookie written at {}", path.display());
+                self.rpc_cookie_path = Some(path);
+            }
+        }
         self.auth_manager = Some(Self::build_auth_manager(auth_config).await);
+        Ok(())
     }
 
     /// Build an [`RpcAuthManager`] from TOML / env [`RpcAuthConfig`] (shared by startup and tests).
@@ -450,6 +508,7 @@ impl RpcManager {
             shutdown_tx: None,
             quinn_shutdown_tx: None,
             auth_manager: None,
+            rpc_cookie_path: None,
             allow_unauthenticated_rpc: false,
             marketplace_fetch_enabled: false,
             node_shutdown: None,
@@ -872,6 +931,14 @@ impl RpcManager {
             let _ = tx.send(());
         }
 
+        if let Some(path) = &self.rpc_cookie_path {
+            if let Err(e) = std::fs::remove_file(path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("Failed to remove RPC cookie {}: {e}", path.display());
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -888,6 +955,11 @@ impl RpcManager {
     /// Get mining RPC methods
     pub fn mining(&self) -> &mining::MiningRpc {
         &self.mining_rpc
+    }
+
+    #[cfg(test)]
+    pub(crate) fn auth_manager_for_test(&self) -> &auth::RpcAuthManager {
+        self.auth_manager.as_ref().expect("auth manager")
     }
 }
 
@@ -927,5 +999,94 @@ mod tests {
             .authenticate_request(&HeaderMap::new(), loopback)
             .await;
         assert!(allowed.error.is_none());
+    }
+
+    fn basic_header(user: &str, password: &str) -> HeaderMap {
+        const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let raw = format!("{user}:{password}");
+        let bytes = raw.as_bytes();
+        let mut out = String::new();
+        let mut i = 0;
+        while i + 3 <= bytes.len() {
+            let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | bytes[i + 2] as u32;
+            out.push(TABLE[((n >> 18) & 63) as usize] as char);
+            out.push(TABLE[((n >> 12) & 63) as usize] as char);
+            out.push(TABLE[((n >> 6) & 63) as usize] as char);
+            out.push(TABLE[(n & 63) as usize] as char);
+            i += 3;
+        }
+        let rest = bytes.len() - i;
+        if rest == 1 {
+            let n = (bytes[i] as u32) << 16;
+            out.push(TABLE[((n >> 18) & 63) as usize] as char);
+            out.push(TABLE[((n >> 12) & 63) as usize] as char);
+            out.push('=');
+            out.push('=');
+        } else if rest == 2 {
+            let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8);
+            out.push(TABLE[((n >> 18) & 63) as usize] as char);
+            out.push(TABLE[((n >> 12) & 63) as usize] as char);
+            out.push(TABLE[((n >> 6) & 63) as usize] as char);
+            out.push('=');
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Basic {out}").parse().expect("basic header"),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn cookie_basic_auth_accepts_the_file_and_stop_removes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rpc = RpcManager::new("127.0.0.1:18332".parse().unwrap());
+        rpc.apply_auth_config(RpcAuthConfig::default(), Some(dir.path()))
+            .await
+            .unwrap();
+        let path = dir.path().join(".cookie");
+        let body = std::fs::read_to_string(&path).unwrap();
+        let (user, password) = body.split_once(':').unwrap();
+        assert_eq!(user, "__cookie__");
+        assert_eq!(password.len(), 64);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        let client: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let ok = rpc
+            .auth_manager_for_test()
+            .authenticate_request(&basic_header(user, password), client)
+            .await;
+        assert!(ok.error.is_none(), "{ok:?}");
+        let bad = rpc
+            .auth_manager_for_test()
+            .authenticate_request(&basic_header(user, "nope"), client)
+            .await;
+        assert!(bad.error.is_some(), "{bad:?}");
+
+        rpc.stop().unwrap();
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn configured_password_does_not_write_a_cookie() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut auth = RpcAuthConfig::default();
+        auth.username = Some("ckpool".to_string());
+        auth.password = Some("s3cret".to_string());
+        let mut rpc = RpcManager::new("127.0.0.1:18332".parse().unwrap());
+        rpc.apply_auth_config(auth, Some(dir.path())).await.unwrap();
+        assert!(!dir.path().join(".cookie").exists());
+
+        let client: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let ok = rpc
+            .auth_manager_for_test()
+            .authenticate_request(&basic_header("ckpool", "s3cret"), client)
+            .await;
+        assert!(ok.error.is_none(), "{ok:?}");
     }
 }

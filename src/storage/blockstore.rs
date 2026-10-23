@@ -51,6 +51,276 @@ pub fn decode_wire_body_blob(data: &[u8]) -> Option<&[u8]> {
     Some(&data[8..8 + len])
 }
 
+fn output_scripts_of_block(block: &blvm_protocol::Block) -> Vec<Vec<u8>> {
+    block
+        .transactions
+        .iter()
+        .flat_map(|tx| {
+            tx.outputs
+                .iter()
+                .map(|output| output.script_pubkey.clone())
+        })
+        .collect()
+}
+
+fn prev_hash_from_wire_header(payload: &[u8]) -> Result<[u8; 32]> {
+    if payload.len() < 36 {
+        return Err(anyhow::anyhow!("block header truncated"));
+    }
+    let mut prev = [0u8; 32];
+    prev.copy_from_slice(&payload[4..36]);
+    Ok(prev)
+}
+
+fn prev_hash_from_bincode_header(data: &[u8]) -> Result<[u8; 32]> {
+    if data.len() < 40 {
+        return Err(anyhow::anyhow!("bincode header truncated"));
+    }
+    let mut prev = [0u8; 32];
+    prev.copy_from_slice(&data[8..40]);
+    Ok(prev)
+}
+
+fn prev_hash_from_stored_body(data: &[u8]) -> Result<[u8; 32]> {
+    if let Some(payload) = decode_wire_body_blob(data) {
+        return prev_hash_from_wire_header(payload);
+    }
+    #[cfg(feature = "block-compression")]
+    if BlockStore::is_compressed(data) {
+        let decoded = zstd::decode_all(data)
+            .map_err(|e| anyhow::anyhow!("Block decompression failed: {}", e))?;
+        return prev_hash_from_bincode_header(&decoded);
+    }
+    prev_hash_from_bincode_header(data)
+}
+
+/// Output scripts borrowed from `bytes`. The ranges index that buffer.
+pub(crate) struct ScriptSpans {
+    bytes: Vec<u8>,
+    spans: Vec<(usize, usize)>,
+}
+
+impl Default for ScriptSpans {
+    fn default() -> Self {
+        Self {
+            bytes: Vec::new(),
+            spans: Vec::new(),
+        }
+    }
+}
+
+impl ScriptSpans {
+    pub(crate) fn slices(&self) -> Vec<&[u8]> {
+        let mut out = Vec::with_capacity(self.spans.len());
+        self.push_slices(&mut out);
+        out
+    }
+
+    fn push_slices<'a>(&'a self, out: &mut Vec<&'a [u8]>) {
+        out.extend(
+            self.spans
+                .iter()
+                .map(|&(start, end)| &self.bytes[start..end]),
+        );
+    }
+
+}
+
+/// One pointer list for output scripts and spent scripts.
+pub(crate) fn output_and_spent_slices<'a>(
+    outputs: &'a ScriptSpans,
+    spent: &'a ScriptSpans,
+) -> Vec<&'a [u8]> {
+    let mut scripts = Vec::with_capacity(outputs.spans.len() + spent.spans.len());
+    outputs.push_slices(&mut scripts);
+    spent.push_slices(&mut scripts);
+    scripts
+}
+
+pub(crate) struct OutputScriptSpans {
+    pub(crate) scripts: ScriptSpans,
+    pub(crate) prev_hash: [u8; 32],
+}
+
+fn span_in(bytes: &[u8], script: &[u8]) -> Result<(usize, usize)> {
+    let start = (script.as_ptr() as usize)
+        .checked_sub(bytes.as_ptr() as usize)
+        .ok_or_else(|| anyhow::anyhow!("script is outside the stored body"))?;
+    let end = start
+        .checked_add(script.len())
+        .ok_or_else(|| anyhow::anyhow!("script span overflows"))?;
+    if end > bytes.len() {
+        return Err(anyhow::anyhow!("script is outside the stored body"));
+    }
+    Ok((start, end))
+}
+
+fn spans_in(bytes: &[u8], slices: &[&[u8]]) -> Result<Vec<(usize, usize)>> {
+    slices.iter().map(|script| span_in(bytes, script)).collect()
+}
+
+fn wire_output_spans(bytes: Vec<u8>) -> Result<OutputScriptSpans> {
+    let prev_hash = prev_hash_from_wire_header(&bytes)?;
+    let spans = {
+        let slices =
+            blvm_protocol::serialization::output_script_pubkey_slices_from_wire_block(&bytes)
+                .map_err(|e| anyhow::anyhow!("wire output scripts: {e}"))?;
+        spans_in(&bytes, &slices)?
+    };
+    Ok(OutputScriptSpans {
+        scripts: ScriptSpans { bytes, spans },
+        prev_hash,
+    })
+}
+
+fn output_spans(bytes: Vec<u8>) -> Result<OutputScriptSpans> {
+    if decode_wire_body_blob(&bytes).is_some() {
+        let prev_hash = prev_hash_from_stored_body(&bytes)?;
+        let spans = {
+            let payload = decode_wire_body_blob(&bytes).expect("wire body");
+            let slices =
+                blvm_protocol::serialization::output_script_pubkey_slices_from_wire_block(payload)
+                    .map_err(|e| anyhow::anyhow!("wire output scripts: {e}"))?;
+            spans_in(&bytes, &slices)?
+        };
+        return Ok(OutputScriptSpans {
+            scripts: ScriptSpans { bytes, spans },
+            prev_hash,
+        });
+    }
+    #[cfg(feature = "block-compression")]
+    if BlockStore::is_compressed(&bytes) {
+        let decoded = zstd::decode_all(bytes.as_slice())
+            .map_err(|e| anyhow::anyhow!("Block decompression failed: {}", e))?;
+        return output_spans(decoded);
+    }
+    let prev_hash = prev_hash_from_bincode_header(&bytes)?;
+    let spans = {
+        let slices = output_scripts_from_bincode_block(&bytes)?;
+        spans_in(&bytes, &slices)?
+    };
+    Ok(OutputScriptSpans {
+        scripts: ScriptSpans { bytes, spans },
+        prev_hash,
+    })
+}
+
+fn spent_spans(bytes: Vec<u8>) -> Result<ScriptSpans> {
+    let spans = {
+        let slices = spent_scripts_from_undo_bytes(&bytes)?;
+        spans_in(&bytes, &slices)?
+    };
+    Ok(ScriptSpans { bytes, spans })
+}
+
+/// `bincode::serialize` of a `Block`: fixed little-endian lengths, struct field order.
+fn output_scripts_from_bincode_block(data: &[u8]) -> Result<Vec<&[u8]>> {
+    let mut cur = BinCursor { data, pos: 0 };
+    // BlockHeader: version i64, two hashes, timestamp, bits, nonce.
+    cur.skip(8 + 32 + 32 + 8 + 8 + 8)?;
+    let tx_count = cur.seq_len()?;
+    let mut scripts = Vec::new();
+    for _ in 0..tx_count {
+        cur.skip(8)?; // version
+        let input_count = cur.seq_len()?;
+        for _ in 0..input_count {
+            cur.skip(32 + 4 + 8)?; // prevout hash, index, sequence
+            let script_len = cur.u64()?;
+            cur.skip(script_len)?;
+        }
+        let output_count = cur.seq_len()?;
+        for _ in 0..output_count {
+            cur.skip(8)?; // value
+            let script_len = cur.u64()?;
+            scripts.push(cur.take_slice(script_len)?);
+        }
+        cur.skip(8)?; // lock_time
+    }
+    Ok(scripts)
+}
+
+struct BinCursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> BinCursor<'a> {
+    fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.pos)
+    }
+
+    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or_else(|| anyhow::anyhow!("bincode block truncated"))?;
+        if end > self.data.len() {
+            return Err(anyhow::anyhow!("bincode block truncated"));
+        }
+        let slice = &self.data[self.pos..end];
+        self.pos = end;
+        Ok(slice)
+    }
+
+    fn u64(&mut self) -> Result<u64> {
+        let bytes = self.take(8)?;
+        Ok(u64::from_le_bytes(bytes.try_into().expect("8 bytes")))
+    }
+
+    /// `bincode::serialize` writes `Option` as one byte, 0 or 1.
+    fn option_present(&mut self) -> Result<bool> {
+        match self.take(1)?[0] {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(anyhow::anyhow!("bincode option tag")),
+        }
+    }
+
+    fn skip(&mut self, n: u64) -> Result<()> {
+        let n = usize::try_from(n).map_err(|_| anyhow::anyhow!("bincode length overflows"))?;
+        self.take(n).map(|_| ())
+    }
+
+    fn seq_len(&mut self) -> Result<usize> {
+        let n = usize::try_from(self.u64()?).map_err(|_| anyhow::anyhow!("bincode length overflows"))?;
+        if n > self.remaining() {
+            return Err(anyhow::anyhow!("bincode sequence exceeds body"));
+        }
+        Ok(n)
+    }
+
+    fn take_slice(&mut self, n: u64) -> Result<&'a [u8]> {
+        let n = usize::try_from(n).map_err(|_| anyhow::anyhow!("bincode length overflows"))?;
+        self.take(n)
+    }
+}
+
+/// Previous `scriptPubKey`s from a `bincode::serialize` of `BlockUndoLog`.
+///
+/// Each entry is outpoint, optional previous UTXO, optional new UTXO.
+/// Only the previous script is borrowed.
+fn spent_scripts_from_undo_bytes(data: &[u8]) -> Result<Vec<&[u8]>> {
+    let mut cur = BinCursor { data, pos: 0 };
+    let n = cur.seq_len()?;
+    let mut scripts = Vec::new();
+    for _ in 0..n {
+        cur.skip(32 + 4)?;
+        if cur.option_present()? {
+            cur.skip(8)?;
+            let script_len = cur.u64()?;
+            scripts.push(cur.take_slice(script_len)?);
+            cur.skip(8 + 1)?;
+        }
+        if cur.option_present()? {
+            cur.skip(8)?;
+            let script_len = cur.u64()?;
+            cur.skip(script_len)?;
+            cur.skip(8 + 1)?;
+        }
+    }
+    Ok(scripts)
+}
+
 /// Row key length when block body / header / witness / metadata are stored with a known height.
 /// Prefix is big-endian height so IBD batch writes are sorted for LSM backends.
 pub const BLOCK_HEIGHT_ROW_KEY_LEN: usize = 40;
@@ -946,6 +1216,27 @@ impl BlockStore {
         Ok(None)
     }
 
+    /// Output scripts and the parent block hash, from one read of the stored body.
+    ///
+    /// The scripts are slices of that body.
+    pub(crate) fn output_scripts_and_prev_hash(
+        &self,
+        hash: &Hash,
+    ) -> Result<Option<OutputScriptSpans>> {
+        if let Some(data) = self.load_block_blob(hash)? {
+            return Ok(Some(output_spans(data)?));
+        }
+        #[cfg(feature = "rocksdb")]
+        {
+            if let Some(reader) = &self.bitcoin_core_reader {
+                if let Some(bytes) = reader.read_block_payload(hash)? {
+                    return Ok(Some(wire_output_spans(bytes)?));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Check if data is compressed (zstd magic bytes: 0x28, 0xB5, 0x2F, 0xFD)
     #[cfg(feature = "block-compression")]
     fn is_compressed(data: &[u8]) -> bool {
@@ -1409,6 +1700,17 @@ impl BlockStore {
         }
     }
 
+    /// Previous output scripts from the stored undo record.
+    ///
+    /// The scripts are slices of that record.
+    #[cfg(feature = "production")]
+    pub(crate) fn spent_script_spans(&self, hash: &Hash) -> Result<ScriptSpans> {
+        match self.block_undo.get(hash.as_slice())? {
+            Some(data) => spent_spans(data),
+            None => Ok(ScriptSpans::default()),
+        }
+    }
+
     /// Load connect undo for a block hash.
     #[cfg(feature = "production")]
     pub fn get_undo_log(
@@ -1428,6 +1730,154 @@ mod header_height_tests {
     use crate::storage::database::{Database, create_database, default_backend};
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[test]
+    fn bincode_output_scripts_match_the_decoded_block() {
+        use blvm_protocol::{Transaction, TransactionInput, TransactionOutput};
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [1; 32],
+                merkle_root: [2; 32],
+                timestamp: 1_231_006_505,
+                bits: 0x1d00_ffff,
+                nonce: 4,
+            },
+            transactions: vec![Transaction {
+                version: 1,
+                inputs: blvm_protocol::tx_inputs![TransactionInput {
+                    prevout: blvm_protocol::OutPoint {
+                        hash: [3; 32],
+                        index: 1,
+                    },
+                    sequence: 0xffff_fffe,
+                    script_sig: vec![0xaa, 0xbb, 0xcc],
+                }],
+                outputs: blvm_protocol::tx_outputs![
+                    TransactionOutput {
+                        value: 50,
+                        script_pubkey: vec![0x76, 0xa9],
+                    },
+                    TransactionOutput {
+                        value: 1,
+                        script_pubkey: vec![],
+                    },
+                ],
+                lock_time: 9,
+            }]
+            .into_boxed_slice(),
+        };
+        let bytes = bincode::serialize(&block).unwrap();
+        let scripts = output_scripts_from_bincode_block(&bytes).unwrap();
+        let decoded: Block = bincode::deserialize(&bytes).unwrap();
+        let owned = output_scripts_of_block(&decoded);
+        assert_eq!(scripts, owned.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        assert_eq!(scripts, vec![&[0x76, 0xa9][..], &[][..]]);
+        let held = output_spans(bytes.clone()).unwrap();
+        assert_eq!(held.scripts.slices(), scripts);
+        assert_eq!(held.prev_hash, block.header.prev_block_hash);
+        assert_eq!(
+            prev_hash_from_stored_body(&bytes).unwrap(),
+            block.header.prev_block_hash
+        );
+        let wire = blvm_protocol::serialization::serialize_block(&block);
+        let blob = encode_wire_body_blob(&wire);
+        let wire_held = output_spans(blob).unwrap();
+        assert_eq!(wire_held.scripts.slices(), scripts);
+        assert_eq!(wire_held.prev_hash, block.header.prev_block_hash);
+    }
+
+    #[test]
+    fn undo_spent_scripts_match_the_decoded_log() {
+        use blvm_consensus::reorganization::{BlockUndoLog, UndoEntry};
+        use blvm_protocol::{OutPoint, UTXO};
+        use std::sync::Arc;
+
+        let short = vec![0x51];
+        let long = vec![0xab; 40];
+        let created = vec![0x52];
+        let mut undo = BlockUndoLog::new();
+        undo.push(UndoEntry {
+            outpoint: OutPoint {
+                hash: [1; 32],
+                index: 0,
+            },
+            previous_utxo: Some(Arc::new(UTXO {
+                value: 10,
+                script_pubkey: short.clone().into(),
+                height: 3,
+                is_coinbase: false,
+            })),
+            new_utxo: None,
+        });
+        undo.push(UndoEntry {
+            outpoint: OutPoint {
+                hash: [2; 32],
+                index: 1,
+            },
+            previous_utxo: None,
+            new_utxo: Some(Arc::new(UTXO {
+                value: 11,
+                script_pubkey: created.into(),
+                height: 4,
+                is_coinbase: true,
+            })),
+        });
+        undo.push(UndoEntry {
+            outpoint: OutPoint {
+                hash: [3; 32],
+                index: 2,
+            },
+            previous_utxo: Some(Arc::new(UTXO {
+                value: 12,
+                script_pubkey: long.clone().into(),
+                height: 5,
+                is_coinbase: false,
+            })),
+            new_utxo: Some(Arc::new(UTXO {
+                value: 13,
+                script_pubkey: Vec::<u8>::new().into(),
+                height: 6,
+                is_coinbase: false,
+            })),
+        });
+        undo.push(UndoEntry {
+            outpoint: OutPoint {
+                hash: [4; 32],
+                index: 3,
+            },
+            previous_utxo: Some(Arc::new(UTXO {
+                value: 14,
+                script_pubkey: Vec::<u8>::new().into(),
+                height: 7,
+                is_coinbase: true,
+            })),
+            new_utxo: None,
+        });
+        let bytes = bincode::serialize(&undo).unwrap();
+        let scripts = spent_scripts_from_undo_bytes(&bytes).unwrap();
+        let decoded: BlockUndoLog = bincode::deserialize(&bytes).unwrap();
+        let from_decoded: Vec<Vec<u8>> = decoded
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .previous_utxo
+                    .as_ref()
+                    .map(|prev| prev.script_pubkey.as_ref().to_vec())
+            })
+            .collect();
+        assert_eq!(
+            scripts,
+            from_decoded.iter().map(Vec::as_slice).collect::<Vec<_>>()
+        );
+        assert_eq!(scripts, vec![short.as_slice(), long.as_slice(), &[][..]]);
+        let held = spent_spans(bytes.clone()).unwrap();
+        assert_eq!(held.slices(), scripts);
+        let empty = ScriptSpans::default();
+        let combined = output_and_spent_slices(&empty, &held);
+        assert_eq!(combined, scripts);
+    }
 
     #[test]
     fn later_hash_does_not_replace_the_height() {

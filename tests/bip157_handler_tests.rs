@@ -4,8 +4,11 @@ use blvm_node::network::bip157_handler::{
     generate_cfilter_response, handle_getcfcheckpt, handle_getcfheaders, handle_getcfilters,
 };
 use blvm_node::network::filter_service::BlockFilterService;
-use blvm_node::network::protocol::{GetCfcheckptMessage, GetCfheadersMessage, GetCfiltersMessage};
+use blvm_node::network::protocol::{
+    GetCfcheckptMessage, GetCfheadersMessage, GetCfiltersMessage, ProtocolMessage,
+};
 use blvm_node::storage::Storage;
+use blvm_protocol::{Block, BlockHeader, Transaction, TransactionOutput};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -70,6 +73,109 @@ fn test_handle_getcfilters_no_storage() {
     let result = handle_getcfilters(&request, &filter_service, None);
     assert!(result.is_ok());
     assert_eq!(result.unwrap().len(), 0);
+}
+
+#[test]
+fn test_handle_getcfilters_uses_height_index_hash() {
+    let filter_service = create_test_filter_service();
+    let (_, storage) = create_test_storage();
+    let block = Block {
+        header: BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0x11; 32],
+            timestamp: 1_231_006_505,
+            bits: 0x0f00ffff,
+            nonce: 7,
+        },
+        transactions: vec![Transaction {
+            version: 1,
+            inputs: blvm_protocol::tx_inputs![],
+            outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                value: 0,
+                script_pubkey: vec![0x51],
+            }],
+            lock_time: 0,
+        }]
+        .into_boxed_slice(),
+    };
+    let block_hash = storage.blocks().get_block_hash(&block);
+    storage.blocks().store_block(&block).unwrap();
+    storage.blocks().store_height(0, &block_hash).unwrap();
+
+    let request = GetCfiltersMessage {
+        filter_type: 0,
+        start_height: 0,
+        stop_hash: block_hash,
+    };
+    let responses = handle_getcfilters(&request, &filter_service, Some(&storage)).unwrap();
+    match responses.as_slice() {
+        [ProtocolMessage::Cfilter(message)] => {
+            assert_eq!(message.block_hash, block_hash);
+            assert!(message.num_elements >= 1);
+        }
+        other => panic!("expected one cfilter, got {other:?}"),
+    }
+    assert!(filter_service.has_filter(&block_hash));
+
+    let again = handle_getcfilters(&request, &filter_service, Some(&storage)).unwrap();
+    match again.as_slice() {
+        [ProtocolMessage::Cfilter(message)] => assert_eq!(message.block_hash, block_hash),
+        other => panic!("expected the cached cfilter, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_handle_getcfilters_reads_wire_output_scripts() {
+    let filter_service = create_test_filter_service();
+    let (_, storage) = create_test_storage();
+    let block = Block {
+        header: BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0x22; 32],
+            timestamp: 1_231_006_505,
+            bits: 0x0f00ffff,
+            nonce: 8,
+        },
+        transactions: vec![Transaction {
+            version: 1,
+            inputs: blvm_protocol::tx_inputs![],
+            outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                value: 1,
+                script_pubkey: vec![0x51, 0x52],
+            }],
+            lock_time: 0,
+        }]
+        .into_boxed_slice(),
+    };
+    let block_hash = storage.blocks().get_block_hash(&block);
+    let payload = blvm_protocol::serialization::serialize_block(&block);
+    storage
+        .blocks()
+        .store_block_wire_bytes(&block, 0, &payload)
+        .unwrap();
+    storage.blocks().store_height(0, &block_hash).unwrap();
+    let expected = blvm_protocol::bip158::build_block_filter(block.transactions.as_ref(), &[])
+        .unwrap();
+
+    let request = GetCfiltersMessage {
+        filter_type: 0,
+        start_height: 0,
+        stop_hash: block_hash,
+    };
+    let responses = handle_getcfilters(&request, &filter_service, Some(&storage)).unwrap();
+    match responses.as_slice() {
+        [ProtocolMessage::Cfilter(message)] => {
+            assert_eq!(message.block_hash, block_hash);
+            assert_eq!(message.num_elements, expected.num_elements);
+            assert_eq!(
+                message.filter_data.as_slice(),
+                expected.filter_data.as_slice()
+            );
+        }
+        other => panic!("expected one cfilter, got {other:?}"),
+    }
 }
 
 #[test]

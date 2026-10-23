@@ -2250,6 +2250,15 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("Method not found"));
     }
 
+    /// The default node build does not serve payment RPC. Enable `bip70-http` only for the payment module.
+    #[tokio::test]
+    #[cfg(not(feature = "bip70-http"))]
+    async fn createpaymentrequest_is_absent_from_the_default_server() {
+        let server = RpcServer::new("127.0.0.1:0".parse().unwrap());
+        let result = server.call_method("createpaymentrequest", json!([])).await;
+        assert!(result.unwrap_err().to_string().contains("Method not found"));
+    }
+
     #[tokio::test]
     async fn test_json_rpc_2_0_compliance() {
         let request = r#"{"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":1}"#;

@@ -11,35 +11,6 @@ use std::sync::Arc;
 #[cfg(feature = "utxo-compression")]
 use zstd;
 
-#[cfg(feature = "production")]
-use std::sync::{OnceLock, RwLock};
-
-/// UTXO serialization cache (production feature only).
-///
-/// Writes no longer store a txid-only copy here. The reader is the database.
-#[cfg(feature = "production")]
-#[allow(dead_code)]
-static SERIALIZATION_CACHE: OnceLock<RwLock<blvm_protocol::lru::LruCache<[u8; 32], Vec<u8>>>> =
-    OnceLock::new();
-
-#[cfg(feature = "production")]
-#[allow(dead_code)]
-fn get_serialization_cache() -> &'static RwLock<blvm_protocol::lru::LruCache<[u8; 32], Vec<u8>>> {
-    SERIALIZATION_CACHE.get_or_init(|| {
-        use blvm_protocol::lru::LruCache;
-        use std::num::NonZeroUsize;
-        RwLock::new(LruCache::new(NonZeroUsize::new(20_000).unwrap()))
-    })
-}
-
-#[cfg(all(test, feature = "production"))]
-pub(crate) fn serialization_cache_len() -> usize {
-    get_serialization_cache()
-        .read()
-        .map(|cache| cache.len())
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 thread_local! {
     static GET_ALL_UTXOS_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -689,7 +660,5 @@ mod tests {
                 .value,
             49_000
         );
-        #[cfg(feature = "production")]
-        assert_eq!(serialization_cache_len(), 0);
     }
 }

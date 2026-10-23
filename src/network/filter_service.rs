@@ -5,7 +5,7 @@
 
 use anyhow::{Result, anyhow};
 use blvm_protocol::bip157;
-use blvm_protocol::bip158::{CompactBlockFilter, build_block_filter};
+use blvm_protocol::bip158::CompactBlockFilter;
 use blvm_protocol::{Block, BlockHeader, Hash};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -55,11 +55,56 @@ impl BlockFilterService {
         previous_outpoint_scripts: &[Vec<u8>],
         height: u32,
     ) -> Result<CompactBlockFilter> {
-        // Generate filter
-        let filter = build_block_filter(&block.transactions, previous_outpoint_scripts)
-            .map_err(|e| anyhow!("Failed to build filter: {}", e))?;
+        let refs: Vec<&[u8]> = previous_outpoint_scripts.iter().map(Vec::as_slice).collect();
+        self.generate_and_cache_filter_slices(block, &refs, height)
+    }
 
+    /// Same cache path as [`Self::generate_and_cache_filter`]. The spent scripts are borrowed.
+    pub fn generate_and_cache_filter_slices(
+        &self,
+        block: &Block,
+        previous_outpoint_scripts: &[&[u8]],
+        height: u32,
+    ) -> Result<CompactBlockFilter> {
         let block_hash = self.calculate_block_hash(&block.header);
+        self.generate_and_cache_filter_at_hash(block, previous_outpoint_scripts, block_hash, height)
+    }
+
+    /// Same cache path as [`Self::generate_and_cache_filter_slices`] for a known block id.
+    pub(crate) fn generate_and_cache_filter_at_hash(
+        &self,
+        block: &Block,
+        previous_outpoint_scripts: &[&[u8]],
+        block_hash: Hash,
+        height: u32,
+    ) -> Result<CompactBlockFilter> {
+        let mut output_scripts = Vec::new();
+        for tx in &block.transactions {
+            for output in &tx.outputs {
+                output_scripts.push(output.script_pubkey.as_slice());
+            }
+        }
+        self.generate_and_cache_filter_for_scripts(
+            output_scripts,
+            previous_outpoint_scripts,
+            block_hash,
+            height,
+        )
+    }
+
+    /// Cache a filter built from output scripts that were read without a full block value.
+    pub(crate) fn generate_and_cache_filter_for_scripts<'a>(
+        &self,
+        output_scripts: Vec<&'a [u8]>,
+        previous_outpoint_scripts: &[&'a [u8]],
+        block_hash: Hash,
+        height: u32,
+    ) -> Result<CompactBlockFilter> {
+        let filter = blvm_protocol::bip158::build_block_filter_output_scripts(
+            output_scripts,
+            previous_outpoint_scripts,
+        )
+        .map_err(|e| anyhow!("Failed to build filter: {}", e))?;
 
         // Cache filter
         self.filters
@@ -93,9 +138,9 @@ impl BlockFilterService {
             .unwrap_or_else(|e| e.into_inner());
         let current_len = headers.len() as u32;
         if height >= current_len {
-            headers.resize((height + 1) as usize, filter_header.clone());
+            headers.resize((height + 1) as usize, filter_header);
         } else {
-            headers[height as usize] = filter_header.clone();
+            headers[height as usize] = filter_header;
         }
 
         // Update current height (avoid holding read and write locks simultaneously)
@@ -210,7 +255,7 @@ impl BlockFilterService {
     }
 
     /// Double-SHA256 of the 80-byte Bitcoin wire header (block id).
-    fn calculate_block_hash(&self, header: &BlockHeader) -> Hash {
+    pub(crate) fn calculate_block_hash(&self, header: &BlockHeader) -> Hash {
         use crate::storage::hashing::double_sha256;
 
         let mut header_data = [0u8; 80];
@@ -299,6 +344,42 @@ mod tests {
             }]
             .into_boxed_slice(),
         }
+    }
+
+    #[test]
+    fn test_block_hash_matches_wire_header_buffer() {
+        use crate::storage::hashing::double_sha256;
+        let block = sample_block(0x11, 7);
+        let header = &block.header;
+        let mut header_data = Vec::with_capacity(80);
+        header_data.extend_from_slice(&(header.version as i32).to_le_bytes());
+        header_data.extend_from_slice(&header.prev_block_hash);
+        header_data.extend_from_slice(&header.merkle_root);
+        header_data.extend_from_slice(&(header.timestamp as u32).to_le_bytes());
+        header_data.extend_from_slice(&(header.bits as u32).to_le_bytes());
+        header_data.extend_from_slice(&(header.nonce as u32).to_le_bytes());
+        let service = BlockFilterService::new();
+        assert_eq!(
+            service.calculate_block_hash(header),
+            double_sha256(&header_data)
+        );
+    }
+
+    #[test]
+    fn test_cache_filter_at_known_hash_matches_generated_filter() {
+        let block = sample_block(0x21, 9);
+        let generated = BlockFilterService::new();
+        let supplied = BlockFilterService::new();
+        let hash = generated.calculate_block_hash(&block.header);
+        let left = generated
+            .generate_and_cache_filter_slices(&block, &[], 0)
+            .unwrap();
+        let right = supplied
+            .generate_and_cache_filter_at_hash(&block, &[], hash, 0)
+            .unwrap();
+        assert_eq!(left, right);
+        assert_eq!(generated.get_filter(&hash), Some(left));
+        assert_eq!(supplied.get_filter(&hash), Some(right));
     }
 
     #[test]

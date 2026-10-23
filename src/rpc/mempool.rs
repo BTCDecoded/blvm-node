@@ -10,7 +10,7 @@ use crate::rpc::errors::RpcResult;
 use crate::rpc::params::{param_bool_default, param_str, param_str_required};
 use crate::storage::Storage;
 use blvm_protocol::Hash;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::debug;
@@ -581,7 +581,7 @@ mod verbose_pool_tests {
     use crate::storage::Storage;
     use blvm_protocol::opcodes::OP_1;
     use blvm_protocol::{
-        OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO,
+        OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet,
     };
     use serde_json::json;
     use std::sync::Arc;

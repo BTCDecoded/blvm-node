@@ -46,16 +46,9 @@ fn main() -> anyhow::Result<()> {
     println!("To start the node with this config (operator binary is `blvm`, not `blvm-node`):");
     println!("  blvm --config {config_path} --network testnet --rpc-addr 127.0.0.1:18332");
     println!();
-    println!("Electrum Configuration:");
-    println!("  1. Open Electrum");
-    println!("  2. Go to: Tools → Network → Server");
-    println!("  3. Uncheck 'Select server automatically'");
-    println!("  4. Enter: 127.0.0.1");
-    println!("  5. Port: 18332 (testnet) or 8332 (mainnet)");
-    println!("  6. Protocol: TCP");
-    println!("  7. Click 'Close'");
-    println!();
-    println!("Electrum will now connect to your local blvm-node!");
+    println!("Electrum protocol is the blvm-wallet-index module, not this RPC port.");
+    println!("Set listen = \"127.0.0.1:50001\" in that module's config.toml.");
+    println!("The node RPC port speaks Bitcoin Core JSON-RPC.");
 
     Ok(())
 }

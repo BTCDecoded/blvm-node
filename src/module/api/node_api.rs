@@ -339,12 +339,6 @@ impl NodeApiImpl {
         self.payment_state_machine = Some(payment_state_machine);
     }
 
-    /// Helper to calculate difficulty from bits (private helper, not part of trait).
-    /// Uses blvm-consensus difficulty_from_bits (MAX_TARGET / target).
-    fn calculate_difficulty_from_bits_helper(&self, bits: u64) -> f64 {
-        blvm_protocol::pow::difficulty_from_bits(bits).unwrap_or(1.0)
-    }
-
     /// Parse `commons_get_coinbase_outputs`. `None` = do not use Commons.
     /// Holding is an error so GBT does not issue a node-default coinbase.
     pub(crate) fn commons_gbt_outputs(
