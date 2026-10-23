@@ -68,7 +68,7 @@ fn test_transaction_selector_selects_mempool_tx() {
         .into(),
         outputs: vec![TransactionOutput {
             value: 90_000,
-            script_pubkey: vec![OP_0, OP_CHECKSIG],
+            script_pubkey: p2wpkh_script(),
         }]
         .into(),
         lock_time: 0,
@@ -157,6 +157,13 @@ fn test_mining_engine_update_average_block_time() {
     assert_eq!(stats.average_block_time, 10.5);
 }
 
+/// Standard P2WPKH output script (OP_0 <20-byte key hash>); default policy rejects bare scripts.
+fn p2wpkh_script() -> Vec<u8> {
+    let mut script = vec![0x00, 0x14];
+    script.extend_from_slice(&[0u8; 20]);
+    script
+}
+
 fn create_test_mempool() -> Arc<MempoolManager> {
     Arc::new(MempoolManager::new())
 }
@@ -231,7 +238,7 @@ async fn test_mining_coordinator_mempool_witness_storage() {
         .into(),
         outputs: vec![TransactionOutput {
             value: 50_000,
-            script_pubkey: vec![OP_0, OP_CHECKSIG],
+            script_pubkey: p2wpkh_script(),
         }]
         .into(),
         lock_time: 0,
@@ -291,7 +298,7 @@ async fn test_mining_coordinator_template_selects_mempool_tx() {
         .into(),
         outputs: vec![TransactionOutput {
             value: 90_000,
-            script_pubkey: vec![OP_0, OP_CHECKSIG],
+            script_pubkey: p2wpkh_script(),
         }]
         .into(),
         lock_time: 0,

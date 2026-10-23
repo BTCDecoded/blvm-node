@@ -17,6 +17,13 @@ use common::{
     valid_transaction,
 };
 
+/// Standard P2WPKH output script (OP_0 <20-byte key hash>); default policy rejects bare scripts.
+fn p2wpkh_script() -> Vec<u8> {
+    let mut script = vec![0x00, 0x14];
+    script.extend_from_slice(&[0u8; 20]);
+    script
+}
+
 async fn expect_block_template(
     mining: &MiningRpc,
     params: &serde_json::Value,
@@ -316,7 +323,7 @@ async fn test_getblocktemplate_includes_prioritized_mempool_tx() {
         .into(),
         outputs: vec![TransactionOutput {
             value: 90_000,
-            script_pubkey: vec![OP_1],
+            script_pubkey: p2wpkh_script(),
         }]
         .into(),
         lock_time: 0,
@@ -391,7 +398,7 @@ async fn test_getblocktemplate_includes_segwit_mempool_tx_on_regtest() {
         .into(),
         outputs: vec![TransactionOutput {
             value: 90_000,
-            script_pubkey: vec![OP_1],
+            script_pubkey: p2wpkh_script(),
         }]
         .into(),
         lock_time: 0,
@@ -517,7 +524,7 @@ async fn test_getblocktemplate_mempool_witness_available_for_template() {
         .into(),
         outputs: vec![TransactionOutput {
             value: 90_000,
-            script_pubkey: vec![OP_1],
+            script_pubkey: p2wpkh_script(),
         }]
         .into(),
         lock_time: 0,
@@ -669,7 +676,7 @@ async fn getblocktemplate_refuses_missing_mempool_witnesses() {
         .into(),
         outputs: vec![TransactionOutput {
             value: 90_000,
-            script_pubkey: vec![OP_1],
+            script_pubkey: p2wpkh_script(),
         }]
         .into(),
         lock_time: 0,
