@@ -87,11 +87,10 @@ mod tests {
         let listen: SocketAddr = "127.0.0.1:18474".parse().unwrap();
         let peer: SocketAddr = "127.0.0.1:18475".parse().unwrap();
         let nm = NetworkManager::new(listen);
-        assert!(
-            nm.handle_pkgtxn_request(vec![0xff, 0xfe], peer)
-                .await
-                .is_err()
-        );
+        assert!(nm
+            .handle_pkgtxn_request(vec![0xff, 0xfe], peer)
+            .await
+            .is_err());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -103,7 +102,7 @@ mod tests {
         use blvm_protocol::serialization::transaction::serialize_transaction_with_witness;
         use blvm_protocol::{
             BitcoinProtocolEngine, OutPoint, ProtocolVersion, Transaction, TransactionInput,
-            TransactionOutput, UTXO, UtxoSet,
+            TransactionOutput, UtxoSet, UTXO,
         };
         use std::sync::Arc;
 
@@ -157,6 +156,7 @@ mod tests {
         let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
         let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_tx_fee = 0;
         policy.min_relay_fee_rate = 1;
         mempool.set_policy_config(Some(policy));
@@ -167,11 +167,9 @@ mod tests {
         nm.submit_transactions_to_mempool(&[(decoded, decoded_witness)])
             .await
             .unwrap();
-        assert!(
-            mempool
-                .get_transactions()
-                .iter()
-                .all(|pooled| pooled.outputs[0].value != 49_000)
-        );
+        assert!(mempool
+            .get_transactions()
+            .iter()
+            .all(|pooled| pooled.outputs[0].value != 49_000));
     }
 }

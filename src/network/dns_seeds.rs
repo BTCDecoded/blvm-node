@@ -22,6 +22,19 @@ pub const MAINNET_DNS_SEEDS: &[&str] = &[
     "seed.bitcoin.wiz.biz",
 ];
 
+/// Fixed mainnet peers used when every DNS seed returns no addresses.
+/// Taken from Bitcoin Core `chainparams_seed_main` IPv4 entries (port 8333).
+pub const MAINNET_FIXED_SEEDS: &[&str] = &[
+    "2.121.116.198:8333",
+    "3.86.179.235:8333",
+    "4.2.51.251:8333",
+    "5.2.23.226:8333",
+    "5.2.222.125:8333",
+    "5.11.92.140:8333",
+    "5.35.15.93:8333",
+    "5.36.230.237:8333",
+];
+
 /// Bitcoin DNS seeds filtered for full-history (archive) nodes only.
 ///
 /// These use the `x1.` subdomain prefix which instructs the DNS seeder to return
@@ -85,6 +98,15 @@ pub async fn resolve_dns_seeds(
     // Limit to max_addresses
     addresses.truncate(max_addresses);
     addresses
+}
+
+/// Fixed mainnet peers. Parsing an IP does not use DNS.
+pub fn fixed_mainnet_addresses() -> Vec<NetworkAddress> {
+    MAINNET_FIXED_SEEDS
+        .iter()
+        .filter_map(|seed| seed.parse::<SocketAddr>().ok())
+        .map(socket_addr_to_network_address)
+        .collect()
 }
 
 /// Resolve a single DNS seed
@@ -162,5 +184,16 @@ mod tests {
         assert_eq!(addr.ip[13], 0);
         assert_eq!(addr.ip[14], 0);
         assert_eq!(addr.ip[15], 1);
+    }
+
+    #[test]
+    fn fixed_mainnet_seeds_are_ipv4_port_8333() {
+        let addresses = fixed_mainnet_addresses();
+        assert_eq!(addresses.len(), MAINNET_FIXED_SEEDS.len());
+        assert_eq!(addresses[0].port, 8333);
+        assert_eq!(addresses[0].ip[12], 2);
+        assert_eq!(addresses[0].ip[13], 121);
+        assert_eq!(addresses[0].ip[14], 116);
+        assert_eq!(addresses[0].ip[15], 198);
     }
 }

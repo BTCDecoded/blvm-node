@@ -2,10 +2,10 @@
 //!
 //! Extracted from network_manager.rs to reduce file size.
 
-use crate::network::NetworkMessage;
 use crate::network::network_manager::NetworkManager;
 use crate::network::peer;
 use crate::network::transport::{Transport, TransportAddr, TransportType};
+use crate::network::NetworkMessage;
 use crate::utils::current_timestamp;
 use anyhow::Result;
 use std::net::SocketAddr;
@@ -75,7 +75,11 @@ impl NetworkManager {
             .as_ref()
             .unwrap_or(&timing_config_default);
         let max_addresses = timing_config.max_addresses_from_dns;
-        let addresses = dns_seeds::resolve_dns_seeds(seeds, port, max_addresses).await;
+        let mut addresses = dns_seeds::resolve_dns_seeds(seeds, port, max_addresses).await;
+        if addresses.is_empty() && network == "mainnet" {
+            info!("DNS seeds returned no addresses; using the fixed mainnet seed list");
+            addresses = dns_seeds::fixed_mainnet_addresses();
+        }
         let address_count = addresses.len();
 
         {
@@ -819,11 +823,10 @@ mod tests {
         nm.clear_ibd_evicted_ips();
         Arc::clone(&nm).spawn_outbound_reconnect_attempt(addr);
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        assert!(
-            nm.peer_reconnection_queue()
-                .lock()
-                .await
-                .contains_key(&addr)
-        );
+        assert!(nm
+            .peer_reconnection_queue()
+            .lock()
+            .await
+            .contains_key(&addr));
     }
 }

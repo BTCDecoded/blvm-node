@@ -192,6 +192,7 @@ async fn test_ancestor_and_descendant_walks_and_signed_fee_delta() {
     let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
     let mempool = Arc::new(MempoolManager::new());
     let mut policy = blvm_node::config::mempool::MempoolPolicyConfig::default();
+    policy.require_standard = false;
     policy.max_mempool_mb = 1;
     policy.min_relay_fee_rate = 5;
     mempool.set_policy_config(Some(policy));

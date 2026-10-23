@@ -15,6 +15,7 @@ use blvm_node::node::mempool::MempoolManager;
 async fn test_eviction_strategy_lowest_fee_rate() {
     let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
+    policy.require_standard = false;
     policy.max_mempool_mb = 1; // 1 MB limit
     policy.max_mempool_txs = 10;
     let strategy = EvictionStrategy::LowestFeeRate;
@@ -30,6 +31,7 @@ async fn test_eviction_strategy_lowest_fee_rate() {
 async fn test_eviction_strategy_oldest_first() {
     let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
+    policy.require_standard = false;
     policy.max_mempool_mb = 1;
     policy.max_mempool_txs = 10;
     let strategy = EvictionStrategy::OldestFirst;
@@ -44,6 +46,7 @@ async fn test_eviction_strategy_oldest_first() {
 async fn test_ancestor_count_limit() {
     let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
+    policy.require_standard = false;
     policy.max_ancestor_count = 5; // Allow max 5 ancestors
 
     // Verify before moving
@@ -56,6 +59,7 @@ async fn test_ancestor_count_limit() {
 async fn test_ancestor_size_limit() {
     let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
+    policy.require_standard = false;
     policy.max_ancestor_size = 10_000; // 10 KB limit
 
     // Verify before moving
@@ -68,6 +72,7 @@ async fn test_ancestor_size_limit() {
 async fn test_descendant_count_limit() {
     let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
+    policy.require_standard = false;
     policy.max_descendant_count = 5; // Allow max 5 descendants
 
     // Verify before moving
@@ -80,6 +85,7 @@ async fn test_descendant_count_limit() {
 async fn test_descendant_size_limit() {
     let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
+    policy.require_standard = false;
     policy.max_descendant_size = 10_000; // 10 KB limit
 
     // Verify before moving
@@ -92,6 +98,7 @@ async fn test_descendant_size_limit() {
 async fn test_mempool_size_limit() {
     let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
+    policy.require_standard = false;
     policy.max_mempool_mb = 1; // 1 MB limit
     policy.max_mempool_txs = 100;
 
@@ -106,6 +113,7 @@ async fn test_mempool_size_limit() {
 async fn test_mempool_transaction_count_limit() {
     let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
+    policy.require_standard = false;
     policy.max_mempool_txs = 10;
 
     // Verify before moving
@@ -118,6 +126,7 @@ async fn test_mempool_transaction_count_limit() {
 async fn test_mempool_expiry() {
     let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
+    policy.require_standard = false;
     policy.mempool_expiry_hours = 1; // 1 hour expiry
 
     // Verify before moving
@@ -204,6 +213,7 @@ fn sigop_adjusted_vsize_rejects_underpriced_tx() {
         prevout, 50_000,
     ))));
     let mut policy = MempoolPolicyConfig::default();
+    policy.require_standard = false;
     policy.min_relay_fee_rate = 2;
     policy.min_tx_fee = 1000;
     mempool.set_policy_config(Some(policy));
@@ -219,6 +229,7 @@ fn sigop_adjusted_vsize_rejects_underpriced_tx() {
         prevout, 50_000,
     ))));
     let mut loose = MempoolPolicyConfig::default();
+    loose.require_standard = false;
     loose.min_relay_fee_rate = 2;
     loose.min_tx_fee = 1000;
     loose.bytes_per_sigop = 1;
@@ -275,12 +286,12 @@ fn ancestor_limit_uses_sigop_adjusted_vsize() {
 
     let mempool = MempoolManager::new();
     mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(parent_utxo)));
-    mempool.set_policy_config(Some(MempoolPolicyConfig::default()));
-    assert!(
-        mempool
-            .add_transaction_with_witness(parent.clone(), Some(witness))
-            .unwrap()
-    );
+    let mut admit = MempoolPolicyConfig::default();
+    admit.require_standard = false;
+    mempool.set_policy_config(Some(admit));
+    assert!(mempool
+        .add_transaction_with_witness(parent.clone(), Some(witness))
+        .unwrap());
 
     let child = tx_with_script_sig(
         blvm_protocol::OutPoint {
@@ -293,6 +304,7 @@ fn ancestor_limit_uses_sigop_adjusted_vsize() {
     let stripped =
         serialize_transaction(&parent).len() as u64 + serialize_transaction(&child).len() as u64;
     let mut tight = MempoolPolicyConfig::default();
+    tight.require_standard = false;
     tight.max_ancestor_size = stripped;
     tight.min_relay_fee_rate = 1;
     tight.min_tx_fee = 0;

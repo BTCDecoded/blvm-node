@@ -5,12 +5,12 @@
 #[cfg(feature = "protocol-verification")]
 use blvm_spec_lock::spec_locked;
 
-use crate::network::NetworkMessage;
 use crate::network::network_manager::NetworkManager;
 use crate::network::protocol::{
     BlockMessage, HeadersMessage, ProtocolMessage, ProtocolParser, VersionMessage,
 };
 use crate::network::transport::TransportAddr;
+use crate::network::NetworkMessage;
 use anyhow::Result;
 use blvm_protocol::BlockHeader;
 use blvm_protocol::ProtocolVersion;
@@ -236,6 +236,21 @@ impl NetworkManager {
                         .await;
                 }
             }
+        }
+
+        if version_msg.user_agent.len() > crate::network::protocol::MAX_SUBVERSION_LENGTH {
+            warn!(
+                "Peer {} version user agent is {} bytes",
+                peer_addr,
+                version_msg.user_agent.len()
+            );
+            return self
+                .disconnect_for_protocol_violation(
+                    peer_addr,
+                    "version user agent exceeds 256",
+                    true,
+                )
+                .await;
         }
 
         let mut pm = self.peer_manager_mutex().lock().await;
@@ -565,6 +580,16 @@ impl NetworkManager {
                 return Ok(());
             }
             ProtocolMessage::GetHeaders(getheaders) => {
+                if getheaders.block_locator_hashes.len() > crate::network::protocol::MAX_LOCATOR_SZ
+                {
+                    return self
+                        .disconnect_for_protocol_violation(
+                            peer_addr,
+                            "getheaders locator exceeds 101",
+                            true,
+                        )
+                        .await;
+                }
                 if let Some(storage) = self.storage().as_ref() {
                     let max = self.protocol_limits().max_headers_results.max(1);
                     match storage.blocks().build_headers_response(
@@ -726,7 +751,7 @@ impl NetworkManager {
                         .disconnect_for_protocol_violation(
                             peer_addr,
                             "inv message size exceeded",
-                            false,
+                            true,
                         )
                         .await;
                 }
@@ -901,12 +926,13 @@ impl NetworkManager {
                         cmpct_msg.compact_block.short_ids.len(),
                         peer_addr
                     );
-                    let _ =
-                        self.peer_tx()
-                            .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
-                                peer_addr,
-                            )));
-                    return Err(anyhow::anyhow!("Invalid compact block: too many short IDs"));
+                    return self
+                        .disconnect_for_protocol_violation(
+                            peer_addr,
+                            "compact block has too many short ids",
+                            true,
+                        )
+                        .await;
                 }
                 self.handle_cmpctblock(peer_addr, &cmpct_msg.compact_block)
                     .await?;
@@ -919,12 +945,13 @@ impl NetworkManager {
                         getblocktxn_msg.indices.len(),
                         peer_addr
                     );
-                    let _ =
-                        self.peer_tx()
-                            .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
-                                peer_addr,
-                            )));
-                    return Err(anyhow::anyhow!("GetBlockTxn with too many indices"));
+                    return self
+                        .disconnect_for_protocol_violation(
+                            peer_addr,
+                            "getblocktxn has too many indices",
+                            true,
+                        )
+                        .await;
                 }
                 self.handle_getblocktxn(peer_addr, getblocktxn_msg).await?;
                 return Ok(());
@@ -968,6 +995,15 @@ impl NetworkManager {
                 return Ok(());
             }
             ProtocolMessage::GetBlocks(getblocks) => {
+                if getblocks.block_locator_hashes.len() > crate::network::protocol::MAX_LOCATOR_SZ {
+                    return self
+                        .disconnect_for_protocol_violation(
+                            peer_addr,
+                            "getblocks locator exceeds 101",
+                            true,
+                        )
+                        .await;
+                }
                 if let Some(storage) = self.storage().as_ref() {
                     use crate::network::inventory::{MSG_BLOCK, MSG_WITNESS_BLOCK};
                     use blvm_consensus::block::block_header_hash;
@@ -1157,7 +1193,7 @@ mod plan_wire_locks {
     use blvm_protocol::opcodes::OP_1;
     use blvm_protocol::{
         BitcoinProtocolEngine, BlockHeader, OutPoint, ProtocolVersion, Transaction,
-        TransactionInput, TransactionOutput, UTXO, UtxoSet,
+        TransactionInput, TransactionOutput, UtxoSet, UTXO,
     };
     use std::sync::Arc;
 
@@ -1332,6 +1368,7 @@ mod plan_wire_locks {
 
         let mut node = wired().await;
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_tx_fee = 0;
         policy.min_relay_fee_rate = 1;
         node.mempool.set_policy_config(Some(policy));
@@ -1386,11 +1423,9 @@ mod plan_wire_locks {
         };
         let cheap_id = calculate_tx_id(&cheap);
         let rich_id = calculate_tx_id(&rich);
-        assert!(
-            inventory
-                .iter()
-                .any(|item| { item.hash == rich_id && item.inv_type == MSG_WITNESS_TX })
-        );
+        assert!(inventory
+            .iter()
+            .any(|item| { item.hash == rich_id && item.inv_type == MSG_WITNESS_TX }));
         assert!(inventory.iter().all(|item| item.hash != cheap_id));
     }
 
@@ -1631,11 +1666,9 @@ mod plan_wire_locks {
         let next_hash = blvm_consensus::block::block_header_hash(&header_one);
         match ProtocolParser::parse_message(&bytes).unwrap() {
             ProtocolMessage::Inv(InvMessage { inventory }) => {
-                assert!(
-                    inventory
-                        .iter()
-                        .any(|item| { item.inv_type == MSG_BLOCK && item.hash == next_hash })
-                );
+                assert!(inventory
+                    .iter()
+                    .any(|item| { item.inv_type == MSG_BLOCK && item.hash == next_hash }));
             }
             other => panic!("expected inv, got {other:?}"),
         }
@@ -1684,11 +1717,9 @@ mod plan_wire_locks {
         let bytes = node.incoming.recv().await.unwrap();
         match ProtocolParser::parse_message(&bytes).unwrap() {
             ProtocolMessage::Inv(InvMessage { inventory }) => {
-                assert!(
-                    inventory
-                        .iter()
-                        .any(|item| item.inv_type == MSG_WITNESS_BLOCK && item.hash == hash)
-                );
+                assert!(inventory
+                    .iter()
+                    .any(|item| item.inv_type == MSG_WITNESS_BLOCK && item.hash == hash));
                 assert!(inventory.iter().all(|item| item.inv_type != MSG_BLOCK));
             }
             other => panic!("expected inv, got {other:?}"),
@@ -1714,11 +1745,9 @@ mod plan_wire_locks {
         let bytes = node.incoming.recv().await.unwrap();
         match ProtocolParser::parse_message(&bytes).unwrap() {
             ProtocolMessage::Inv(InvMessage { inventory }) => {
-                assert!(
-                    inventory.iter().any(|item| {
-                        item.inv_type == MSG_WITNESS_BLOCK && item.hash == block_hash
-                    })
-                );
+                assert!(inventory
+                    .iter()
+                    .any(|item| { item.inv_type == MSG_WITNESS_BLOCK && item.hash == block_hash }));
             }
             other => panic!("expected block inv, got {other:?}"),
         }
@@ -1727,11 +1756,9 @@ mod plan_wire_locks {
         let bytes = node.incoming.recv().await.unwrap();
         match ProtocolParser::parse_message(&bytes).unwrap() {
             ProtocolMessage::Inv(InvMessage { inventory }) => {
-                assert!(
-                    inventory
-                        .iter()
-                        .any(|item| item.inv_type == MSG_WITNESS_TX && item.hash == txid)
-                );
+                assert!(inventory
+                    .iter()
+                    .any(|item| item.inv_type == MSG_WITNESS_TX && item.hash == txid));
             }
             other => panic!("expected tx inv, got {other:?}"),
         }
@@ -1744,6 +1771,7 @@ mod plan_wire_locks {
 
         let node = wired().await;
         let mut policy = crate::config::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_relay_fee_rate = 0;
         policy.min_tx_fee = 0;
         node.mempool.set_policy_config(Some(policy));
@@ -1844,13 +1872,12 @@ mod plan_wire_locks {
                 .unwrap_or(0),
             0
         );
-        assert!(
-            node.manager
-                .ibd_protection()
-                .can_serve_ibd(node.peer)
-                .await
-                .unwrap()
-        );
+        assert!(node
+            .manager
+            .ibd_protection()
+            .can_serve_ibd(node.peer)
+            .await
+            .unwrap());
         for _ in 0..3 {
             let bytes = node.incoming.recv().await.unwrap();
             match ProtocolParser::parse_message(&bytes).unwrap() {
@@ -1911,13 +1938,12 @@ mod plan_wire_locks {
             .dispatch_protocol_message(node.peer, &msg, Vec::new())
             .await
             .unwrap();
-        assert!(
-            node.storage
-                .blocks()
-                .get_hash_by_height(6)
-                .unwrap()
-                .is_none()
-        );
+        assert!(node
+            .storage
+            .blocks()
+            .get_hash_by_height(6)
+            .unwrap()
+            .is_none());
 
         let mut good = BlockHeader {
             version: 1,
@@ -2063,6 +2089,7 @@ mod plan_wire_locks {
 
         let mut node = wired().await;
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_tx_fee = 0;
         policy.min_relay_fee_rate = 1;
         node.mempool.set_policy_config(Some(policy));
@@ -2236,6 +2263,7 @@ mod plan_wire_locks {
 
         let mut node = wired().await;
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_tx_fee = 0;
         policy.min_relay_fee_rate = 0;
         node.mempool.set_policy_config(Some(policy));
@@ -2299,6 +2327,7 @@ mod plan_wire_locks {
         let storage = Arc::new(Storage::new(dir.path()).unwrap());
         let mempool = Arc::new(MempoolManager::new());
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_tx_fee = 0;
         policy.min_relay_fee_rate = 0;
         mempool.set_policy_config(Some(policy));
@@ -2371,6 +2400,7 @@ mod plan_wire_locks {
         let rate = next_feefilter(&mut node.incoming).await;
         assert_eq!(rate, 1_000);
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_relay_fee_rate = 3;
         node.mempool.set_policy_config(Some(policy));
         node.manager

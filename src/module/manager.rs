@@ -1444,6 +1444,13 @@ impl ModuleManager {
 
     /// Auto-discover and load all modules
     pub async fn auto_load_modules(&mut self) -> Result<(), ModuleError> {
+        const MAX_AUTO_LOAD_MODULES: usize = 32;
+        if self.enabled_modules.len() > MAX_AUTO_LOAD_MODULES {
+            return Err(ModuleError::ResourceLimitExceeded(format!(
+                "enabled_modules has {} entries; auto-load refuses more than {MAX_AUTO_LOAD_MODULES}",
+                self.enabled_modules.len()
+            )));
+        }
         info!("Auto-discovering and loading modules");
 
         let discovery = ModuleDiscovery::new(&self.spawner.modules_dir);

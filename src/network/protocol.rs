@@ -46,6 +46,29 @@ pub const MAX_INV_SZ: usize = 50000;
 /// Maximum headers in a headers message (MAX_HEADERS_RESULTS)
 pub const MAX_HEADERS_RESULTS: usize = 2000;
 
+/// Locator hashes in one `getheaders` or `getblocks` (MAX_LOCATOR_SZ).
+pub const MAX_LOCATOR_SZ: usize = 101;
+
+/// Bytes in a version user agent (MAX_SUBVERSION_LENGTH).
+pub const MAX_SUBVERSION_LENGTH: usize = 256;
+
+/// True when the 4-byte magic matches the magic set at startup.
+pub(crate) fn wire_header_magic_ok(header: &[u8]) -> bool {
+    if header.len() < 4 {
+        return false;
+    }
+    let magic = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+    magic == ACTIVE_MAGIC.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// True when bytes 20..24 of the header are the double-SHA256 checksum of `payload`.
+pub(crate) fn wire_checksum_ok(header: &[u8], payload: &[u8]) -> bool {
+    if header.len() < 24 {
+        return false;
+    }
+    ProtocolParser::calculate_checksum(payload) == header[20..24]
+}
+
 /// Service flags (bitfield in Version.services)
 #[cfg(feature = "dandelion")]
 pub const NODE_DANDELION: u64 = 1 << 24;

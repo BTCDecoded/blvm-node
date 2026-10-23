@@ -200,6 +200,11 @@ pub struct MempoolPolicyConfig {
     #[serde(default = "default_tx_byte_rate_burst")]
     pub tx_byte_rate_burst: u64,
 
+    /// Reject a transaction whose weight is above the standard limit, or whose
+    /// output script is not a standard type. Default on.
+    #[serde(default = "default_require_standard")]
+    pub require_standard: bool,
+
     /// Reject transactions classified as spam before they enter the mempool (opt-in).
     /// When `spam_filter` is set, it overrides default spam filter parameters.
     #[serde(default = "default_reject_spam_in_mempool")]
@@ -278,6 +283,10 @@ fn default_tx_byte_rate_burst() -> u64 {
     1_000_000
 }
 
+fn default_require_standard() -> bool {
+    true
+}
+
 fn default_reject_spam_in_mempool() -> bool {
     false
 }
@@ -308,6 +317,7 @@ impl Default for MempoolPolicyConfig {
             tx_rate_limit_per_sec: 1,
             tx_byte_rate_limit: 100_000,
             tx_byte_rate_burst: 1_000_000,
+            require_standard: true,
             reject_spam_in_mempool: false,
             spam_filter: None,
         }

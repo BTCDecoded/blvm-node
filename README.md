@@ -156,17 +156,15 @@ cargo test -- --nocapture
 
 ## Usage
 
-### Running the Node
+### Running the node
+
+The node binary is `blvm`. The `blvm` crate builds it (`cargo build --release -p blvm` in that checkout). This crate's binaries are the config converter and the migrator. `cargo run` here does not start a node.
 
 ```bash
-# Start node in regtest mode (default)
-cargo run
-
-# Start in testnet mode
-cargo run -- --network testnet
-
-# Start in mainnet mode (use with caution)
-cargo run -- --network mainnet
+# From the blvm crate, after `cargo build --release -p blvm`:
+./target/release/blvm --network regtest
+./target/release/blvm --network testnet
+./target/release/blvm --network mainnet
 ```
 
 For **release mainnet IBD**, use the **`blvm`** binary — [Mainnet initial sync](https://docs.thebitcoincommons.org/getting-started/mainnet-sync.html).

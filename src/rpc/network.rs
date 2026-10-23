@@ -8,7 +8,7 @@ use crate::rpc::params::{
     param_bool, param_bool_default, param_str, param_str_required, param_u64_default,
 };
 use crate::utils::current_timestamp;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tracing::debug;
@@ -632,9 +632,9 @@ impl Default for NetworkRpc {
 #[cfg(test)]
 mod info_locks {
     use super::*;
-    use crate::network::NetworkManager;
     use crate::network::peer::Peer;
     use crate::network::transport::TransportAddr;
+    use crate::network::NetworkManager;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn networkactive_follows_setnetworkactive() {
@@ -711,6 +711,7 @@ mod info_locks {
         let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
         let mempool = Arc::new(MempoolManager::new());
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_relay_fee_rate = 5;
         mempool.set_policy_config(Some(policy));
         let nm = Arc::new(
@@ -739,6 +740,7 @@ mod info_locks {
         let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
         let mempool = Arc::new(MempoolManager::new());
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_relay_fee_rate = 5;
         mempool.set_policy_config(Some(policy));
         let nm = Arc::new(
@@ -804,14 +806,13 @@ mod info_locks {
         let sock: SocketAddr = "1.2.3.4:8333".parse().unwrap();
         let rpc = NetworkRpc::with_dependencies(Arc::clone(&nm));
 
-        assert!(
-            rpc.getaddednodeinfo(&json!(["1.2.3.4:8333"]))
-                .await
-                .unwrap()
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
+        assert!(rpc
+            .getaddednodeinfo(&json!(["1.2.3.4:8333"]))
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty());
         nm.add_persistent_peer(sock);
         {
             let mut peers = nm.peer_manager().await;
@@ -830,25 +831,23 @@ mod info_locks {
         assert!(listed.to_string().contains("1.2.3.4:8333"));
 
         rpc.disconnect_node(&json!(["1.2.3.4:8333"])).await.unwrap();
-        assert!(
-            rpc.get_peer_info()
-                .await
-                .unwrap()
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
+        assert!(rpc
+            .get_peer_info()
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty());
         assert!(rpc.disconnect_node(&json!(["9.9.9.9:8333"])).await.is_err());
 
         nm.dos_protection().update_metrics(0, 10, 0, 0).await;
         let totals = rpc.get_net_totals(&json!([])).await.unwrap();
         assert_eq!(totals["messagequeuesize"].as_u64(), Some(10));
 
-        assert!(
-            rpc.set_ban(&json!(["1.2.3.4", "add", u64::MAX, false]))
-                .await
-                .is_err()
-        );
+        assert!(rpc
+            .set_ban(&json!(["1.2.3.4", "add", u64::MAX, false]))
+            .await
+            .is_err());
         assert!(nm.get_banned_peers().is_empty());
         let before = current_timestamp();
         rpc.set_ban(&json!(["1.2.3.4", "add", 86_400, false]))
@@ -912,11 +911,10 @@ mod info_locks {
         rpc.set_ban(&json!(["1.2.3.4", "add", 0, true]))
             .await
             .unwrap();
-        assert!(
-            nm.get_banned_peers()
-                .iter()
-                .all(|(addr, _)| addr.ip().to_string() != "1.2.3.4")
-        );
+        assert!(nm
+            .get_banned_peers()
+            .iter()
+            .all(|(addr, _)| addr.ip().to_string() != "1.2.3.4"));
         rpc.set_ban(&json!(["1.2.3.5", "add", 0, false]))
             .await
             .unwrap();

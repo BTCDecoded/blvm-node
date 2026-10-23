@@ -84,11 +84,9 @@ This document defines the security boundaries, threat model, and limitations of 
 **Timeline**: 6-12 months testing phase
 **Threats**: Limited to development and testing scenarios
 
-#### Threats NOT Applicable (Trusted Network)
-- Eclipse attacks
-- Sybil attacks
-- Network partitioning attacks
-- Malicious peer injection
+#### Peer attacks
+
+Eclipse, Sybil, network partition, and a peer that sends malformed messages are in scope whenever P2P listens beyond loopback. The released `blvm` binary binds P2P to `127.0.0.1` when no config file is loaded. A loopback bind keeps those attacks off the host's public interfaces. A config that sets `listen` to a public address brings them back into scope. The node still bans an oversized `addr`, `inv`, `getdata`, compact-block, `getheaders` locator, or version user agent on any bind.
 
 #### Threats That Apply
 - **Code vulnerabilities** in consensus validation

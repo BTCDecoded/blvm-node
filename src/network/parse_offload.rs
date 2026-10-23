@@ -19,6 +19,38 @@ use tracing::{debug, warn};
 
 static PEER_RX_DEPTH: AtomicUsize = AtomicUsize::new(0);
 static PEER_RX_MAX: AtomicUsize = AtomicUsize::new(0);
+static PEER_RX_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+/// Bytes of `RawMessageReceived` frames allowed to sit unread.
+pub(crate) const PEER_RX_BYTE_CAP: usize = 32 * 1024 * 1024;
+
+/// Reserve `n` bytes against [`PEER_RX_BYTE_CAP`]. False when `n` does not fit.
+pub(crate) fn try_reserve_peer_rx(n: usize) -> bool {
+    if n > PEER_RX_BYTE_CAP {
+        return false;
+    }
+    loop {
+        let cur = PEER_RX_BYTES.load(Ordering::Relaxed);
+        let Some(next) = cur.checked_add(n) else {
+            return false;
+        };
+        if next > PEER_RX_BYTE_CAP {
+            return false;
+        }
+        if PEER_RX_BYTES
+            .compare_exchange_weak(cur, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return true;
+        }
+    }
+}
+
+pub(crate) fn release_peer_rx(n: usize) {
+    let _ = PEER_RX_BYTES.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+        Some(cur.saturating_sub(n))
+    });
+}
 
 fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
@@ -186,6 +218,16 @@ mod tests {
             "getdata is the SERVE path — offload must not take it"
         );
         assert!(!is_block_frame(&[0u8; 8]), "short frame is not a block");
+    }
+
+    #[test]
+    fn peer_rx_byte_cap_refuses_a_frame_that_does_not_fit() {
+        release_peer_rx(PEER_RX_BYTE_CAP);
+        assert!(try_reserve_peer_rx(1024));
+        assert!(!try_reserve_peer_rx(PEER_RX_BYTE_CAP));
+        release_peer_rx(1024);
+        assert!(try_reserve_peer_rx(PEER_RX_BYTE_CAP));
+        release_peer_rx(PEER_RX_BYTE_CAP);
     }
 
     #[test]

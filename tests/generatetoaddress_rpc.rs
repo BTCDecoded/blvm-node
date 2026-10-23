@@ -194,7 +194,7 @@ fn fund(
     value: i64,
     script: Vec<u8>,
 ) {
-    use blvm_protocol::{OutPoint, UTXO, UtxoSet};
+    use blvm_protocol::{OutPoint, UtxoSet, UTXO};
 
     let outpoint = OutPoint {
         hash: prev_hash,
@@ -226,6 +226,7 @@ async fn generatetoaddress_adds_the_mempool_fee_and_connects_a_witness_spend() -
     storage.chain().initialize(&genesis_header)?;
     let mempool = Arc::new(MempoolManager::new());
     let mut policy = blvm_node::config::mempool::MempoolPolicyConfig::default();
+    policy.require_standard = false;
     policy.min_tx_fee = 0;
     policy.min_relay_fee_rate = 0;
     mempool.set_policy_config(Some(policy));
@@ -255,6 +256,7 @@ async fn generatetoaddress_adds_the_mempool_fee_and_connects_a_witness_spend() -
     storage.chain().initialize(&genesis_header)?;
     let mempool = Arc::new(MempoolManager::new());
     let mut policy = blvm_node::config::mempool::MempoolPolicyConfig::default();
+    policy.require_standard = false;
     policy.min_tx_fee = 0;
     policy.min_relay_fee_rate = 0;
     mempool.set_policy_config(Some(policy));
@@ -266,11 +268,9 @@ async fn generatetoaddress_adds_the_mempool_fee_and_connects_a_witness_spend() -
     fund(&storage, &mempool, prev, 41_000, program);
     let spend = funded_spend(prev, 41_000, 40_000);
     let stacks = vec![vec![witness_script]];
-    assert!(
-        mempool
-            .add_transaction_with_witness(spend.clone(), Some(stacks.clone()))
-            .unwrap()
-    );
+    assert!(mempool
+        .add_transaction_with_witness(spend.clone(), Some(stacks.clone()))
+        .unwrap());
     let slot = CommonsGbtSlot::default();
     slot.set(Arc::new(ScriptCommons));
     let mining = MiningRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool))

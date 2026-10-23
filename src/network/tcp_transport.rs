@@ -245,12 +245,18 @@ impl TransportConnection for TcpConnection {
             }
         }
 
+        if !crate::network::protocol::wire_header_magic_ok(&header) {
+            return Err(anyhow::anyhow!("Invalid magic number"));
+        }
+
         // Extract payload length from bytes 16-19 (little-endian)
         let payload_len =
             u32::from_le_bytes([header[16], header[17], header[18], header[19]]) as usize;
 
         if payload_len == 0 {
-            // Message with no payload (like verack)
+            if !crate::network::protocol::wire_checksum_ok(&header, &[]) {
+                return Err(anyhow::anyhow!("Invalid checksum"));
+            }
             return Ok(header.to_vec());
         }
 
@@ -268,7 +274,10 @@ impl TransportConnection for TcpConnection {
         let mut payload = vec![0u8; payload_len];
         reader.read_exact(&mut payload).await?;
 
-        // Combine header and payload
+        if !crate::network::protocol::wire_checksum_ok(&header, &payload) {
+            return Err(anyhow::anyhow!("Invalid checksum"));
+        }
+
         let mut message = header.to_vec();
         message.extend_from_slice(&payload);
 

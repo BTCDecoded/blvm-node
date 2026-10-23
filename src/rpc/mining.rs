@@ -12,7 +12,7 @@ use crate::rpc::errors::{RpcError, RpcResult, TIP_BLOCK_NOT_FOUND_MSG};
 use crate::rpc::params::{param_str_required, param_u64_default, param_u64_required};
 use crate::rpc::rawtx::address_string_to_script_pubkey;
 use crate::storage::Storage;
-use crate::utils::{CACHE_REFRESH_TIP, current_timestamp};
+use crate::utils::{current_timestamp, CACHE_REFRESH_TIP};
 use async_trait::async_trait;
 use blvm_protocol::mining::BlockTemplate;
 use blvm_protocol::mining::MiningResult;
@@ -25,17 +25,17 @@ use blvm_protocol::serialization::serialize_block_with_witnesses;
 use blvm_protocol::serialization::serialize_transaction;
 use blvm_protocol::types::Network as ConsensusNetwork;
 use blvm_protocol::{
+    types::{BlockHeader, ByteString, Natural, Transaction, UtxoSet},
+    ConsensusProof,
+};
+use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+use blvm_protocol::{
     BIP112_CSV_ACTIVATION_MAINNET, BIP112_CSV_ACTIVATION_REGTEST, BIP112_CSV_ACTIVATION_TESTNET,
     SEGWIT_ACTIVATION_MAINNET, SEGWIT_ACTIVATION_TESTNET, TAPROOT_ACTIVATION_MAINNET,
     TAPROOT_ACTIVATION_TESTNET,
 };
-use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
-use blvm_protocol::{
-    ConsensusProof,
-    types::{BlockHeader, ByteString, Natural, Transaction, UtxoSet},
-};
 use hex;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -761,8 +761,8 @@ impl MiningRpc {
     fn count_sigops(&self, tx: &Transaction, witnesses: Option<&[Witness]>) -> u32 {
         #[cfg(feature = "sigop")]
         {
-            use blvm_protocol::UTXO;
             use blvm_protocol::sigop::get_transaction_sigop_cost_with_utxos;
+            use blvm_protocol::UTXO;
 
             let owned: Vec<Option<UTXO>> = tx
                 .inputs
@@ -1460,7 +1460,7 @@ mod tests {
     use crate::storage::Storage;
     use blvm_protocol::opcodes::OP_1;
     use blvm_protocol::{
-        OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet,
+        OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO,
     };
     use std::sync::Arc;
 
@@ -1604,12 +1604,10 @@ mod tests {
     #[tokio::test]
     async fn submitblock_without_storage_returns_an_error() {
         let mining = MiningRpc::new();
-        assert!(
-            mining
-                .submit_block(&serde_json::json!(["00"]))
-                .await
-                .is_err()
-        );
+        assert!(mining
+            .submit_block(&serde_json::json!(["00"]))
+            .await
+            .is_err());
     }
 
     fn regtest_mining() -> (
@@ -1822,6 +1820,7 @@ mod tests {
 
         let (_dir, storage, mempool, mining) = regtest_mining();
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_tx_fee = 0;
         policy.min_relay_fee_rate = 0;
         let funding = OutPoint {
@@ -1862,6 +1861,7 @@ mod tests {
 
         let (_dir, storage, mempool, mining) = regtest_mining();
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_tx_fee = 0;
         policy.min_relay_fee_rate = 1;
         let funding = OutPoint {
@@ -1899,6 +1899,7 @@ mod tests {
     async fn estimate_uses_the_spent_prevout_when_another_row_is_bad() {
         let (_dir, storage, mempool, mining) = regtest_mining();
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_tx_fee = 0;
         policy.min_relay_fee_rate = 0;
         mempool.set_policy_config(Some(policy));
@@ -1953,12 +1954,10 @@ mod tests {
         assert!(quote.get("feerate").is_none());
         assert!(!quote["errors"].as_array().unwrap().is_empty());
         assert_eq!(quote["blocks"].as_u64(), Some(6));
-        assert!(
-            mining
-                .estimate_smart_fee(&serde_json::json!([0u64]))
-                .await
-                .is_err()
-        );
+        assert!(mining
+            .estimate_smart_fee(&serde_json::json!([0u64]))
+            .await
+            .is_err());
 
         let info = mining.get_mining_info().await.unwrap();
         assert_eq!(info["pooledtx"].as_u64(), Some(0));
@@ -1973,6 +1972,7 @@ mod tests {
 
         let (_dir, storage, mempool, mining) = regtest_mining();
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_tx_fee = 0;
         policy.min_relay_fee_rate = 0;
         mempool.set_policy_config(Some(policy));

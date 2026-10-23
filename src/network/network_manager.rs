@@ -2287,6 +2287,9 @@ impl NetworkManager {
                 None => break, // No more pending messages
             };
 
+            if let NetworkMessage::RawMessageReceived(data, _) = &message {
+                crate::network::parse_offload::release_peer_rx(data.len());
+            }
             // Process the message (reuse the same processing logic)
             self.handle_network_message(message).await;
             processed += 1;
@@ -2526,6 +2529,9 @@ impl NetworkManager {
             }
 
             crate::network::parse_offload::note_peer_rx_dequeue();
+            if let NetworkMessage::RawMessageReceived(data, _) = &message {
+                crate::network::parse_offload::release_peer_rx(data.len());
+            }
 
             // Process getdata inline (KEEP tc220 path). Spawn+SEM was forensics-only and
             // coincided with tip30 collapse; parallel W5 serve_getdata_request remains.

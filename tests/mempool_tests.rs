@@ -2,7 +2,7 @@
 
 use blvm_node::config::MempoolPolicyConfig;
 use blvm_node::node::mempool::MempoolManager;
-use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet};
+use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO};
 
 #[tokio::test]
 async fn test_mempool_stores_full_transactions() {
@@ -171,6 +171,7 @@ fn dust_spam_tx() -> Transaction {
 async fn test_reject_spam_in_mempool_rejects_classified_spam() {
     let mempool = MempoolManager::new();
     let mut policy = MempoolPolicyConfig::default();
+    policy.require_standard = false;
     policy.reject_spam_in_mempool = true;
     mempool.set_policy_config(Some(policy));
 

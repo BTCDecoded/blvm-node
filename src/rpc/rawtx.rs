@@ -21,7 +21,7 @@ use crate::rpc::params::{
 use crate::storage::Storage;
 use crate::utils::{storage_timeout_from_config, with_custom_timeout};
 use hex;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::result::Result;
 use std::sync::Arc;
@@ -1359,7 +1359,7 @@ impl RawTxRpc {
                 return Err(RpcError::invalid_params("Empty proof"));
             }
 
-            use crate::rpc::merkle_block::{MerkleBlock, block_hash_from_header};
+            use crate::rpc::merkle_block::{block_hash_from_header, MerkleBlock};
 
             let merkle_block = MerkleBlock::deserialize(&proof_bytes).map_err(|e| {
                 RpcError::invalid_params(format!("Invalid merkle block proof: {e}"))
@@ -2058,7 +2058,11 @@ pub(crate) fn required_signatures(script: &[u8]) -> u64 {
         index += data_len;
         seen += 1;
     }
-    if seen == keys { required } else { 1 }
+    if seen == keys {
+        required
+    } else {
+        1
+    }
 }
 
 fn small_push_int(op: u8) -> Option<u64> {
@@ -2104,7 +2108,7 @@ pub(crate) fn script_pubkey_type(script: &[u8]) -> &'static str {
 
 #[cfg(test)]
 mod createraw_locks {
-    use super::{RawTxRpc, address_string_to_script_pubkey, script_pubkey_type};
+    use super::{address_string_to_script_pubkey, script_pubkey_type, RawTxRpc};
     use blvm_protocol::opcodes::{OP_PUSHDATA1, OP_RETURN};
     use serde_json::json;
 
@@ -2237,14 +2241,13 @@ mod createraw_locks {
             assert_eq!(data.script_pubkey[2], 80);
             assert_eq!(script_pubkey_type(data.script_pubkey.as_ref()), "nulldata");
         }
-        assert!(
-            rpc.createrawtransaction(&json!([
+        assert!(rpc
+            .createrawtransaction(&json!([
                 [{"txid": txid, "vout": 0}],
                 {address: -1.0}
             ]))
             .await
-            .is_err()
-        );
+            .is_err());
     }
 
     #[tokio::test]
@@ -2253,7 +2256,7 @@ mod createraw_locks {
         use crate::storage::Storage;
         use blvm_protocol::opcodes::OP_1;
         use blvm_protocol::{
-            OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet,
+            OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO,
         };
         use std::sync::Arc;
 
@@ -2261,6 +2264,7 @@ mod createraw_locks {
         let storage = Arc::new(Storage::new(temp.path()).unwrap());
         let mempool = Arc::new(MempoolManager::new());
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_tx_fee = 0;
         policy.min_relay_fee_rate = 0;
         mempool.set_policy_config(Some(policy));
@@ -2298,11 +2302,9 @@ mod createraw_locks {
         let err = rpc.sendrawtransaction(&json!([hex_tx])).await.unwrap_err();
         let text = err.to_string();
         assert!(text.contains("BTC/kvB"), "{text}");
-        assert!(
-            mempool
-                .get_transaction(&blvm_protocol::block::calculate_tx_id(&tx))
-                .is_none()
-        );
+        assert!(mempool
+            .get_transaction(&blvm_protocol::block::calculate_tx_id(&tx))
+            .is_none());
     }
 
     #[tokio::test]
@@ -2317,6 +2319,7 @@ mod createraw_locks {
         let storage = Arc::new(Storage::new(temp.path()).unwrap());
         let mempool = Arc::new(MempoolManager::new());
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_tx_fee = 0;
         policy.min_relay_fee_rate = 0;
         mempool.set_policy_config(Some(policy));
@@ -2374,7 +2377,7 @@ mod createraw_locks {
         use crate::storage::Storage;
         use blvm_protocol::opcodes::OP_1;
         use blvm_protocol::{
-            OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet,
+            OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO,
         };
         use std::sync::Arc;
 
@@ -2382,6 +2385,7 @@ mod createraw_locks {
         let storage = Arc::new(Storage::new(temp.path()).unwrap());
         let mempool = Arc::new(MempoolManager::new());
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_tx_fee = 0;
         mempool.set_policy_config(Some(policy));
         let funding = OutPoint {
@@ -2436,11 +2440,9 @@ mod createraw_locks {
         let rpc = RawTxRpc::with_dependencies(storage, Arc::clone(&mempool), None, None);
         let admitted = rpc.sendrawtransaction(&json!([child_hex])).await.unwrap();
         assert_eq!(admitted.as_str().unwrap().len(), 64);
-        assert!(
-            mempool
-                .get_transaction(&blvm_protocol::block::calculate_tx_id(&child))
-                .is_some()
-        );
+        assert!(mempool
+            .get_transaction(&blvm_protocol::block::calculate_tx_id(&child))
+            .is_some());
 
         let missing = Transaction {
             version: 1,
@@ -2467,11 +2469,11 @@ mod createraw_locks {
     #[tokio::test]
     async fn output_at_height_1001_reports_confirmations_and_a_spent_pool_output_is_null() {
         use crate::node::mempool::MempoolManager;
-        use crate::storage::Storage;
         use crate::storage::hashing::hash_to_rpc_hex;
+        use crate::storage::Storage;
         use blvm_protocol::opcodes::OP_1;
         use blvm_protocol::{
-            BlockHeader, OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet,
+            BlockHeader, OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO,
         };
         use std::sync::Arc;
 
@@ -2570,11 +2572,11 @@ mod createraw_locks {
     async fn unknown_txid_errors_and_pool_fee_is_the_base_fee() {
         use crate::node::mempool::MempoolManager;
         use crate::rpc::mempool::MempoolRpc;
-        use crate::storage::Storage;
         use crate::storage::hashing::hash_to_rpc_hex;
+        use crate::storage::Storage;
         use blvm_protocol::opcodes::OP_1;
         use blvm_protocol::{
-            OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet,
+            OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO,
         };
         use std::sync::Arc;
 
@@ -2583,11 +2585,10 @@ mod createraw_locks {
         let mempool = Arc::new(MempoolManager::new());
         let rpc =
             RawTxRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool), None, None);
-        assert!(
-            rpc.getrawtransaction(&json!([hash_to_rpc_hex(&[9u8; 32])]))
-                .await
-                .is_err()
-        );
+        assert!(rpc
+            .getrawtransaction(&json!([hash_to_rpc_hex(&[9u8; 32])]))
+            .await
+            .is_err());
 
         let funding = OutPoint {
             hash: [7u8; 32],

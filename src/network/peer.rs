@@ -92,6 +92,36 @@ fn next_peer_id() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+async fn reserve_raw_frame(len: usize) -> bool {
+    use crate::network::parse_offload::{PEER_RX_BYTE_CAP, try_reserve_peer_rx};
+    if len > PEER_RX_BYTE_CAP {
+        return false;
+    }
+    for _ in 0..40 {
+        if try_reserve_peer_rx(len) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    false
+}
+
+fn enqueue_raw(
+    message_tx: &mpsc::UnboundedSender<NetworkMessage>,
+    data: Vec<u8>,
+    peer_socket: std::net::SocketAddr,
+) {
+    let len = data.len();
+    if message_tx
+        .send(NetworkMessage::RawMessageReceived(data, peer_socket))
+        .is_ok()
+    {
+        crate::network::parse_offload::note_peer_rx_enqueue();
+    } else {
+        crate::network::parse_offload::release_peer_rx(len);
+    }
+}
+
 impl Peer {
     /// Create a minimal peer instance for testing purposes.
     ///
@@ -201,11 +231,6 @@ impl Peer {
                         break;
                     }
                     Ok(data) => {
-                        debug!(
-                            "Received {} bytes from {:?}",
-                            data.len(),
-                            transport_addr_clone
-                        );
                         let peer_addr = match &transport_addr_clone {
                             super::transport::TransportAddr::Tcp(sock) => *sock,
                             #[cfg(feature = "quinn")]
@@ -215,12 +240,31 @@ impl Peer {
                                 std::net::SocketAddr::from(([0, 0, 0, 0], 0))
                             }
                         };
-                        if message_tx_clone
-                            .send(NetworkMessage::RawMessageReceived(data, peer_addr))
-                            .is_ok()
+                        if data.len() < 24
+                            || !crate::network::protocol::wire_header_magic_ok(&data)
+                            || !crate::network::protocol::wire_checksum_ok(&data, &data[24..])
                         {
-                            crate::network::parse_offload::note_peer_rx_enqueue();
+                            warn!(
+                                "Peer {:?} sent a frame that failed magic or checksum, disconnecting",
+                                transport_addr_clone
+                            );
+                            let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
+                                transport_addr_clone.clone(),
+                            ));
+                            break;
                         }
+                        if !reserve_raw_frame(data.len()).await {
+                            warn!(
+                                "Peer {:?} filled the receive queue ({} bytes), disconnecting",
+                                transport_addr_clone,
+                                data.len()
+                            );
+                            let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
+                                transport_addr_clone.clone(),
+                            ));
+                            break;
+                        }
+                        enqueue_raw(&message_tx_clone, data, peer_addr);
                     }
                     Err(e) => {
                         warn!("Peer read error for {:?}: {}", transport_addr_clone, e);
@@ -369,19 +413,30 @@ impl Peer {
                     }
                 }
 
+                if !crate::network::protocol::wire_header_magic_ok(&header) {
+                    warn!(
+                        "Peer {:?} sent a bad magic, disconnecting",
+                        transport_addr_clone
+                    );
+                    let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
+                        transport_addr_clone.clone(),
+                    ));
+                    break;
+                }
+
                 // Extract payload length from bytes 16-19 (little-endian)
                 let payload_len =
                     u32::from_le_bytes([header[16], header[17], header[18], header[19]]) as usize;
 
-                // Read payload if any
+                // Read payload if any. Magic is already checked, so a bad magic
+                // does not allocate the claimed length.
                 let max_payload = max_message_length.saturating_sub(24);
-                let data = if payload_len > 0 {
+                let payload = if payload_len > 0 {
                     if payload_len > max_payload {
                         warn!(
                             "Peer {:?} sent oversized message: {} bytes",
                             transport_addr_clone, payload_len
                         );
-                        // CRITICAL: Send PeerDisconnected on oversized message
                         let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
                             transport_addr_clone.clone(),
                         ));
@@ -389,17 +444,12 @@ impl Peer {
                     }
                     let mut payload = vec![0u8; payload_len];
                     match reader.read_exact(&mut payload).await {
-                        Ok(_) => {
-                            let mut data = header.to_vec();
-                            data.extend_from_slice(&payload);
-                            data
-                        }
+                        Ok(_) => payload,
                         Err(e) => {
                             warn!(
                                 "Peer read payload error for {:?}: {}",
                                 transport_addr_clone, e
                             );
-                            // CRITICAL: Send PeerDisconnected on payload read error
                             let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
                                 transport_addr_clone.clone(),
                             ));
@@ -407,14 +457,21 @@ impl Peer {
                         }
                     }
                 } else {
-                    header.to_vec()
+                    Vec::new()
                 };
+                if !crate::network::protocol::wire_checksum_ok(&header, &payload) {
+                    warn!(
+                        "Peer {:?} sent a bad checksum, disconnecting",
+                        transport_addr_clone
+                    );
+                    let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
+                        transport_addr_clone.clone(),
+                    ));
+                    break;
+                }
+                let mut data = header.to_vec();
+                data.extend_from_slice(&payload);
 
-                debug!(
-                    "Received {} bytes from {:?}",
-                    data.len(),
-                    transport_addr_clone
-                );
                 let peer_socket = match &transport_addr_clone {
                     TransportAddr::Tcp(sock) => *sock,
                     #[cfg(feature = "quinn")]
@@ -422,12 +479,18 @@ impl Peer {
                     #[cfg(feature = "iroh")]
                     TransportAddr::Iroh(_) => std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
                 };
-                if message_tx_clone
-                    .send(NetworkMessage::RawMessageReceived(data, peer_socket))
-                    .is_ok()
-                {
-                    crate::network::parse_offload::note_peer_rx_enqueue();
+                if !reserve_raw_frame(data.len()).await {
+                    warn!(
+                        "Peer {:?} filled the receive queue ({} bytes), disconnecting",
+                        transport_addr_clone,
+                        data.len()
+                    );
+                    let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
+                        transport_addr_clone.clone(),
+                    ));
+                    break;
                 }
+                enqueue_raw(&message_tx_clone, data, peer_socket);
             }
         });
 

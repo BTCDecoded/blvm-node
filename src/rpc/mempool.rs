@@ -10,7 +10,7 @@ use crate::rpc::errors::RpcResult;
 use crate::rpc::params::{param_bool_default, param_str, param_str_required};
 use crate::storage::Storage;
 use blvm_protocol::Hash;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::debug;
@@ -581,7 +581,7 @@ mod verbose_pool_tests {
     use crate::storage::Storage;
     use blvm_protocol::opcodes::OP_1;
     use blvm_protocol::{
-        OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet,
+        OutPoint, Transaction, TransactionInput, TransactionOutput, UtxoSet, UTXO,
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -594,6 +594,7 @@ mod verbose_pool_tests {
         let storage = Arc::new(Storage::new(temp.path()).unwrap());
         let mempool = Arc::new(MempoolManager::new());
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_tx_fee = 0;
         policy.min_relay_fee_rate = 0;
         mempool.set_policy_config(Some(policy));

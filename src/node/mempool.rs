@@ -6,7 +6,7 @@ use crate::config::{MempoolPolicyConfig, RbfConfig};
 use crate::node::event_publisher::EventPublisher;
 use anyhow::Result;
 use blvm_protocol::mempool::{
-    Mempool, has_conflict_with_tx, replacement_checks_with_witness, signals_rbf,
+    has_conflict_with_tx, replacement_checks_with_witness, signals_rbf, Mempool,
 };
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::{Block, Hash, OutPoint, Transaction, TransactionOutput, UtxoSet};
@@ -128,7 +128,7 @@ fn is_p2sh_script(script: &[u8]) -> bool {
 /// Last push in a push-only script, which is the redeem script of a P2SH spend.
 fn last_script_push(script: &[u8]) -> Option<Vec<u8>> {
     use blvm_protocol::opcodes::{
-        OP_0, OP_1, OP_1NEGATE, OP_16, OP_PUSHDATA1, OP_PUSHDATA2, OP_PUSHDATA4,
+        OP_0, OP_1, OP_16, OP_1NEGATE, OP_PUSHDATA1, OP_PUSHDATA2, OP_PUSHDATA4,
     };
     let mut i = 0;
     let mut last = None;
@@ -196,6 +196,48 @@ fn p2sh_redeem_is_witness_program(script_pubkey: &[u8], script_sig: &[u8]) -> bo
     script_needs_witness_verification(&redeem)
 }
 
+/// BIP141 standard transaction weight. A relay transaction above this is non-standard.
+const MAX_STANDARD_TX_WEIGHT: u64 = 400_000;
+
+/// True for a standard output script: P2PKH, P2SH, P2PK, P2WPKH, P2WSH, P2TR, or a short OP_RETURN.
+fn output_script_is_standard(script: &[u8]) -> bool {
+    if script.is_empty() {
+        return false;
+    }
+    if script[0] == 0x6a {
+        return script.len() <= 83;
+    }
+    if script.len() == 22 && script[0] == 0x00 && script[1] == 0x14 {
+        return true;
+    }
+    if script.len() == 34 && script[0] == 0x00 && script[1] == 0x20 {
+        return true;
+    }
+    if script.len() == 34 && script[0] == 0x51 && script[1] == 0x20 {
+        return true;
+    }
+    if script.len() == 25
+        && script[0] == 0x76
+        && script[1] == 0xa9
+        && script[2] == 0x14
+        && script[23] == 0x88
+        && script[24] == 0xac
+    {
+        return true;
+    }
+    if script.len() == 23 && script[0] == 0xa9 && script[1] == 0x14 && script[22] == 0x87 {
+        return true;
+    }
+    if script.len() == 35
+        && script[0] == 0x21
+        && (script[1] == 0x02 || script[1] == 0x03)
+        && script[34] == 0xac
+    {
+        return true;
+    }
+    script.len() == 67 && script[0] == 0x41 && script[1] == 0x04 && script[66] == 0xac
+}
+
 /// Spendable outputs below `n_size * 3` satoshis are dust.
 ///
 /// `n_size` is the output's wire size plus the bytes a spend of that output adds.
@@ -231,11 +273,11 @@ fn consensus_checks_reject(
     witnesses: Option<&[Witness]>,
     prevouts: &[Option<TransactionOutput>],
 ) -> bool {
-    use blvm_protocol::ValidationResult;
     use blvm_protocol::block::calculate_script_flags_for_block_network;
     use blvm_protocol::script::verify_script_with_context;
     use blvm_protocol::transaction::{check_transaction, is_coinbase};
     use blvm_protocol::types::Network;
+    use blvm_protocol::ValidationResult;
 
     const MEMPOOL_POLICY_HEIGHT: u64 = 1_000_000;
 
@@ -362,7 +404,7 @@ fn accounted_tx_bytes(tx: &Transaction, witnesses: Option<&[Witness]>) -> u64 {
 impl MempoolManager {
     /// Create a new mempool manager
     pub fn new() -> Self {
-        Self {
+        let manager = Self {
             pool: Mutex::new(MempoolPool {
                 transactions: HashMap::new(),
                 tx_witnesses: HashMap::new(),
@@ -388,7 +430,17 @@ impl MempoolManager {
             event_publisher: RwLock::new(None),
             storage: RwLock::new(None),
             chain_tip: RwLock::new(None),
+        };
+        #[cfg(test)]
+        {
+            let mut policy = crate::config::MempoolPolicyConfig::default();
+            policy.require_standard = false;
+            *manager
+                .policy_config
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = Some(policy);
         }
+        manager
     }
 
     /// Create a new mempool manager with RBF configuration
@@ -1559,13 +1611,35 @@ impl MempoolManager {
             return Ok(false);
         }
 
-        // Policy checks (min fee, spam filter).
         let effective_policy = self
             .policy_config
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
             .unwrap_or_default();
+
+        let weight = self.transaction_weight(&tx, witnesses.as_deref());
+        if effective_policy.require_standard && weight > MAX_STANDARD_TX_WEIGHT {
+            warn!(
+                "Transaction {} rejected: standard weight {} > {}",
+                hex::encode(tx_hash),
+                weight,
+                MAX_STANDARD_TX_WEIGHT
+            );
+            return Ok(false);
+        }
+        if effective_policy.require_standard
+            && tx
+                .outputs
+                .iter()
+                .any(|output| !output_script_is_standard(output.script_pubkey.as_ref()))
+        {
+            warn!(
+                "Transaction {} rejected: non-standard output",
+                hex::encode(tx_hash)
+            );
+            return Ok(false);
+        }
 
         if effective_policy.reject_spam_in_mempool {
             use blvm_protocol::spam_filter::SpamFilter;
@@ -2347,10 +2421,10 @@ impl MempoolManager {
         witnesses: Option<&[Witness]>,
         utxo_set: &UtxoSet,
     ) -> (u64, u64) {
-        use blvm_protocol::UTXO;
-        use blvm_protocol::mempool::{DEFAULT_BYTES_PER_SIGOP, sigop_adjusted_vsize};
+        use blvm_protocol::mempool::{sigop_adjusted_vsize, DEFAULT_BYTES_PER_SIGOP};
         use blvm_protocol::script::flags::SEGWIT_STANDARD_FLAGS;
         use blvm_protocol::sigop::get_transaction_sigop_cost_with_utxos;
+        use blvm_protocol::UTXO;
 
         let (bytes_per_sigop, count_sigops) = {
             let policy = self.policy_config.read().unwrap_or_else(|e| e.into_inner());
@@ -2917,7 +2991,11 @@ mod tests {
             .into(),
             outputs: vec![TransactionOutput {
                 value: 1000,
-                script_pubkey: Vec::new(),
+                script_pubkey: {
+                    let mut script = vec![0x00, 0x14];
+                    script.extend_from_slice(&[0u8; 20]);
+                    script
+                },
             }]
             .into(),
             lock_time: 0,
@@ -2938,6 +3016,30 @@ mod tests {
             }),
         );
         utxo_set
+    }
+
+    #[test]
+    fn default_policy_rejects_a_nonstandard_output_and_a_heavy_transaction() {
+        use std::sync::Arc;
+
+        let mempool = MempoolManager::new();
+        let mut policy = crate::config::MempoolPolicyConfig::default();
+        assert!(policy.require_standard);
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        mempool.set_policy_config(Some(policy));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded(
+            vec![blvm_protocol::opcodes::OP_1],
+            2_000_000,
+        ))));
+
+        let mut nonstandard = legacy_empty_script();
+        nonstandard.outputs[0].script_pubkey = vec![0x51];
+        assert!(!mempool.add_transaction(nonstandard).unwrap());
+
+        let mut heavy = legacy_empty_script();
+        heavy.inputs[0].script_sig = vec![0u8; 100_001];
+        assert!(!mempool.add_transaction(heavy).unwrap());
     }
 
     fn funded(script_pubkey: Vec<u8>, value: i64) -> blvm_protocol::UtxoSet {
@@ -2968,6 +3070,7 @@ mod tests {
 
         let mempool = MempoolManager::new();
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_tx_fee = 0;
         policy.min_relay_fee_rate = 0;
         mempool.set_policy_config(Some(policy));
@@ -3069,11 +3172,9 @@ mod tests {
 
         let mempool = MempoolManager::new();
         let tx = legacy_empty_script();
-        assert!(
-            !mempool
-                .add_transaction_with_witness(tx, Some(Vec::new()))
-                .unwrap()
-        );
+        assert!(!mempool
+            .add_transaction_with_witness(tx, Some(Vec::new()))
+            .unwrap());
 
         let mempool = MempoolManager::new();
         mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
@@ -3115,13 +3216,12 @@ mod tests {
             100_000,
         ))));
         let mut policy = MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.max_mempool_mb = 1;
         mempool.set_policy_config(Some(policy));
-        assert!(
-            mempool
-                .add_transaction_with_witness(tx.clone(), Some(witness))
-                .unwrap()
-        );
+        assert!(mempool
+            .add_transaction_with_witness(tx.clone(), Some(witness))
+            .unwrap());
         let base = serialize_transaction(&tx).len() as u64;
         assert!(mempool.mempool_size_bytes() >= base + witness_script.len() as u64);
 
@@ -3131,6 +3231,7 @@ mod tests {
             100_000,
         ))));
         let mut policy = MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.max_mempool_mb = 1;
         mempool.set_policy_config(Some(policy));
         let big: Vec<Witness> = vec![vec![witness_script, vec![7u8; 1_100_000]]];
@@ -3202,11 +3303,9 @@ mod tests {
             .into(),
             lock_time: 0,
         };
-        assert!(
-            !mempool
-                .add_transaction_with_witness(tx.clone(), Some(vec![vec![]]))
-                .unwrap()
-        );
+        assert!(!mempool
+            .add_transaction_with_witness(tx.clone(), Some(vec![vec![]]))
+            .unwrap());
         assert!(mempool.get_transaction(&calculate_tx_id(&tx)).is_none());
     }
 
@@ -3281,11 +3380,9 @@ mod tests {
         let txid = calculate_tx_id(&tx);
         set.remove(&second);
         let ranked = mempool.get_prioritized_transactions(10, &set);
-        assert!(
-            ranked
-                .iter()
-                .all(|ranked_tx| calculate_tx_id(ranked_tx) != txid)
-        );
+        assert!(ranked
+            .iter()
+            .all(|ranked_tx| calculate_tx_id(ranked_tx) != txid));
         assert!(mempool.cached_fee_basis(&txid).is_none());
     }
 
@@ -3508,6 +3605,7 @@ mod tests {
         );
         let (child_vsize, _) = mempool.admit_vsize(&child, None, &utxo_set);
         let mut policy = crate::config::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.max_descendant_size = parent_vsize + child_vsize - 1;
         mempool.set_policy_config(Some(policy));
         assert!(!mempool.add_transaction(child).unwrap());
@@ -3646,6 +3744,7 @@ mod tests {
         const OP_RETURN: u8 = 0x6a;
 
         let mut policy = crate::config::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_relay_fee_rate = 0;
         policy.min_tx_fee = 0;
         policy.reject_spam_in_mempool = false;
@@ -3697,6 +3796,7 @@ mod tests {
         const OP_2: u8 = 0x52;
 
         let mut policy = crate::config::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_relay_fee_rate = 0;
         policy.min_tx_fee = 0;
         policy.reject_spam_in_mempool = false;
@@ -3723,11 +3823,12 @@ mod tests {
     fn mempool_rejects_a_prevout_sum_above_max_money() {
         use std::sync::Arc;
 
-        use blvm_protocol::UTXO;
         use blvm_protocol::constants::MAX_MONEY;
         use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::UTXO;
 
         let mut policy = crate::config::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_relay_fee_rate = 0;
         policy.min_tx_fee = 0;
 
@@ -3870,6 +3971,7 @@ mod tests {
         use blvm_protocol::opcodes::OP_1;
 
         let mut policy = MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_tx_fee = 0;
         policy.min_relay_fee_rate = 0;
 
@@ -3911,12 +4013,13 @@ mod tests {
 
         use crate::config::MempoolPolicyConfig;
         use crate::node::miner::{MempoolProvider, TransactionSelector};
-        use blvm_protocol::TransactionInput;
         use blvm_protocol::block::calculate_tx_id;
         use blvm_protocol::constants::SEQUENCE_FINAL;
         use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::TransactionInput;
 
         let mut policy = MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_tx_fee = 0;
         policy.min_relay_fee_rate = 0;
 
@@ -3997,6 +4100,7 @@ mod tests {
         use blvm_protocol::opcodes::OP_1;
 
         let mut policy = MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_tx_fee = 0;
         policy.min_relay_fee_rate = 0;
 
@@ -4201,17 +4305,13 @@ mod tests {
         assert!(mempool.add_transaction(unrelated.clone()).unwrap());
 
         mempool.remove_for_connected_block(&[confirmed.clone()]);
-        assert!(
-            mempool
-                .get_transaction(&calculate_tx_id(&confirmed))
-                .is_none()
-        );
+        assert!(mempool
+            .get_transaction(&calculate_tx_id(&confirmed))
+            .is_none());
         assert!(mempool.get_transaction(&calculate_tx_id(&child)).is_some());
-        assert!(
-            mempool
-                .get_transaction(&calculate_tx_id(&unrelated))
-                .is_some()
-        );
+        assert!(mempool
+            .get_transaction(&calculate_tx_id(&unrelated))
+            .is_some());
 
         let mempool = MempoolManager::new();
         mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded(
@@ -4233,16 +4333,12 @@ mod tests {
         let mut in_block = conflict.clone();
         in_block.outputs[0].value = 70_000;
         mempool.remove_for_connected_block(&[in_block]);
-        assert!(
-            mempool
-                .get_transaction(&calculate_tx_id(&conflict))
-                .is_none()
-        );
-        assert!(
-            mempool
-                .get_transaction(&calculate_tx_id(&conflict_child))
-                .is_none()
-        );
+        assert!(mempool
+            .get_transaction(&calculate_tx_id(&conflict))
+            .is_none());
+        assert!(mempool
+            .get_transaction(&calculate_tx_id(&conflict_child))
+            .is_none());
         assert_eq!(mempool.size(), 0);
     }
 
@@ -4329,26 +4425,18 @@ mod tests {
             &after,
         );
 
-        assert!(
-            mempool
-                .get_transaction(&calculate_tx_id(&conflict))
-                .is_none()
-        );
-        assert!(
-            mempool
-                .get_transaction(&calculate_tx_id(&conflict_child))
-                .is_none()
-        );
-        assert!(
-            mempool
-                .get_transaction(&calculate_tx_id(&resurrected))
-                .is_some()
-        );
-        assert!(
-            mempool
-                .get_transaction(&calculate_tx_id(&resurrected_child))
-                .is_some()
-        );
+        assert!(mempool
+            .get_transaction(&calculate_tx_id(&conflict))
+            .is_none());
+        assert!(mempool
+            .get_transaction(&calculate_tx_id(&conflict_child))
+            .is_none());
+        assert!(mempool
+            .get_transaction(&calculate_tx_id(&resurrected))
+            .is_some());
+        assert!(mempool
+            .get_transaction(&calculate_tx_id(&resurrected_child))
+            .is_some());
         assert_eq!(mempool.size(), 2);
     }
 
@@ -4451,11 +4539,9 @@ mod tests {
         assert!(!mempool.add_transaction(spend.clone()).unwrap());
 
         let witness: Vec<Witness> = vec![vec![witness_script]];
-        assert!(
-            mempool
-                .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
-                .unwrap()
-        );
+        assert!(mempool
+            .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
+            .unwrap());
         assert_eq!(
             mempool.get_transaction_witnesses(&calculate_tx_id(&spend)),
             Some(witness)
@@ -4531,11 +4617,9 @@ mod tests {
         assert!(!mempool.add_transaction(spend.clone()).unwrap());
 
         let witness: Vec<Witness> = vec![vec![witness_script]];
-        assert!(
-            mempool
-                .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
-                .unwrap()
-        );
+        assert!(mempool
+            .add_transaction_with_witness(spend.clone(), Some(witness.clone()))
+            .unwrap());
         assert_eq!(
             mempool.get_transaction_witnesses(&calculate_tx_id(&spend)),
             Some(witness)
@@ -4578,11 +4662,9 @@ mod tests {
         assert!(!mempool.add_transaction(child.clone()).unwrap());
 
         let witness: Vec<Witness> = vec![vec![witness_script]];
-        assert!(
-            mempool
-                .add_transaction_with_witness(child.clone(), Some(witness.clone()))
-                .unwrap()
-        );
+        assert!(mempool
+            .add_transaction_with_witness(child.clone(), Some(witness.clone()))
+            .unwrap());
         assert_eq!(
             mempool.get_transaction_witnesses(&calculate_tx_id(&child)),
             Some(witness)
@@ -4836,9 +4918,11 @@ mod tests {
 
     fn open_policy() -> crate::config::MempoolPolicyConfig {
         let mut policy = crate::config::MempoolPolicyConfig::default();
+        policy.require_standard = false;
         policy.min_relay_fee_rate = 0;
         policy.min_tx_fee = 0;
         policy.reject_spam_in_mempool = false;
+        policy.require_standard = false;
         policy
     }
 
