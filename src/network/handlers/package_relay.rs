@@ -87,10 +87,11 @@ mod tests {
         let listen: SocketAddr = "127.0.0.1:18474".parse().unwrap();
         let peer: SocketAddr = "127.0.0.1:18475".parse().unwrap();
         let nm = NetworkManager::new(listen);
-        assert!(nm
-            .handle_pkgtxn_request(vec![0xff, 0xfe], peer)
-            .await
-            .is_err());
+        assert!(
+            nm.handle_pkgtxn_request(vec![0xff, 0xfe], peer)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -102,7 +103,7 @@ mod tests {
         use blvm_protocol::serialization::transaction::serialize_transaction_with_witness;
         use blvm_protocol::{
             BitcoinProtocolEngine, OutPoint, ProtocolVersion, Transaction, TransactionInput,
-            TransactionOutput, UtxoSet, UTXO,
+            TransactionOutput, UTXO, UtxoSet,
         };
         use std::sync::Arc;
 
@@ -167,9 +168,11 @@ mod tests {
         nm.submit_transactions_to_mempool(&[(decoded, decoded_witness)])
             .await
             .unwrap();
-        assert!(mempool
-            .get_transactions()
-            .iter()
-            .all(|pooled| pooled.outputs[0].value != 49_000));
+        assert!(
+            mempool
+                .get_transactions()
+                .iter()
+                .all(|pooled| pooled.outputs[0].value != 49_000)
+        );
     }
 }

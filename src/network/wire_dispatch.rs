@@ -5,12 +5,12 @@
 #[cfg(feature = "protocol-verification")]
 use blvm_spec_lock::spec_locked;
 
+use crate::network::NetworkMessage;
 use crate::network::network_manager::NetworkManager;
 use crate::network::protocol::{
     BlockMessage, HeadersMessage, ProtocolMessage, ProtocolParser, VersionMessage,
 };
 use crate::network::transport::TransportAddr;
-use crate::network::NetworkMessage;
 use anyhow::Result;
 use blvm_protocol::BlockHeader;
 use blvm_protocol::ProtocolVersion;
@@ -1193,7 +1193,7 @@ mod plan_wire_locks {
     use blvm_protocol::opcodes::OP_1;
     use blvm_protocol::{
         BitcoinProtocolEngine, BlockHeader, OutPoint, ProtocolVersion, Transaction,
-        TransactionInput, TransactionOutput, UtxoSet, UTXO,
+        TransactionInput, TransactionOutput, UTXO, UtxoSet,
     };
     use std::sync::Arc;
 
@@ -1423,9 +1423,11 @@ mod plan_wire_locks {
         };
         let cheap_id = calculate_tx_id(&cheap);
         let rich_id = calculate_tx_id(&rich);
-        assert!(inventory
-            .iter()
-            .any(|item| { item.hash == rich_id && item.inv_type == MSG_WITNESS_TX }));
+        assert!(
+            inventory
+                .iter()
+                .any(|item| { item.hash == rich_id && item.inv_type == MSG_WITNESS_TX })
+        );
         assert!(inventory.iter().all(|item| item.hash != cheap_id));
     }
 
@@ -1666,9 +1668,11 @@ mod plan_wire_locks {
         let next_hash = blvm_consensus::block::block_header_hash(&header_one);
         match ProtocolParser::parse_message(&bytes).unwrap() {
             ProtocolMessage::Inv(InvMessage { inventory }) => {
-                assert!(inventory
-                    .iter()
-                    .any(|item| { item.inv_type == MSG_BLOCK && item.hash == next_hash }));
+                assert!(
+                    inventory
+                        .iter()
+                        .any(|item| { item.inv_type == MSG_BLOCK && item.hash == next_hash })
+                );
             }
             other => panic!("expected inv, got {other:?}"),
         }
@@ -1717,9 +1721,11 @@ mod plan_wire_locks {
         let bytes = node.incoming.recv().await.unwrap();
         match ProtocolParser::parse_message(&bytes).unwrap() {
             ProtocolMessage::Inv(InvMessage { inventory }) => {
-                assert!(inventory
-                    .iter()
-                    .any(|item| item.inv_type == MSG_WITNESS_BLOCK && item.hash == hash));
+                assert!(
+                    inventory
+                        .iter()
+                        .any(|item| item.inv_type == MSG_WITNESS_BLOCK && item.hash == hash)
+                );
                 assert!(inventory.iter().all(|item| item.inv_type != MSG_BLOCK));
             }
             other => panic!("expected inv, got {other:?}"),
@@ -1745,9 +1751,11 @@ mod plan_wire_locks {
         let bytes = node.incoming.recv().await.unwrap();
         match ProtocolParser::parse_message(&bytes).unwrap() {
             ProtocolMessage::Inv(InvMessage { inventory }) => {
-                assert!(inventory
-                    .iter()
-                    .any(|item| { item.inv_type == MSG_WITNESS_BLOCK && item.hash == block_hash }));
+                assert!(
+                    inventory.iter().any(|item| {
+                        item.inv_type == MSG_WITNESS_BLOCK && item.hash == block_hash
+                    })
+                );
             }
             other => panic!("expected block inv, got {other:?}"),
         }
@@ -1756,9 +1764,11 @@ mod plan_wire_locks {
         let bytes = node.incoming.recv().await.unwrap();
         match ProtocolParser::parse_message(&bytes).unwrap() {
             ProtocolMessage::Inv(InvMessage { inventory }) => {
-                assert!(inventory
-                    .iter()
-                    .any(|item| item.inv_type == MSG_WITNESS_TX && item.hash == txid));
+                assert!(
+                    inventory
+                        .iter()
+                        .any(|item| item.inv_type == MSG_WITNESS_TX && item.hash == txid)
+                );
             }
             other => panic!("expected tx inv, got {other:?}"),
         }
@@ -1872,12 +1882,13 @@ mod plan_wire_locks {
                 .unwrap_or(0),
             0
         );
-        assert!(node
-            .manager
-            .ibd_protection()
-            .can_serve_ibd(node.peer)
-            .await
-            .unwrap());
+        assert!(
+            node.manager
+                .ibd_protection()
+                .can_serve_ibd(node.peer)
+                .await
+                .unwrap()
+        );
         for _ in 0..3 {
             let bytes = node.incoming.recv().await.unwrap();
             match ProtocolParser::parse_message(&bytes).unwrap() {
@@ -1938,12 +1949,13 @@ mod plan_wire_locks {
             .dispatch_protocol_message(node.peer, &msg, Vec::new())
             .await
             .unwrap();
-        assert!(node
-            .storage
-            .blocks()
-            .get_hash_by_height(6)
-            .unwrap()
-            .is_none());
+        assert!(
+            node.storage
+                .blocks()
+                .get_hash_by_height(6)
+                .unwrap()
+                .is_none()
+        );
 
         let mut good = BlockHeader {
             version: 1,

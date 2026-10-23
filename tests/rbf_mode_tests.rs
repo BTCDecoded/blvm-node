@@ -13,6 +13,23 @@ use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, 
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
+/// Standard P2SH output whose redeem script is OP_1, so a child spends it with
+/// `p2sh_op_true_script_sig()` and no signature. Default policy rejects a bare OP_1 output.
+fn p2sh_op_true_script() -> Vec<u8> {
+    use ripemd::Ripemd160;
+    use sha2::{Digest, Sha256};
+    let hash = Ripemd160::digest(Sha256::digest([blvm_protocol::opcodes::OP_1]));
+    let mut script = vec![0xa9, 0x14];
+    script.extend_from_slice(&hash);
+    script.push(0x87);
+    script
+}
+
+/// Script sig for `p2sh_op_true_script()`: one push of the OP_1 redeem script.
+fn p2sh_op_true_script_sig() -> Vec<u8> {
+    vec![0x01, blvm_protocol::opcodes::OP_1]
+}
+
 /// Create a test transaction with RBF signaling
 fn create_rbf_tx(input_value: u64, output_value: u64) -> Transaction {
     create_rbf_tx_spending(
@@ -34,7 +51,7 @@ fn create_rbf_tx_spending(prevout: OutPoint, output_value: u64) -> Transaction {
         }],
         outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: output_value as i64,
-            script_pubkey: vec![blvm_protocol::opcodes::OP_1],
+            script_pubkey: p2sh_op_true_script(),
         }],
         lock_time: 0,
     }
@@ -231,13 +248,14 @@ fn test_rbf_package_replacement_uses_descendant_fees() {
     let parent_hash = calculate_tx_id(&parent);
     assert!(mempool.add_transaction(parent.clone()).unwrap());
 
-    let child = create_rbf_tx_spending(
+    let mut child = create_rbf_tx_spending(
         OutPoint {
             hash: parent_hash,
             index: 0,
         },
         80_000,
     );
+    child.inputs[0].script_sig = p2sh_op_true_script_sig();
     let child_hash = calculate_tx_id(&child);
     assert!(mempool.add_transaction(child).unwrap());
     assert_eq!(mempool.size(), 2);
@@ -300,6 +318,7 @@ fn opted_in_parent_with_final_child_stays_in_the_pool() {
         80_000,
     );
     child.inputs[0].sequence = 0xffffffff;
+    child.inputs[0].script_sig = p2sh_op_true_script_sig();
     let child_hash = calculate_tx_id(&child);
     assert!(mempool.add_transaction(child).unwrap());
 

@@ -334,7 +334,7 @@ fn empty_pool_does_not_report_the_minimum_as_a_measured_rate() {
 fn an_urgent_batch_is_stored_in_the_mempool() {
     use blvm_node::node::mempool::MempoolManager;
     use blvm_protocol::opcodes::OP_1;
-    use blvm_protocol::{OutPoint, UtxoSet, UTXO};
+    use blvm_protocol::{OutPoint, UTXO, UtxoSet};
 
     let mempool = Arc::new(MempoolManager::new());
     let mut policy = blvm_node::config::mempool::MempoolPolicyConfig::default();

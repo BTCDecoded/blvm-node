@@ -4,15 +4,15 @@
 
 #![allow(dead_code)]
 
-use blvm_node::storage::blockstore::BlockStore;
-use blvm_node::storage::chainstate::ChainState;
-use blvm_node::storage::txindex::TxIndex;
-use blvm_node::storage::utxostore::UtxoStore;
 use blvm_node::Block;
 use blvm_node::BlockHeader;
 use blvm_node::Hash;
 use blvm_node::OutPoint;
 use blvm_node::Transaction;
+use blvm_node::storage::blockstore::BlockStore;
+use blvm_node::storage::chainstate::ChainState;
+use blvm_node::storage::txindex::TxIndex;
+use blvm_node::storage::utxostore::UtxoStore;
 use blvm_node::{ByteString, TransactionInput, TransactionOutput};
 use blvm_protocol::ProtocolVersion;
 use std::collections::HashMap;
@@ -81,7 +81,7 @@ impl TempDb {
         // Use the directory path, not a file path - create_database handles the file creation
         let db_path = temp_dir.path();
 
-        use blvm_node::storage::database::{create_database, default_backend, Database};
+        use blvm_node::storage::database::{Database, create_database, default_backend};
         let db_arc: std::sync::Arc<dyn Database> =
             std::sync::Arc::from(create_database(db_path, default_backend(), None)?);
         let utxo_store = UtxoStore::new(db_arc.clone())?;
