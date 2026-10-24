@@ -12,6 +12,14 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 mod common;
+
+/// Native P2WPKH. Default relay admits this and rejects a bare `OP_1` output.
+fn standard_p2wpkh() -> Vec<u8> {
+    let mut script = vec![0x00, 0x14];
+    script.resize(22, 0);
+    script
+}
+
 use common::{
     MINING_RPC_CHAIN_BLOCKS, patch_storage_chain_network_regtest, setup_mining_chain,
     valid_transaction,
@@ -316,7 +324,7 @@ async fn test_getblocktemplate_includes_prioritized_mempool_tx() {
         .into(),
         outputs: vec![TransactionOutput {
             value: 90_000,
-            script_pubkey: vec![OP_1],
+            script_pubkey: standard_p2wpkh(),
         }]
         .into(),
         lock_time: 0,
@@ -391,7 +399,7 @@ async fn test_getblocktemplate_includes_segwit_mempool_tx_on_regtest() {
         .into(),
         outputs: vec![TransactionOutput {
             value: 90_000,
-            script_pubkey: vec![OP_1],
+            script_pubkey: standard_p2wpkh(),
         }]
         .into(),
         lock_time: 0,
@@ -517,7 +525,7 @@ async fn test_getblocktemplate_mempool_witness_available_for_template() {
         .into(),
         outputs: vec![TransactionOutput {
             value: 90_000,
-            script_pubkey: vec![OP_1],
+            script_pubkey: standard_p2wpkh(),
         }]
         .into(),
         lock_time: 0,
@@ -669,7 +677,7 @@ async fn getblocktemplate_refuses_missing_mempool_witnesses() {
         .into(),
         outputs: vec![TransactionOutput {
             value: 90_000,
-            script_pubkey: vec![OP_1],
+            script_pubkey: standard_p2wpkh(),
         }]
         .into(),
         lock_time: 0,
