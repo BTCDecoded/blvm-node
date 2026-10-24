@@ -6,7 +6,7 @@
 //! - Standard: BIP125-compliant (default)
 //! - Aggressive: Relaxed rules for miners
 
-use blvm_node::config::{RbfConfig, RbfMode};
+use blvm_node::config::{MempoolPolicyConfig, RbfConfig, RbfMode};
 use blvm_node::node::mempool::MempoolManager;
 use blvm_protocol::block::calculate_tx_id;
 use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet};
@@ -22,6 +22,13 @@ fn create_rbf_tx(input_value: u64, output_value: u64) -> Transaction {
         },
         output_value,
     )
+}
+
+/// These fixtures spend a bare `OP_1`. That script is valid and non-standard.
+fn admit_bare_op1(mempool: &MempoolManager) {
+    let mut policy = MempoolPolicyConfig::default();
+    policy.require_standard = false;
+    mempool.set_policy_config(Some(policy));
 }
 
 fn create_rbf_tx_spending(prevout: OutPoint, output_value: u64) -> Transaction {
@@ -220,6 +227,7 @@ fn test_rbf_config_with_mode() {
 #[test]
 fn test_rbf_package_replacement_uses_descendant_fees() {
     let mempool = MempoolManager::new();
+    admit_bare_op1(&mempool);
     let rbf_config = RbfConfig::with_mode(RbfMode::Aggressive);
     mempool.set_rbf_config(Some(rbf_config));
 
@@ -268,6 +276,7 @@ fn test_rbf_package_replacement_uses_descendant_fees() {
 #[test]
 fn sequence_fffffffe_is_not_replaced() {
     let mempool = MempoolManager::new();
+    admit_bare_op1(&mempool);
     let utxo_set = create_test_utxo_set();
     mempool.set_utxo_set_arc(Arc::new(TokioMutex::new(utxo_set)));
 
@@ -285,6 +294,7 @@ fn sequence_fffffffe_is_not_replaced() {
 #[test]
 fn opted_in_parent_with_final_child_stays_in_the_pool() {
     let mempool = MempoolManager::new();
+    admit_bare_op1(&mempool);
     let utxo_set = create_test_utxo_set();
     mempool.set_utxo_set_arc(Arc::new(TokioMutex::new(utxo_set)));
 
