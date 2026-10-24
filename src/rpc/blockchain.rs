@@ -2137,19 +2137,19 @@ impl BlockchainRpc {
                 return Err(BlockNotFoundError::new("").into());
             };
             #[cfg(feature = "production")]
-            let spent = storage.blocks().spent_script_spans(&hash).unwrap_or_default();
+            let spent = storage
+                .blocks()
+                .spent_script_spans(&hash)
+                .unwrap_or_default();
             #[cfg(not(feature = "production"))]
             let spent = crate::storage::blockstore::ScriptSpans::default();
-            let scripts = crate::storage::blockstore::output_and_spent_slices(
-                &outputs.scripts,
-                &spent,
-            );
+            let scripts =
+                crate::storage::blockstore::output_and_spent_slices(&outputs.scripts, &spent);
             let prev_block_hash = outputs.prev_hash;
             match blvm_protocol::bip158::build_block_filter_output_scripts(scripts, &[]) {
                 Ok(filter) => {
                     let prev_header = previous_filter_header(storage, &prev_block_hash)?;
-                    let header =
-                        chain_filter_header(filter.filter_data.as_slice(), &prev_header);
+                    let header = chain_filter_header(filter.filter_data.as_slice(), &prev_header);
                     storage.blocks().store_filter_header(&hash, &header)?;
                     Ok(json!({
                         "filter": hex::encode(filter.filter_data.as_slice()),
@@ -2969,7 +2969,10 @@ mod block_stats_tests {
         let expected = hex::encode(crate::storage::hashing::double_sha256(&chained));
         assert_eq!(result["header"].as_str().unwrap(), expected);
         let peer = blvm_protocol::bip157::FilterHeader::new(&built, None);
-        assert_eq!(result["header"].as_str().unwrap(), hex::encode(peer.header_hash()));
+        assert_eq!(
+            result["header"].as_str().unwrap(),
+            hex::encode(peer.header_hash())
+        );
 
         let rpc = BlockchainRpc::with_dependencies(Arc::clone(&storage));
         let before = rpc.get_index_info(&json!([])).await.unwrap();

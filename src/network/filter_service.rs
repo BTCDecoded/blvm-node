@@ -55,7 +55,10 @@ impl BlockFilterService {
         previous_outpoint_scripts: &[Vec<u8>],
         height: u32,
     ) -> Result<CompactBlockFilter> {
-        let refs: Vec<&[u8]> = previous_outpoint_scripts.iter().map(Vec::as_slice).collect();
+        let refs: Vec<&[u8]> = previous_outpoint_scripts
+            .iter()
+            .map(Vec::as_slice)
+            .collect();
         self.generate_and_cache_filter_slices(block, &refs, height)
     }
 

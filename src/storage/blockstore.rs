@@ -55,11 +55,7 @@ fn output_scripts_of_block(block: &blvm_protocol::Block) -> Vec<Vec<u8>> {
     block
         .transactions
         .iter()
-        .flat_map(|tx| {
-            tx.outputs
-                .iter()
-                .map(|output| output.script_pubkey.clone())
-        })
+        .flat_map(|tx| tx.outputs.iter().map(|output| output.script_pubkey.clone()))
         .collect()
 }
 
@@ -123,7 +119,6 @@ impl ScriptSpans {
                 .map(|&(start, end)| &self.bytes[start..end]),
         );
     }
-
 }
 
 /// One pointer list for output scripts and spent scripts.
@@ -282,7 +277,8 @@ impl<'a> BinCursor<'a> {
     }
 
     fn seq_len(&mut self) -> Result<usize> {
-        let n = usize::try_from(self.u64()?).map_err(|_| anyhow::anyhow!("bincode length overflows"))?;
+        let n = usize::try_from(self.u64()?)
+            .map_err(|_| anyhow::anyhow!("bincode length overflows"))?;
         if n > self.remaining() {
             return Err(anyhow::anyhow!("bincode sequence exceeds body"));
         }

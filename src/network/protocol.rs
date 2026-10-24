@@ -1774,7 +1774,12 @@ fn cfilter_len_varint(len: u64) -> ([u8; 9], usize) {
     (buf, n)
 }
 
-fn cfilter_checksum(filter_type: u8, block_hash: &[u8; 32], varint: &[u8], filter: &[u8]) -> [u8; 4] {
+fn cfilter_checksum(
+    filter_type: u8,
+    block_hash: &[u8; 32],
+    varint: &[u8],
+    filter: &[u8],
+) -> [u8; 4] {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
