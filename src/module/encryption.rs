@@ -80,12 +80,15 @@ impl ModuleEncryption {
         // Create cipher
         let cipher = Aes256Gcm::new(&key.into());
 
-        // Convert nonce to Nonce type
-        let nonce = Nonce::from_slice(nonce);
+        // GCM nonces are 12 bytes. generic-array 0.14's from_slice is deprecated.
+        let nonce_bytes: [u8; 12] = nonce.try_into().map_err(|_| {
+            ModuleError::CryptoError(format!("nonce must be 12 bytes, got {}", nonce.len()))
+        })?;
+        let nonce = Nonce::from(nonce_bytes);
 
         // Decrypt
         let decrypted = cipher
-            .decrypt(nonce, encrypted_data)
+            .decrypt(&nonce, encrypted_data)
             .map_err(|e| ModuleError::CryptoError(format!("Decryption failed: {e}")))?;
 
         Ok(decrypted)

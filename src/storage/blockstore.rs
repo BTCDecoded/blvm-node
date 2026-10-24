@@ -91,18 +91,10 @@ fn prev_hash_from_stored_body(data: &[u8]) -> Result<[u8; 32]> {
 }
 
 /// Output scripts borrowed from `bytes`. The ranges index that buffer.
+#[derive(Default)]
 pub(crate) struct ScriptSpans {
     bytes: Vec<u8>,
     spans: Vec<(usize, usize)>,
-}
-
-impl Default for ScriptSpans {
-    fn default() -> Self {
-        Self {
-            bytes: Vec::new(),
-            spans: Vec::new(),
-        }
-    }
 }
 
 impl ScriptSpans {
