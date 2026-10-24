@@ -4,6 +4,13 @@ use blvm_node::config::MempoolPolicyConfig;
 use blvm_node::node::mempool::MempoolManager;
 use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet};
 
+/// Native P2WPKH. Default relay admits this and rejects a bare `OP_1`.
+fn standard_p2wpkh() -> Vec<u8> {
+    let mut script = vec![0x00, 0x14];
+    script.resize(22, 0);
+    script
+}
+
 #[tokio::test]
 async fn test_mempool_stores_full_transactions() {
     let mempool = MempoolManager::new();
@@ -21,7 +28,7 @@ async fn test_mempool_stores_full_transactions() {
         }],
         outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 1000,
-            script_pubkey: vec![0x51], // OP_1
+            script_pubkey: standard_p2wpkh(),
         }],
         lock_time: 0,
     };
@@ -69,7 +76,7 @@ async fn test_mempool_get_prioritized_transactions() {
         }],
         outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 5000, // 5000 sat fee
-            script_pubkey: vec![0x51],
+            script_pubkey: standard_p2wpkh(),
         }],
         lock_time: 0,
     };
@@ -87,7 +94,7 @@ async fn test_mempool_get_prioritized_transactions() {
         }],
         outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 9000, // 1000 sat fee
-            script_pubkey: vec![0x51],
+            script_pubkey: standard_p2wpkh(),
         }],
         lock_time: 0,
     };
@@ -132,7 +139,7 @@ async fn test_mempool_remove_transaction() {
         }],
         outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 1000,
-            script_pubkey: vec![0x51],
+            script_pubkey: standard_p2wpkh(),
         }],
         lock_time: 0,
     };
