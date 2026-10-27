@@ -3493,6 +3493,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             .flatten()
                             .unwrap_or(0);
                         if next_height > durable {
+                            storage_clone
+                                .ensure_parent_chainwork(&block_arc.header, next_height)?;
                             if let Err(e) = storage_clone.chain().update_tip(
                                 &block_hash,
                                 &block_arc.header,

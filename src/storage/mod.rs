@@ -934,6 +934,7 @@ impl Storage {
                 );
             }
         };
+        self.ensure_parent_chainwork(&header, target_height)?;
         self.chain().update_tip(&tip_hash, &header, target_height)?;
         info!(
             "[IBD_RESUME] advanced chain_info height {current} → {target_height} (UTXO watermark catch-up)"
@@ -1319,5 +1320,164 @@ impl Storage {
                 warn!("set_pruning_network: PruningManager already shared; network not updated");
             }
         }
+    }
+
+    /// Store cumulative chainwork for `header.prev_block_hash` when prune skipped
+    /// that parent body. `update_tip` refuses the child until the parent row exists.
+    ///
+    /// Headers stay in the height index after the body is skipped. The sum walks
+    /// those headers back to the last stored chainwork, or to genesis.
+    pub fn ensure_parent_chainwork(
+        &self,
+        header: &blvm_protocol::BlockHeader,
+        height: u64,
+    ) -> Result<()> {
+        if height == 0 {
+            return Ok(());
+        }
+        if self
+            .chain()
+            .get_chainwork(&header.prev_block_hash)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let parent_height = height - 1;
+        let (chainwork, parent_proof, walked) =
+            self.cumulative_chainwork_at(parent_height, header.prev_block_hash)?;
+        self.chain()
+            .store_work(&header.prev_block_hash, parent_proof)?;
+        self.chain()
+            .store_chainwork(&header.prev_block_hash, chainwork)?;
+        if walked > 1 {
+            info!(
+                "[IBD_CHAINWORK_GAP] bridged {walked} header(s) so chainwork exists \
+                 for the parent of height {height}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Chainwork through `height`, plus that block's own proof (for the work cache).
+    /// `walked` is how many headers were summed because their chainwork was missing.
+    ///
+    /// `expected_hash` is the hash of the header at `height`. Each older header must
+    /// hash to the previous header's `prev_block_hash`.
+    fn cumulative_chainwork_at(
+        &self,
+        height: u64,
+        mut expected_hash: [u8; 32],
+    ) -> Result<(blvm_consensus::pow::U256, blvm_consensus::pow::U256, u64)> {
+        use blvm_consensus::pow::U256;
+        let mut above = U256::zero();
+        let mut h = height;
+        let mut walked = 0u64;
+        let mut target_proof: Option<U256> = None;
+        loop {
+            let header = self
+                .blockstore
+                .get_header_at_height(h)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "header {h} missing while summing chainwork through {height}"
+                    )
+                })?;
+            let actual = self.chain().calculate_hash(&header);
+            if actual != expected_hash {
+                anyhow::bail!(
+                    "header {h} hash does not match the previous link \
+                     while summing chainwork through {height}"
+                );
+            }
+            let proof = blvm_consensus::pow::get_block_proof(header.bits).unwrap_or(U256::zero());
+            if target_proof.is_none() {
+                target_proof = Some(proof);
+            }
+            walked += 1;
+            let own = target_proof.unwrap_or(proof);
+            if h == 0 {
+                return Ok((above.saturating_add(proof), own, walked));
+            }
+            if let Some(prev) = self.chain().get_chainwork(&header.prev_block_hash)? {
+                return Ok((prev.saturating_add(proof).saturating_add(above), own, walked));
+            }
+            above = above.saturating_add(proof);
+            expected_hash = header.prev_block_hash;
+            h -= 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod chainwork_gap_tests {
+    use super::Storage;
+    use blvm_consensus::pow::get_block_proof;
+    use blvm_protocol::BlockHeader;
+
+    fn header(prev: [u8; 32], bits: u64, nonce: u64) -> BlockHeader {
+        BlockHeader {
+            version: 1,
+            prev_block_hash: prev,
+            merkle_root: [0u8; 32],
+            timestamp: 1_700_000_000,
+            bits,
+            nonce,
+        }
+    }
+
+    /// Store three linked headers under their real double-SHA256 hashes.
+    fn store_three(storage: &Storage, bits: u64) -> [([u8; 32], BlockHeader); 3] {
+        let mut prev = [0u8; 32];
+        let mut out = Vec::with_capacity(3);
+        for nonce in 0..3u64 {
+            let hdr = header(prev, bits, nonce);
+            let hash = storage.chain().calculate_hash(&hdr);
+            storage.blockstore.store_header(&hash, &hdr).unwrap();
+            storage.blockstore.store_height(nonce, &hash).unwrap();
+            out.push((hash, hdr));
+            prev = hash;
+        }
+        out.try_into().unwrap()
+    }
+
+    #[test]
+    fn prune_gap_still_advances_chain_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        let bits = 0x1d00ffffu64;
+        let headers = store_three(&storage, bits);
+        let h1 = headers[1].0;
+        let h2 = headers[2].0;
+        let tip_header = headers[2].1.clone();
+        assert!(storage.chain().get_chainwork(&h1).unwrap().is_none());
+
+        storage.ensure_parent_chainwork(&tip_header, 2).unwrap();
+        storage
+            .chain()
+            .update_tip(&h2, &tip_header, 2)
+            .unwrap();
+
+        assert_eq!(storage.chain().get_height().unwrap(), Some(2));
+        let proof = get_block_proof(bits).unwrap();
+        let expected = proof.saturating_add(proof).saturating_add(proof);
+        assert_eq!(storage.chain().get_chainwork(&h2).unwrap(), Some(expected));
+        assert_eq!(storage.chain().get_work(&h1).unwrap(), Some(proof));
+    }
+
+    #[test]
+    fn parent_hash_mismatch_writes_no_chainwork() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        let bits = 0x1d00ffffu64;
+        let parent = header([0u8; 32], bits, 0);
+        let parent_hash = storage.chain().calculate_hash(&parent);
+        storage.blockstore.store_header(&parent_hash, &parent).unwrap();
+        storage.blockstore.store_height(0, &parent_hash).unwrap();
+
+        let bogus_prev = [9u8; 32];
+        assert_ne!(bogus_prev, parent_hash);
+        let child = header(bogus_prev, bits, 1);
+        assert!(storage.ensure_parent_chainwork(&child, 1).is_err());
+        assert!(storage.chain().get_chainwork(&bogus_prev).unwrap().is_none());
     }
 }

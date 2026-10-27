@@ -1201,7 +1201,7 @@ impl ChainState {
     }
 
     /// Calculate block hash using proper Bitcoin double SHA256
-    fn calculate_hash(&self, header: &BlockHeader) -> Hash {
+    pub(crate) fn calculate_hash(&self, header: &BlockHeader) -> Hash {
         use crate::storage::hashing::double_sha256;
 
         // OPTIMIZATION: Use stack-allocated array instead of heap Vec

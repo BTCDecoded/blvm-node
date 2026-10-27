@@ -36,6 +36,9 @@ pub(crate) fn index_ibd_flushed_blocks(
             (&block_hashes[i], &block.header, heights[i])
         })
         .collect();
+    if let Some((_, header, height)) = entries.first() {
+        storage.ensure_parent_chainwork(header, *height)?;
+    }
     storage.chain().index_connected_blocks_batch(&entries)
 }
 

@@ -10892,6 +10892,7 @@ impl ParallelIBD {
         if let Some(storage) = _storage {
             if let Some(tip_hash) = tip_hash_for_update {
                 if let Some((block, _, tip_height, _)) = pending.last() {
+                    storage.ensure_parent_chainwork(&block.header, *tip_height)?;
                     storage
                         .chain()
                         .update_tip(&tip_hash, &block.header, *tip_height)?;
