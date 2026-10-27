@@ -1765,16 +1765,21 @@ impl ModuleManager {
         let entries: Vec<RegistryEntry> = serde_json::from_slice(&index_bytes)
             .map_err(|e| ModuleError::op_err("Registry JSON parse failed", e))?;
 
-        let entry = entries
-            .into_iter()
-            .find(|e| e.name == name)
-            .ok_or_else(|| {
-                ModuleError::OperationError(format!(
-                    "Module '{name}' not found in registry at {registry_url}"
-                ))
-            })?;
-
-        let github_repo = entry.repo;
+        let entry = entries.into_iter().find(|e| e.name == name);
+        let (github_repo, module_toml_url, manifest_ref_override) = if let Some(entry) = entry {
+            (entry.repo, entry.module_toml_url, entry.manifest_ref)
+        } else if let Some(repo) =
+            crate::module::github_release_install::builtin_default_module_repo(name)
+        {
+            info!(
+                "Bootstrap: '{name}' is a default module and is not in {registry_url}; using {repo}"
+            );
+            (repo.to_string(), None, None)
+        } else {
+            return Err(ModuleError::OperationError(format!(
+                "Module '{name}' not found in registry at {registry_url}"
+            )));
+        };
 
         crate::module::github_release_install::validate_github_repo(&github_repo)?;
 
@@ -1793,8 +1798,7 @@ impl ModuleManager {
         let manifest_ref = if let Some(ref version) = pinned_version {
             release_tag(version)
         } else {
-            entry
-                .manifest_ref
+            manifest_ref_override
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -1802,8 +1806,7 @@ impl ModuleManager {
                 .to_string()
         };
 
-        let module_toml_url = entry
-            .module_toml_url
+        let module_toml_url = module_toml_url
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())

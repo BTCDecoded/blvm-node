@@ -96,6 +96,7 @@ blvm-zmq = "0.3.*"
     let config = NodeConfig::from_toml_file(&path).unwrap();
     let modules = config.modules.as_ref().unwrap();
     assert_eq!(modules.enabled_modules.len(), 2);
+    assert!(modules.enabled_modules.get("blvm-wallet-index").is_none());
     assert_eq!(
         modules.enabled_modules.get("blvm-zmq").map(String::as_str),
         Some("0.3.*")

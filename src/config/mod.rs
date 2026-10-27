@@ -85,7 +85,37 @@ fn flatten_toml_to_string_map(value: &toml::Value) -> HashMap<String, String> {
 }
 
 /// GitHub raw URL for the monorepo’s `registry/modules.json` (module name → `repo`; `module.toml` URL is conventional unless overridden).
-pub const DEFAULT_MODULE_REGISTRY_INDEX_URL: &str = "https://raw.githubusercontent.com/BTCDecoded/blvm/4bf2d067cf34f0adbbe327bda2fb58fb3c8396f3/registry/modules.json";
+pub const DEFAULT_MODULE_REGISTRY_INDEX_URL: &str =
+    "https://raw.githubusercontent.com/BTCDecoded/blvm/main/registry/modules.json";
+
+/// Modules a fresh install enables and bootstrap-downloads when they are not on disk.
+pub fn default_enabled_modules() -> HashMap<String, String> {
+    [
+        ("blvm-miniscript", "0.1.*"),
+        ("blvm-zmq", "0.1.*"),
+        ("blvm-wallet-index", "0.1.*"),
+    ]
+    .into_iter()
+    .map(|(name, constraint)| (name.to_string(), constraint.to_string()))
+    .collect()
+}
+
+/// Loopback ZeroMQ binds for a fresh install. Wallet-index ports stay closed until configured.
+fn default_module_configs() -> HashMap<String, HashMap<String, String>> {
+    let zmq = [
+        ("hashblock", "tcp://127.0.0.1:28332"),
+        ("hashtx", "tcp://127.0.0.1:28333"),
+        ("rawblock", "tcp://127.0.0.1:28334"),
+        ("rawtx", "tcp://127.0.0.1:28335"),
+        ("sequence", "tcp://127.0.0.1:28336"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), value.to_string()))
+    .collect();
+    let mut configs = HashMap::new();
+    configs.insert("blvm-zmq".to_string(), zmq);
+    configs
+}
 
 fn default_module_registry_url() -> Option<String> {
     Some(DEFAULT_MODULE_REGISTRY_INDEX_URL.to_string())
@@ -131,10 +161,10 @@ where
             let mut modules_dir = "modules".to_string();
             let mut data_dir = "data/modules".to_string();
             let mut socket_dir = "data/modules/sockets".to_string();
-            let mut enabled_modules: HashMap<String, String> = HashMap::new();
+            let mut enabled_modules = default_enabled_modules();
             let mut disabled_modules = Vec::new();
             let mut registry_url = default_module_registry_url();
-            let mut module_configs = HashMap::new();
+            let mut module_configs = default_module_configs();
             let mut watch_enabled = true;
             let mut watch_auto_load = false;
             let mut watch_auto_unload = false;
@@ -149,8 +179,10 @@ where
                         "data_dir" => data_dir = map.next_value().unwrap_or(data_dir),
                         "socket_dir" => socket_dir = map.next_value().unwrap_or(socket_dir),
                         "enabled_modules" => {
+                            // A present key replaces the baseline. An empty list is disk-only.
                             let value: toml::Value =
                                 map.next_value().unwrap_or(toml::Value::Array(vec![]));
+                            enabled_modules.clear();
                             merge_enabled_modules_value(&mut enabled_modules, value);
                         }
                         "disabled_modules" => {
@@ -187,7 +219,7 @@ where
                                 enabled_modules.insert(key.clone(), version);
                             }
                             if !flat.is_empty() {
-                                module_configs.insert(key, flat);
+                                module_configs.entry(key).or_default().extend(flat);
                             }
                         }
                         _ => {}
@@ -250,18 +282,15 @@ pub struct ModuleConfig {
     /// Directory for IPC sockets
     pub socket_dir: String,
 
-    /// Enabled modules and optional version constraints (empty = auto-discover all on disk).
+    /// Enabled modules and optional version constraints.
     ///
-    /// In TOML, prefer inline pins at the `[modules]` level:
-    /// ```toml
-    /// [modules]
-    /// blvm-miniscript = "0.1.*"
-    /// blvm-wallet-index = "0.1.*"
-    /// blvm-payment = "0.1.*"
-    /// ```
+    /// The baseline is `blvm-miniscript`, `blvm-zmq`, and `blvm-wallet-index` at `0.1.*`.
+    /// A `[modules]` table starts from that set. An inline `name = "0.1.*"` adds or replaces
+    /// one pin. A present `enabled_modules` key replaces the whole set; an empty list loads
+    /// only binaries already on disk. `disabled_modules` wins over a pin at load time.
     ///
     /// When a module also needs spawn overrides (`[modules.blvm-zmq]`), put the pin in that
-    /// table as `version = "0.3.*"` (inline `blvm-zmq = "…"` would conflict with the table).
+    /// table as `version = "0.1.*"` (inline `blvm-zmq = "…"` would conflict with the table).
     ///
     /// Legacy array form (`enabled_modules = ["name"]`) is supported with constraint `"*"`.
     #[serde(default)]
@@ -332,11 +361,11 @@ impl Default for ModuleConfig {
             modules_dir: "modules".to_string(),
             data_dir: "data/modules".to_string(),
             socket_dir: "data/modules/sockets".to_string(),
-            enabled_modules: HashMap::new(),
+            enabled_modules: default_enabled_modules(),
             disabled_modules: Vec::new(),
             registry_url: default_module_registry_url(),
             module_database_backend: None,
-            module_configs: std::collections::HashMap::new(),
+            module_configs: default_module_configs(),
             watch_enabled: true,
             watch_auto_load: false,
             watch_auto_unload: false,
@@ -744,7 +773,8 @@ pub struct NodeConfig {
     #[serde(default)]
     pub signet_challenge: Option<String>,
 
-    /// Module system configuration. Omitted in a config file ⇒ same as `ModuleConfig::default()` (enabled, auto-discover).
+    /// Module system configuration. Omitted in a config file ⇒ `ModuleConfig::default()`
+    /// (the three default modules, bootstrap if missing).
     #[serde(default = "default_modules_option")]
     pub modules: Option<ModuleConfig>,
 

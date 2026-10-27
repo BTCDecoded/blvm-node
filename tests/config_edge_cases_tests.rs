@@ -342,7 +342,7 @@ fn test_config_roundtrip_complex_scenario() {
     }
     assert_eq!(
         deserialized.modules.as_ref().unwrap().enabled_modules.len(),
-        2
+        5
     );
 }
 

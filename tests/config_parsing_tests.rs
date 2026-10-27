@@ -17,7 +17,24 @@ fn test_module_config_default() {
     assert_eq!(config.modules_dir, "modules");
     assert_eq!(config.data_dir, "data/modules");
     assert_eq!(config.socket_dir, "data/modules/sockets");
-    assert!(config.enabled_modules.is_empty());
+    assert_eq!(
+        config
+            .enabled_modules
+            .get("blvm-miniscript")
+            .map(String::as_str),
+        Some("0.1.*")
+    );
+    assert_eq!(
+        config.enabled_modules.get("blvm-zmq").map(String::as_str),
+        Some("0.1.*")
+    );
+    assert_eq!(
+        config
+            .enabled_modules
+            .get("blvm-wallet-index")
+            .map(String::as_str),
+        Some("0.1.*")
+    );
     assert!(config.registry_url.is_some());
     assert!(config.disabled_modules.is_empty());
     assert!(config.module_database_backend.is_none());
@@ -145,8 +162,93 @@ transport_preference = "tcponly"
     let modules = config.modules.as_ref().expect("default modules");
     assert!(modules.enabled);
     assert_eq!(modules.modules_dir, "modules");
-    assert!(modules.enabled_modules.is_empty());
+    assert_eq!(
+        modules
+            .enabled_modules
+            .get("blvm-miniscript")
+            .map(String::as_str),
+        Some("0.1.*")
+    );
+    assert_eq!(
+        modules.enabled_modules.get("blvm-zmq").map(String::as_str),
+        Some("0.1.*")
+    );
+    assert_eq!(
+        modules
+            .enabled_modules
+            .get("blvm-wallet-index")
+            .map(String::as_str),
+        Some("0.1.*")
+    );
     assert!(modules.registry_url.is_some());
+    assert_eq!(
+        modules
+            .module_configs
+            .get("blvm-zmq")
+            .and_then(|c| c.get("hashblock"))
+            .map(String::as_str),
+        Some("tcp://127.0.0.1:28332")
+    );
+    assert!(modules.module_configs.get("blvm-wallet-index").is_none());
+}
+
+#[test]
+fn test_modules_table_keeps_the_baseline_pins() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"transport_preference = "tcponly"
+
+[modules]
+data_dir = "data/modules"
+blvm-payment = "0.1.*"
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("modules");
+    assert_eq!(modules.enabled_modules.len(), 4);
+    assert_eq!(
+        modules
+            .enabled_modules
+            .get("blvm-payment")
+            .map(String::as_str),
+        Some("0.1.*")
+    );
+    assert_eq!(
+        modules
+            .enabled_modules
+            .get("blvm-wallet-index")
+            .map(String::as_str),
+        Some("0.1.*")
+    );
+    assert_eq!(
+        modules
+            .module_configs
+            .get("blvm-zmq")
+            .and_then(|c| c.get("sequence"))
+            .map(String::as_str),
+        Some("tcp://127.0.0.1:28336")
+    );
+}
+
+#[test]
+fn test_explicit_empty_enabled_modules_clears_the_baseline() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"transport_preference = "tcponly"
+
+[modules]
+enabled_modules = []
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("modules");
+    assert!(modules.enabled_modules.is_empty());
 }
 
 #[test]
@@ -166,7 +268,7 @@ blvm-zmq = "0.3.*"
     .unwrap();
     let config = NodeConfig::from_toml_file(&path).unwrap();
     let modules = config.modules.as_ref().expect("modules");
-    assert_eq!(modules.enabled_modules.len(), 2);
+    assert_eq!(modules.enabled_modules.len(), 3);
     assert_eq!(
         modules
             .enabled_modules
@@ -177,6 +279,21 @@ blvm-zmq = "0.3.*"
     assert_eq!(
         modules.enabled_modules.get("blvm-zmq").map(String::as_str),
         Some("0.3.*")
+    );
+    assert_eq!(
+        modules
+            .enabled_modules
+            .get("blvm-wallet-index")
+            .map(String::as_str),
+        Some("0.1.*")
+    );
+    assert_eq!(
+        modules
+            .module_configs
+            .get("blvm-zmq")
+            .and_then(|c| c.get("hashblock"))
+            .map(String::as_str),
+        Some("tcp://127.0.0.1:28332")
     );
 }
 
@@ -203,6 +320,7 @@ enabled_modules = ["blvm-miniscript", "blvm-zmq"]
             .map(String::as_str),
         Some("*")
     );
+    assert!(modules.enabled_modules.get("blvm-wallet-index").is_none());
 }
 
 #[test]
@@ -224,10 +342,17 @@ hashblock = "tcp://127.0.0.1:28332"
     .unwrap();
     let config = NodeConfig::from_toml_file(&path).unwrap();
     let modules = config.modules.as_ref().expect("modules");
-    assert_eq!(modules.enabled_modules.len(), 2);
+    assert_eq!(modules.enabled_modules.len(), 3);
     assert_eq!(
         modules.enabled_modules.get("blvm-zmq").map(String::as_str),
         Some("0.3.*")
+    );
+    assert_eq!(
+        modules
+            .enabled_modules
+            .get("blvm-wallet-index")
+            .map(String::as_str),
+        Some("0.1.*")
     );
     assert_eq!(
         modules
@@ -236,6 +361,14 @@ hashblock = "tcp://127.0.0.1:28332"
             .and_then(|c| c.get("hashblock"))
             .map(String::as_str),
         Some("tcp://127.0.0.1:28332")
+    );
+    assert_eq!(
+        modules
+            .module_configs
+            .get("blvm-zmq")
+            .and_then(|c| c.get("hashtx"))
+            .map(String::as_str),
+        Some("tcp://127.0.0.1:28333")
     );
     assert!(
         !modules
@@ -631,7 +764,7 @@ fn test_node_config_with_custom_modules() {
         .insert("module2".into(), "2.0.0".into());
     config.modules = Some(module_config);
 
-    assert_eq!(config.modules.as_ref().unwrap().enabled_modules.len(), 2);
+    assert_eq!(config.modules.as_ref().unwrap().enabled_modules.len(), 5);
 }
 
 #[test]

@@ -40,6 +40,17 @@ pub const CHECKSUM_FILENAMES: &[&str] = &["sha256sums.txt", "SHA256SUMS"];
 /// Default Git ref for `module.toml` when the registry omits `module_toml_url` (repo-root convention).
 pub const DEFAULT_MODULE_MANIFEST_REF: &str = "main";
 
+/// Repositories for the modules `ModuleConfig::default()` enables.
+/// Used when `modules.json` has not yet listed the name.
+pub fn builtin_default_module_repo(name: &str) -> Option<&'static str> {
+    match name {
+        "blvm-miniscript" => Some("BTCDecoded/blvm-miniscript"),
+        "blvm-zmq" => Some("BTCDecoded/blvm-zmq"),
+        "blvm-wallet-index" => Some("BTCDecoded/blvm-wallet-index"),
+        _ => None,
+    }
+}
+
 /// Raw GitHub URL for `module.toml` at the repository root (`owner/name` + ref), like a `Cargo.toml` layout.
 pub fn default_module_toml_raw_url(github_repo: &str, git_ref: &str) -> String {
     let github_repo = github_repo.trim();
@@ -303,6 +314,23 @@ pub async fn try_fetch_expected_sha_for_native_module(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_default_modules_have_repos() {
+        assert_eq!(
+            builtin_default_module_repo("blvm-miniscript"),
+            Some("BTCDecoded/blvm-miniscript")
+        );
+        assert_eq!(
+            builtin_default_module_repo("blvm-zmq"),
+            Some("BTCDecoded/blvm-zmq")
+        );
+        assert_eq!(
+            builtin_default_module_repo("blvm-wallet-index"),
+            Some("BTCDecoded/blvm-wallet-index")
+        );
+        assert!(builtin_default_module_repo("blvm-payment").is_none());
+    }
 
     #[test]
     fn sha256_from_checksums_finds_line() {
