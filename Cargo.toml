@@ -163,7 +163,7 @@ sysinfo = { version = "=0.30", optional = true }
 reqwest = { version = "=0.12", optional = true, features = ["json"] }
 
 # Cross-platform optional deps (top-level so Windows release builds match Linux defaults).
-zstd = { version = "=0.13", optional = true }
+zstd = { version = "=0.14", optional = true }
 notify = { version = "=6.1", optional = true }
 iroh = { version = "=0.95", optional = true }
 quinn = { version = "=0.11", optional = true }
