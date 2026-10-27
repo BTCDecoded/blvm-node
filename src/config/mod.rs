@@ -727,6 +727,49 @@ pub fn default_assume_valid_height_for_network(network: &str) -> u64 {
     }
 }
 
+/// Bitcoin display order (the 64-hex block id) reversed into the internal
+/// header-hash bytes `connect_block` compares. A 32-integer array is stored
+/// as written. `null` leaves the hash unset.
+fn deserialize_assume_valid_hash<'de, D>(deserializer: D) -> Result<Option<[u8; 32]>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Bytes([u8; 32]),
+        Hex(String),
+    }
+
+    let value = Option::<Repr>::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(Repr::Bytes(bytes)) => Ok(Some(bytes)),
+        Some(Repr::Hex(text)) => assume_valid_hash_from_display_hex(&text)
+            .map(Some)
+            .map_err(D::Error::custom),
+    }
+}
+
+fn assume_valid_hash_from_display_hex(text: &str) -> Result<[u8; 32], String> {
+    let trimmed = text.trim();
+    let hex_str = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    if hex_str.len() != 64 || !hex_str.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(
+            "assume_valid_hash must be a 64-character block hash or an array of 32 bytes"
+                .to_string(),
+        );
+    }
+    let mut bytes = hex::decode(hex_str).map_err(|err| err.to_string())?;
+    bytes.reverse();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
 /// Block validation configuration (maps to blvm-consensus BlockValidationConfig)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockValidationNodeConfig {
@@ -734,9 +777,9 @@ pub struct BlockValidationNodeConfig {
     #[serde(default)]
     pub assume_valid_height: u64,
 
-    /// Assume-valid block hash: when set, verify block at assume_valid_height matches; skip verification for ancestors.
-    /// Takes precedence over assume_valid_height when both set.
-    #[serde(default)]
+    /// Block hash at `assume_valid_height`. A 64-character Bitcoin block id is
+    /// stored in internal byte order. An array of 32 integers is stored as written.
+    #[serde(default, deserialize_with = "deserialize_assume_valid_hash")]
     pub assume_valid_hash: Option<[u8; 32]>,
 }
 
@@ -1438,7 +1481,7 @@ pub struct RestApiConfig {
     #[serde(default)]
     pub listen_addr: Option<SocketAddr>,
 
-    /// Enable payment endpoints (default: false, requires bip70-http feature)
+    /// Kept so an existing toml file still loads. The node no longer serves payment REST routes.
     #[serde(default = "default_false")]
     pub payment_endpoints_enabled: bool,
 }

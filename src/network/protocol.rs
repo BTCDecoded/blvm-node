@@ -708,7 +708,7 @@ pub struct PaymentRequestMessage {
     /// Optional CTV covenant proof (for instant proof)
     #[cfg(feature = "ctv")]
     #[serde(default)]
-    pub covenant_proof: Option<crate::payment::covenant::CovenantProof>,
+    pub covenant_proof: Option<Vec<u8>>,
 }
 
 /// payment message - Customer payment transaction(s)
@@ -747,10 +747,10 @@ pub struct PaymentProofMessage {
     pub request_id: u64,
     /// Payment request ID this proof commits to
     pub payment_request_id: String,
-    /// CTV covenant proof
-    pub covenant_proof: crate::payment::covenant::CovenantProof,
-    /// Optional full transaction template (for verification)
-    pub transaction_template: Option<crate::payment::covenant::TransactionTemplate>,
+    /// Serialized CTV covenant proof. The payment module owns the proof type.
+    pub covenant_proof: Vec<u8>,
+    /// Optional serialized transaction template.
+    pub transaction_template: Option<Vec<u8>>,
 }
 
 /// settlementnotification message - Settlement status update

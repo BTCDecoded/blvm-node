@@ -4,7 +4,6 @@
 
 mod common;
 
-use blvm_node::config::PaymentConfig;
 use blvm_node::module::encryption::{
     EncryptedModuleMetadata, ModuleEncryption, load_encrypted_module, store_encrypted_module,
 };
@@ -12,8 +11,6 @@ use blvm_node::module::registry::client::ModuleRegistry;
 use blvm_node::module::registry::manifest::{ModuleManifest, PaymentSection};
 use blvm_node::network::module_registry_extensions::handle_get_module;
 use blvm_node::network::protocol::GetModuleMessage;
-use blvm_node::payment::processor::PaymentProcessor;
-use blvm_node::payment::state_machine::PaymentStateMachine;
 use blvm_protocol::address::{BitcoinAddress, Network};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -139,7 +136,7 @@ async fn test_handle_get_module_payment_required_no_payment_id() {
         payment_id: None,
     };
 
-    let result = handle_get_module(message, Some(registry), None, None, None, None, None).await;
+    let result = handle_get_module(message, Some(registry), None, None, None, None).await;
 
     // Should return error requesting payment
     assert!(result.is_err());
@@ -209,16 +206,6 @@ async fn test_handle_get_module_payment_pending_serves_encrypted() {
         .await
         .unwrap();
 
-    // Create payment state machine with pending payment
-    let config = PaymentConfig::default();
-    let processor = Arc::new(PaymentProcessor::new(config).unwrap());
-    let state_machine = Arc::new(PaymentStateMachine::new(processor));
-
-    // Create payment request to set state to RequestCreated (pending)
-    // We'll use the state machine's create_payment_request method
-    // For this test, we'll manually set up the state by creating a payment request
-    // Note: This is a simplified test - in real usage, state would be set via payment processing
-
     let registry = create_mock_registry(&temp_dir, module_name, module_binary).await;
 
     let message = GetModuleMessage {
@@ -232,7 +219,6 @@ async fn test_handle_get_module_payment_pending_serves_encrypted() {
         message,
         Some(registry),
         None,
-        Some(state_machine),
         Some(Arc::new(encryption)),
         Some(modules_dir),
         None,
@@ -292,20 +278,6 @@ async fn test_handle_get_module_payment_confirmed_serves_decrypted() {
         .await
         .unwrap();
 
-    // Create payment state machine with settled payment
-    let config = PaymentConfig::default();
-    let processor = Arc::new(PaymentProcessor::new(config).unwrap());
-    let state_machine = Arc::new(PaymentStateMachine::new(processor));
-
-    // Set payment state to Settled (confirmed)
-
-    let tx_hash = [0u8; 32];
-    let block_hash = [0u8; 32];
-    state_machine
-        .mark_settled(payment_id, tx_hash, block_hash, 1, None)
-        .await
-        .unwrap();
-
     let registry = create_mock_registry(&temp_dir, module_name, module_binary).await;
 
     let message = GetModuleMessage {
@@ -319,7 +291,6 @@ async fn test_handle_get_module_payment_confirmed_serves_decrypted() {
         message,
         Some(registry),
         None,
-        Some(state_machine),
         Some(Arc::new(encryption)),
         Some(modules_dir),
         None,

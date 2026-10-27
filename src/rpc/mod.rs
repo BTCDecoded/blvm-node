@@ -16,8 +16,6 @@ pub mod mining;
 
 pub mod network;
 pub mod params;
-#[cfg(feature = "bip70-http")]
-pub mod payment;
 pub mod rawtx;
 #[cfg(feature = "rest-api")]
 pub mod rest;
@@ -55,8 +53,6 @@ pub struct RpcManager {
     quinn_addr: Option<SocketAddr>,
     #[cfg(feature = "rest-api")]
     rest_api_addr: Option<SocketAddr>,
-    #[cfg(feature = "rest-api")]
-    payment_endpoints_enabled: bool,
     blockchain_rpc: blockchain::BlockchainRpc,
     network_rpc: network::NetworkRpc,
     mining_rpc: mining::MiningRpc,
@@ -79,12 +75,6 @@ pub struct RpcManager {
     metrics: Option<Arc<MetricsCollector>>,
     /// Performance profiler (optional)
     profiler: Option<Arc<PerformanceProfiler>>,
-    /// Payment processor for BIP70 HTTP endpoints
-    #[cfg(feature = "bip70-http")]
-    payment_processor: Option<Arc<crate::payment::processor::PaymentProcessor>>,
-    /// Payment state machine for BIP70 / path-3 RPC
-    #[cfg(feature = "bip70-http")]
-    payment_state_machine: Option<Arc<crate::payment::state_machine::PaymentStateMachine>>,
     /// Event publisher for module event notifications (optional)
     event_publisher: Option<Arc<crate::node::event_publisher::EventPublisher>>,
     /// Maximum request body size in bytes (default: 1MB)
@@ -159,8 +149,6 @@ impl RpcManager {
             quinn_addr: None,
             #[cfg(feature = "rest-api")]
             rest_api_addr: None,
-            #[cfg(feature = "rest-api")]
-            payment_endpoints_enabled: false,
             blockchain_rpc: blockchain::BlockchainRpc::new(),
             network_rpc: network::NetworkRpc::new(),
             mining_rpc: mining::MiningRpc::new().with_commons_gbt(commons_gbt.clone()),
@@ -181,10 +169,6 @@ impl RpcManager {
             allow_unauthenticated_rpc: false,
             marketplace_fetch_enabled: false,
             node_shutdown: None,
-            #[cfg(feature = "bip70-http")]
-            payment_processor: None,
-            #[cfg(feature = "bip70-http")]
-            payment_state_machine: None,
             event_publisher: None,
             max_request_size_bytes: 1_048_576,
             max_connections_per_ip_per_minute: 10,
@@ -462,26 +446,6 @@ impl RpcManager {
         self
     }
 
-    /// Set payment processor for BIP70 HTTP endpoints
-    #[cfg(feature = "bip70-http")]
-    pub fn with_payment_processor(
-        mut self,
-        processor: Arc<crate::payment::processor::PaymentProcessor>,
-    ) -> Self {
-        self.payment_processor = Some(processor);
-        self
-    }
-
-    /// Set payment state machine for CTV payment endpoints
-    #[cfg(feature = "bip70-http")]
-    pub fn with_payment_state_machine(
-        mut self,
-        state_machine: Arc<crate::payment::state_machine::PaymentStateMachine>,
-    ) -> Self {
-        self.payment_state_machine = Some(state_machine);
-        self
-    }
-
     /// Create a new RPC manager with both TCP and QUIC transports
     #[cfg(feature = "quinn")]
     pub fn with_quinn(tcp_addr: SocketAddr, quinn_addr: SocketAddr) -> Self {
@@ -491,8 +455,6 @@ impl RpcManager {
             quinn_addr: Some(quinn_addr),
             #[cfg(feature = "rest-api")]
             rest_api_addr: None,
-            #[cfg(feature = "rest-api")]
-            payment_endpoints_enabled: false,
             #[cfg(feature = "rest-api")]
             rest_api_shutdown_tx: None,
             blockchain_rpc: blockchain::BlockchainRpc::new(),
@@ -512,10 +474,6 @@ impl RpcManager {
             allow_unauthenticated_rpc: false,
             marketplace_fetch_enabled: false,
             node_shutdown: None,
-            #[cfg(feature = "bip70-http")]
-            payment_processor: None,
-            #[cfg(feature = "bip70-http")]
-            payment_state_machine: None,
             event_publisher: None,
             max_request_size_bytes: 1_048_576,
             max_connections_per_ip_per_minute: 10,
@@ -538,12 +496,6 @@ impl RpcManager {
     #[cfg(feature = "rest-api")]
     pub fn enable_rest_api(&mut self, rest_api_addr: SocketAddr) {
         self.rest_api_addr = Some(rest_api_addr);
-    }
-
-    /// `/api/v1/payments` is served when this is true and the bip70-http feature is compiled.
-    #[cfg(feature = "rest-api")]
-    pub fn set_payment_endpoints_enabled(&mut self, enabled: bool) {
-        self.payment_endpoints_enabled = enabled;
     }
 
     /// Get the RPC server address
@@ -730,23 +682,6 @@ impl RpcManager {
             }
         };
 
-        #[cfg(feature = "bip70-http")]
-        let server = {
-            if let Some(ref state_machine) = self.payment_state_machine {
-                let mut payment_rpc =
-                    payment::PaymentRpc::with_state_machine(Arc::clone(state_machine));
-                if let (Some(mempool), Some(storage)) =
-                    (self.mempool.as_ref(), self.storage.as_ref())
-                {
-                    payment_rpc =
-                        payment_rpc.with_chain_access(Arc::clone(mempool), Arc::clone(storage));
-                }
-                server.with_payment(Arc::new(payment_rpc))
-            } else {
-                server
-            }
-        };
-
         let server = server.with_rpc_timeout(crate::utils::timeout::rpc_timeout_from_config(
             self.request_timeouts.as_ref(),
         ));
@@ -876,17 +811,6 @@ impl RpcManager {
                 };
                 rest_server = rest_server.with_connection_limiter(Arc::clone(&connection_limiter));
                 rest_server = rest_server.with_control(Arc::clone(&control_rpc));
-                rest_server = rest_server.with_payment_endpoints(self.payment_endpoints_enabled);
-
-                // Set payment processor if available
-                #[cfg(feature = "bip70-http")]
-                if let Some(ref processor) = self.payment_processor {
-                    rest_server = rest_server.with_payment_processor(Arc::clone(processor));
-                }
-                #[cfg(feature = "bip70-http")]
-                if let Some(ref state_machine) = self.payment_state_machine {
-                    rest_server = rest_server.with_payment_state_machine(Arc::clone(state_machine));
-                }
 
                 Some(tokio::spawn(async move {
                     tokio::select! {

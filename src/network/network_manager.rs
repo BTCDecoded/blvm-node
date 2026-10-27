@@ -135,14 +135,8 @@ pub struct NetworkManager {
     /// Module registry for serving modules via P2P
     module_registry:
         Arc<tokio::sync::Mutex<Option<Arc<crate::module::registry::client::ModuleRegistry>>>>,
-    /// Payment processor for BIP70 payments (HTTP and P2P)
-    payment_processor:
-        Arc<tokio::sync::Mutex<Option<Arc<crate::payment::processor::PaymentProcessor>>>>,
-    /// Payment state machine for unified payment coordination
-    payment_state_machine:
-        Arc<tokio::sync::Mutex<Option<Arc<crate::payment::state_machine::PaymentStateMachine>>>>,
-    /// Merchant private key for signing payment ACKs (optional)
-    merchant_key: Arc<tokio::sync::Mutex<Option<[u8; 32]>>>,
+    /// Node API. Paid GetModule asks blvm-payment through this.
+    node_api: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::module::traits::NodeAPI>>>>,
     /// Node payment address script (for module downloads - 10% fee)
     node_payment_script: Arc<tokio::sync::Mutex<Option<Vec<u8>>>>,
     /// Module encryption for encrypted module serving
@@ -531,9 +525,7 @@ impl NetworkManager {
             storage: None,
             mempool_manager: None,
             module_registry: Arc::new(tokio::sync::Mutex::new(None)),
-            payment_processor: Arc::new(tokio::sync::Mutex::new(None)),
-            payment_state_machine: Arc::new(tokio::sync::Mutex::new(None)),
-            merchant_key: Arc::new(tokio::sync::Mutex::new(None)),
+            node_api: Arc::new(tokio::sync::Mutex::new(None)),
             node_payment_script: Arc::new(tokio::sync::Mutex::new(None)),
             module_encryption: Arc::new(tokio::sync::Mutex::new(None)),
             modules_dir: Arc::new(tokio::sync::Mutex::new(None)),
@@ -636,32 +628,14 @@ impl NetworkManager {
         *self.module_registry.lock().await = Some(module_registry);
     }
 
-    /// Set payment processor for BIP70 payments (HTTP and P2P)
-    pub async fn set_payment_processor(
-        &self,
-        processor: Arc<crate::payment::processor::PaymentProcessor>,
-    ) {
-        *self.payment_processor.lock().await = Some(processor);
-    }
-
-    /// Set merchant private key for signing payment ACKs
-    pub async fn set_merchant_key(&self, merchant_key: Option<[u8; 32]>) {
-        *self.merchant_key.lock().await = merchant_key;
+    /// Remember the node API so paid GetModule can ask blvm-payment.
+    pub async fn set_node_api(&self, api: Arc<dyn crate::module::traits::NodeAPI>) {
+        *self.node_api.lock().await = Some(api);
     }
 
     /// Set node payment address script (for module downloads)
     pub async fn set_node_payment_script(&self, script: Option<Vec<u8>>) {
         *self.node_payment_script.lock().await = script;
-    }
-
-    /// Set payment state machine for unified payment coordination
-    pub async fn set_payment_state_machine(
-        &self,
-        state_machine: Arc<crate::payment::state_machine::PaymentStateMachine>,
-    ) {
-        #[cfg(feature = "ctv")]
-        state_machine.set_network_sender(self.peer_tx.clone());
-        *self.payment_state_machine.lock().await = Some(state_machine);
     }
 
     /// Set module encryption for encrypted module serving
@@ -3264,17 +3238,10 @@ impl NetworkManager {
         &self.module_registry
     }
 
-    pub(crate) fn payment_processor(
+    pub(crate) fn node_api(
         &self,
-    ) -> &Arc<tokio::sync::Mutex<Option<Arc<crate::payment::processor::PaymentProcessor>>>> {
-        &self.payment_processor
-    }
-
-    pub(crate) fn payment_state_machine(
-        &self,
-    ) -> &Arc<tokio::sync::Mutex<Option<Arc<crate::payment::state_machine::PaymentStateMachine>>>>
-    {
-        &self.payment_state_machine
+    ) -> &Arc<tokio::sync::Mutex<Option<Arc<dyn crate::module::traits::NodeAPI>>>> {
+        &self.node_api
     }
 
     pub(crate) fn module_encryption(
@@ -3289,10 +3256,6 @@ impl NetworkManager {
 
     pub(crate) fn node_payment_script(&self) -> &Arc<tokio::sync::Mutex<Option<Vec<u8>>>> {
         &self.node_payment_script
-    }
-
-    pub(crate) fn merchant_key(&self) -> &Arc<tokio::sync::Mutex<Option<[u8; 32]>>> {
-        &self.merchant_key
     }
 
     pub(crate) fn event_publisher(

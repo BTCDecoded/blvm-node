@@ -53,18 +53,7 @@ impl NetworkManager {
         }
 
         let registry = self.module_registry().lock().await.as_ref().map(Arc::clone);
-        let payment_processor = self
-            .payment_processor()
-            .lock()
-            .await
-            .as_ref()
-            .map(Arc::clone);
-        let payment_state_machine = self
-            .payment_state_machine()
-            .lock()
-            .await
-            .as_ref()
-            .map(Arc::clone);
+        let node_api = self.node_api().lock().await.as_ref().map(Arc::clone);
         let encryption = self
             .module_encryption()
             .lock()
@@ -77,8 +66,7 @@ impl NetworkManager {
         match handle_get_module(
             message,
             registry,
-            payment_processor,
-            payment_state_machine,
+            node_api,
             encryption,
             modules_dir,
             node_script,

@@ -30,6 +30,26 @@ async fn publish_network_event_if_configured(
     }
 }
 
+async fn publish_peer_payment(
+    nm: &NetworkManager,
+    command: &str,
+    payload: Vec<u8>,
+    peer_addr: std::net::SocketAddr,
+) {
+    let event = EventPayload::PeerPayment {
+        command: command.to_string(),
+        payload,
+        peer_addr: peer_addr.to_string(),
+    };
+    publish_network_event_if_configured(
+        nm.event_publisher(),
+        EventType::PeerPayment,
+        event,
+        "Failed to publish PeerPayment",
+    )
+    .await;
+}
+
 /// Handle a single network message (full dispatch for process_messages loop)
 pub(crate) async fn handle_network_message(
     nm: &NetworkManager,
@@ -163,36 +183,16 @@ pub(crate) async fn handle_network_message(
             debug!("ModuleListReceived (no request matching)");
         }
         NetworkMessage::GetPaymentRequestReceived(data, peer_addr) => {
-            let protocol_msg = match ProtocolParser::parse_message(&data) {
-                Ok(ProtocolMessage::GetPaymentRequest(msg)) => msg,
-                _ => {
-                    debug!("Invalid GetPaymentRequest message from {}", peer_addr);
-                    return Ok(());
-                }
-            };
-            ignore_error(
-                || nm.handle_get_payment_request(peer_addr, protocol_msg),
-                &format!("Error handling GetPaymentRequest from {peer_addr}"),
-            )
-            .await;
+            publish_peer_payment(nm, "getpaymentrequest", data, peer_addr).await;
         }
         NetworkMessage::PaymentReceived(data, peer_addr) => {
-            let protocol_msg = match ProtocolParser::parse_message(&data) {
-                Ok(ProtocolMessage::Payment(msg)) => msg,
-                _ => {
-                    debug!("Invalid Payment message from {}", peer_addr);
-                    return Ok(());
-                }
-            };
-            ignore_error(
-                || nm.handle_payment(peer_addr, protocol_msg),
-                &format!("Error handling Payment from {peer_addr}"),
-            )
-            .await;
+            publish_peer_payment(nm, "payment", data, peer_addr).await;
         }
-        NetworkMessage::PaymentRequestReceived(_data, _peer_addr)
-        | NetworkMessage::PaymentACKReceived(_data, _peer_addr) => {
-            debug!("Payment response received (handled via complete_request if applicable)");
+        NetworkMessage::PaymentRequestReceived(data, peer_addr) => {
+            publish_peer_payment(nm, "paymentrequest", data, peer_addr).await;
+        }
+        NetworkMessage::PaymentACKReceived(data, peer_addr) => {
+            publish_peer_payment(nm, "paymentack", data, peer_addr).await;
         }
         NetworkMessage::HeadersReceived(_data, _peer_addr) => {
             // Headers are handled in wire_dispatch via complete_headers_request
@@ -225,12 +225,12 @@ pub(crate) async fn handle_network_message(
             )
             .await;
         }
-        NetworkMessage::SettlementNotificationReceived(_data, _peer_addr) => {
-            debug!("SettlementNotificationReceived");
+        NetworkMessage::SettlementNotificationReceived(data, peer_addr) => {
+            publish_peer_payment(nm, "settlementnotification", data, peer_addr).await;
         }
         #[cfg(feature = "ctv")]
-        NetworkMessage::PaymentProofReceived(_data, _peer_addr) => {
-            debug!("PaymentProofReceived");
+        NetworkMessage::PaymentProofReceived(data, peer_addr) => {
+            publish_peer_payment(nm, "paymentproof", data, peer_addr).await;
         }
         #[cfg(feature = "ctv")]
         NetworkMessage::SendPaymentProof(data, peer_addr) => {

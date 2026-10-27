@@ -32,7 +32,7 @@ use tracing::{debug, warn};
 ///
 /// Returns the decoded payload (without the 4-byte checksum suffix).
 /// Returns `None` if the input is not valid Base58 or the checksum does not match.
-pub(crate) fn base58check_decode(s: &str) -> Option<Vec<u8>> {
+pub fn base58check_decode(s: &str) -> Option<Vec<u8>> {
     const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
     // Count leading '1's (each encodes a leading zero byte).
@@ -71,7 +71,7 @@ pub(crate) fn base58check_decode(s: &str) -> Option<Vec<u8>> {
     Some(payload.to_vec())
 }
 
-pub(crate) fn base58check_encode(payload: &[u8]) -> String {
+pub fn base58check_encode(payload: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     let hash1 = Sha256::digest(payload);

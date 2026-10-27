@@ -149,7 +149,7 @@ cargo run --example rpc-address
 
 ### rpc-payment.rs
 
-**Purpose**: Demonstrate payment, vault, and pool RPC methods (blvm-node extensions)
+**Purpose**: Demonstrate payment, vault, and pool RPC methods served by blvm-payment
 
 **What it does**:
 - Shows `createpaymentrequest`, `createcovenantproof`, `getpaymentstate`, `listpayments`
@@ -161,7 +161,7 @@ cargo run --example rpc-address
 cargo run --example rpc-payment
 ```
 
-**Note**: Vault and pool methods require `--features ctv`
+**Note**: The node returns method-not-found until `blvm-payment` is loaded. That module is not in the default set.
 
 ---
 

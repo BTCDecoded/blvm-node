@@ -146,6 +146,8 @@ impl NodeApiIpc {
             RequestPayload::SubmitMempoolTransaction { .. } => {
                 MessageType::SubmitMempoolTransaction
             }
+            RequestPayload::GetTxMetadata { .. } => MessageType::GetTxMetadata,
+            RequestPayload::GetMempoolFeeRateSummary => MessageType::GetMempoolFeeRateSummary,
             RequestPayload::SubmitBlock { .. } => MessageType::SubmitBlock,
             RequestPayload::QueueReceivedBlock { .. } => MessageType::QueueReceivedBlock,
             RequestPayload::MergeBlockServeDenylist { .. } => MessageType::MergeBlockServeDenylist,
@@ -444,6 +446,34 @@ impl NodeAPI for NodeApiIpc {
                 )),
             },
         )
+        .await
+    }
+
+    async fn get_tx_metadata(
+        &self,
+        txid: &Hash,
+    ) -> Result<Option<crate::module::traits::TxBlockMetadata>, ModuleError> {
+        self.request(
+            RequestPayload::GetTxMetadata { txid: *txid },
+            |payload| match payload {
+                ResponsePayload::TxMetadata(metadata) => Ok(metadata),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn get_mempool_fee_rate_summary(
+        &self,
+    ) -> Result<crate::module::traits::MempoolFeeRateSummary, ModuleError> {
+        self.request(RequestPayload::GetMempoolFeeRateSummary, |payload| match payload {
+            ResponsePayload::MempoolFeeRateSummary(summary) => Ok(summary),
+            _ => Err(ModuleError::OperationError(
+                "Unexpected response type".to_string(),
+            )),
+        })
         .await
     }
 

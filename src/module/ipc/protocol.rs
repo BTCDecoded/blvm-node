@@ -167,6 +167,10 @@ pub enum MessageType {
     GetBlockTemplateDeclared,
     /// JD ProvideMissing → mempool (`SendTransactions`). Added at end.
     SubmitMempoolTransaction,
+    /// Tx index block location. Added at end so existing variant indices stay put.
+    GetTxMetadata,
+    /// Positive mempool fee-rate summary. Added at end.
+    GetMempoolFeeRateSummary,
 }
 
 /// Request message from module to node
@@ -392,6 +396,10 @@ pub enum RequestPayload {
         tx: Transaction,
         witnesses: Option<Vec<blvm_protocol::Witness>>,
     },
+    GetTxMetadata {
+        txid: Hash,
+    },
+    GetMempoolFeeRateSummary,
 }
 
 /// CLI spec for module commands (JSON-serializable structure)
@@ -573,6 +581,8 @@ pub enum ResponsePayload {
     NodeSyncStatus(SyncStatus),
     /// `true` = added, `false` = already present.
     MempoolTransactionSubmitted(bool),
+    TxMetadata(Option<crate::module::traits::TxBlockMetadata>),
+    MempoolFeeRateSummary(crate::module::traits::MempoolFeeRateSummary),
 }
 
 /// Event message from node to subscribed modules
@@ -1224,6 +1234,12 @@ pub enum EventPayload {
     ModuleRemoved {
         module_name: String,
         version: String,
+    },
+    /// Raw BIP70 frame from a peer. `command` is the P2P command name.
+    PeerPayment {
+        command: String,
+        payload: Vec<u8>,
+        peer_addr: String,
     },
 }
 

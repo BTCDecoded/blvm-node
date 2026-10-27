@@ -49,7 +49,6 @@ pub struct Node {
     /// Module subsystem: registry, manager, event publisher
     module_subsystem: Option<subsystems::ModuleSubsystem>,
     /// Payment subsystem: processor, state machine, reorg handler
-    payment_subsystem: Option<subsystems::PaymentSubsystem>,
     rpc: RpcManager,
     #[allow(dead_code)]
     sync_coordinator: sync::SyncCoordinator,
@@ -178,7 +177,6 @@ impl Node {
             mempool_manager: mempool_manager_arc,
             mining_coordinator,
             module_subsystem: None,
-            payment_subsystem: None,
             metrics,
             profiler,
             protocol_version,
@@ -518,8 +516,6 @@ impl Node {
                 if rest_cfg.enabled {
                     let bind = rest_cfg.resolve_bind_addr(self.rpc.rpc_addr());
                     self.rpc.enable_rest_api(bind);
-                    self.rpc
-                        .set_payment_endpoints_enabled(rest_cfg.payment_endpoints_enabled);
                     info!("[START_COMPONENTS] REST API enabled on {}", bind);
                 }
             }
@@ -1283,6 +1279,9 @@ impl Node {
             // We'll update it via Arc::get_mut if possible, or store it separately
 
             let mut node_api = Arc::new(node_api_impl);
+            self.network
+                .set_node_api(Arc::clone(&node_api) as Arc<dyn crate::module::traits::NodeAPI>)
+                .await;
             // RPC may already be running; slot is shared with the live MiningRpc copies.
             self.rpc.set_commons_gbt(
                 Arc::clone(&node_api) as Arc<dyn crate::rpc::mining::CommonsGbtCaller>
@@ -1301,167 +1300,19 @@ impl Node {
                     .set_module_registry(Arc::clone(module_registry_arc));
                 info!("Module registry initialized and connected to network and module manager");
 
-                // Initialize payment processor if payment is enabled
-                let payment_config = self
-                    .config_sub(|c| c.payment.as_ref())
-                    .cloned()
-                    .unwrap_or_default();
-
-                if payment_config.p2p_enabled || payment_config.http_enabled {
-                    match crate::payment::processor::PaymentProcessor::new(payment_config.clone()) {
-                        Ok(mut processor) => {
-                            // Connect module registry to payment processor
-                            processor =
-                                processor.with_module_registry(Arc::clone(module_registry_arc));
-
-                            // Add module encryption support
-                            let module_encryption =
-                                Arc::new(crate::module::encryption::ModuleEncryption::new());
-                            processor =
-                                processor.with_module_encryption(Arc::clone(&module_encryption));
-
-                            // Add modules directory for storing encrypted/decrypted modules
-                            if let Some(module_config) = self.config_sub(|c| c.modules.as_ref()) {
-                                let modules_dir = PathBuf::from(&module_config.modules_dir);
-                                processor = processor.with_modules_dir(modules_dir);
-                            }
-
-                            let processor_arc = Arc::new(processor);
-
-                            // Store processor in node
-                            self.payment_subsystem
-                                .get_or_insert_with(Default::default)
-                                .payment_processor = Some(Arc::clone(&processor_arc));
-
-                            // Create payment state machine for unified payment coordination
-                            #[cfg(feature = "ctv")]
-                            let state_machine =
-                                crate::payment::state_machine::PaymentStateMachine::with_storage(
-                                    Arc::clone(&processor_arc),
-                                    Some(Arc::clone(&self.storage)),
-                                )
-                                .with_congestion_manager(
-                                    Some(Arc::clone(&self.mempool_manager)),
-                                    Some(Arc::clone(&self.storage)),
-                                    crate::payment::congestion::BatchConfig::default(),
-                                );
-                            #[cfg(not(feature = "ctv"))]
-                            let state_machine =
-                                crate::payment::state_machine::PaymentStateMachine::new(
-                                    Arc::clone(&processor_arc),
-                                );
-
-                            let state_machine_arc = Arc::new(state_machine);
-
-                            self.payment_subsystem
-                                .get_or_insert_with(Default::default)
-                                .payment_state_machine = Some(Arc::clone(&state_machine_arc));
-
-                            // Connect to network manager (for P2P payments)
-                            self.network
-                                .set_payment_processor(Arc::clone(&processor_arc))
-                                .await;
-                            self.network
-                                .set_payment_state_machine(Arc::clone(&state_machine_arc))
-                                .await;
-
-                            // Set merchant key from config if available
-                            let merchant_key =
-                                payment_config.merchant_key.as_ref().and_then(|hex_key| {
-                                    hex::decode(hex_key)
-                                        .ok()
-                                        .and_then(|bytes| bytes.try_into().ok())
-                                });
-                            self.network.set_merchant_key(merchant_key).await;
-
-                            // Set node payment address script from config if available
-                            let node_script = payment_config
-                                .node_payment_address
-                                .as_ref()
-                                .and_then(|addr_str| {
-                                    crate::rpc::rawtx::address_string_to_script_pubkey(addr_str)
-                                        .ok()
-                                });
-                            self.network.set_node_payment_script(node_script).await;
-
-                            // Set module encryption and modules directory in network manager
-                            self.network
-                                .set_module_encryption(Arc::clone(&module_encryption))
-                                .await;
-                            if let Some(module_config) = self.config_sub(|c| c.modules.as_ref()) {
-                                self.network
-                                    .set_modules_dir(PathBuf::from(&module_config.modules_dir))
-                                    .await;
-                            }
-
-                            // Connect to RPC manager (for HTTP payments)
-                            #[cfg(feature = "bip70-http")]
-                            {
-                                let rpc = std::mem::replace(
-                                    &mut self.rpc,
-                                    crate::rpc::RpcManager::new("127.0.0.1:0".parse().unwrap()),
-                                );
-                                self.rpc = rpc.with_payment_processor(Arc::clone(&processor_arc));
-                                let rpc = std::mem::replace(
-                                    &mut self.rpc,
-                                    crate::rpc::RpcManager::new("127.0.0.1:0".parse().unwrap()),
-                                );
-                                self.rpc =
-                                    rpc.with_payment_state_machine(Arc::clone(&state_machine_arc));
-                            }
-
-                            // Update node API with payment state machine
-                            // Try to get mutable access to update the Arc
-                            if let Some(node_api_mut) = Arc::get_mut(&mut node_api) {
-                                node_api_mut
-                                    .set_payment_state_machine(Arc::clone(&state_machine_arc));
-                                info!("Payment state machine set on NodeApiImpl");
-                            } else {
-                                // If we can't get mutable access (multiple references exist),
-                                // the payment state machine will be None until node_api is recreated
-                                // This is acceptable as payment features will work once modules reconnect
-                                warn!(
-                                    "Could not set payment state machine on NodeApiImpl (multiple references exist)"
-                                );
-                            }
-
-                            // Create SettlementMonitor and PaymentTxCache for reorg resilience
-                            #[cfg(feature = "ctv")]
-                            {
-                                let tx_cache = Arc::new(crate::payment::PaymentTxCache::new());
-                                let settlement_monitor = Arc::new(
-                                    crate::payment::SettlementMonitor::new(Arc::clone(
-                                        &state_machine_arc,
-                                    ))
-                                    .with_confirmation_depth(payment_config.safe_confirmation_depth)
-                                    .with_mempool_manager(Arc::clone(&self.mempool_manager))
-                                    .with_storage(Arc::clone(&self.storage))
-                                    .with_tx_cache(Arc::clone(&tx_cache)),
-                                );
-                                self.payment_subsystem
-                                    .get_or_insert_with(Default::default)
-                                    .payment_reorg_handler =
-                                    Some(crate::payment::PaymentReorgHandler::new(
-                                        Arc::clone(&state_machine_arc),
-                                        Some(Arc::clone(&self.storage)),
-                                        Some(Arc::clone(&self.mempool_manager)),
-                                        Some(tx_cache),
-                                        Some(settlement_monitor),
-                                        Arc::clone(&event_manager),
-                                    ));
-                            }
-
-                            info!(
-                                "Payment processor initialized: P2P={}, HTTP={}",
-                                payment_config.p2p_enabled, payment_config.http_enabled
-                            );
-                        }
-                        Err(e) => {
-                            warn!("Failed to initialize payment processor: {}", e);
-                        }
-                    }
+                // Paid module download decrypts here. Payment state lives in blvm-payment.
+                let module_encryption =
+                    Arc::new(crate::module::encryption::ModuleEncryption::new());
+                self.network
+                    .set_module_encryption(Arc::clone(&module_encryption))
+                    .await;
+                if let Some(module_config) = self.config_sub(|c| c.modules.as_ref()) {
+                    self.network
+                        .set_modules_dir(PathBuf::from(&module_config.modules_dir))
+                        .await;
                 }
             }
+
             if module_registry_arc.is_none() {
                 warn!(
                     "Failed to initialize module registry - modules will only load from local directory"

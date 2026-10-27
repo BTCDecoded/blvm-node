@@ -197,6 +197,20 @@ pub trait NodeAPI: Send + Sync {
     /// Get current block height
     async fn get_block_height(&self) -> Result<u64, ModuleError>;
 
+    /// Block location of a confirmed transaction from the tx index.
+    ///
+    /// `None` when the txid is not in the index. Confirmations are
+    /// `get_block_height() - block_height + 1` in the caller.
+    async fn get_tx_metadata(&self, _txid: &Hash) -> Result<Option<TxBlockMetadata>, ModuleError> {
+        Ok(None)
+    }
+
+    /// Positive mempool fee rates, summarized. Empty pool is zeros.
+    /// The caller applies its own target fee rate.
+    async fn get_mempool_fee_rate_summary(&self) -> Result<MempoolFeeRateSummary, ModuleError> {
+        Ok(MempoolFeeRateSummary::default())
+    }
+
     /// Get UTXO by outpoint (read-only, cannot modify)
     async fn get_utxo(
         &self,
@@ -902,6 +916,8 @@ pub enum EventType {
     ModuleUpdated,
     /// Module removed
     ModuleRemoved,
+    /// Inbound BIP70 bytes on the node peer socket. Subscribers only.
+    PeerPayment,
 }
 
 /// Module system errors
@@ -1159,6 +1175,22 @@ pub struct LightningInfo {
     pub channel_count: usize,
     /// Total channel capacity (sats)
     pub total_capacity_sats: u64,
+}
+
+/// Confirmed-transaction location from the tx index. No body, no script scan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TxBlockMetadata {
+    pub block_hash: Hash,
+    pub block_height: u64,
+}
+
+/// Average and median of positive mempool fee rates (sat/vB).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MempoolFeeRateSummary {
+    /// How many positive rates were summarized.
+    pub sample_count: usize,
+    pub avg_sat_vb: u64,
+    pub median_sat_vb: u64,
 }
 
 /// Payment state

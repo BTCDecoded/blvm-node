@@ -9,27 +9,16 @@
 pub mod addresses;
 pub mod blocks;
 pub mod chain;
-#[cfg(feature = "ctv")]
-#[cfg(feature = "bip70-http")]
-pub mod congestion;
 pub mod fees;
 pub mod mempool;
 pub mod mining;
 pub mod network;
 pub mod node;
-#[cfg(feature = "bip70-http")]
-pub mod payment;
-#[cfg(feature = "ctv")]
-#[cfg(feature = "bip70-http")]
-pub mod pool;
 pub mod rbac;
 pub mod server;
 pub mod transactions;
 pub mod types;
 pub mod validation;
-#[cfg(feature = "ctv")]
-#[cfg(feature = "bip70-http")]
-pub mod vault;
 
 #[cfg(test)]
 mod tests;

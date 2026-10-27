@@ -598,6 +598,14 @@ impl ModuleApiHub {
                     .await?;
                 ResponsePayload::Bool(true)
             }
+            RequestPayload::GetTxMetadata { txid } => {
+                let metadata = self.node_api.get_tx_metadata(txid).await?;
+                ResponsePayload::TxMetadata(metadata)
+            }
+            RequestPayload::GetMempoolFeeRateSummary => {
+                let summary = self.node_api.get_mempool_fee_rate_summary().await?;
+                ResponsePayload::MempoolFeeRateSummary(summary)
+            }
             // Module RPC Endpoint Registration
             RequestPayload::RegisterRpcEndpoint {
                 method,
@@ -705,6 +713,8 @@ impl ModuleApiHub {
             RequestPayload::SetBlockServeMaintenanceMode { .. } => {
                 "set_block_serve_maintenance_mode"
             }
+            RequestPayload::GetTxMetadata { .. } => "get_tx_metadata",
+            RequestPayload::GetMempoolFeeRateSummary => "get_mempool_fee_rate_summary",
             // Filesystem API
             RequestPayload::ReadFile { .. } => "read_file",
             RequestPayload::WriteFile { .. } => "write_file",

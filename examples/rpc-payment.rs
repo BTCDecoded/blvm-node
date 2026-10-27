@@ -1,19 +1,17 @@
 //! Example: Payment, vault, and pool RPC methods
 //!
-//! This example demonstrates the payment-related JSON-RPC methods available
-//! in blvm-node. These methods cover BIP70 payment requests, CTV covenant
-//! vaults, and payment pools — all blvm-node extensions beyond Bitcoin Core.
+//! These methods are served by the `blvm-payment` process after it is loaded.
+//! A default node has no payment state machine, so the same names are
+//! method-not-found until that module registers them.
 //!
 //! This example shows the RPC request format. To test with a running node:
-//!   1. Start blvm-node with BIP70: blvm-node --network testnet --features bip70-http,ctv
+//!   1. Load blvm-payment (it is not in the default module set)
 //!   2. Run this example: cargo run --example rpc-payment
 //!
 //! Or use curl:
 //!   curl -X POST http://127.0.0.1:18332 \
 //!     -H "Content-Type: application/json" \
 //!     -d '{"jsonrpc":"2.0","method":"listpayments","params":[],"id":1}'
-//!
-//! Note: Vault and pool methods require the `ctv` feature flag.
 
 use serde_json::json;
 
@@ -22,7 +20,7 @@ fn main() -> anyhow::Result<()> {
     println!("==================================");
     println!();
     println!("These methods handle BIP70 payments, CTV vaults, and payment pools.");
-    println!("These are blvm-node extensions — not part of the Bitcoin Core API.");
+    println!("Load blvm-payment before sending them. They are not part of the Bitcoin Core API.");
     println!();
 
     let rpc_url = "http://127.0.0.1:18332"; // Testnet
@@ -246,10 +244,10 @@ fn main() -> anyhow::Result<()> {
     println!("  joinpool             - Add a participant to a pool");
     println!("  distributepool       - Finalize pool payout with CTV proof");
     println!();
-    println!("Note: Vault and pool methods require `ctv` feature: cargo build --features ctv");
+    println!("Vault, pool, and batch methods are part of the blvm-payment process.");
     println!();
     println!("To test with a running node:");
-    println!("  1. Start node: blvm-node --network testnet --features bip70-http");
+    println!("  1. Load the blvm-payment module");
     println!("  2. Send requests with curl or any HTTP client");
 
     Ok(())

@@ -53,14 +53,8 @@ pub struct RestApiServer {
     auth_manager: Option<Arc<auth::RpcAuthManager>>,
     /// Whether security headers are enabled
     security_headers_enabled: bool,
-    #[cfg(feature = "bip70-http")]
-    payment_processor: Option<Arc<crate::payment::processor::PaymentProcessor>>,
-    #[cfg(feature = "bip70-http")]
-    payment_state_machine: Option<Arc<crate::payment::state_machine::PaymentStateMachine>>,
     /// Connection rate limiter (per-IP per minute)
     connection_limiter: Option<Arc<tokio::sync::Mutex<ConnectionRateLimiter>>>,
-    /// `rest_api.payment_endpoints_enabled`. Default false.
-    payment_endpoints_enabled: bool,
 }
 
 impl RestApiServer {
@@ -83,12 +77,7 @@ impl RestApiServer {
             control: None,
             auth_manager: None,
             security_headers_enabled: true, // Enable security headers by default
-            #[cfg(feature = "bip70-http")]
-            payment_processor: None,
-            #[cfg(feature = "bip70-http")]
-            payment_state_machine: None,
             connection_limiter: None,
-            payment_endpoints_enabled: false,
         }
     }
 
@@ -112,12 +101,7 @@ impl RestApiServer {
             control: None,
             auth_manager: Some(auth_manager),
             security_headers_enabled: true,
-            #[cfg(feature = "bip70-http")]
-            payment_processor: None,
-            #[cfg(feature = "bip70-http")]
-            payment_state_machine: None,
             connection_limiter: None,
-            payment_endpoints_enabled: false,
         }
     }
 
@@ -136,12 +120,6 @@ impl RestApiServer {
         self
     }
 
-    /// Serve `/api/v1/payments` when the config flag is set.
-    pub fn with_payment_endpoints(mut self, enabled: bool) -> Self {
-        self.payment_endpoints_enabled = enabled;
-        self
-    }
-
     /// Set authentication manager
     pub fn set_auth_manager(mut self, auth_manager: Arc<auth::RpcAuthManager>) -> Self {
         self.auth_manager = Some(auth_manager);
@@ -151,26 +129,6 @@ impl RestApiServer {
     /// Enable or disable security headers
     pub fn with_security_headers(mut self, enabled: bool) -> Self {
         self.security_headers_enabled = enabled;
-        self
-    }
-
-    /// Set payment processor for BIP70 HTTP endpoints
-    #[cfg(feature = "bip70-http")]
-    pub fn with_payment_processor(
-        mut self,
-        processor: Arc<crate::payment::processor::PaymentProcessor>,
-    ) -> Self {
-        self.payment_processor = Some(processor);
-        self
-    }
-
-    /// Set payment state machine for CTV payment endpoints
-    #[cfg(feature = "bip70-http")]
-    pub fn with_payment_state_machine(
-        mut self,
-        state_machine: Arc<crate::payment::state_machine::PaymentStateMachine>,
-    ) -> Self {
-        self.payment_state_machine = Some(state_machine);
         self
     }
 
@@ -361,244 +319,6 @@ impl RestApiServer {
             Self::handle_mining_request(server, method, path, req, request_id).await
         } else if path.starts_with("/api/v1/fees") {
             Self::handle_fee_request(server, method, path, &uri, request_id).await
-        } else if path.starts_with("/api/v1/payments") && server.payment_endpoints_enabled {
-            // CTV payment endpoints (requires bip70-http feature)
-            #[cfg(feature = "bip70-http")]
-            {
-                if let Some(ref state_machine) = server.payment_state_machine {
-                    // Parse request body if present (S-010: use read_json_body for 1MB limit)
-                    let body = if method == Method::POST || method == Method::PUT {
-                        match crate::rpc::rest::types::read_json_body(req).await {
-                            Ok(opt) => opt,
-                            Err(e) => {
-                                return Ok(Self::error_response_with_headers(
-                                    security_headers,
-                                    StatusCode::PAYLOAD_TOO_LARGE,
-                                    "PAYLOAD_TOO_LARGE",
-                                    &e,
-                                    None,
-                                    request_id,
-                                ));
-                            }
-                        }
-                    } else {
-                        None
-                    };
-
-                    // Handle payment REST endpoints
-                    crate::rpc::rest::payment::handle_payment_request(
-                        Arc::clone(state_machine),
-                        &method,
-                        path,
-                        body,
-                    )
-                    .await
-                } else {
-                    Self::error_response_with_headers(
-                        security_headers,
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "SERVICE_UNAVAILABLE",
-                        "Payment state machine not configured",
-                        None,
-                        request_id,
-                    )
-                }
-            }
-            #[cfg(not(feature = "bip70-http"))]
-            {
-                Self::error_response_with_headers(
-                    security_headers,
-                    StatusCode::NOT_IMPLEMENTED,
-                    "NOT_IMPLEMENTED",
-                    "Payment endpoints require --features bip70-http",
-                    None,
-                    request_id,
-                )
-            }
-        } else if path.starts_with("/api/v1/vaults") {
-            // Vault endpoints (requires ctv feature)
-            #[cfg(feature = "ctv")]
-            {
-                if let Some(ref state_machine) = server.payment_state_machine {
-                    let body = match crate::rpc::rest::types::read_json_body(req).await {
-                        Ok(opt) => opt,
-                        Err(e) => {
-                            return Ok(Self::error_response_with_headers(
-                                security_headers,
-                                StatusCode::PAYLOAD_TOO_LARGE,
-                                "PAYLOAD_TOO_LARGE",
-                                &e,
-                                None,
-                                request_id,
-                            ));
-                        }
-                    };
-                    crate::rpc::rest::vault::handle_vault_request(
-                        Arc::clone(state_machine),
-                        &method,
-                        path,
-                        body,
-                        request_id,
-                    )
-                    .await
-                } else {
-                    Self::error_response_with_headers(
-                        security_headers,
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "SERVICE_UNAVAILABLE",
-                        "Vault engine not configured",
-                        None,
-                        request_id,
-                    )
-                }
-            }
-            #[cfg(not(feature = "ctv"))]
-            {
-                Self::error_response_with_headers(
-                    security_headers,
-                    StatusCode::NOT_IMPLEMENTED,
-                    "NOT_IMPLEMENTED",
-                    "CTV feature not enabled for Vaults",
-                    None,
-                    request_id,
-                )
-            }
-        } else if path.starts_with("/api/v1/pools") {
-            // Pool endpoints (requires ctv feature)
-            #[cfg(feature = "ctv")]
-            {
-                if let Some(ref state_machine) = server.payment_state_machine {
-                    let body = match crate::rpc::rest::types::read_json_body(req).await {
-                        Ok(opt) => opt,
-                        Err(e) => {
-                            return Ok(Self::error_response_with_headers(
-                                security_headers,
-                                StatusCode::PAYLOAD_TOO_LARGE,
-                                "PAYLOAD_TOO_LARGE",
-                                &e,
-                                None,
-                                request_id,
-                            ));
-                        }
-                    };
-                    crate::rpc::rest::pool::handle_pool_request(
-                        Arc::clone(state_machine),
-                        &method,
-                        path,
-                        body,
-                        request_id,
-                    )
-                    .await
-                } else {
-                    Self::error_response_with_headers(
-                        security_headers,
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "SERVICE_UNAVAILABLE",
-                        "Pool engine not configured",
-                        None,
-                        request_id,
-                    )
-                }
-            }
-            #[cfg(not(feature = "ctv"))]
-            {
-                Self::error_response_with_headers(
-                    security_headers,
-                    StatusCode::NOT_IMPLEMENTED,
-                    "NOT_IMPLEMENTED",
-                    "CTV feature not enabled for Pools",
-                    None,
-                    request_id,
-                )
-            }
-        } else if path.starts_with("/api/v1/batches") || path.starts_with("/api/v1/congestion") {
-            // Congestion control endpoints (requires ctv feature)
-            #[cfg(feature = "ctv")]
-            {
-                if let Some(ref state_machine) = server.payment_state_machine {
-                    let body = match crate::rpc::rest::types::read_json_body(req).await {
-                        Ok(opt) => opt,
-                        Err(e) => {
-                            return Ok(Self::error_response_with_headers(
-                                security_headers,
-                                StatusCode::PAYLOAD_TOO_LARGE,
-                                "PAYLOAD_TOO_LARGE",
-                                &e,
-                                None,
-                                request_id,
-                            ));
-                        }
-                    };
-                    crate::rpc::rest::congestion::handle_congestion_request(
-                        Arc::clone(state_machine),
-                        &method,
-                        path,
-                        body,
-                        request_id,
-                    )
-                    .await
-                } else {
-                    Self::error_response_with_headers(
-                        security_headers,
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "SERVICE_UNAVAILABLE",
-                        "Congestion manager not configured",
-                        None,
-                        request_id,
-                    )
-                }
-            }
-            #[cfg(not(feature = "ctv"))]
-            {
-                Self::error_response_with_headers(
-                    security_headers,
-                    StatusCode::NOT_IMPLEMENTED,
-                    "NOT_IMPLEMENTED",
-                    "CTV feature not enabled for Congestion Control",
-                    None,
-                    request_id,
-                )
-            }
-        } else if path.starts_with("/api/v1/payment") {
-            // Legacy BIP70 payment endpoints (requires bip70-http feature)
-            #[cfg(feature = "bip70-http")]
-            {
-                if let Some(ref processor) = server.payment_processor {
-                    match crate::payment::http::handle_payment_routes(Arc::clone(processor), req)
-                        .await
-                    {
-                        Ok(resp) => resp,
-                        Err(e) => Self::error_response_with_headers(
-                            security_headers,
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "PAYMENT_ERROR",
-                            &format!("Payment processing error: {e}"),
-                            None,
-                            request_id,
-                        ),
-                    }
-                } else {
-                    Self::error_response_with_headers(
-                        security_headers,
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "SERVICE_UNAVAILABLE",
-                        "Payment processor not configured",
-                        None,
-                        request_id,
-                    )
-                }
-            }
-            #[cfg(not(feature = "bip70-http"))]
-            {
-                Self::error_response_with_headers(
-                    security_headers,
-                    StatusCode::NOT_IMPLEMENTED,
-                    "NOT_IMPLEMENTED",
-                    "HTTP BIP70 not enabled. Compile with --features bip70-http",
-                    None,
-                    request_id,
-                )
-            }
         } else {
             Self::error_response_with_headers(
                 server.security_headers_enabled,

@@ -188,6 +188,8 @@ impl RequestValidator {
             | RequestPayload::GetSyncStatus
             | RequestPayload::BanPeer { .. }
             | RequestPayload::SetBlockServeMaintenanceMode { .. }
+            | RequestPayload::GetTxMetadata { .. }
+            | RequestPayload::GetMempoolFeeRateSummary
             | RequestPayload::RegisterCliSpec { .. } => Ok(ValidationResult::Allowed),
         }
     }

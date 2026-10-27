@@ -563,11 +563,6 @@ path = "tests/node_mod_coverage_suite.rs"
 required-features = ["coverage-tests"]
 
 [[test]]
-name = "payment_settlement_coverage_suite"
-path = "tests/payment_settlement_coverage_suite.rs"
-required-features = ["coverage-tests"]
-
-[[test]]
 name = "pruning_coverage_suite"
 path = "tests/pruning_coverage_suite.rs"
 required-features = ["coverage-tests"]

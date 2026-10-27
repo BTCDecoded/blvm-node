@@ -7,6 +7,5 @@ pub mod ban_list;
 pub mod bip157;
 pub mod module;
 pub mod package_relay;
-pub mod payment;
 #[cfg(feature = "utxo-commitments")]
 pub mod utxo_commitments;

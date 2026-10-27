@@ -72,8 +72,6 @@ pub struct NodeApiImpl {
     ipc_server: Option<Arc<tokio::sync::Mutex<crate::module::ipc::server::ModuleIpcServer>>>,
     /// Sync coordinator (optional, for sync status checking)
     sync_coordinator: Option<Arc<tokio::sync::Mutex<crate::node::sync::SyncCoordinator>>>,
-    /// Payment state machine (optional, for payment state queries)
-    payment_state_machine: Option<Arc<crate::payment::state_machine::PaymentStateMachine>>,
     /// Module manager (optional, for module discovery)
     module_manager: Option<Arc<tokio::sync::Mutex<crate::module::manager::ModuleManager>>>,
     /// Module API registry (for module-to-module communication)
@@ -114,7 +112,6 @@ impl NodeApiImpl {
             module_data_dirs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             ipc_server: None,
             sync_coordinator: None,
-            payment_state_machine: None,
             module_manager: None,
             module_api_registry: None,
             module_router: None,
@@ -149,7 +146,6 @@ impl NodeApiImpl {
             module_data_dirs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             ipc_server: None,
             sync_coordinator: None,
-            payment_state_machine: None,
             module_manager: None,
             module_api_registry: None,
             module_router: None,
@@ -187,7 +183,6 @@ impl NodeApiImpl {
             )),
             module_data_dirs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             sync_coordinator: None,
-            payment_state_machine: None,
             module_manager: None,
             module_api_registry: None,
             module_router: None,
@@ -329,14 +324,6 @@ impl NodeApiImpl {
         sync_coordinator: Arc<tokio::sync::Mutex<crate::node::sync::SyncCoordinator>>,
     ) {
         self.sync_coordinator = Some(sync_coordinator);
-    }
-
-    /// Set payment state machine (for late initialization)
-    pub fn set_payment_state_machine(
-        &mut self,
-        payment_state_machine: Arc<crate::payment::state_machine::PaymentStateMachine>,
-    ) {
-        self.payment_state_machine = Some(payment_state_machine);
     }
 
     /// Parse `commons_get_coinbase_outputs`. `None` = do not use Commons.
@@ -560,6 +547,59 @@ impl NodeAPI for NodeApiImpl {
         })
         .await
         .map_err(|e| ModuleError::op_err("Task join error", e))?
+    }
+
+    async fn get_tx_metadata(
+        &self,
+        txid: &Hash,
+    ) -> Result<Option<crate::module::traits::TxBlockMetadata>, ModuleError> {
+        let txid = *txid;
+        tokio::task::spawn_blocking({
+            let storage = Arc::clone(&self.storage);
+            move || {
+                let metadata = storage
+                    .transactions()
+                    .get_metadata(&txid)
+                    .map_err(|e| ModuleError::op_err("Failed to get tx metadata", e))?;
+                Ok(metadata.map(|metadata| crate::module::traits::TxBlockMetadata {
+                    block_hash: metadata.block_hash,
+                    block_height: metadata.block_height,
+                }))
+            }
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
+    }
+
+    async fn get_mempool_fee_rate_summary(
+        &self,
+    ) -> Result<crate::module::traits::MempoolFeeRateSummary, ModuleError> {
+        let mempool = self.mempool_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+        let mempool = Arc::clone(mempool);
+        let storage = Arc::clone(&self.storage);
+        tokio::task::spawn_blocking(move || {
+            let mut rates: Vec<u64> = mempool
+                .fee_rates_for_storage(Some(storage.as_ref()))
+                .into_iter()
+                .filter(|rate| *rate > 0)
+                .collect();
+            if rates.is_empty() {
+                return crate::module::traits::MempoolFeeRateSummary::default();
+            }
+            rates.sort_unstable();
+            let sum: u64 = rates.iter().sum();
+            let avg = sum / rates.len() as u64;
+            let median = rates[rates.len() / 2];
+            crate::module::traits::MempoolFeeRateSummary {
+                sample_count: rates.len(),
+                avg_sat_vb: avg,
+                median_sat_vb: median,
+            }
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))
     }
 
     async fn get_block_height(&self) -> Result<u64, ModuleError> {
@@ -891,95 +931,11 @@ impl NodeAPI for NodeApiImpl {
     // === Payment API Methods ===
     async fn get_payment_state(
         &self,
-        payment_id: &str,
+        _payment_id: &str,
     ) -> Result<Option<PaymentState>, ModuleError> {
-        let payment_state_machine = self.payment_state_machine.as_ref().ok_or_else(|| {
-            ModuleError::OperationError(
-                module_error_msg::PAYMENT_STATE_MACHINE_NOT_AVAILABLE.to_string(),
-            )
-        })?;
-
-        match payment_state_machine.get_payment_state(payment_id).await {
-            Ok(state) => {
-                // Convert internal PaymentState to module API PaymentState
-                match state {
-                    crate::payment::state_machine::PaymentState::RequestCreated { request_id } => {
-                        Ok(Some(PaymentState {
-                            payment_id: request_id,
-                            status: "pending".to_string(),
-                            amount_sats: 0,
-                            tx_hash: None,
-                            confirmations: None,
-                            reason: None,
-                        }))
-                    }
-                    crate::payment::state_machine::PaymentState::ProofCreated {
-                        request_id,
-                        ..
-                    }
-                    | crate::payment::state_machine::PaymentState::ProofBroadcast {
-                        request_id,
-                        ..
-                    } => Ok(Some(PaymentState {
-                        payment_id: request_id,
-                        status: "pending".to_string(),
-                        amount_sats: 0,
-                        tx_hash: None,
-                        confirmations: None,
-                        reason: None,
-                    })),
-                    crate::payment::state_machine::PaymentState::InMempool {
-                        request_id,
-                        tx_hash,
-                    } => Ok(Some(PaymentState {
-                        payment_id: request_id,
-                        status: "pending".to_string(),
-                        amount_sats: 0,
-                        tx_hash: Some(tx_hash),
-                        confirmations: Some(0),
-                        reason: None,
-                    })),
-                    crate::payment::state_machine::PaymentState::Settled {
-                        request_id,
-                        tx_hash,
-                        confirmation_count,
-                        expected_outputs,
-                        ..
-                    } => Ok(Some(PaymentState {
-                        payment_id: request_id,
-                        status: "confirmed".to_string(),
-                        amount_sats: payment_output_sum(expected_outputs.as_ref()),
-                        tx_hash: Some(tx_hash),
-                        confirmations: Some(confirmation_count),
-                        reason: None,
-                    })),
-                    crate::payment::state_machine::PaymentState::ReorgPending {
-                        request_id,
-                        tx_hash,
-                        expected_outputs,
-                        ..
-                    } => Ok(Some(PaymentState {
-                        payment_id: request_id,
-                        status: "reorg_pending".to_string(),
-                        amount_sats: payment_output_sum(expected_outputs.as_ref()),
-                        tx_hash: Some(tx_hash),
-                        confirmations: Some(0),
-                        reason: None,
-                    })),
-                    crate::payment::state_machine::PaymentState::Failed { request_id, reason } => {
-                        Ok(Some(PaymentState {
-                            payment_id: request_id,
-                            status: "failed".to_string(),
-                            amount_sats: 0,
-                            tx_hash: None,
-                            confirmations: None,
-                            reason: Some(reason),
-                        }))
-                    }
-                }
-            }
-            Err(_) => Ok(None), // Payment not found
-        }
+        Err(ModuleError::OperationError(
+            module_error_msg::PAYMENT_STATE_MACHINE_NOT_AVAILABLE.to_string(),
+        ))
     }
 
     // === Additional Mempool API Methods ===
@@ -2312,15 +2268,6 @@ impl NodeAPI for NodeApiImpl {
     }
 }
 
-fn payment_output_sum(outputs: Option<&Vec<blvm_protocol::payment::PaymentOutput>>) -> u64 {
-    outputs
-        .into_iter()
-        .flatten()
-        .map(|output| output.amount.unwrap_or(0))
-        .fold(0u64, u64::saturating_add)
-}
-
-/// Hash rate from the tip difficulty and the seconds since the previous block.
 fn hash_rate_from_tip(storage: &crate::storage::Storage) -> f64 {
     let Ok(Some(header)) = storage.chain().get_tip_header() else {
         return 0.0;

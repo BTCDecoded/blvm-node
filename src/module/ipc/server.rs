@@ -1560,6 +1560,20 @@ impl ModuleIpcServer {
                     ResponsePayload::Bool(true),
                 ))
             }
+            RequestPayload::GetTxMetadata { txid } => {
+                let metadata = node_api.get_tx_metadata(txid).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::TxMetadata(metadata),
+                ))
+            }
+            RequestPayload::GetMempoolFeeRateSummary => {
+                let summary = node_api.get_mempool_fee_rate_summary().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::MempoolFeeRateSummary(summary),
+                ))
+            }
             RequestPayload::DiscoverModules => {
                 let modules = node_api.discover_modules().await?;
                 Ok(ResponseMessage::success(

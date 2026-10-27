@@ -17,10 +17,23 @@
 use crate::module::registry::client::ModuleRegistry;
 use crate::module::registry::manifest::ModuleManifest;
 use crate::network::protocol::*;
-use crate::payment::processor::PaymentProcessor;
-use crate::payment::state_machine::PaymentStateMachine;
 use anyhow::Result;
 use std::sync::Arc;
+
+async fn payment_is_released(
+    api: &dyn crate::module::traits::NodeAPI,
+    payment_id: &str,
+) -> Result<bool> {
+    let params = serde_json::to_vec(&serde_json::json!([payment_id]))?;
+    let response = api
+        .call_module(Some("blvm-payment"), "getpaymentstate", params)
+        .await
+        .map_err(|error| anyhow::anyhow!("paid GetModule requires blvm-payment: {error}"))?;
+    let value: serde_json::Value = serde_json::from_slice(&response)
+        .map_err(|error| anyhow::anyhow!("blvm-payment getpaymentstate: {error}"))?;
+    let state = value.get("state").and_then(|item| item.as_str()).unwrap_or("");
+    Ok(state == "settled" || state == "in_mempool")
+}
 
 /// Handle GetModule message
 ///
@@ -37,8 +50,7 @@ use std::sync::Arc;
 pub async fn handle_get_module(
     message: GetModuleMessage,
     registry: Option<Arc<ModuleRegistry>>,
-    payment_processor: Option<Arc<PaymentProcessor>>,
-    payment_state_machine: Option<Arc<PaymentStateMachine>>,
+    node_api: Option<Arc<dyn crate::module::traits::NodeAPI>>,
     encryption: Option<std::sync::Arc<crate::module::encryption::ModuleEncryption>>,
     modules_dir: Option<std::path::PathBuf>,
     _node_script: Option<Vec<u8>>, // Reserved: node payment address for 10% payment split when implemented
@@ -78,47 +90,14 @@ pub async fn handle_get_module(
             // Module requires payment
             if let Some(ref payment_id) = message.payment_id {
                 // Payment ID provided - verify payment and decrypt if confirmed
-                let payment_confirmed = if let Some(ref state_machine) = payment_state_machine {
-                    // Use state machine to check payment state
-                    match state_machine.get_payment_state(payment_id).await {
-                        Ok(state) => {
-                            // Check if payment is settled or in mempool
-                            match state {
-                                crate::payment::state_machine::PaymentState::Settled { .. }
-                                | crate::payment::state_machine::PaymentState::InMempool {
-                                    ..
-                                } => {
-                                    tracing::info!(
-                                        "Payment verified for module {} (payment_id: {}, state: {:?})",
-                                        message.name,
-                                        payment_id,
-                                        state
-                                    );
-                                    true
-                                }
-                                _ => {
-                                    // Payment pending - serve encrypted version
-                                    false
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            // Fallback: check if payment request exists
-                            if let Some(ref processor) = payment_processor {
-                                processor.get_payment_request(payment_id).await.is_ok()
-                            } else {
-                                false
-                            }
-                        }
+                let payment_confirmed = match node_api.as_ref() {
+                    Some(api) => payment_is_released(api.as_ref(), payment_id).await?,
+                    None => {
+                        return Err(anyhow::anyhow!(
+                            "blvm-payment is not available: cannot verify payment for module {}",
+                            message.name
+                        ));
                     }
-                } else if let Some(ref processor) = payment_processor {
-                    // Fallback to payment processor if state machine not available
-                    processor.get_payment_request(payment_id).await.is_ok()
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "Payment processor not available: cannot verify payment for module {}",
-                        message.name
-                    ));
                 };
 
                 // If payment confirmed, decrypt module; otherwise serve encrypted
@@ -421,7 +400,7 @@ mod tests {
             payment_id: None,
         };
         assert!(
-            handle_get_module(msg, None, None, None, None, None, None)
+            handle_get_module(msg, None, None, None, None, None)
                 .await
                 .is_err()
         );

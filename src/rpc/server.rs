@@ -18,8 +18,6 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{Span, debug, error, info, warn};
 
-#[cfg(feature = "bip70-http")]
-use super::payment;
 use super::{auth, blockchain, control, errors, mempool, mining, network, rawtx};
 use crate::module::rpc::handler::ModuleRpcHandler;
 use crate::network::dos_protection::ConnectionRateLimiter;
@@ -91,8 +89,6 @@ pub struct RpcServer {
     mining: Arc<mining::MiningRpc>,
     rawtx: Arc<rawtx::RawTxRpc>,
     control: Arc<control::ControlRpc>,
-    #[cfg(feature = "bip70-http")]
-    payment: Option<Arc<payment::PaymentRpc>>,
     // Authentication manager (optional)
     auth_manager: Option<Arc<auth::RpcAuthManager>>,
     // Metrics collector (optional, for Prometheus export)
@@ -164,8 +160,6 @@ impl RpcServer {
             mining,
             rawtx,
             control,
-            #[cfg(feature = "bip70-http")]
-            payment: None,
             auth_manager,
             metrics,
             module_endpoints: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -276,13 +270,6 @@ impl RpcServer {
         )
     }
 
-    /// Create with dependencies including payment RPC
-    #[cfg(feature = "bip70-http")]
-    pub fn with_payment(mut self, payment: Arc<payment::PaymentRpc>) -> Self {
-        self.payment = Some(payment);
-        self
-    }
-
     /// Create with dependencies and metrics
     pub fn with_dependencies_and_metrics(
         addr: SocketAddr,
@@ -385,8 +372,6 @@ impl RpcServer {
             mining: Arc::clone(&self.mining),
             rawtx: Arc::clone(&self.rawtx),
             control: Arc::clone(&self.control),
-            #[cfg(feature = "bip70-http")]
-            payment: self.payment.clone(),
             auth_manager: self.auth_manager.clone(),
             metrics: self.metrics.clone(),
             module_endpoints: Arc::clone(&self.module_endpoints),
@@ -1500,285 +1485,6 @@ impl RpcServer {
             "listmodules" => self.control.listmodules(&params).await,
             "getmoduleclispecs" => self.control.getmoduleclispecs(&params).await,
             "runmodulecli" => self.control.runmodulecli(&params).await,
-            // Payment methods (requires bip70-http feature)
-            #[cfg(feature = "bip70-http")]
-            "createpaymentrequest" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .create_payment_request(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            #[cfg(feature = "bip70-http")]
-            #[cfg(feature = "ctv")]
-            "createcovenantproof" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .create_covenant_proof(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            #[cfg(feature = "bip70-http")]
-            "getpaymentstate" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .get_payment_state(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            #[cfg(feature = "bip70-http")]
-            "verifyonchainpayment" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .verify_on_chain_payment(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            #[cfg(feature = "bip70-http")]
-            "verifyonchainpaymentbytx" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .verify_on_chain_payment_by_tx(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            #[cfg(feature = "bip70-http")]
-            #[cfg(feature = "ctv")]
-            "verifycovenantproof" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .verify_covenant_proof(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            #[cfg(feature = "bip70-http")]
-            "listpayments" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .list_payments(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            // Vault RPC methods
-            #[cfg(feature = "bip70-http")]
-            #[cfg(feature = "ctv")]
-            "createvault" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .create_vault(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            #[cfg(feature = "bip70-http")]
-            #[cfg(feature = "ctv")]
-            "getvaultstate" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .get_vault_state(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            #[cfg(feature = "bip70-http")]
-            #[cfg(feature = "ctv")]
-            "unvault" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .unvault(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            #[cfg(feature = "bip70-http")]
-            #[cfg(feature = "ctv")]
-            "withdrawfromvault" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .withdraw_from_vault(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            // Pool RPC methods
-            #[cfg(feature = "bip70-http")]
-            #[cfg(feature = "ctv")]
-            "createpool" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .create_pool(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            #[cfg(feature = "bip70-http")]
-            #[cfg(feature = "ctv")]
-            "getpoolstate" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .get_pool_state(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            #[cfg(feature = "bip70-http")]
-            #[cfg(feature = "ctv")]
-            "joinpool" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .join_pool(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            #[cfg(feature = "bip70-http")]
-            #[cfg(feature = "ctv")]
-            "distributepool" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .distribute_pool(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            // Congestion RPC methods
-            #[cfg(feature = "bip70-http")]
-            #[cfg(feature = "ctv")]
-            "createbatch" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .create_batch(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            #[cfg(feature = "bip70-http")]
-            #[cfg(feature = "ctv")]
-            "addtobatch" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .add_to_batch(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            #[cfg(feature = "bip70-http")]
-            #[cfg(feature = "ctv")]
-            "getcongestion" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .get_congestion(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            #[cfg(feature = "bip70-http")]
-            #[cfg(feature = "ctv")]
-            "getcongestionmetrics" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .get_congestion_metrics(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
-            #[cfg(feature = "bip70-http")]
-            #[cfg(feature = "ctv")]
-            "broadcastbatch" => {
-                if let Some(ref payment_rpc) = self.payment {
-                    payment_rpc
-                        .broadcast_batch(&params)
-                        .await
-                        .map_err(|e| errors::RpcError::internal_error(e.to_string()))
-                } else {
-                    Err(errors::RpcError::internal_error(
-                        "Payment RPC not available".to_string(),
-                    ))
-                }
-            }
             "getdescriptorinfo" | "analyzepsbt" => {
                 let overrides = self.rpc_core_overrides.read().await;
                 if let Some((_, handler)) = overrides.get(method) {
@@ -2250,9 +1956,8 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("Method not found"));
     }
 
-    /// The default node build does not serve payment RPC. Enable `bip70-http` only for the payment module.
+    /// A node with no loaded module does not serve payment RPC. `blvm-payment` registers these methods.
     #[tokio::test]
-    #[cfg(not(feature = "bip70-http"))]
     async fn createpaymentrequest_is_absent_from_the_default_server() {
         let server = RpcServer::new("127.0.0.1:0".parse().unwrap());
         let result = server.call_method("createpaymentrequest", json!([])).await;

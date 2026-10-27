@@ -311,6 +311,8 @@ impl PermissionChecker {
             RequestPayload::GetSyncStatus => Permission::ReadChainState,
             RequestPayload::BanPeer { .. } => Permission::NetworkAccess,
             RequestPayload::SetBlockServeMaintenanceMode { .. } => Permission::NetworkAccess,
+            RequestPayload::GetTxMetadata { .. } => Permission::ReadBlockchain,
+            RequestPayload::GetMempoolFeeRateSummary => Permission::ReadMempool,
             RequestPayload::RegisterCliSpec { .. } => Permission::RegisterRpcEndpoint,
         };
 
