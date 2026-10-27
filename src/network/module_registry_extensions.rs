@@ -31,7 +31,10 @@ async fn payment_is_released(
         .map_err(|error| anyhow::anyhow!("paid GetModule requires blvm-payment: {error}"))?;
     let value: serde_json::Value = serde_json::from_slice(&response)
         .map_err(|error| anyhow::anyhow!("blvm-payment getpaymentstate: {error}"))?;
-    let state = value.get("state").and_then(|item| item.as_str()).unwrap_or("");
+    let state = value
+        .get("state")
+        .and_then(|item| item.as_str())
+        .unwrap_or("");
     Ok(state == "settled" || state == "in_mempool")
 }
 
