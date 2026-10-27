@@ -1334,6 +1334,23 @@ impl MemoryGuard {
         }
     }
 
+    /// Startup swap below 15% free forces [`WorkloadClass::Shared`].
+    ///
+    /// Exactly 15% free, and a host with no swap, keep `detected`.
+    /// `BLVM_IBD_EXCLUSIVE=1` is already folded into `detected` and still loses
+    /// to a swap that is under this line.
+    pub(crate) fn workload_for_startup_swap(
+        detected: WorkloadClass,
+        swap_total_mb: u64,
+        swap_free_mb: u64,
+    ) -> WorkloadClass {
+        if swap_total_mb > 0 && swap_free_mb * 100 / swap_total_mb < 15 {
+            WorkloadClass::Shared
+        } else {
+            detected
+        }
+    }
+
     /// RAM headroom reserved inside the RSS envelope for storage-engine pipeline buffers.
     /// RocksDB block cache + WBM dominate; heed3/LMDB uses mmap and smaller txn buffers.
     pub(crate) fn pipeline_reserve_mb(backend: crate::storage::database::DatabaseBackend) -> u64 {
@@ -1613,14 +1630,6 @@ impl MemoryGuard {
         let os_reserve_mb = (total_mb * 22 / 100).max(2816);
         let spare_mb = effective_avail.saturating_sub(os_reserve_mb).max(256);
 
-        // If swap is nearly full at startup, don't trust MemAvailable as a co-tenant signal.
-        // A full swap means the kernel is already under pressure — the "missing" available RAM is
-        // from memory pressure / restart transient page-cache retention, not real competing workloads.
-        // Treat as Dedicated so the UTXO cache isn't capped at 4 GiB (which would then surge to
-        // 16 GiB when the next segment starts and detects Dedicated — causing an anon RSS spike).
-        let swap_nearly_full = startup_swap_total_mb > 0
-            && startup_swap_free_mb * 100 / startup_swap_total_mb.max(1) < 15; // <15% swap free
-
         // Workload class latch: determine the class once per process, then lock it in.
         // Each catch-up cycle calls new_for_ibd again; without the latch, transient dips in
         // MemAvailable (LMDB page-cache eviction, network buffer spikes) flip the class between
@@ -1641,17 +1650,26 @@ impl MemoryGuard {
             wc
         } else {
             // First call in this process: determine from current conditions.
-            let wc = if swap_nearly_full && !ctx.ibd_dedicated {
+            // Swap already under 15% free means co-tenants own the paging space.
+            // MemAvailable can still look high because idle pages were pushed to swap.
+            // A Dedicated latch then reserves a 16 GiB UTXO cache and a ~47 GiB RSS
+            // budget on top of that full swap (testnet4 av2, 2026-10-27: 1 GiB swap
+            // free, cache latched at 16384 MiB).
+            let detected =
+                Self::detect_workload_class(total_mb, available_mb, ctx.ibd_dedicated);
+            let wc = Self::workload_for_startup_swap(
+                detected,
+                startup_swap_total_mb,
+                startup_swap_free_mb,
+            );
+            if wc != detected {
                 tracing::warn!(
-                    "MemoryGuard: swap is >85% full at startup ({}/{} MB free) — \
-                     overriding workload to Dedicated to avoid cache surge on restart",
+                    "MemoryGuard: swap is under 15% free at startup ({}/{} MB free) — \
+                     Shared workload so the UTXO cache stays at the co-tenant cap",
                     startup_swap_free_mb,
                     startup_swap_total_mb
                 );
-                WorkloadClass::Dedicated
-            } else {
-                Self::detect_workload_class(total_mb, available_mb, ctx.ibd_dedicated)
-            };
+            }
             // Store in latch so subsequent catch-up cycles reuse this class.
             WORKLOAD_CLASS_LATCH.store(
                 if wc == WorkloadClass::Dedicated { 1 } else { 0 },
@@ -3303,6 +3321,27 @@ mod memory_tier_tests {
         assert!(
             MemoryGuard::pipeline_reserve_mb(DatabaseBackend::Heed3)
                 < MemoryGuard::pipeline_reserve_mb(DatabaseBackend::RocksDB)
+        );
+    }
+
+    #[test]
+    fn startup_swap_under_15_percent_free_forces_shared() {
+        let detected = WorkloadClass::Dedicated;
+        assert_eq!(
+            MemoryGuard::workload_for_startup_swap(detected, 10_240, 1_024),
+            WorkloadClass::Shared
+        );
+        assert_eq!(
+            MemoryGuard::workload_for_startup_swap(detected, 10_000, 1_500),
+            WorkloadClass::Dedicated
+        );
+        assert_eq!(
+            MemoryGuard::workload_for_startup_swap(detected, 10_000, 5_000),
+            WorkloadClass::Dedicated
+        );
+        assert_eq!(
+            MemoryGuard::workload_for_startup_swap(detected, 0, 0),
+            WorkloadClass::Dedicated
         );
     }
 
