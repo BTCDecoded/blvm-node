@@ -561,10 +561,12 @@ impl NodeAPI for NodeApiImpl {
                     .transactions()
                     .get_metadata(&txid)
                     .map_err(|e| ModuleError::op_err("Failed to get tx metadata", e))?;
-                Ok(metadata.map(|metadata| crate::module::traits::TxBlockMetadata {
-                    block_hash: metadata.block_hash,
-                    block_height: metadata.block_height,
-                }))
+                Ok(
+                    metadata.map(|metadata| crate::module::traits::TxBlockMetadata {
+                        block_hash: metadata.block_hash,
+                        block_height: metadata.block_height,
+                    }),
+                )
             }
         })
         .await

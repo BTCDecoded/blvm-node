@@ -468,12 +468,15 @@ impl NodeAPI for NodeApiIpc {
     async fn get_mempool_fee_rate_summary(
         &self,
     ) -> Result<crate::module::traits::MempoolFeeRateSummary, ModuleError> {
-        self.request(RequestPayload::GetMempoolFeeRateSummary, |payload| match payload {
-            ResponsePayload::MempoolFeeRateSummary(summary) => Ok(summary),
-            _ => Err(ModuleError::OperationError(
-                "Unexpected response type".to_string(),
-            )),
-        })
+        self.request(
+            RequestPayload::GetMempoolFeeRateSummary,
+            |payload| match payload {
+                ResponsePayload::MempoolFeeRateSummary(summary) => Ok(summary),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
         .await
     }
 

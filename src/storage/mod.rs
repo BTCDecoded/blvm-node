@@ -1439,14 +1439,9 @@ impl Storage {
         let mut walked = 0u64;
         let mut target_proof: Option<U256> = None;
         loop {
-            let header = self
-                .blockstore
-                .get_header_at_height(h)?
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "header {h} missing while summing chainwork through {height}"
-                    )
-                })?;
+            let header = self.blockstore.get_header_at_height(h)?.ok_or_else(|| {
+                anyhow::anyhow!("header {h} missing while summing chainwork through {height}")
+            })?;
             let actual = self.chain().calculate_hash(&header);
             if actual != expected_hash {
                 anyhow::bail!(
@@ -1464,7 +1459,11 @@ impl Storage {
                 return Ok((above.saturating_add(proof), own, walked));
             }
             if let Some(prev) = self.chain().get_chainwork(&header.prev_block_hash)? {
-                return Ok((prev.saturating_add(proof).saturating_add(above), own, walked));
+                return Ok((
+                    prev.saturating_add(proof).saturating_add(above),
+                    own,
+                    walked,
+                ));
             }
             above = above.saturating_add(proof);
             expected_hash = header.prev_block_hash;
@@ -1517,10 +1516,7 @@ mod chainwork_gap_tests {
         assert!(storage.chain().get_chainwork(&h1).unwrap().is_none());
 
         storage.ensure_parent_chainwork(&tip_header, 2).unwrap();
-        storage
-            .chain()
-            .update_tip(&h2, &tip_header, 2)
-            .unwrap();
+        storage.chain().update_tip(&h2, &tip_header, 2).unwrap();
 
         assert_eq!(storage.chain().get_height().unwrap(), Some(2));
         let proof = get_block_proof(bits).unwrap();
@@ -1536,14 +1532,23 @@ mod chainwork_gap_tests {
         let bits = 0x1d00ffffu64;
         let parent = header([0u8; 32], bits, 0);
         let parent_hash = storage.chain().calculate_hash(&parent);
-        storage.blockstore.store_header(&parent_hash, &parent).unwrap();
+        storage
+            .blockstore
+            .store_header(&parent_hash, &parent)
+            .unwrap();
         storage.blockstore.store_height(0, &parent_hash).unwrap();
 
         let bogus_prev = [9u8; 32];
         assert_ne!(bogus_prev, parent_hash);
         let child = header(bogus_prev, bits, 1);
         assert!(storage.ensure_parent_chainwork(&child, 1).is_err());
-        assert!(storage.chain().get_chainwork(&bogus_prev).unwrap().is_none());
+        assert!(
+            storage
+                .chain()
+                .get_chainwork(&bogus_prev)
+                .unwrap()
+                .is_none()
+        );
     }
 }
 

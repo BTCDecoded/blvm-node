@@ -1655,8 +1655,7 @@ impl MemoryGuard {
             // A Dedicated latch then reserves a 16 GiB UTXO cache and a ~47 GiB RSS
             // budget on top of that full swap (testnet4 av2, 2026-10-27: 1 GiB swap
             // free, cache latched at 16384 MiB).
-            let detected =
-                Self::detect_workload_class(total_mb, available_mb, ctx.ibd_dedicated);
+            let detected = Self::detect_workload_class(total_mb, available_mb, ctx.ibd_dedicated);
             let wc = Self::workload_for_startup_swap(
                 detected,
                 startup_swap_total_mb,
