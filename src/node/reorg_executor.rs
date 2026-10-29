@@ -355,9 +355,7 @@ pub fn try_activate_heavier_fork(
         match storage.open_engine_resume_snapshot()? {
             Some(tree) => Some(tree),
             None => {
-                return Err(anyhow::anyhow!(
-                    "reorg refused: IBD UTXO snapshot is empty"
-                ));
+                return Err(anyhow::anyhow!("reorg refused: IBD UTXO snapshot is empty"));
             }
         }
     } else {
@@ -433,30 +431,29 @@ pub fn try_activate_heavier_fork(
         }
         Some(headers)
     };
-    let mut connect_context =
-        move |_height: u64,
-              recent_headers: Option<&[BlockHeader]>,
-              network_time: u64,
-              net: Network|
-              -> blvm_consensus::block::BlockValidationContext {
-            let mut ctx = blvm_consensus::block::block_validation_context_for_connect_ibd(
-                recent_headers,
-                network_time,
-                net,
-            );
-            let mtp_store = mtp_store.clone();
-            let mtp_headers = mtp_headers.clone();
-            ctx.sequence_prev_mtp = Some(Arc::new(move |height| {
-                median_with_overlay(&mtp_store, &mtp_headers, height)
-            }));
-            let difficulty_store = difficulty_store.clone();
-            let difficulty_headers = difficulty_headers.clone();
-            ctx.difficulty_ancestor = Some(Arc::new(move |height| {
-                header_at(&difficulty_store, &difficulty_headers, height)
-                    .map(|header| (header.bits, header.timestamp))
-            }));
-            ctx
-        };
+    let mut connect_context = move |_height: u64,
+                                    recent_headers: Option<&[BlockHeader]>,
+                                    network_time: u64,
+                                    net: Network|
+          -> blvm_consensus::block::BlockValidationContext {
+        let mut ctx = blvm_consensus::block::block_validation_context_for_connect_ibd(
+            recent_headers,
+            network_time,
+            net,
+        );
+        let mtp_store = mtp_store.clone();
+        let mtp_headers = mtp_headers.clone();
+        ctx.sequence_prev_mtp = Some(Arc::new(move |height| {
+            median_with_overlay(&mtp_store, &mtp_headers, height)
+        }));
+        let difficulty_store = difficulty_store.clone();
+        let difficulty_headers = difficulty_headers.clone();
+        ctx.difficulty_ancestor = Some(Arc::new(move |height| {
+            header_at(&difficulty_store, &difficulty_headers, height)
+                .map(|header| (header.bits, header.timestamp))
+        }));
+        ctx
+    };
 
     let result = reorganize_chain_with_witnesses(
         &new_chain,
@@ -493,9 +490,9 @@ pub fn try_activate_heavier_fork(
         let mut disconnected = Vec::with_capacity(result.disconnected_blocks.len());
         for block in result.disconnected_blocks.iter().rev() {
             let hash = blockstore.get_block_hash(block);
-            let undo = blockstore.get_undo_log(&hash)?.with_context(|| {
-                format!("missing undo for disconnected {}", hex::encode(hash))
-            })?;
+            let undo = blockstore
+                .get_undo_log(&hash)?
+                .with_context(|| format!("missing undo for disconnected {}", hex::encode(hash)))?;
             disconnected.push(undo);
         }
         let disconnect_refs: Vec<&BlockUndoLog> = disconnected.iter().collect();
@@ -508,12 +505,8 @@ pub fn try_activate_heavier_fork(
                 .with_context(|| format!("missing undo for connected {}", hex::encode(hash)))?;
             connect_refs.push(undo);
         }
-        let written = commit_utxo_snapshot_delta(
-            tree.as_ref(),
-            codec,
-            &disconnect_refs,
-            &connect_refs,
-        )?;
+        let written =
+            commit_utxo_snapshot_delta(tree.as_ref(), codec, &disconnect_refs, &connect_refs)?;
         info!("[REORG] wrote {written} UTXO rows in snapshot {name}");
     }
 
@@ -626,11 +619,8 @@ mod snapshot_delta_tests {
             (created_by_old, coin(30, 9)),
         ] {
             let key = outpoint_to_key(&op);
-            tree.insert(
-                &key,
-                &encode_utxo_with_codec(codec, &utxo).unwrap(),
-            )
-            .unwrap();
+            tree.insert(&key, &encode_utxo_with_codec(codec, &utxo).unwrap())
+                .unwrap();
         }
 
         let disconnect = create_undo(created_by_old, coin(30, 9));
@@ -652,8 +642,15 @@ mod snapshot_delta_tests {
 
         assert!(tree.get(&outpoint_to_key(&kept)).unwrap().is_some());
         assert!(tree.get(&outpoint_to_key(&spent)).unwrap().is_none());
-        assert!(tree.get(&outpoint_to_key(&created_by_old)).unwrap().is_none());
-        let born = tree.get(&outpoint_to_key(&created_by_new)).unwrap().unwrap();
+        assert!(
+            tree.get(&outpoint_to_key(&created_by_old))
+                .unwrap()
+                .is_none()
+        );
+        let born = tree
+            .get(&outpoint_to_key(&created_by_new))
+            .unwrap()
+            .unwrap();
         let born = decode_utxo_with_codec(codec, &born).unwrap();
         assert_eq!(born.value, 40);
         assert_eq!(born.height, 10);

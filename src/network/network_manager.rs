@@ -2626,9 +2626,7 @@ impl NetworkManager {
                         // drops a peer that just sent version and verack, then sendaddrv2
                         // or wtxidrelay.
                         if !Self::disconnect_on_unrecognized_command(&err) {
-                            info!(
-                                "ignoring unrecognized message from {peer_addr}: {err:#}"
-                            );
+                            info!("ignoring unrecognized message from {peer_addr}: {err:#}");
                             return Ok(());
                         }
                         let _ = self.peer_tx().send(NetworkMessage::PeerDisconnected(
@@ -3730,7 +3728,9 @@ mod block_fetch_timeout_tests {
     fn an_unknown_command_does_not_drop_the_peer() {
         let unknown = anyhow::anyhow!("Unknown command: sendaddrv2");
         let bad_checksum = anyhow::anyhow!("Invalid checksum");
-        assert!(!NetworkManager::disconnect_on_unrecognized_command(&unknown));
+        assert!(!NetworkManager::disconnect_on_unrecognized_command(
+            &unknown
+        ));
         assert!(NetworkManager::disconnect_on_unrecognized_command(
             &bad_checksum
         ));

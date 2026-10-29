@@ -188,23 +188,19 @@ impl ForkBodyHold {
         witnesses: Vec<Vec<blvm_protocol::segwit::Witness>>,
     ) -> bool {
         let hash = blvm_consensus::block::block_header_hash(&block.header);
-        if self
-            .by_parent
-            .values()
-            .any(|held| {
-                held.iter()
-                    .any(|item| blvm_consensus::block::block_header_hash(&item.block.header) == hash)
-            })
-        {
+        if self.by_parent.values().any(|held| {
+            held.iter()
+                .any(|item| blvm_consensus::block::block_header_hash(&item.block.header) == hash)
+        }) {
             return true;
         }
         if self.len >= FORK_BODY_HOLD_LIMIT {
             return false;
         }
-        self.by_parent.entry(parent).or_default().push(HeldForkBody {
-            block,
-            witnesses,
-        });
+        self.by_parent
+            .entry(parent)
+            .or_default()
+            .push(HeldForkBody { block, witnesses });
         self.len += 1;
         true
     }
@@ -573,11 +569,11 @@ impl SyncCoordinator {
             } else if let Some(entry) = storage.chain().block_index().get(&parent_hash)? {
                 entry.height + 1
             } else if blockstore.get_header(&parent_hash)?.is_some() {
-                let parked = self.fork_hold.lock().unwrap_or_else(|e| e.into_inner()).park(
-                    parent_hash,
-                    block,
-                    witnesses,
-                );
+                let parked = self
+                    .fork_hold
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .park(parent_hash, block, witnesses);
                 if parked {
                     held_any = true;
                     warn!(
@@ -653,9 +649,11 @@ impl SyncCoordinator {
 
                 block_hash = blockstore.get_block_hash(&block);
                 blockstore.store_undo_log(&block_hash, &undo_log)?;
-                storage
-                    .chain()
-                    .cache_block_chainwork(&block_hash, &block.header, connect_height)?;
+                storage.chain().cache_block_chainwork(
+                    &block_hash,
+                    &block.header,
+                    connect_height,
+                )?;
 
                 storage
                     .chain()
@@ -703,9 +701,11 @@ impl SyncCoordinator {
                 )?;
 
                 block_hash = blockstore.get_block_hash(&block);
-                storage
-                    .chain()
-                    .cache_block_chainwork(&block_hash, &block.header, connect_height)?;
+                storage.chain().cache_block_chainwork(
+                    &block_hash,
+                    &block.header,
+                    connect_height,
+                )?;
 
                 if !try_activate_heavier_fork(
                     storage,
@@ -1088,10 +1088,7 @@ mod tests {
         let sibling = fork_block(parent, 2);
         let sibling_hash = blvm_consensus::block::block_header_hash(&sibling.header);
         let child = fork_block(sibling_hash, 3);
-        let grandchild = fork_block(
-            blvm_consensus::block::block_header_hash(&child.header),
-            4,
-        );
+        let grandchild = fork_block(blvm_consensus::block::block_header_hash(&child.header), 4);
 
         let mut hold = ForkBodyHold::default();
         assert!(hold.park(sibling_hash, child.clone(), Vec::new()));

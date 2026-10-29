@@ -18,11 +18,11 @@ pub mod parallel_ibd;
 pub mod performance;
 #[cfg(feature = "production")]
 pub mod reorg_executor;
-#[cfg(feature = "production")]
-pub mod undo_repair;
 pub mod run_loop;
 pub mod subsystems;
 pub mod sync;
+#[cfg(feature = "production")]
+pub mod undo_repair;
 
 use anyhow::Result;
 use hex;
@@ -2089,12 +2089,7 @@ impl Node {
             .blocks()
             .get_hash_by_height(synced_tip.saturating_add(1))
         {
-            if self
-                .storage
-                .chain()
-                .is_invalid(&next_hash)
-                .unwrap_or(false)
-            {
+            if self.storage.chain().is_invalid(&next_hash).unwrap_or(false) {
                 warn!(
                     "[CATCH_UP] not retrying height {} — {} is marked invalid (double-spend of the connected chain)",
                     synced_tip.saturating_add(1),

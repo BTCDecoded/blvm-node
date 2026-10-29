@@ -109,8 +109,7 @@ pub fn soft_repair_rollback_watermark(watermark: u64, interval: u64) -> u64 {
 /// `validation_error_suggests_utxo_repair` must not arm a snapshot rollback for this.
 /// av2: block 157771 spent vout 1023, block 157772 spent it again, and the repair
 /// marker would roll the watermark to 0.
-pub const DOUBLE_SPEND_OF_CONNECTED_BLOCK: &str =
-    "double-spend of a connected block";
+pub const DOUBLE_SPEND_OF_CONNECTED_BLOCK: &str = "double-spend of a connected block";
 
 pub fn validation_error_suggests_utxo_repair(err: &anyhow::Error) -> bool {
     let chain = format!("{err:#}");

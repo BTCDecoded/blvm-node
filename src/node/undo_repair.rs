@@ -34,8 +34,7 @@ pub async fn repair_missing_active_undo(
     disconnect_from: u64,
 ) -> Result<usize> {
     let blocks = storage.blocks();
-    let missing_blocks =
-        active_blocks_missing_undo(blocks.as_ref(), tip_height, disconnect_from)?;
+    let missing_blocks = active_blocks_missing_undo(blocks.as_ref(), tip_height, disconnect_from)?;
     if missing_blocks.is_empty() {
         return Ok(0);
     }
@@ -57,7 +56,10 @@ pub async fn repair_missing_active_undo(
         for (height, _, block) in &missing_blocks {
             note_outputs(block, *height, &wanted, &mut prevouts);
         }
-        let oldest = missing_blocks.last().map(|(h, _, _)| *h).unwrap_or(tip_height);
+        let oldest = missing_blocks
+            .last()
+            .map(|(h, _, _)| *h)
+            .unwrap_or(tip_height);
         remember_local_prevouts(blocks.as_ref(), oldest, &wanted, &mut prevouts)?;
         fetch_prevouts(network, blocks.as_ref(), oldest, &wanted, &mut prevouts).await?;
     }
@@ -101,7 +103,9 @@ pub(crate) fn active_blocks_missing_undo(
     // Only blocks the heavier chain will disconnect. Rebuilding the whole
     // prune window asks for prevouts that are older than the fetch limit and
     // are not required to leave the fork.
-    let floor = disconnect_from.min(tip_height).max(tip_height.saturating_sub(REPAIR_TAIL));
+    let floor = disconnect_from
+        .min(tip_height)
+        .max(tip_height.saturating_sub(REPAIR_TAIL));
     let mut missing_blocks = Vec::new();
     for height in (floor..=tip_height).rev() {
         let Some(hash) = blocks.get_hash_by_height(height)? else {
@@ -111,9 +115,7 @@ pub(crate) fn active_blocks_missing_undo(
             break;
         }
         let Some(block) = blocks.get_block(&hash)? else {
-            info!(
-                "[UNDO_REPAIR] height {height} body is pruned; repairing undo above it"
-            );
+            info!("[UNDO_REPAIR] height {height} body is pruned; repairing undo above it");
             break;
         };
         missing_blocks.push((height, hash, block));
@@ -131,7 +133,10 @@ fn remember_local_prevouts(
     let stop = from_height.saturating_sub(REPAIR_FETCH);
     while height > stop {
         height -= 1;
-        if wanted.iter().all(|txid| found.keys().any(|op| op.hash == *txid)) {
+        if wanted
+            .iter()
+            .all(|txid| found.keys().any(|op| op.hash == *txid))
+        {
             break;
         }
         let Some(hash) = blocks.get_hash_by_height(height)? else {
@@ -156,7 +161,10 @@ async fn fetch_prevouts(
     let stop = from_height.saturating_sub(REPAIR_FETCH);
     let mut fetched = 0u64;
     while height > stop {
-        if wanted.iter().all(|txid| found.keys().any(|op| op.hash == *txid)) {
+        if wanted
+            .iter()
+            .all(|txid| found.keys().any(|op| op.hash == *txid))
+        {
             return Ok(());
         }
         height -= 1;
@@ -306,7 +314,13 @@ mod tests {
         let child_hash = storage.blocks().get_block_hash(&child);
         storage.blocks().store_block(&child).unwrap();
         storage.blocks().store_height(5, &child_hash).unwrap();
-        assert!(storage.blocks().get_undo_log(&child_hash).unwrap().is_none());
+        assert!(
+            storage
+                .blocks()
+                .get_undo_log(&child_hash)
+                .unwrap()
+                .is_none()
+        );
 
         let mut found = HashMap::new();
         let wanted = HashSet::from([parent_id]);
@@ -326,11 +340,19 @@ mod tests {
             })
         })
         .unwrap();
-        assert!(storage
-            .blocks()
-            .store_undo_log_if_absent(&child_hash, &undo)
-            .unwrap());
-        assert!(storage.blocks().get_undo_log(&child_hash).unwrap().is_some());
+        assert!(
+            storage
+                .blocks()
+                .store_undo_log_if_absent(&child_hash, &undo)
+                .unwrap()
+        );
+        assert!(
+            storage
+                .blocks()
+                .get_undo_log(&child_hash)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

@@ -27,23 +27,17 @@ static HEADER_PROBE_FAILS: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 fn note_header_probe_failure(peer: SocketAddr) {
-    let mut fails = HEADER_PROBE_FAILS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut fails = HEADER_PROBE_FAILS.lock().unwrap_or_else(|e| e.into_inner());
     fails.insert(peer, std::time::Instant::now());
 }
 
 fn clear_header_probe_failure(peer: SocketAddr) {
-    let mut fails = HEADER_PROBE_FAILS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut fails = HEADER_PROBE_FAILS.lock().unwrap_or_else(|e| e.into_inner());
     fails.remove(&peer);
 }
 
 fn header_probe_failures() -> Vec<SocketAddr> {
-    let mut fails = HEADER_PROBE_FAILS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut fails = HEADER_PROBE_FAILS.lock().unwrap_or_else(|e| e.into_inner());
     let now = std::time::Instant::now();
     fails.retain(|_, failed_at| now.duration_since(*failed_at) < HEADER_PROBE_COOLDOWN);
     fails.keys().copied().collect()
@@ -75,11 +69,7 @@ pub(crate) fn order_header_probe_peers(
 
 /// A peer on the wrong P2P port gets a short probe. Waiting 30s on mainnet
 /// `:8333` during a testnet4 catch-up is how one address stalls the tip.
-pub(crate) fn header_probe_timeout_secs(
-    peer_port: u16,
-    network_port: u16,
-    configured: u64,
-) -> u64 {
+pub(crate) fn header_probe_timeout_secs(peer_port: u16, network_port: u16, configured: u64) -> u64 {
     if peer_port == network_port {
         configured
     } else {
@@ -306,8 +296,11 @@ impl NetworkManager {
         }
 
         let network_port = ProtocolParser::dns_seed_network().1;
-        let timeout_secs =
-            header_probe_timeout_secs(peer_addr.port(), network_port, self.headers_probe_timeout_secs());
+        let timeout_secs = header_probe_timeout_secs(
+            peer_addr.port(),
+            network_port,
+            self.headers_probe_timeout_secs(),
+        );
         match timeout(Duration::from_secs(timeout_secs), headers_rx).await {
             Ok(Ok(headers)) if headers.is_empty() => {
                 clear_header_probe_failure(peer_addr);

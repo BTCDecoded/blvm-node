@@ -1062,7 +1062,6 @@ fn indexed_chain_extends(
 }
 
 impl Storage {
-
     /// Get the transaction index (as Arc for sharing)
     pub fn transactions(&self) -> Arc<txindex::TxIndex> {
         Arc::clone(&self.txindex)

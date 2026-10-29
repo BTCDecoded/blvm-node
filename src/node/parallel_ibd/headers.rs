@@ -1131,9 +1131,7 @@ mod n13_tests {
             nonce: 2,
         };
         store.store_height(157903, &grandparent).unwrap();
-        store
-            .store_header(&active_parent, &parent_header)
-            .unwrap();
+        store.store_header(&active_parent, &parent_header).unwrap();
         store.store_height(157904, &active_parent).unwrap();
         store.store_header(&child, &child_header).unwrap();
         store.store_height(157905, &child).unwrap();

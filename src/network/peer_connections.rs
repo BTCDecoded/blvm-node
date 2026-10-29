@@ -122,9 +122,7 @@ impl NetworkManager {
                 db.add_address_from_dns_seed(addr);
             }
         }
-        info!(
-            "IBD: discovered {count} peer addresses for {network} on port {port}"
-        );
+        info!("IBD: discovered {count} peer addresses for {network} on port {port}");
         Ok(count)
     }
 
@@ -785,11 +783,7 @@ pub(crate) fn prefer_network_port(sockets: Vec<SocketAddr>, network_port: u16) -
         .copied()
         .filter(|addr| addr.port() == network_port)
         .collect();
-    if on_port.is_empty() {
-        sockets
-    } else {
-        on_port
-    }
+    if on_port.is_empty() { sockets } else { on_port }
 }
 
 const DIAL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(120);

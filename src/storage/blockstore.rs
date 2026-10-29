@@ -1945,14 +1945,10 @@ mod header_height_tests {
                 (h3, unlinked, 3),
             ])
             .unwrap();
-        let got = store
-            .build_headers_response(&[h1], &[0u8; 32], 10)
-            .unwrap();
+        let got = store.build_headers_response(&[h1], &[0u8; 32], 10).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].prev_block_hash, h1);
-        let none = store
-            .build_headers_response(&[h2], &[0u8; 32], 10)
-            .unwrap();
+        let none = store.build_headers_response(&[h2], &[0u8; 32], 10).unwrap();
         assert!(none.is_empty());
     }
 
