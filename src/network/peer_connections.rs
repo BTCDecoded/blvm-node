@@ -653,6 +653,10 @@ impl NetworkManager {
                 return;
             }
             if dial_is_cooled(addr) {
+                // The periodic task retries this entry after the cooldown. Dropping it
+                // here loses the peer for the rest of the session.
+                let mut q = reconnection_queue.lock().await;
+                q.entry(addr).or_insert((0, 0, 0.85));
                 return;
             }
             {

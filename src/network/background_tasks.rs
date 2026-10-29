@@ -501,6 +501,9 @@ impl NetworkManager {
                     if is_evicted {
                         continue;
                     }
+                    if crate::network::peer_connections::dial_is_cooled(*addr) {
+                        continue;
+                    }
                     {
                         let ban_list_guard = ban_list.read().await;
                         if let Some(unban_timestamp) =
