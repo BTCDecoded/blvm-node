@@ -431,18 +431,23 @@ fn descendant_closure(map: &HashMap<Hash, HashSet<Hash>>, root: &Hash) -> HashSe
     out
 }
 
-/// Base serialization plus every witness stack item. The cap uses this size.
+/// Bytes the cap charges for a transaction: its full serialization, witness included
+/// (BIP144 marker and flag, the per-input item count and each item's length prefix).
+/// Without witness data, or with only empty stacks, that is the stripped serialization.
 fn accounted_tx_bytes(tx: &Transaction, witnesses: Option<&[Witness]>) -> u64 {
-    use blvm_protocol::serialization::transaction::serialize_transaction;
-    let mut n = serialize_transaction(tx).len() as u64;
-    if let Some(stacks) = witnesses {
-        for stack in stacks {
-            for item in stack {
-                n = n.saturating_add(item.len() as u64);
-            }
-        }
+    use blvm_protocol::serialization::transaction::{
+        serialize_transaction, serialize_transaction_with_witness,
+    };
+    let stripped = || serialize_transaction(tx).len() as u64;
+    let Some(stacks) = witnesses else {
+        return stripped();
+    };
+    if stacks.len() != tx.inputs.len() || stacks.iter().all(|stack| stack.is_empty()) {
+        return stripped();
     }
-    n
+    serialize_transaction_with_witness(tx, stacks)
+        .map(|bytes| bytes.len() as u64)
+        .unwrap_or_else(|_| stripped())
 }
 
 impl MempoolManager {
@@ -3256,6 +3261,44 @@ mod tests {
             2_000,
         ))));
         assert!(mempool.add_transaction(legacy_empty_script()).unwrap());
+    }
+
+    /// The cap charges the exact BIP144 serialization: stripped bytes plus marker and
+    /// flag, the item count, and a length prefix per item (not just the item bytes).
+    #[test]
+    fn accounted_bytes_are_the_exact_witness_serialization() {
+        use super::accounted_tx_bytes;
+        use blvm_protocol::segwit::Witness;
+        use blvm_protocol::serialization::transaction::serialize_transaction_with_witness;
+        let tx = Transaction {
+            version: 2,
+            inputs: vec![blvm_protocol::TransactionInput {
+                prevout: blvm_protocol::OutPoint {
+                    hash: [7; 32],
+                    index: 0,
+                },
+                script_sig: vec![],
+                sequence: 0xffff_fffd,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 1_000,
+                script_pubkey: vec![0x51],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        // P2WPKH-shaped stack: 72-byte signature, 33-byte pubkey.
+        let stacks: Vec<Witness> = vec![vec![vec![0x30; 72], vec![0x02; 33]]];
+        let stripped = serialize_transaction(&tx).len() as u64;
+        let full = serialize_transaction_with_witness(&tx, &stacks)
+            .unwrap()
+            .len() as u64;
+        // marker+flag 2, item count 1, (1 + 72), (1 + 33)
+        assert_eq!(full, stripped + 2 + 1 + 73 + 34);
+        assert_eq!(accounted_tx_bytes(&tx, Some(&stacks)), full);
+        assert_eq!(accounted_tx_bytes(&tx, None), stripped);
+        assert_eq!(accounted_tx_bytes(&tx, Some(&[Vec::new()])), stripped);
     }
 
     #[test]
