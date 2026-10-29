@@ -72,6 +72,18 @@ pub const TESTNET_DNS_SEEDS: &[&str] = &[
     "testnet-seed.bluematt.me",
 ];
 
+/// Archive discovery for `network`. Mainnet uses the `x1.` full-history seeds.
+/// Other networks use their own seeds and P2P port. Testnet4 must not dial mainnet `:8333`.
+pub fn archive_seed_set(network: &str) -> (&'static [&'static str], u16) {
+    match network {
+        "testnet4" => (TESTNET4_DNS_SEEDS, 48333),
+        "testnet" => (TESTNET_DNS_SEEDS, 18333),
+        "signet" => (SIGNET_DNS_SEEDS, 38333),
+        "regtest" => (&[], 18444),
+        _ => (MAINNET_ARCHIVE_DNS_SEEDS, 8333),
+    }
+}
+
 /// Resolve DNS seeds to peer addresses
 pub async fn resolve_dns_seeds(
     seeds: &[&str],
@@ -195,5 +207,15 @@ mod tests {
         assert_eq!(addresses[0].ip[13], 121);
         assert_eq!(addresses[0].ip[14], 116);
         assert_eq!(addresses[0].ip[15], 198);
+    }
+
+    #[test]
+    fn testnet4_archive_seeds_use_port_48333() {
+        let (seeds, port) = archive_seed_set("testnet4");
+        assert_eq!(port, 48333);
+        assert_eq!(seeds, TESTNET4_DNS_SEEDS);
+        let (main_seeds, main_port) = archive_seed_set("mainnet");
+        assert_eq!(main_port, 8333);
+        assert_eq!(main_seeds, MAINNET_ARCHIVE_DNS_SEEDS);
     }
 }

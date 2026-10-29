@@ -404,13 +404,6 @@ async fn handle_peer_connected(nm: &NetworkManager, addr: TransportAddr) {
 async fn handle_peer_disconnected(nm: &NetworkManager, addr: TransportAddr) {
     info!("Peer disconnected: {:?}", addr);
 
-    nm.clear_companion_udp_peer_on_disconnect(&addr).await;
-
-    let mut pm = nm.peer_manager_mutex().lock().await;
-    pm.remove_peer(&addr);
-    drop(pm);
-
-    // Clean up per-connection state for this peer.
     let sock_opt: Option<std::net::SocketAddr> = match &addr {
         TransportAddr::Tcp(s) => Some(*s),
         #[cfg(feature = "quinn")]
@@ -418,6 +411,25 @@ async fn handle_peer_disconnected(nm: &NetworkManager, addr: TransportAddr) {
         #[cfg(feature = "iroh")]
         TransportAddr::Iroh(_) => None,
     };
+    let handshake_done = {
+        let pm = nm.peer_manager_mutex().lock().await;
+        pm.get_peer(&addr).is_some_and(|peer| peer.version() > 0)
+    };
+
+    nm.clear_companion_udp_peer_on_disconnect(&addr).await;
+
+    let mut pm = nm.peer_manager_mutex().lock().await;
+    pm.remove_peer(&addr);
+    drop(pm);
+
+    if let Some(sock) = sock_opt {
+        if !handshake_done {
+            crate::network::peer_connections::note_dial_failure(sock);
+        }
+    }
+
+    // Clean up per-connection state for this peer.
+    let sock_opt: Option<std::net::SocketAddr> = sock_opt;
     if let Some(sock) = sock_opt {
         nm.getaddr_responded
             .lock()

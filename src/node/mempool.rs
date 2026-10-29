@@ -96,8 +96,27 @@ pub struct MempoolManager {
     event_publisher: RwLock<Option<Arc<EventPublisher>>>,
     /// Live chain, so admission can read the next block's height and median time.
     storage: RwLock<Option<Arc<crate::storage::Storage>>>,
+    /// Point-read for a prevout the in-memory set does not hold.
+    ///
+    /// The steady-state set stays empty. The coins live in the IBD snapshot.
+    /// Inserting a hit into the shared set would make the next block call
+    /// `store_utxo_set` on a fragment.
+    snapshot_prevout: RwLock<Option<SnapshotPrevoutLookup>>,
     /// Test tip: next-block height and median time-past. Ignored when `storage` is set.
     chain_tip: RwLock<Option<(u64, u64)>>,
+}
+
+type SnapshotPrevoutLookup = Arc<dyn Fn(&OutPoint) -> Option<blvm_protocol::UTXO> + Send + Sync>;
+
+fn ibd_snapshot_prevout(
+    storage: &crate::storage::Storage,
+    prevout: &OutPoint,
+) -> Option<blvm_protocol::UTXO> {
+    let (_name, tree) = storage.open_engine_resume_snapshot().ok().flatten()?;
+    let key = crate::storage::disk_utxo::outpoint_to_key(prevout);
+    let bytes = tree.get(&key).ok().flatten()?;
+    crate::storage::utxo_value_codec::decode_utxo_with_codec(storage.utxo_value_codec(), &bytes)
+        .ok()
 }
 
 /// Next block height and the median time of the headers before that block.
@@ -453,6 +472,7 @@ impl MempoolManager {
             utxo_set_hash: RwLock::new(None),
             event_publisher: RwLock::new(None),
             storage: RwLock::new(None),
+            snapshot_prevout: RwLock::new(None),
             chain_tip: RwLock::new(None),
         };
         #[cfg(test)]
@@ -493,6 +513,7 @@ impl MempoolManager {
             utxo_set_hash: RwLock::new(None),
             event_publisher: RwLock::new(None),
             storage: RwLock::new(None),
+            snapshot_prevout: RwLock::new(None),
             chain_tip: RwLock::new(None),
         }
     }
@@ -505,7 +526,20 @@ impl MempoolManager {
 
     /// Wire chain storage so locktime checks use the current tip.
     pub fn set_storage(&self, storage: Arc<crate::storage::Storage>) {
+        let lookup_storage = Arc::clone(&storage);
         *self.storage.write().unwrap_or_else(|e| e.into_inner()) = Some(storage);
+        self.set_snapshot_prevout_lookup(Arc::new(move |prevout| {
+            ibd_snapshot_prevout(&lookup_storage, prevout)
+        }));
+    }
+
+    /// Prevout source used when the in-memory set misses. Tests pass a map.
+    /// `set_storage` installs a point-read of the IBD snapshot.
+    pub(crate) fn set_snapshot_prevout_lookup(&self, lookup: SnapshotPrevoutLookup) {
+        *self
+            .snapshot_prevout
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(lookup);
     }
 
     /// Next-block height and median time-past, for tests that have no chain storage.
@@ -657,6 +691,26 @@ impl MempoolManager {
             total = sum;
         }
         false
+    }
+
+    /// Copy snapshot hits into this admission's set only. The shared set is unchanged.
+    fn fill_snapshot_misses(&self, tx: &Transaction, utxo_set: &mut UtxoSet) {
+        for input in tx.inputs.iter() {
+            if utxo_set.contains_key(&input.prevout) || self.mempool_creates(&input.prevout) {
+                continue;
+            }
+            if let Some(utxo) = self.snapshot_prevout(&input.prevout) {
+                utxo_set.insert(input.prevout, Arc::new(utxo));
+            }
+        }
+    }
+
+    fn snapshot_prevout(&self, prevout: &OutPoint) -> Option<blvm_protocol::UTXO> {
+        let lookup = self
+            .snapshot_prevout
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        lookup.as_ref().and_then(|lookup| lookup(prevout))
     }
 
     fn unknown_prevout(&self, tx: &Transaction, utxo_set: &UtxoSet, utxo_wired: bool) -> bool {
@@ -1683,7 +1737,7 @@ impl MempoolManager {
         // been wired in yet we skip this check (startup path).
         // try_lock stays non-blocking. A wired set that is busy is not an empty
         // set: admitting against that would skip script, prevout, and fee checks.
-        let (utxo_snapshot, utxo_wired) = {
+        let (mut utxo_snapshot, utxo_wired) = {
             let utxo_slot = self.utxo_set_arc.read().unwrap_or_else(|e| e.into_inner());
             if let Some(arc) = utxo_slot.as_ref() {
                 match arc.try_lock() {
@@ -1700,6 +1754,9 @@ impl MempoolManager {
                 (UtxoSet::default(), false)
             }
         };
+        if utxo_wired {
+            self.fill_snapshot_misses(&tx, &mut utxo_snapshot);
+        }
 
         let witness_ref = witnesses.as_deref();
         if let Some((height, median_time_past)) = self.finality_context() {
@@ -3199,6 +3256,47 @@ mod tests {
             2_000,
         ))));
         assert!(mempool.add_transaction(legacy_empty_script()).unwrap());
+    }
+
+    #[test]
+    fn an_empty_chain_set_admits_a_snapshot_coin_and_stays_empty() {
+        use std::sync::Arc;
+
+        use blvm_protocol::opcodes::OP_1;
+
+        let mempool = MempoolManager::new();
+        let shared = Arc::new(tokio::sync::Mutex::new(blvm_protocol::UtxoSet::default()));
+        mempool.set_utxo_set_arc(Arc::clone(&shared));
+        let tx = legacy_empty_script();
+        let prevout = tx.inputs[0].prevout;
+        let coin = funded(vec![OP_1], 2_000)
+            .get(&prevout)
+            .unwrap()
+            .as_ref()
+            .clone();
+        mempool.set_snapshot_prevout_lookup(Arc::new(move |outpoint| {
+            if *outpoint == prevout {
+                Some(coin.clone())
+            } else {
+                None
+            }
+        }));
+
+        assert!(mempool.add_transaction(tx).unwrap());
+        let guard = shared.try_lock().expect("shared set");
+        assert!(guard.is_empty());
+    }
+
+    #[test]
+    fn a_missing_snapshot_coin_is_still_rejected() {
+        use std::sync::Arc;
+
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(
+            blvm_protocol::UtxoSet::default(),
+        )));
+        mempool.set_snapshot_prevout_lookup(Arc::new(|_| None));
+        assert!(!mempool.add_transaction(legacy_empty_script()).unwrap());
     }
 
     #[test]

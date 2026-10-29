@@ -112,6 +112,25 @@ pub(crate) fn empty_headers_is_ibd_tip(
     fetched_tip + 1 > start_height
 }
 
+/// The hash at `height` extends the active chain only when its header's prev is
+/// the active hash at `height - 1`. A side header that shares a height does not.
+pub(crate) fn stored_height_extends_active_parent(
+    blockstore: &BlockStore,
+    height: u64,
+    hash: &[u8; 32],
+) -> Result<bool> {
+    if height == 0 {
+        return Ok(true);
+    }
+    let Some(header) = blockstore.get_header(hash)? else {
+        return Ok(false);
+    };
+    let Some(parent) = blockstore.get_hash_by_height(height - 1)? else {
+        return Ok(false);
+    };
+    Ok(header.prev_block_hash == parent)
+}
+
 /// H08: child links to the parent this walk has already accepted.
 ///
 /// A stored row at `height - 1` is that parent only when its hash is `last_hash`.
@@ -412,7 +431,15 @@ pub(crate) async fn download_headers(
         let mut h = start_height;
         while h <= end_height {
             match blockstore.get_hash_by_height(h) {
-                Ok(Some(_)) => h += 1,
+                Ok(Some(stored_hash)) => {
+                    if !stored_height_extends_active_parent(blockstore, h, &stored_hash)? {
+                        warn!(
+                            "[IBD_HEADER_LINK] height {h} does not extend the active parent — not replaying"
+                        );
+                        break;
+                    }
+                    h += 1;
+                }
                 _ => break,
             }
         }
@@ -539,6 +566,17 @@ pub(crate) async fn download_headers(
         while current_height <= end_height {
             match blockstore.get_hash_by_height(current_height) {
                 Ok(Some(stored_hash)) => {
+                    if !stored_height_extends_active_parent(
+                        blockstore,
+                        current_height,
+                        &stored_hash,
+                    )? {
+                        warn!(
+                            "[IBD_HEADER_LINK] height {current_height} hash {} does not extend the active parent — not skipping",
+                            hex::encode(stored_hash)
+                        );
+                        break;
+                    }
                     last_hash = stored_hash;
                     skip_count += 1;
                     current_height += 1;
@@ -1059,6 +1097,55 @@ mod n13_tests {
         // No row yet (header still inside the same uncommitted batch).
         assert!(header_prev_links(None, &accepted_155498, &accepted_155498));
         assert!(!header_prev_links(None, &accepted_155498, &disk_155498));
+    }
+
+    /// av3: height 157905's header pointed at the other block stored at 157904.
+    /// Skipping that height would treat it as the next block of the active chain.
+    #[test]
+    fn stored_height_stops_when_prev_is_not_the_active_parent() {
+        use crate::storage::database::{Database, create_database, default_backend};
+        use std::sync::Arc;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        let grandparent = [0x0fu8; 32];
+        let active_parent = [0x32u8; 32];
+        let side_parent = [0x02u8; 32];
+        let child = [0x06u8; 32];
+        let parent_header = blvm_protocol::BlockHeader {
+            version: 1,
+            prev_block_hash: grandparent,
+            merkle_root: [1u8; 32],
+            timestamp: 1_700_000_000,
+            bits: 0x1d00ffff,
+            nonce: 1,
+        };
+        let child_header = blvm_protocol::BlockHeader {
+            version: 1,
+            prev_block_hash: side_parent,
+            merkle_root: [2u8; 32],
+            timestamp: 1_700_000_001,
+            bits: 0x1d00ffff,
+            nonce: 2,
+        };
+        store.store_height(157903, &grandparent).unwrap();
+        store
+            .store_header(&active_parent, &parent_header)
+            .unwrap();
+        store.store_height(157904, &active_parent).unwrap();
+        store.store_header(&child, &child_header).unwrap();
+        store.store_height(157905, &child).unwrap();
+
+        assert!(
+            stored_height_extends_active_parent(&store, 157904, &active_parent).unwrap(),
+            "157904 extends the active hash at 157903"
+        );
+        assert!(
+            !stored_height_extends_active_parent(&store, 157905, &child).unwrap(),
+            "157905 extends the side header at 157904, not the active hash"
+        );
     }
 }
 

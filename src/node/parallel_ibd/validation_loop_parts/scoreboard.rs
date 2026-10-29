@@ -3469,6 +3469,24 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     pending_blocks_bytes_atomic
                         .store(pending_storage_bytes as usize, Ordering::Relaxed);
                 } else {
+                    // The body was stored before this connect, so the flush that writes
+                    // undo never runs. Keep the undo this connect just built or a reorg
+                    // cannot disconnect the block (live: missing undo for 157910).
+                    #[cfg(feature = "production")]
+                    if already_persisted {
+                        let Some(undo) = undo_log_opt.as_ref() else {
+                            return Err(anyhow::anyhow!(
+                                "connected height {next_height} has no undo log; not advancing the tip"
+                            ));
+                        };
+                        blockstore
+                            .store_undo_log_if_absent(&block_hash, undo)
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "height {next_height} undo was not stored: {e:#}"
+                                )
+                            })?;
+                    }
                     // Skip path: body already on disk, so `do_flush_to_storage` (and its
                     // `update_tip`) never runs. Without advancing `chain_info` here, durable tip
                     // stays stuck (observed: tip=236160 while validation reached ~496k with
@@ -3885,6 +3903,51 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     );
                 }
                 error!("Failed to validate block at height {}: {}", next_height, e);
+                let e = if next_height > 0 {
+                    match (
+                        crate::storage::ibd_autorepair::utxo_miss_prevout(&e),
+                        blockstore.get_hash_by_height(next_height - 1),
+                    ) {
+                        (Some((txid, vout)), Ok(Some(parent_hash))) => {
+                            match blockstore.get_block(&parent_hash) {
+                                Ok(Some(parent))
+                                    if crate::storage::ibd_autorepair::block_spends_prevout(
+                                        &parent, &txid, vout,
+                                    ) =>
+                                {
+                                    let failed_hash =
+                                        blockstore.get_block_hash(block_arc.as_ref());
+                                    warn!(
+                                        "[IBD_DOUBLE_SPEND] height={} prevout {}:{} already spent in connected parent {} — not a snapshot repair",
+                                        next_height,
+                                        hex::encode(txid),
+                                        vout,
+                                        hex::encode(parent_hash)
+                                    );
+                                    if let Err(mark_e) =
+                                        storage_clone.chain().mark_invalid(&failed_hash)
+                                    {
+                                        warn!(
+                                            "Could not mark double-spend block invalid: {mark_e:#}"
+                                        );
+                                    }
+                                    {
+                                        use anyhow::Context;
+                                        Err::<(), _>(e)
+                                            .context(
+                                                crate::storage::ibd_autorepair::DOUBLE_SPEND_OF_CONNECTED_BLOCK,
+                                            )
+                                            .unwrap_err()
+                                    }
+                                }
+                                _ => e,
+                            }
+                        }
+                        _ => e,
+                    }
+                } else {
+                    e
+                };
                 if crate::storage::ibd_autorepair::validation_error_suggests_utxo_repair(&e) {
                     if let Some(dir) = storage_clone.data_dir() {
                         if let Err(flag_e) =

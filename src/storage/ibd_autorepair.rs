@@ -104,13 +104,54 @@ pub fn soft_repair_rollback_watermark(watermark: u64, interval: u64) -> u64 {
     floor.saturating_sub(interval)
 }
 
+/// Marker on a validation error that is a double-spend of a block already connected.
+///
+/// `validation_error_suggests_utxo_repair` must not arm a snapshot rollback for this.
+/// av2: block 157771 spent vout 1023, block 157772 spent it again, and the repair
+/// marker would roll the watermark to 0.
+pub const DOUBLE_SPEND_OF_CONNECTED_BLOCK: &str =
+    "double-spend of a connected block";
+
 pub fn validation_error_suggests_utxo_repair(err: &anyhow::Error) -> bool {
+    let chain = format!("{err:#}");
+    if chain.contains(DOUBLE_SPEND_OF_CONNECTED_BLOCK) {
+        return false;
+    }
     let s = err.to_string();
     s.contains("UTXO not found for input")
         || s.contains("Invalid transaction inputs")
         || s.contains("IBD UTXO mutex poisoned")
         || s.contains("UTXO flush panicked")
         || s.contains("Failed to open IBD UTXO tree")
+}
+
+/// `UTXO not found for input N (prevout HEX:VOUT tx_idx=M)` — HEX is internal byte order.
+pub fn utxo_miss_prevout(err: &anyhow::Error) -> Option<(blvm_protocol::Hash, u32)> {
+    let chain = format!("{err:#}");
+    let marker = "prevout ";
+    let start = chain.find(marker)? + marker.len();
+    let rest = &chain[start..];
+    let end = rest.find(" tx_idx=").unwrap_or(rest.len());
+    let spec = rest[..end].trim();
+    let (hex_s, vout_s) = spec.rsplit_once(':')?;
+    if hex_s.len() != 64 {
+        return None;
+    }
+    let mut hash = [0u8; 32];
+    for i in 0..32 {
+        hash[i] = u8::from_str_radix(&hex_s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    let vout = vout_s.parse().ok()?;
+    Some((hash, vout))
+}
+
+/// True when `block` has an input that spends this outpoint.
+pub fn block_spends_prevout(block: &blvm_protocol::Block, txid: &[u8; 32], vout: u32) -> bool {
+    block.transactions.iter().any(|tx| {
+        tx.inputs
+            .iter()
+            .any(|inp| inp.prevout.hash == *txid && inp.prevout.index == vout)
+    })
 }
 
 /// Reject incomplete / truncated checkpoint snapshots.
@@ -755,6 +796,46 @@ mod ibd_autorepair_tests {
         assert!(!validation_error_suggests_utxo_repair(&anyhow::anyhow!(
             "bad peer disconnect"
         )));
+        // av2: the inner miss is real, but the parent block already spent the coin.
+        let miss = anyhow::anyhow!(
+            "UTXO not found for input 0 (prevout 99a725b5d40b4409e0e658cbf508a0dc6673da27f7b6fbdd3b6f6cc3ba45c5ef:1023 tx_idx=1)"
+        );
+        let (txid, vout) = utxo_miss_prevout(&miss).unwrap();
+        assert_eq!(vout, 1023);
+        assert_eq!(
+            hex::encode(txid),
+            "99a725b5d40b4409e0e658cbf508a0dc6673da27f7b6fbdd3b6f6cc3ba45c5ef"
+        );
+        let wrapped = Err::<(), _>(miss)
+            .context(DOUBLE_SPEND_OF_CONNECTED_BLOCK)
+            .unwrap_err();
+        assert!(
+            !validation_error_suggests_utxo_repair(&wrapped),
+            "a double-spend of a connected block must not arm snapshot repair"
+        );
+    }
+
+    #[test]
+    fn block_spends_prevout_matches_the_parent_input() {
+        use blvm_protocol::{Block, BlockHeader, OutPoint, Transaction, TransactionInput};
+        let txid = [0x99u8; 32];
+        let spend = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: txid,
+                    index: 1023,
+                },
+                sequence: 0xffff_ffff,
+                script_sig: Vec::new().into(),
+            }]
+            .into(),
+            outputs: Vec::new().into(),
+            lock_time: 0,
+        };
+        let block = Block::from_parts(BlockHeader::default(), vec![spend].into());
+        assert!(block_spends_prevout(&block, &txid, 1023));
+        assert!(!block_spends_prevout(&block, &txid, 1024));
     }
 
     #[test]

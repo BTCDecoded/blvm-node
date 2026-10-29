@@ -19,7 +19,7 @@ pub(crate) use env_latch::latch_env;
 pub(crate) mod body_dup;
 mod feeder;
 mod feeder_miss;
-mod headers;
+pub(crate) mod headers;
 pub(crate) use headers::ibd_header_locator_heights;
 #[cfg(feature = "production")]
 mod ibd_staging;
@@ -10068,6 +10068,16 @@ impl ParallelIBD {
         Option<blvm_protocol::block::UtxoDelta>,
         blvm_consensus::reorganization::BlockUndoLog,
     )> {
+        // H08. The run loop checks this. The IBD worker did not, so a coinbase-only
+        // block whose prev is a side header at the previous height still connected.
+        if let Some(blvm_protocol::ValidationResult::Invalid(reason)) =
+            crate::node::block_processor::reject_if_bad_prev_hash(blockstore, block, height)?
+        {
+            return Err(anyhow::anyhow!(
+                "Block validation failed at height {height}: {reason}"
+            ));
+        }
+
         // BIP54 activation from version bits when miners signal (no fixed height required).
         // Merge candidates with `min` so an earlier period’s lock-in is not overwritten by a
         // later window’s larger computed activation height (see `version_bits` module docs).

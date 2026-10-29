@@ -18,6 +18,8 @@ pub mod parallel_ibd;
 pub mod performance;
 #[cfg(feature = "production")]
 pub mod reorg_executor;
+#[cfg(feature = "production")]
+pub mod undo_repair;
 pub mod run_loop;
 pub mod subsystems;
 pub mod sync;
@@ -1011,7 +1013,27 @@ impl Node {
             );
         }
 
-        if is_ibd {
+        let next_header_extends = match self
+            .storage
+            .blocks()
+            .get_hash_by_height(ibd_first_block_height)
+        {
+            Ok(Some(next_hash)) => {
+                crate::node::parallel_ibd::headers::stored_height_extends_active_parent(
+                    self.storage.blocks().as_ref(),
+                    ibd_first_block_height,
+                    &next_hash,
+                )
+                .unwrap_or(false)
+            }
+            _ => true,
+        };
+        if is_ibd && !next_header_extends {
+            warn!(
+                "[START_COMPONENTS] height {ibd_first_block_height} does not extend the tip — not starting parallel IBD"
+            );
+        }
+        if is_ibd && next_header_extends {
             info!(
                 "[START_COMPONENTS] Need to sync (synced_tip {} < target {}), checking for parallel IBD support...",
                 synced_tip, target_height
@@ -1570,8 +1592,8 @@ impl Node {
 
         // Outbound / DNS / LAN scan use the network P2P port, not listen_addr.
         // Listen 8334 (second dest) must still dial Bitcoin peers on 8333.
-        // R-66 dest-dead: every connect was :8334 → 0 peers. Archive DNS already
-        // hardcodes 8333 (`discover_archive_peers_from_dns`).
+        // R-66 dest-dead: every connect was :8334 → 0 peers. Archive DNS uses this
+        // same port (`discover_archive_peers_from_dns`), so testnet4 dials 48333.
         let port = crate::network::protocol::ProtocolParser::dns_seed_network().1;
 
         // Use config if available, otherwise use defaults
@@ -1984,7 +2006,8 @@ impl Node {
                         debug!("[CATCH_UP] empty peer set connect failed: {e}");
                     }
                 });
-                return Ok(());
+                // A version height is not required to notice a heavier header chain.
+                synced_tip
             }
         };
 
@@ -1996,6 +2019,58 @@ impl Node {
                 .await
             {
                 peer_height = peer_height.max(probed.peer_height);
+                // A short heavier fork must not start parallel IBD at tip+1.
+                // That path reseeds the UTXO snapshot and downloads whatever hash
+                // already claimed the next height, which is the lighter chain.
+                if probed.heavier_than_tip && probed.forks_before_tip {
+                    warn!(
+                        "[CATCH_UP] headers fork before {} and have more work ({} missing bodies) — not starting parallel IBD",
+                        synced_tip,
+                        probed.missing_bodies.len()
+                    );
+                    if probed.missing_bodies.is_empty() {
+                        let disconnect_from = probed.disconnect_from.unwrap_or(synced_tip);
+                        if let Err(e) = crate::node::undo_repair::repair_missing_active_undo(
+                            &self.network,
+                            &self.storage,
+                            synced_tip,
+                            disconnect_from,
+                        )
+                        .await
+                        {
+                            warn!("[UNDO_REPAIR] heavier fork not activated: {e:#}");
+                            return Ok(());
+                        }
+                        if let Some(candidate) = probed.heavier_tip {
+                            match crate::node::reorg_executor::try_activate_heavier_fork(
+                                &self.storage,
+                                self.storage.blocks().as_ref(),
+                                &self.protocol,
+                                &candidate,
+                                utxo_set,
+                                None,
+                                Some(self.mempool_manager.as_ref()),
+                            ) {
+                                Ok(true) => warn!(
+                                    "[CATCH_UP] activated heavier tip {}",
+                                    hex::encode(candidate)
+                                ),
+                                Ok(false) => warn!(
+                                    "[CATCH_UP] heavier tip {} did not activate",
+                                    hex::encode(candidate)
+                                ),
+                                Err(e) => warn!("[CATCH_UP] heavier tip activate failed: {e:#}"),
+                            }
+                        }
+                    } else if let Err(e) = self
+                        .network
+                        .request_header_chain_bodies(probed.peer, &probed.missing_bodies)
+                        .await
+                    {
+                        warn!("[CATCH_UP] heavier-fork getdata failed: {e}");
+                    }
+                    return Ok(());
+                }
             }
         }
 
@@ -2006,6 +2081,40 @@ impl Node {
                 synced_tip, target_height
             );
             return Ok(());
+        }
+        // av2: the block at synced_tip+1 double-spends an output the connected
+        // parent already spent. Retrying reseeds the same snapshot and fails again.
+        if let Ok(Some(next_hash)) = self
+            .storage
+            .blocks()
+            .get_hash_by_height(synced_tip.saturating_add(1))
+        {
+            if self
+                .storage
+                .chain()
+                .is_invalid(&next_hash)
+                .unwrap_or(false)
+            {
+                warn!(
+                    "[CATCH_UP] not retrying height {} — {} is marked invalid (double-spend of the connected chain)",
+                    synced_tip.saturating_add(1),
+                    hex::encode(next_hash)
+                );
+                return Ok(());
+            }
+            let extends = crate::node::parallel_ibd::headers::stored_height_extends_active_parent(
+                self.storage.blocks().as_ref(),
+                synced_tip.saturating_add(1),
+                &next_hash,
+            )
+            .unwrap_or(false);
+            if !extends {
+                warn!(
+                    "[CATCH_UP] height {} does not extend the tip — not starting parallel IBD",
+                    synced_tip.saturating_add(1)
+                );
+                return Ok(());
+            }
         }
 
         // Clear evicted-IP set BEFORE checking peer count.

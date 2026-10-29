@@ -1449,6 +1449,15 @@ impl BlockStore {
         let mut out = Vec::new();
         let stop_all_zero = hash_stop.iter().all(|&b| b == 0);
         let cap = max_headers.max(1);
+        // The next header has to extend the one before it. A height-index row
+        // whose prev is a different block (the live 157911 case) must not be
+        // sent: Bitcoin Core treats a non-continuous headers message as
+        // misbehavior and disconnects.
+        let mut expect = if start == 0 {
+            None
+        } else {
+            self.get_hash_by_height(start - 1)?
+        };
 
         for height in start..=tip_h {
             if out.len() >= cap {
@@ -1460,7 +1469,13 @@ impl BlockStore {
             let Some(hdr) = self.get_header(&hash)? else {
                 break;
             };
+            if let Some(prev) = expect {
+                if hdr.prev_block_hash != prev {
+                    break;
+                }
+            }
             out.push(hdr);
+            expect = Some(hash);
             if !stop_all_zero && hash == *hash_stop {
                 break;
             }
@@ -1624,6 +1639,24 @@ impl BlockStore {
     /// Get reference to block metadata tree for batch operations
     pub fn metadata_tree(&self) -> Result<Arc<dyn Tree>> {
         Ok(Arc::clone(&self.block_metadata))
+    }
+
+    /// Persist connect undo when this hash has none.
+    ///
+    /// The validation skip path leaves the body on disk and drops the undo log.
+    /// A later reorg then cannot disconnect that block. An existing row is left
+    /// as it was: a second connect must not replace a real undo with an empty one.
+    #[cfg(feature = "production")]
+    pub fn store_undo_log_if_absent(
+        &self,
+        hash: &Hash,
+        undo: &blvm_consensus::reorganization::BlockUndoLog,
+    ) -> Result<bool> {
+        if self.get_undo_log(hash)?.is_some() {
+            return Ok(false);
+        }
+        self.store_undo_log(hash, undo)?;
+        Ok(true)
     }
 
     /// Persist connect undo for a block hash (required for disconnect on reorg).
@@ -1884,6 +1917,43 @@ mod header_height_tests {
         assert_eq!(store.get_hash_by_height(100).unwrap(), Some(active));
         assert_eq!(store.get_height_by_hash(&other).unwrap(), Some(100));
         assert!(store.get_header(&other).unwrap().is_some());
+    }
+
+    #[test]
+    fn headers_response_stops_before_an_unlinked_height() {
+        let dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        let g = [4u8; 32];
+        let h1 = [1u8; 32];
+        let h2 = [2u8; 32];
+        let h3 = [9u8; 32];
+        let mut genesis = BlockHeader::default();
+        genesis.prev_block_hash = [0u8; 32];
+        let mut parent = BlockHeader::default();
+        parent.prev_block_hash = g;
+        let mut child = BlockHeader::default();
+        child.prev_block_hash = h1;
+        let mut unlinked = BlockHeader::default();
+        unlinked.prev_block_hash = [8u8; 32];
+        store
+            .store_headers_batch(&[
+                (g, genesis, 0),
+                (h1, parent, 1),
+                (h2, child, 2),
+                (h3, unlinked, 3),
+            ])
+            .unwrap();
+        let got = store
+            .build_headers_response(&[h1], &[0u8; 32], 10)
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].prev_block_hash, h1);
+        let none = store
+            .build_headers_response(&[h2], &[0u8; 32], 10)
+            .unwrap();
+        assert!(none.is_empty());
     }
 
     #[cfg(feature = "heed3")]

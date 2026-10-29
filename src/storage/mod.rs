@@ -955,6 +955,30 @@ impl Storage {
     pub fn recover_chain_tip_from_blockstore(&self) -> Result<()> {
         use crate::storage::chainstate::{ChainInfo, ChainParams};
 
+        // A height-index row at tip+1 is not the tip. av4 wrote
+        // `000000000045a50e…` over the validated tip because that hash occupied
+        // the next height and its prev was a different block.
+        if let Some(info) = self.chain().load_chain_info()? {
+            if info.height > 0 {
+                if let Some(parent_hash) = self.blockstore.get_hash_by_height(info.height - 1)? {
+                    if info.tip_header.prev_block_hash != parent_hash {
+                        if let Some(parent) = self.blockstore.get_block(&parent_hash)? {
+                            let restored = info.height - 1;
+                            let mut repaired = info;
+                            repaired.tip_hash = parent_hash;
+                            repaired.tip_header = parent.header.clone();
+                            repaired.height = restored;
+                            self.chainstate.store_chain_info(&repaired)?;
+                            warn!(
+                                "chain_info tip did not extend the active block at height {restored}; restored that block (prefix {:02x}{:02x}{:02x}{:02x})",
+                                parent_hash[0], parent_hash[1], parent_hash[2], parent_hash[3]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         let Some(max_h) = self.blockstore.highest_stored_height()? else {
             return Ok(());
         };
@@ -969,6 +993,12 @@ impl Storage {
             return Ok(());
         };
         if let Some(mut info) = self.chain().load_chain_info()? {
+            if !indexed_chain_extends(&self.blockstore, &info.tip_hash, info.height, max_h)? {
+                warn!(
+                    "highest stored height {max_h} does not extend chain_info tip {current}; leaving tip"
+                );
+                return Ok(());
+            }
             info.tip_hash = tip_hash;
             info.tip_header = block.header.clone();
             info.height = max_h;
@@ -980,6 +1010,12 @@ impl Storage {
             );
         } else {
             let genesis_hash = self.blockstore.get_hash_by_height(0)?.unwrap_or_default();
+            if max_h > 0 && !indexed_chain_extends(&self.blockstore, &genesis_hash, 0, max_h)? {
+                warn!(
+                    "highest stored height {max_h} does not extend genesis; not recovering chain_info"
+                );
+                return Ok(());
+            }
             let mut params = ChainParams::default();
             params.genesis_hash = genesis_hash;
             let info = ChainInfo {
@@ -997,6 +1033,35 @@ impl Storage {
         }
         Ok(())
     }
+}
+
+/// True when every height in `(from_height, to_height]` is the child of the hash before it.
+fn indexed_chain_extends(
+    blockstore: &blockstore::BlockStore,
+    from_hash: &blvm_protocol::Hash,
+    from_height: u64,
+    to_height: u64,
+) -> Result<bool> {
+    if to_height <= from_height {
+        return Ok(false);
+    }
+    let mut expect = *from_hash;
+    for height in (from_height + 1)..=to_height {
+        let Some(hash) = blockstore.get_hash_by_height(height)? else {
+            return Ok(false);
+        };
+        let Some(header) = blockstore.get_header(&hash)? else {
+            return Ok(false);
+        };
+        if header.prev_block_hash != expect {
+            return Ok(false);
+        }
+        expect = hash;
+    }
+    Ok(true)
+}
+
+impl Storage {
 
     /// Get the transaction index (as Arc for sharing)
     pub fn transactions(&self) -> Arc<txindex::TxIndex> {
@@ -1479,5 +1544,105 @@ mod chainwork_gap_tests {
         let child = header(bogus_prev, bits, 1);
         assert!(storage.ensure_parent_chainwork(&child, 1).is_err());
         assert!(storage.chain().get_chainwork(&bogus_prev).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod recover_tip_tests {
+    use super::Storage;
+    use blvm_protocol::{Block, BlockHeader};
+
+    fn header(prev: [u8; 32], nonce: u64) -> BlockHeader {
+        BlockHeader {
+            version: 1,
+            prev_block_hash: prev,
+            merkle_root: [0u8; 32],
+            timestamp: 1_700_000_000,
+            bits: 0x1d00ffff,
+            nonce,
+        }
+    }
+
+    fn store_body(storage: &Storage, height: u64, prev: [u8; 32], nonce: u64) -> [u8; 32] {
+        let block = Block {
+            header: header(prev, nonce),
+            transactions: vec![].into_boxed_slice(),
+        };
+        let hash = storage.blocks().get_block_hash(&block);
+        storage.blocks().store_block(&block).unwrap();
+        storage.blocks().store_height(height, &hash).unwrap();
+        hash
+    }
+
+    fn set_tip(storage: &Storage, hash: [u8; 32], height: u64) {
+        let header = storage.blocks().get_header(&hash).unwrap().unwrap();
+        let mut info = storage.chain().load_chain_info().unwrap().unwrap();
+        info.tip_hash = hash;
+        info.tip_header = header;
+        info.height = height;
+        storage.chain().store_chain_info(&info).unwrap();
+    }
+
+    #[test]
+    fn unlinked_next_height_does_not_replace_the_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        let genesis = store_body(&storage, 0, [0u8; 32], 1);
+        storage
+            .chain()
+            .initialize(&storage.blocks().get_header(&genesis).unwrap().unwrap())
+            .unwrap();
+        let tip = store_body(&storage, 1, genesis, 2);
+        set_tip(&storage, tip, 1);
+        let side = store_body(&storage, 2, [9u8; 32], 3);
+        set_tip(&storage, side, 2);
+
+        storage.recover_chain_tip_from_blockstore().unwrap();
+
+        let after = storage.chain().load_chain_info().unwrap().unwrap();
+        assert_eq!(after.height, 1);
+        assert_eq!(after.tip_hash, tip);
+    }
+
+    #[test]
+    fn linked_next_height_advances_the_tip() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        let genesis = store_body(&storage, 0, [0u8; 32], 1);
+        storage
+            .chain()
+            .initialize(&storage.blocks().get_header(&genesis).unwrap().unwrap())
+            .unwrap();
+        let tip = store_body(&storage, 1, genesis, 2);
+        set_tip(&storage, tip, 1);
+        let child = store_body(&storage, 2, tip, 3);
+
+        storage.recover_chain_tip_from_blockstore().unwrap();
+
+        let after = storage.chain().load_chain_info().unwrap().unwrap();
+        assert_eq!(after.height, 2);
+        assert_eq!(after.tip_hash, child);
+    }
+
+    #[cfg(feature = "production")]
+    #[test]
+    fn undo_missing_from_the_skip_path_is_stored_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        let hash = [4u8; 32];
+        let undo = blvm_consensus::reorganization::BlockUndoLog::new();
+        assert!(
+            storage
+                .blocks()
+                .store_undo_log_if_absent(&hash, &undo)
+                .unwrap()
+        );
+        assert!(storage.blocks().get_undo_log(&hash).unwrap().is_some());
+        assert!(
+            !storage
+                .blocks()
+                .store_undo_log_if_absent(&hash, &undo)
+                .unwrap()
+        );
     }
 }

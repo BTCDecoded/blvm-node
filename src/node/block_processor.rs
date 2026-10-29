@@ -209,7 +209,7 @@ pub fn prepare_block_validation_context(
 }
 
 /// Reject when H08 fails and a parent header is available at `height - 1`.
-fn reject_if_bad_prev_hash(
+pub(crate) fn reject_if_bad_prev_hash(
     blockstore: &BlockStore,
     block: &Block,
     height: u64,

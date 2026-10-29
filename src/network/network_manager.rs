@@ -2383,7 +2383,14 @@ impl NetworkManager {
             }
             NetworkMessage::PeerDisconnected(addr) => {
                 info!("Peer disconnected (during pending processing): {:?}", addr);
+                let handshake_done = {
+                    let pm = self.peer_manager.lock().await;
+                    pm.get_peer(&addr).is_some_and(|peer| peer.version() > 0)
+                };
                 if let TransportAddr::Tcp(sa) = addr {
+                    if !handshake_done {
+                        crate::network::peer_connections::note_dial_failure(sa);
+                    }
                     crate::node::parallel_ibd::ibd_peer_gone(&sa.to_string());
                 }
                 self.clear_companion_udp_peer_on_disconnect(&addr).await;
@@ -2522,6 +2529,11 @@ impl NetworkManager {
 
     // NOTE: Network message handling match extracted to network_message_dispatch::handle_network_message
 
+    /// An unrecognized command is not a broken peer. Checksum and size errors are.
+    pub(crate) fn disconnect_on_unrecognized_command(err: &anyhow::Error) -> bool {
+        !format!("{err:#}").contains("Unknown command")
+    }
+
     /// Parse incoming TCP wire message and process with protocol layer
     ///
     /// This function:
@@ -2610,6 +2622,15 @@ impl NetworkManager {
                 match ProtocolParser::parse_message(&data) {
                     Ok(parsed) => parsed,
                     Err(err) => {
+                        // Bitcoin ignores an unrecognized command. Disconnecting here
+                        // drops a peer that just sent version and verack, then sendaddrv2
+                        // or wtxidrelay.
+                        if !Self::disconnect_on_unrecognized_command(&err) {
+                            info!(
+                                "ignoring unrecognized message from {peer_addr}: {err:#}"
+                            );
+                            return Ok(());
+                        }
                         let _ = self.peer_tx().send(NetworkMessage::PeerDisconnected(
                             TransportAddr::Tcp(peer_addr),
                         ));
@@ -3703,5 +3724,15 @@ mod block_fetch_timeout_tests {
         let wait = NetworkManager::block_fetch_timeout(&RequestTimeoutConfig::default());
         assert_eq!(wait, Duration::from_secs(300));
         assert_ne!(wait, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn an_unknown_command_does_not_drop_the_peer() {
+        let unknown = anyhow::anyhow!("Unknown command: sendaddrv2");
+        let bad_checksum = anyhow::anyhow!("Invalid checksum");
+        assert!(!NetworkManager::disconnect_on_unrecognized_command(&unknown));
+        assert!(NetworkManager::disconnect_on_unrecognized_command(
+            &bad_checksum
+        ));
     }
 }

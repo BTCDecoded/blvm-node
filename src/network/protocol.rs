@@ -1375,6 +1375,12 @@ impl ProtocolParser {
                 // This uses the serialize_version function from blvm-protocol wire.rs
                 // which implements the exact Bitcoin protocol format
                 let payload = serialize_version(&version_msg)?;
+                let magic = ACTIVE_MAGIC.load(std::sync::atomic::Ordering::Relaxed).to_le_bytes();
+                tracing::debug!(
+                    "outbound version magic={:02x}{:02x}{:02x}{:02x} payload={} services={} height={} ua={}",
+                    magic[0], magic[1], magic[2], magic[3], payload.len(),
+                    version_msg.services, version_msg.start_height, version_msg.user_agent
+                );
                 (cmd::VERSION, payload)
             }
             ProtocolMessage::Verack => (cmd::VERACK, vec![]),
@@ -2068,5 +2074,19 @@ mod tests {
             ("mainnet", 8333),
             "stale pre-protocol#7 signet magic must not map to signet"
         );
+    }
+
+    #[test]
+    fn a_testnet4_seed_version_and_verack_parse() {
+        let version = hex_frame("1c163f2876657273696f6e00000000006c000000c7f7a7a181110100090c0000000000009defe26a00000000000000000000000000000000000000000000ffff6c040dbf9096090c000000000000000000000000000000000000000000000000a6960f924d5ce593162f5361746f7368693a33322e312e30284077697a292f3f69020001");
+        let verack = hex_frame("1c163f2876657261636b000000000000000000005df6e0e2");
+        ProtocolParser::set_network_magic(super::BITCOIN_MAGIC_TESTNET4);
+        ProtocolParser::parse_message(&version).expect("seed version");
+        ProtocolParser::parse_message(&verack).expect("seed verack");
+        ProtocolParser::set_network_magic(super::BITCOIN_MAGIC_MAINNET);
+    }
+
+    fn hex_frame(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i+2], 16).unwrap()).collect()
     }
 }

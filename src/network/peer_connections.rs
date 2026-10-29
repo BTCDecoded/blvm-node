@@ -95,23 +95,26 @@ impl NetworkManager {
         Ok(())
     }
 
-    /// Discover full-history (archive) peers using service-bit-filtered DNS seeds.
+    /// Discover peers that can serve this network's chain.
     ///
-    /// Uses the `x1.` subdomain prefix to request only `NODE_NETWORK` peers — nodes that
-    /// keep the complete blockchain and can serve historical blocks for IBD.  Call this when
-    /// the standard seed returns mostly pruned peers that cannot serve historical blocks.
+    /// Mainnet uses the `x1.` seeds so the answers are full-history nodes.
+    /// Testnet4, testnet, and signet use their own seeds and P2P port.
     pub async fn discover_archive_peers_from_dns(&self) -> Result<usize> {
         if crate::network::ibd_peers_pinned() {
             info!("IBD: skipping archive DNS seeds — BLVM_IBD_PIN_PEERS set");
             return Ok(0);
         }
         use crate::network::dns_seeds;
-        let seeds = dns_seeds::MAINNET_ARCHIVE_DNS_SEEDS;
+        let (network, _) = crate::network::protocol::ProtocolParser::dns_seed_network();
+        let (seeds, port) = dns_seeds::archive_seed_set(network);
+        if seeds.is_empty() {
+            return Ok(0);
+        }
         info!(
-            "IBD: seeding full-history (archive) peers from {} filtered DNS seeds",
+            "IBD: seeding full-history peers for {network} from {} DNS seeds on port {port}",
             seeds.len()
         );
-        let addresses = dns_seeds::resolve_dns_seeds(seeds, 8333, 1000).await;
+        let addresses = dns_seeds::resolve_dns_seeds(seeds, port, 1000).await;
         let count = addresses.len();
         {
             let mut db = self.address_database().write().await;
@@ -120,8 +123,7 @@ impl NetworkManager {
             }
         }
         info!(
-            "IBD: discovered {} archive-node addresses from x1-filtered DNS seeds",
-            count
+            "IBD: discovered {count} peer addresses for {network} on port {port}"
         );
         Ok(count)
     }
@@ -273,22 +275,28 @@ impl NetworkManager {
             return Ok(connected);
         }
 
-        let current_count = self.peer_count();
-        if current_count >= target_count {
-            return Ok(0);
-        }
-
-        let needed = target_count - current_count;
-        info!(
-            "Need {} more peers (current: {}, target: {})",
-            needed, current_count, target_count
-        );
-
-        let ban_list = self.ban_list().read().await.clone();
+        let (network_name, network_port) =
+            crate::network::protocol::ProtocolParser::dns_seed_network();
         let connected_peers: Vec<SocketAddr> = {
             let pm = self.peer_manager_mutex().lock().await;
             pm.peer_socket_addresses()
         };
+        let on_port = connected_peers
+            .iter()
+            .filter(|addr| addr.port() == network_port)
+            .count();
+        if on_port >= target_count {
+            return Ok(0);
+        }
+
+        let needed = target_count - on_port;
+        info!(
+            "Need {} more peers on port {network_port} (current on-port: {on_port}, connected: {}, target: {target_count})",
+            needed,
+            connected_peers.len()
+        );
+
+        let ban_list = self.ban_list().read().await.clone();
 
         // Check how many fresh non-limited addresses exist before pulling the list.
         // If the address DB has been drained of full-history peers (all marked
@@ -347,12 +355,42 @@ impl NetworkManager {
 
         let sockets: Vec<SocketAddr> = {
             let db = self.address_database().read().await;
-            addresses
+            let mapped: Vec<SocketAddr> = addresses
                 .iter()
                 .take(needed * fanout)
                 .map(|addr| db.network_addr_to_socket(addr))
-                .collect()
+                .collect();
+            prefer_network_port(mapped, network_port)
         };
+        if sockets.iter().all(|addr| addr.port() != network_port) {
+            drop(sockets);
+            info!(
+                "IBD: no stored peers on {network_name} port {network_port}; seeding that network"
+            );
+            #[cfg(not(test))]
+            {
+                let _ = self.discover_archive_peers_from_dns().await;
+            }
+        }
+        let sockets: Vec<SocketAddr> = {
+            let db = self.address_database().read().await;
+            let fresh = db.get_fresh_ibd_addresses(needed * (fanout + 1));
+            let filtered = db.filter_addresses(fresh, &ban_list, &connected_peers);
+            let mapped: Vec<SocketAddr> = filtered
+                .iter()
+                .take(needed * fanout)
+                .map(|addr| db.network_addr_to_socket(addr))
+                .collect();
+            prefer_network_port(mapped, network_port)
+        };
+        let sockets: Vec<SocketAddr> = sockets
+            .into_iter()
+            .filter(|addr| !dial_is_cooled(*addr))
+            .collect();
+        if sockets.is_empty() {
+            debug!("IBD: every dial candidate is in cooldown");
+            return Ok(0);
+        }
 
         // Connect to multiple candidates simultaneously to avoid serializing 10s timeouts.
         // Use FuturesUnordered so each candidate races concurrently; we collect results as
@@ -509,6 +547,9 @@ impl NetworkManager {
 
     /// Connect to a peer at the given address
     pub async fn connect_to_peer(&self, addr: SocketAddr) -> Result<()> {
+        if dial_is_cooled(addr) {
+            return Err(anyhow::anyhow!("dial cooled"));
+        }
         let ip = addr.ip();
 
         // Fast-reject global IPv6 peers when this host has no global IPv6 routing.
@@ -587,6 +628,7 @@ impl NetworkManager {
             }
         }
 
+        note_dial_failure(addr);
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("All transport attempts failed")))
     }
 
@@ -610,6 +652,9 @@ impl NetworkManager {
                     "IBD: skipping reconnect to {} — IP evicted (NODE_NETWORK_LIMITED)",
                     addr
                 );
+                return;
+            }
+            if dial_is_cooled(addr) {
                 return;
             }
             {
@@ -732,11 +777,56 @@ impl NetworkManager {
     }
 }
 
+/// Keep peers on the network P2P port when any are present. A testnet4 node
+/// does not fill its outbound slots with mainnet `:8333` once `:48333` is known.
+pub(crate) fn prefer_network_port(sockets: Vec<SocketAddr>, network_port: u16) -> Vec<SocketAddr> {
+    let on_port: Vec<SocketAddr> = sockets
+        .iter()
+        .copied()
+        .filter(|addr| addr.port() == network_port)
+        .collect();
+    if on_port.is_empty() {
+        sockets
+    } else {
+        on_port
+    }
+}
+
+const DIAL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(120);
+
+static DIAL_FAILS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<SocketAddr, std::time::Instant>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+pub(crate) fn note_dial_failure(addr: SocketAddr) {
+    let mut fails = DIAL_FAILS.lock().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    fails.retain(|_, failed_at| now.duration_since(*failed_at) < DIAL_COOLDOWN);
+    fails.insert(addr, now);
+}
+
+pub(crate) fn dial_is_cooled(addr: SocketAddr) -> bool {
+    let mut fails = DIAL_FAILS.lock().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    fails.retain(|_, failed_at| now.duration_since(*failed_at) < DIAL_COOLDOWN);
+    fails.contains_key(&addr)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::NodeConfig;
     use std::net::SocketAddr;
+
+    #[test]
+    fn on_port_peers_are_dialed_ahead_of_mainnet() {
+        let mainnet: SocketAddr = "1.2.3.4:8333".parse().unwrap();
+        let testnet4: SocketAddr = "5.6.7.8:48333".parse().unwrap();
+        let chosen = prefer_network_port(vec![mainnet, testnet4], 48333);
+        assert_eq!(chosen, vec![testnet4]);
+        let only_mainnet = prefer_network_port(vec![mainnet], 48333);
+        assert_eq!(only_mainnet, vec![mainnet]);
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn discover_peers_from_dns_unknown_network_is_noop() {

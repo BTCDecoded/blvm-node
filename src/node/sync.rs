@@ -15,13 +15,16 @@ use crate::node::event_publisher::EventPublisher;
 use crate::node::metrics::MetricsCollector;
 use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTimer};
 #[cfg(feature = "production")]
-use crate::node::reorg_executor::try_activate_heavier_fork;
+use crate::node::reorg_executor::{
+    commit_utxo_snapshot_delta, note_snapshot_height, read_snapshot_inputs,
+    try_activate_heavier_fork,
+};
 use crate::storage::Storage;
 use crate::storage::blockstore::BlockStore;
 use anyhow::Result;
 use blvm_protocol::{BitcoinProtocolEngine, Block, BlockHeader, UtxoSet, ValidationResult};
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
 
@@ -160,11 +163,65 @@ impl SyncState {
 }
 
 /// Sync coordinator that manages blockchain synchronization
+/// A heavier-fork body whose parent block is not indexed yet.
+///
+/// Peers send the child before the parent. Dropping it leaves the heavier
+/// chain one block short, so it never activates.
+const FORK_BODY_HOLD_LIMIT: usize = 16;
+
+struct HeldForkBody {
+    block: Block,
+    witnesses: Vec<Vec<blvm_protocol::segwit::Witness>>,
+}
+
+#[derive(Default)]
+struct ForkBodyHold {
+    by_parent: HashMap<blvm_protocol::Hash, Vec<HeldForkBody>>,
+    len: usize,
+}
+
+impl ForkBodyHold {
+    fn park(
+        &mut self,
+        parent: blvm_protocol::Hash,
+        block: Block,
+        witnesses: Vec<Vec<blvm_protocol::segwit::Witness>>,
+    ) -> bool {
+        let hash = blvm_consensus::block::block_header_hash(&block.header);
+        if self
+            .by_parent
+            .values()
+            .any(|held| {
+                held.iter()
+                    .any(|item| blvm_consensus::block::block_header_hash(&item.block.header) == hash)
+            })
+        {
+            return true;
+        }
+        if self.len >= FORK_BODY_HOLD_LIMIT {
+            return false;
+        }
+        self.by_parent.entry(parent).or_default().push(HeldForkBody {
+            block,
+            witnesses,
+        });
+        self.len += 1;
+        true
+    }
+
+    fn take_children(&mut self, parent: &blvm_protocol::Hash) -> Vec<HeldForkBody> {
+        let children = self.by_parent.remove(parent).unwrap_or_default();
+        self.len = self.len.saturating_sub(children.len());
+        children
+    }
+}
+
 pub struct SyncCoordinator {
     state_machine: SyncStateMachine,
     block_provider: InMemoryBlockProvider,
     event_publisher: Option<Arc<EventPublisher>>,
     mempool: Option<Arc<crate::node::mempool::MempoolManager>>,
+    fork_hold: Arc<Mutex<ForkBodyHold>>,
 }
 
 impl Default for SyncCoordinator {
@@ -180,6 +237,7 @@ impl Clone for SyncCoordinator {
             block_provider: InMemoryBlockProvider::new(),
             event_publisher: self.event_publisher.clone(),
             mempool: self.mempool.clone(),
+            fork_hold: Arc::clone(&self.fork_hold),
         }
     }
 }
@@ -192,6 +250,7 @@ impl SyncCoordinator {
             block_provider: InMemoryBlockProvider::new(),
             event_publisher: None,
             mempool: None,
+            fork_hold: Arc::new(Mutex::new(ForkBodyHold::default())),
         }
     }
 
@@ -500,131 +559,199 @@ impl SyncCoordinator {
         metrics: Option<Arc<MetricsCollector>>,
         start_time: Instant,
     ) -> Result<bool> {
-        let parent_hash = block.header.prev_block_hash;
-        let (active_tip, active_height) = storage.chain().get_tip_hash_and_height()?;
+        let mut pending: VecDeque<(Block, Vec<Vec<blvm_protocol::segwit::Witness>>)> =
+            VecDeque::from([(block.clone(), witnesses.to_vec())]);
+        let mut stored_any = false;
+        let mut held_any = false;
 
-        let connect_height = if parent_hash == active_tip {
-            active_height + 1
-        } else if let Some(entry) = storage.chain().block_index().get(&parent_hash)? {
-            entry.height + 1
-        } else {
-            warn!(
-                "Rejecting block: parent {:?} not in block index",
-                parent_hash
-            );
-            return Ok(false);
-        };
+        while let Some((block, witnesses)) = pending.pop_front() {
+            let parent_hash = block.header.prev_block_hash;
+            let (active_tip, active_height) = storage.chain().get_tip_hash_and_height()?;
 
-        let extends_active = parent_hash == active_tip;
-
-        let processing_time;
-        let block_hash;
-
-        if extends_active {
-            let mut utxo_for_connect = std::mem::take(utxo_set);
-            let (validation_result, connected_utxo, undo_log) =
-                validate_block_with_context_and_undo(
-                    blockstore,
-                    protocol,
+            let connect_height = if parent_hash == active_tip {
+                active_height + 1
+            } else if let Some(entry) = storage.chain().block_index().get(&parent_hash)? {
+                entry.height + 1
+            } else if blockstore.get_header(&parent_hash)?.is_some() {
+                let parked = self.fork_hold.lock().unwrap_or_else(|e| e.into_inner()).park(
+                    parent_hash,
                     block,
                     witnesses,
-                    &mut utxo_for_connect,
+                );
+                if parked {
+                    held_any = true;
+                    warn!(
+                        "[FORK_HOLD] parent {} is a header only — holding the child until that body is indexed",
+                        hex::encode(parent_hash)
+                    );
+                } else {
+                    warn!(
+                        "Rejecting block: fork hold is full and parent {:?} is not indexed",
+                        parent_hash
+                    );
+                }
+                continue;
+            } else {
+                warn!(
+                    "Rejecting block: parent {:?} not in block index",
+                    parent_hash
+                );
+                continue;
+            };
+
+            let extends_active = parent_hash == active_tip;
+            let processing_time;
+            let block_hash;
+
+            if extends_active {
+                let mut utxo_for_connect = std::mem::take(utxo_set);
+                let snapshot = if utxo_for_connect.is_empty() {
+                    storage.open_engine_resume_snapshot()?
+                } else {
+                    None
+                };
+                if let Some((name, tree)) = &snapshot {
+                    let loaded = read_snapshot_inputs(
+                        tree.as_ref(),
+                        storage.utxo_value_codec(),
+                        std::slice::from_ref(&block),
+                        &mut utxo_for_connect,
+                    )?;
+                    info!("[CONNECT] read {loaded} inputs from UTXO snapshot {name}");
+                }
+                let (validation_result, connected_utxo, undo_log) =
+                    validate_block_with_context_and_undo(
+                        blockstore,
+                        protocol,
+                        &block,
+                        &witnesses,
+                        &mut utxo_for_connect,
+                        connect_height,
+                    )?;
+
+                processing_time = start_time.elapsed();
+                if !matches!(validation_result, ValidationResult::Valid) {
+                    *utxo_set = utxo_for_connect;
+                    error!(
+                        "Block validation failed at height {}: {validation_result:?}",
+                        connect_height
+                    );
+                    if !stored_any {
+                        return Ok(false);
+                    }
+                    continue;
+                }
+
+                store_block_with_context_and_index(
+                    blockstore,
+                    Some(storage),
+                    &block,
+                    &witnesses,
                     connect_height,
+                    true,
                 )?;
 
-            processing_time = start_time.elapsed();
-            if !matches!(validation_result, ValidationResult::Valid) {
-                *utxo_set = utxo_for_connect;
-                error!(
-                    "Block validation failed at height {}: {validation_result:?}",
-                    connect_height
-                );
-                return Ok(false);
-            }
+                block_hash = blockstore.get_block_hash(&block);
+                blockstore.store_undo_log(&block_hash, &undo_log)?;
+                storage
+                    .chain()
+                    .cache_block_chainwork(&block_hash, &block.header, connect_height)?;
 
-            store_block_with_context_and_index(
-                blockstore,
-                Some(storage),
-                block,
-                witnesses,
-                connect_height,
-                true,
-            )?;
-
-            block_hash = blockstore.get_block_hash(block);
-            blockstore.store_undo_log(&block_hash, &undo_log)?;
-            storage
-                .chain()
-                .cache_block_chainwork(&block_hash, &block.header, connect_height)?;
-
-            *utxo_set = connected_utxo;
-            storage
-                .chain()
-                .update_tip(&block_hash, &block.header, connect_height)?;
-            storage.utxos().store_utxo_set(utxo_set)?;
-        } else {
-            let validation_result = validate_block_protocol_only(
-                blockstore,
-                protocol,
-                block,
-                witnesses,
-                connect_height,
-                utxo_set,
-            )?;
-
-            processing_time = start_time.elapsed();
-            if !matches!(validation_result, ValidationResult::Valid) {
-                error!("Block validation failed at height {}", connect_height);
-                return Ok(false);
-            }
-
-            store_block_with_context_and_index(
-                blockstore,
-                Some(storage),
-                block,
-                witnesses,
-                connect_height,
-                false,
-            )?;
-
-            block_hash = blockstore.get_block_hash(block);
-            storage
-                .chain()
-                .cache_block_chainwork(&block_hash, &block.header, connect_height)?;
-
-            if !try_activate_heavier_fork(
-                storage,
-                blockstore,
-                protocol,
-                &block_hash,
-                utxo_set,
-                self.event_publisher.as_ref(),
-                self.mempool.as_deref(),
-            )? {
-                // Side-chain block stored; active tip unchanged.
-            }
-        }
-
-        if let Some(ref metrics) = metrics {
-            metrics.update_storage(|m| {
-                m.block_count += 1;
-                m.transaction_count += block.transactions.len();
-            });
-            metrics.update_performance(|m| {
-                let time_ms = processing_time.as_secs_f64() * 1000.0;
-                m.avg_block_processing_time_ms =
-                    (m.avg_block_processing_time_ms * 0.9) + (time_ms * 0.1);
-                if processing_time.as_secs_f64() > 0.0 {
-                    m.blocks_per_second = 1.0 / processing_time.as_secs_f64();
+                storage
+                    .chain()
+                    .update_tip(&block_hash, &block.header, connect_height)?;
+                if let Some((name, tree)) = &snapshot {
+                    let written = commit_utxo_snapshot_delta(
+                        tree.as_ref(),
+                        storage.utxo_value_codec(),
+                        &[],
+                        &[&undo_log],
+                    )?;
+                    note_snapshot_height(storage, connect_height)?;
+                    info!("[CONNECT] wrote {written} UTXO rows in snapshot {name}");
+                    *utxo_set = UtxoSet::default();
+                } else {
+                    *utxo_set = connected_utxo;
+                    storage.utxos().store_utxo_set(utxo_set)?;
                 }
-            });
+            } else {
+                let validation_result = validate_block_protocol_only(
+                    blockstore,
+                    protocol,
+                    &block,
+                    &witnesses,
+                    connect_height,
+                    utxo_set,
+                )?;
+
+                processing_time = start_time.elapsed();
+                if !matches!(validation_result, ValidationResult::Valid) {
+                    error!("Block validation failed at height {}", connect_height);
+                    if !stored_any {
+                        return Ok(false);
+                    }
+                    continue;
+                }
+
+                store_block_with_context_and_index(
+                    blockstore,
+                    Some(storage),
+                    &block,
+                    &witnesses,
+                    connect_height,
+                    false,
+                )?;
+
+                block_hash = blockstore.get_block_hash(&block);
+                storage
+                    .chain()
+                    .cache_block_chainwork(&block_hash, &block.header, connect_height)?;
+
+                if !try_activate_heavier_fork(
+                    storage,
+                    blockstore,
+                    protocol,
+                    &block_hash,
+                    utxo_set,
+                    self.event_publisher.as_ref(),
+                    self.mempool.as_deref(),
+                )? {
+                    // Side-chain block stored; active tip unchanged.
+                }
+            }
+
+            stored_any = true;
+            if let Some(ref metrics) = metrics {
+                metrics.update_storage(|m| {
+                    m.block_count += 1;
+                    m.transaction_count += block.transactions.len();
+                });
+                metrics.update_performance(|m| {
+                    let time_ms = processing_time.as_secs_f64() * 1000.0;
+                    m.avg_block_processing_time_ms =
+                        (m.avg_block_processing_time_ms * 0.9) + (time_ms * 0.1);
+                    if processing_time.as_secs_f64() > 0.0 {
+                        m.blocks_per_second = 1.0 / processing_time.as_secs_f64();
+                    }
+                });
+            }
+
+            info!(
+                "Block validated and stored at height {} (took {:?})",
+                connect_height, processing_time
+            );
+
+            let children = self
+                .fork_hold
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take_children(&block_hash);
+            for child in children {
+                pending.push_back((child.block, child.witnesses));
+            }
         }
 
-        info!(
-            "Block validated and stored at height {} (took {:?})",
-            connect_height, processing_time
-        );
-        Ok(true)
+        Ok(stored_any || held_any)
     }
 
     /// Connect a block from wire bytes (P2P run loop, regtest mining RPC, integration tests).
@@ -931,5 +1058,73 @@ mod tests {
         );
         provider.set_block_count(5);
         assert_eq!(provider.get_block_count().unwrap(), 5);
+    }
+
+    fn fork_block(prev: [u8; 32], merkle: u8) -> Block {
+        Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: prev,
+                merkle_root: [merkle; 32],
+                timestamp: 1_700_000_000,
+                bits: 0x207fffff,
+                nonce: u64::from(merkle),
+            },
+            transactions: vec![Transaction {
+                version: 1,
+                inputs: vec![].into(),
+                outputs: vec![].into(),
+                lock_time: 0,
+            }]
+            .into_boxed_slice(),
+        }
+    }
+
+    /// The child of a heavier fork can arrive before its parent body is indexed.
+    /// It stays held, then comes back in parent-before-child order.
+    #[test]
+    fn child_body_waits_until_the_parent_body_is_indexed() {
+        let parent = [0x11u8; 32];
+        let sibling = fork_block(parent, 2);
+        let sibling_hash = blvm_consensus::block::block_header_hash(&sibling.header);
+        let child = fork_block(sibling_hash, 3);
+        let grandchild = fork_block(
+            blvm_consensus::block::block_header_hash(&child.header),
+            4,
+        );
+
+        let mut hold = ForkBodyHold::default();
+        assert!(hold.park(sibling_hash, child.clone(), Vec::new()));
+        assert!(hold.park(
+            blvm_consensus::block::block_header_hash(&child.header),
+            grandchild.clone(),
+            Vec::new()
+        ));
+        assert!(
+            hold.take_children(&parent).is_empty(),
+            "the active parent has no held body"
+        );
+
+        let ready = hold.take_children(&sibling_hash);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].block.header.merkle_root, child.header.merkle_root);
+        let child_hash = blvm_consensus::block::block_header_hash(&ready[0].block.header);
+        let next = hold.take_children(&child_hash);
+        assert_eq!(next.len(), 1);
+        assert_eq!(
+            next[0].block.header.merkle_root,
+            grandchild.header.merkle_root
+        );
+        assert!(hold.take_children(&child_hash).is_empty());
+
+        let mut full = ForkBodyHold::default();
+        for i in 0..FORK_BODY_HOLD_LIMIT {
+            assert!(full.park(parent, fork_block(parent, i as u8 + 1), Vec::new()));
+        }
+        assert!(!full.park(parent, fork_block(parent, 0xab), Vec::new()));
+        assert!(
+            full.park(parent, fork_block(parent, 1), Vec::new()),
+            "the same child is already held and must not take another slot"
+        );
     }
 }
