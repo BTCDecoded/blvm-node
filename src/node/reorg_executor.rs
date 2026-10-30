@@ -363,15 +363,15 @@ pub fn try_activate_heavier_fork(
     // snapshot tree. Loading that tree would copy every coin, and writing the
     // reorg's small map back with `store_utxo_set` would replace the database.
     let snapshot = if utxo_set.is_empty() {
-        match storage.open_engine_resume_snapshot()? {
-            Some(tree) => Some(tree),
-            None => {
-                return Err(anyhow::anyhow!("reorg refused: IBD UTXO snapshot is empty"));
-            }
-        }
+        storage.open_engine_resume_snapshot()?
     } else {
         None
     };
+    if snapshot.is_none() && utxo_set.is_empty() {
+        // No checkpoint: the table is the chain. The reorg has to see those
+        // coins, and the set written back is the whole table.
+        *utxo_set = storage.utxos().get_all_utxos()?;
+    }
 
     let (active_tip, active_height) = storage.chain().get_tip_hash_and_height()?;
     let (current_chain, new_chain) =

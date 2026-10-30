@@ -1055,7 +1055,7 @@ impl MiningRpc {
             let template = self
                 .consensus
                 .create_block_template_with_outputs(
-                    &template_utxos,
+                    template_utxos,
                     &pool_txs,
                     connect_height,
                     &prev_header,
