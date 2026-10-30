@@ -30,13 +30,10 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
     // `current_height` is the height of the next block to connect (chain tip + 1).
     let chain_tip = node.storage.chain().get_height()?.unwrap_or(0);
     let mut current_height = chain_tip.saturating_add(1);
-    // Full UTXO load can take minutes at mainnet scale and blocks shutdown; P2P relay
-    // validation reloads from disk as needed. Catch-up sync uses parallel IBD + disk store.
-    let mut utxo_set = if chain_tip == 0 {
-        node.storage.utxos().get_all_utxos().unwrap_or_default()
-    } else {
-        Default::default()
-    };
+    // Coins live in the snapshot, or in the chainstate table when that snapshot
+    // has no rows. A set kept here goes stale when generatetoaddress writes the
+    // table, and the next network block would replace the table with that set.
+    let mut utxo_set = blvm_protocol::UtxoSet::default();
     node.network.replace_utxo_snapshot(utxo_set.clone()).await;
 
     // Catch up immediately if peers are ahead (do not wait for the periodic check).
@@ -171,17 +168,19 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
 
                             let transaction_count =
                                 node.storage.transaction_count().unwrap_or(0) as u64;
-                            log_error(
-                                || {
-                                    node.storage.chain().update_utxo_stats_cache(
-                                        &block_hash,
-                                        tip_height,
-                                        &utxo_set,
-                                        transaction_count,
-                                    )
-                                },
-                                "Failed to update UTXO stats cache",
-                            );
+                            if !utxo_set.is_empty() {
+                                log_error(
+                                    || {
+                                        node.storage.chain().update_utxo_stats_cache(
+                                            &block_hash,
+                                            tip_height,
+                                            &utxo_set,
+                                            transaction_count,
+                                        )
+                                    },
+                                    "Failed to update UTXO stats cache",
+                                );
+                            }
 
                             log_error(
                                 || {
@@ -203,7 +202,7 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                                     .await;
                             }
 
-                            if let Err(e) = node.storage.utxos().store_utxo_set(&utxo_set) {
+                            if let Err(e) = persist_connected_utxo_set(&node.storage, &utxo_set) {
                                 warn!(
                                     "Failed to persist UTXO set after block {}: {}",
                                     tip_height, e
@@ -213,7 +212,9 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
 
                             #[cfg(feature = "utxo-commitments")]
                             {
-                                if let Some(pruning_manager) = node.storage.pruning() {
+                                if !utxo_set.is_empty()
+                                    && let Some(pruning_manager) = node.storage.pruning()
+                                {
                                     if let (Some(commitment_store), Some(_utxostore)) = (
                                         pruning_manager.commitment_store(),
                                         pruning_manager.utxostore(),
@@ -458,6 +459,20 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
     Ok(())
 }
 
+/// Write the in-memory map only when connect kept the chain there.
+///
+/// A snapshot connect clears the map. `store_utxo_set` on that empty map
+/// deletes every row in the chainstate table.
+pub(crate) fn persist_connected_utxo_set(
+    storage: &crate::storage::Storage,
+    utxo_set: &blvm_protocol::UtxoSet,
+) -> Result<()> {
+    if utxo_set.is_empty() {
+        return Ok(());
+    }
+    storage.utxos().store_utxo_set(utxo_set)
+}
+
 #[cfg(test)]
 mod tests {
     use super::node_is_in_ibd;
@@ -468,5 +483,49 @@ mod tests {
         assert!(!node_is_in_ibd(5000, Some(5000)));
         assert!(node_is_in_ibd(999, None));
         assert!(!node_is_in_ibd(1000, Some(1000)));
+    }
+
+    #[test]
+    fn an_empty_connected_set_does_not_erase_the_chainstate_table() {
+        use blvm_protocol::{OutPoint, UTXO};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = crate::storage::Storage::new(temp.path()).unwrap();
+        let prevout = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        storage
+            .utxos()
+            .add_utxo(
+                &prevout,
+                &UTXO {
+                    value: 50_000,
+                    script_pubkey: vec![0x51].into(),
+                    height: 1,
+                    is_coinbase: true,
+                },
+            )
+            .unwrap();
+        super::persist_connected_utxo_set(&storage, &blvm_protocol::UtxoSet::default()).unwrap();
+        assert!(storage.utxos().get_utxo(&prevout).unwrap().is_some());
+
+        let replacement = OutPoint {
+            hash: [5u8; 32],
+            index: 0,
+        };
+        let mut connected = blvm_protocol::UtxoSet::default();
+        connected.insert(
+            replacement,
+            std::sync::Arc::new(UTXO {
+                value: 25_000,
+                script_pubkey: vec![0x51].into(),
+                height: 2,
+                is_coinbase: true,
+            }),
+        );
+        super::persist_connected_utxo_set(&storage, &connected).unwrap();
+        assert!(storage.utxos().get_utxo(&prevout).unwrap().is_none());
+        assert!(storage.utxos().get_utxo(&replacement).unwrap().is_some());
     }
 }

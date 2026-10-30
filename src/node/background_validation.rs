@@ -117,7 +117,7 @@ async fn run_background_validation(
         base_height
     );
 
-    let utxo_set = storage_arc.utxos().get_all_utxos()?;
+    let utxo_set = storage_arc.load_chain_utxo_set()?;
     let computed_hash = AssumeUtxoManager::calculate_utxo_hash(&utxo_set)?;
 
     let expected =

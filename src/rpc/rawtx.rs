@@ -348,7 +348,7 @@ impl RawTxRpc {
                     // is not part of this check.
                     let mut utxo_set = blvm_protocol::UtxoSet::default();
                     for input in &tx.inputs {
-                        match storage.utxos().get_utxo(&input.prevout) {
+                        match storage.read_chain_prevout(&input.prevout) {
                             Ok(Some(utxo)) => {
                                 utxo_set.insert(input.prevout, std::sync::Arc::new(utxo));
                             }
@@ -567,14 +567,24 @@ impl RawTxRpc {
             .mempool
             .clone()
             .ok_or_else(|| RpcError::internal_error("mempool is not available"))?;
-        let utxo_set = if let Some(storage) = &self.storage {
-            storage
-                .utxos()
-                .get_all_utxos()
-                .map_err(|e| RpcError::internal_error(format!("UTXO lookup failed: {e}")))?
-        } else {
-            blvm_protocol::UtxoSet::default()
-        };
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        if let Some(storage) = &self.storage {
+            for tx in &transactions {
+                for input in &tx.inputs {
+                    match storage.read_chain_prevout(&input.prevout) {
+                        Ok(Some(utxo)) => {
+                            utxo_set.insert(input.prevout, Arc::new(utxo));
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            return Err(RpcError::internal_error(format!(
+                                "UTXO lookup failed: {err}"
+                            )));
+                        }
+                    }
+                }
+            }
+        }
 
         // Process each transaction
         let mut results = Vec::new();
@@ -609,6 +619,9 @@ impl RawTxRpc {
                 Ok(blvm_protocol::ValidationResult::Valid)
             );
             let (fee_satoshis, admission_reason) = match mempool.preview_accept(tx, &utxo_set) {
+                Ok(fee) if mempool.script_rejects(tx, Some(tx_witnesses), &utxo_set) => {
+                    (0, Some("failed consensus checks".to_string()))
+                }
                 Ok(fee) => (fee, None),
                 Err(reason) => (0, Some(reason.to_string())),
             };
@@ -1127,7 +1140,7 @@ impl RawTxRpc {
                 async {
                     tokio::task::spawn_blocking({
                         let storage = storage.clone();
-                        move || storage.utxos().get_utxo(&outpoint)
+                        move || storage.read_chain_prevout(&outpoint)
                     })
                     .await
                 },
@@ -1431,7 +1444,12 @@ impl RawTxRpc {
                 let (size, _, weight, vsize) =
                     Self::calculate_segwit_sizes(&tx, witnesses.as_deref());
                 let fee = if let Some(ref storage) = self.storage {
-                    let utxo_set = storage.utxos().get_all_utxos().unwrap_or_default();
+                    let mut utxo_set = blvm_protocol::UtxoSet::default();
+                    for input in &tx.inputs {
+                        if let Ok(Some(utxo)) = storage.read_chain_prevout(&input.prevout) {
+                            utxo_set.insert(input.prevout, Arc::new(utxo));
+                        }
+                    }
                     mempool.calculate_transaction_fee(&tx, &utxo_set) as f64 / 100_000_000.0
                 } else {
                     0.0
@@ -2753,6 +2771,171 @@ mod gettxout_tip_tests {
             .to_string();
         assert!(err.contains("tip read failed"), "{err}");
         assert!(!err.contains(&"0".repeat(64)), "{err}");
+    }
+
+    fn snapshot_coin(storage: &Storage, prevout: &OutPoint, utxo: &UTXO) {
+        let tree_name = crate::storage::ibd_engine::ckpt_tree_for_slot(0);
+        let tree = storage.open_tree(tree_name).unwrap();
+        let key = crate::storage::disk_utxo::outpoint_to_key(prevout);
+        let bytes = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+            storage.utxo_value_codec(),
+            utxo,
+        )
+        .unwrap();
+        tree.insert(&key, &bytes).unwrap();
+        assert!(storage.utxos().get_utxo(prevout).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn gettxout_reads_a_snapshot_coin_the_chainstate_table_does_not_hold() {
+        use blvm_protocol::BlockHeader;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let prevout = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        snapshot_coin(
+            &storage,
+            &prevout,
+            &UTXO {
+                value: 50_000,
+                script_pubkey: vec![0x51].into(),
+                height: 1,
+                is_coinbase: true,
+            },
+        );
+        storage
+            .chain()
+            .update_tip(
+                &[9u8; 32],
+                &BlockHeader {
+                    bits: 0x207f_ffff,
+                    ..BlockHeader::default()
+                },
+                0,
+            )
+            .unwrap();
+        let rpc = RawTxRpc::with_dependencies(
+            Arc::clone(&storage),
+            Arc::new(MempoolManager::new()),
+            None,
+            None,
+        );
+        let txid = crate::storage::hashing::hash_to_rpc_hex(&prevout.hash);
+        let value = rpc.gettxout(&json!([txid, 0, false])).await.unwrap();
+        assert_eq!(value["value"], json!(0.0005), "{value}");
+        assert_eq!(value["coinbase"], json!(true), "{value}");
+    }
+
+    #[tokio::test]
+    async fn sendrawtransaction_and_testmempoolaccept_see_a_snapshot_coin() {
+        use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::{Transaction, TransactionInput, TransactionOutput};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let prevout = OutPoint {
+            hash: [6u8; 32],
+            index: 0,
+        };
+        snapshot_coin(
+            &storage,
+            &prevout,
+            &UTXO {
+                value: 2_000_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 1,
+                is_coinbase: false,
+            },
+        );
+        let tx = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout,
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 1_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let hex_tx = RawTxRpc::serialize_transaction_with_witness(&tx, None);
+        let rpc = RawTxRpc::with_dependencies(
+            Arc::clone(&storage),
+            Arc::new(MempoolManager::new()),
+            None,
+            None,
+        );
+        let err = rpc
+            .sendrawtransaction(&json!([hex_tx.clone()]))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("BTC/kvB"), "{err}");
+        assert!(!err.contains("not found"), "{err}");
+
+        let accepted = rpc.testmempoolaccept(&json!([[hex_tx]])).await.unwrap();
+        assert_eq!(accepted[0]["allowed"], json!(true), "{accepted}");
+    }
+
+    #[tokio::test]
+    async fn testmempoolaccept_rejects_a_script_that_does_not_pass() {
+        use blvm_protocol::opcodes::OP_1;
+        use blvm_protocol::{Transaction, TransactionInput, TransactionOutput};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let prevout = OutPoint {
+            hash: [7u8; 32],
+            index: 0,
+        };
+        storage
+            .utxos()
+            .add_utxo(
+                &prevout,
+                &UTXO {
+                    value: 50_000,
+                    script_pubkey: vec![0x00].into(),
+                    height: 1,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+        let tx = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout,
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 10_000,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let hex_tx = RawTxRpc::serialize_transaction_with_witness(&tx, None);
+        let rpc = RawTxRpc::with_dependencies(
+            Arc::clone(&storage),
+            Arc::new(MempoolManager::new()),
+            None,
+            None,
+        );
+        let accepted = rpc.testmempoolaccept(&json!([[hex_tx]])).await.unwrap();
+        assert_eq!(accepted[0]["allowed"], json!(false), "{accepted}");
+        assert_eq!(
+            accepted[0]["reject-reason"],
+            json!("failed consensus checks"),
+            "{accepted}"
+        );
     }
 }
 

@@ -543,6 +543,48 @@ impl SyncCoordinator {
     }
 
     #[cfg(feature = "production")]
+    fn read_table_inputs(
+        storage: &Storage,
+        block: &Block,
+        utxo_set: &mut UtxoSet,
+    ) -> Result<usize> {
+        let mut loaded = 0usize;
+        for tx in block.transactions.iter() {
+            if blvm_consensus::transaction::is_coinbase(tx) {
+                continue;
+            }
+            for input in tx.inputs.iter() {
+                if utxo_set.contains_key(&input.prevout) {
+                    continue;
+                }
+                if let Some(utxo) = storage.utxos().get_utxo(&input.prevout)? {
+                    utxo_set.insert(input.prevout, Arc::new(utxo));
+                    loaded += 1;
+                }
+            }
+        }
+        Ok(loaded)
+    }
+
+    #[cfg(feature = "production")]
+    fn apply_connect_undo_to_chainstate(
+        storage: &Storage,
+        undo: &blvm_consensus::reorganization::BlockUndoLog,
+    ) -> Result<()> {
+        for entry in undo.entries.iter().rev() {
+            if entry.previous_utxo.is_some() {
+                storage.utxos().remove_utxo(&entry.outpoint)?;
+            }
+            if let Some(created) = &entry.new_utxo {
+                storage
+                    .utxos()
+                    .add_utxo(&entry.outpoint, created.as_ref())?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "production")]
     fn process_block_with_fork_choice(
         &self,
         blockstore: &BlockStore,
@@ -600,8 +642,12 @@ impl SyncCoordinator {
             let block_hash;
 
             if extends_active {
+                // An empty set means the coins are on disk. Filling it with only
+                // this block's inputs and then `store_utxo_set` deletes every
+                // other row in the chainstate table.
+                let from_disk = utxo_set.is_empty();
                 let mut utxo_for_connect = std::mem::take(utxo_set);
-                let snapshot = if utxo_for_connect.is_empty() {
+                let snapshot = if from_disk {
                     storage.open_engine_resume_snapshot()?
                 } else {
                     None
@@ -614,6 +660,9 @@ impl SyncCoordinator {
                         &mut utxo_for_connect,
                     )?;
                     info!("[CONNECT] read {loaded} inputs from UTXO snapshot {name}");
+                } else if from_disk {
+                    let loaded = Self::read_table_inputs(storage, &block, &mut utxo_for_connect)?;
+                    info!("[CONNECT] read {loaded} inputs from chainstate table");
                 }
                 let (validation_result, connected_utxo, undo_log) =
                     validate_block_with_context_and_undo(
@@ -627,7 +676,11 @@ impl SyncCoordinator {
 
                 processing_time = start_time.elapsed();
                 if !matches!(validation_result, ValidationResult::Valid) {
-                    *utxo_set = utxo_for_connect;
+                    *utxo_set = if from_disk {
+                        UtxoSet::default()
+                    } else {
+                        utxo_for_connect
+                    };
                     error!(
                         "Block validation failed at height {}: {validation_result:?}",
                         connect_height
@@ -667,6 +720,9 @@ impl SyncCoordinator {
                     )?;
                     note_snapshot_height(storage, connect_height)?;
                     info!("[CONNECT] wrote {written} UTXO rows in snapshot {name}");
+                    *utxo_set = UtxoSet::default();
+                } else if from_disk {
+                    Self::apply_connect_undo_to_chainstate(storage, &undo_log)?;
                     *utxo_set = UtxoSet::default();
                 } else {
                     *utxo_set = connected_utxo;

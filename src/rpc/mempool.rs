@@ -145,7 +145,7 @@ impl MempoolRpc {
                             if set.contains_key(&input.prevout) {
                                 continue;
                             }
-                            if let Ok(Some(utxo)) = storage.utxos().get_utxo(&input.prevout) {
+                            if let Ok(Some(utxo)) = storage.read_chain_prevout(&input.prevout) {
                                 set.insert(input.prevout, std::sync::Arc::new(utxo));
                             }
                         }
@@ -483,7 +483,12 @@ impl MempoolRpc {
 
     fn mempool_tx_fee_sat(&self, mempool: &MempoolManager, tx: &blvm_protocol::Transaction) -> u64 {
         if let Some(ref storage) = self.storage {
-            let utxo_set = storage.utxos().get_all_utxos().unwrap_or_default();
+            let mut utxo_set = blvm_protocol::UtxoSet::default();
+            for input in &tx.inputs {
+                if let Ok(Some(utxo)) = storage.read_chain_prevout(&input.prevout) {
+                    utxo_set.insert(input.prevout, std::sync::Arc::new(utxo));
+                }
+            }
             mempool.calculate_transaction_fee(tx, &utxo_set)
         } else {
             0

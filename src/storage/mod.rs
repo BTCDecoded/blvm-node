@@ -1140,6 +1140,67 @@ impl Storage {
         Ok(Some((name.to_string(), tree)))
     }
 
+    /// Drop every IBD snapshot tree resume or admission might treat as the chain.
+    pub(crate) fn clear_ibd_snapshot_trees(&self) {
+        for name in ["ibd_utxos", "ibd_utxos_ckpt_a", "ibd_utxos_ckpt_b"] {
+            if let Ok(tree) = self.open_tree(name) {
+                let _ = tree.clear();
+            }
+        }
+    }
+
+    /// Coin for admission and the UTXO RPCs.
+    ///
+    /// A snapshot with rows is the chain. A miss there is final, because the
+    /// `utxos` table can still hold coins that snapshot has spent. With no
+    /// snapshot, the table is the chain. An open error is returned to the
+    /// caller; admission treats it as a miss.
+    pub(crate) fn read_chain_prevout(
+        &self,
+        prevout: &blvm_protocol::OutPoint,
+    ) -> Result<Option<blvm_protocol::UTXO>> {
+        match self.open_engine_resume_snapshot()? {
+            Some((_, tree)) => {
+                let key = crate::storage::disk_utxo::outpoint_to_key(prevout);
+                let Some(bytes) = tree.get(&key)? else {
+                    return Ok(None);
+                };
+                utxo_value_codec::decode_utxo_with_codec(self.utxo_value_codec(), &bytes).map(Some)
+            }
+            None => self.utxos().get_utxo(prevout),
+        }
+    }
+
+    /// Every coin in the chain set. The snapshot when it has rows, otherwise
+    /// the `utxos` table. Callers that hash, rewind, or commit the whole set
+    /// use this so a stale table cannot stand in for the checkpoint.
+    pub(crate) fn load_chain_utxo_set(&self) -> Result<blvm_protocol::UtxoSet> {
+        match self.open_engine_resume_snapshot()? {
+            Some((_, tree)) => self.utxo_set_from_tree(tree.as_ref()),
+            None => self.utxos().get_all_utxos(),
+        }
+    }
+
+    fn utxo_set_from_tree(&self, tree: &dyn database::Tree) -> Result<blvm_protocol::UtxoSet> {
+        use database::Tree;
+        use std::sync::Arc;
+
+        let codec = self.utxo_value_codec();
+        let mut set = blvm_protocol::UtxoSet::default();
+        for item in tree.iter() {
+            let (key, bytes) = item?;
+            if key.len() != 40 {
+                continue;
+            }
+            let mut arr = [0u8; 40];
+            arr.copy_from_slice(&key);
+            let outpoint = disk_utxo::key_to_outpoint(&arr);
+            let utxo = utxo_value_codec::decode_utxo_with_codec(codec, &bytes)?;
+            set.insert(outpoint, Arc::new(utxo));
+        }
+        Ok(set)
+    }
+
     /// Ensure LMDB map headroom for Phase 3 without destroying the active checkpoint.
     ///
     /// Clears only the **inactive** ping-pong ckpt (and empty/stale `ibd_utxos` when unused)
@@ -1648,5 +1709,56 @@ mod recover_tip_tests {
                 .store_undo_log_if_absent(&hash, &undo)
                 .unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod chain_utxo_set_tests {
+    use super::Storage;
+    use blvm_protocol::opcodes::OP_1;
+    use blvm_protocol::{OutPoint, UTXO};
+
+    #[test]
+    fn chain_utxo_set_reads_the_snapshot_and_skips_the_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        let table_coin = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        storage
+            .utxos()
+            .add_utxo(
+                &table_coin,
+                &UTXO {
+                    value: 1,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 1,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+        let snapshot_coin = OutPoint {
+            hash: [2u8; 32],
+            index: 0,
+        };
+        let tree = storage.open_tree("ibd_utxos_ckpt_a").unwrap();
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        let key = crate::storage::disk_utxo::outpoint_to_key(&snapshot_coin);
+        let bytes = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+            storage.utxo_value_codec(),
+            &utxo,
+        )
+        .unwrap();
+        tree.insert(&key, &bytes).unwrap();
+
+        let set = storage.load_chain_utxo_set().unwrap();
+        assert!(set.get(&table_coin).is_none());
+        assert_eq!(set.get(&snapshot_coin).unwrap().value, 50_000);
     }
 }

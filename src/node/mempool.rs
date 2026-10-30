@@ -98,9 +98,10 @@ pub struct MempoolManager {
     storage: RwLock<Option<Arc<crate::storage::Storage>>>,
     /// Point-read for a prevout the in-memory set does not hold.
     ///
-    /// The steady-state set stays empty. The coins live in the IBD snapshot.
-    /// Inserting a hit into the shared set would make the next block call
-    /// `store_utxo_set` on a fragment.
+    /// The steady-state set stays empty. Coins live in the IBD snapshot, or in
+    /// the chainstate table when that snapshot has no rows. Inserting a hit
+    /// into the shared set would make the next block call `store_utxo_set`
+    /// on a fragment.
     snapshot_prevout: RwLock<Option<SnapshotPrevoutLookup>>,
     /// Test tip: next-block height and median time-past. Ignored when `storage` is set.
     chain_tip: RwLock<Option<(u64, u64)>>,
@@ -112,11 +113,7 @@ fn ibd_snapshot_prevout(
     storage: &crate::storage::Storage,
     prevout: &OutPoint,
 ) -> Option<blvm_protocol::UTXO> {
-    let (_name, tree) = storage.open_engine_resume_snapshot().ok().flatten()?;
-    let key = crate::storage::disk_utxo::outpoint_to_key(prevout);
-    let bytes = tree.get(&key).ok().flatten()?;
-    crate::storage::utxo_value_codec::decode_utxo_with_codec(storage.utxo_value_codec(), &bytes)
-        .ok()
+    storage.read_chain_prevout(prevout).ok().flatten()
 }
 
 /// Next block height and the median time of the headers before that block.
@@ -534,7 +531,8 @@ impl MempoolManager {
     }
 
     /// Prevout source used when the in-memory set misses. Tests pass a map.
-    /// `set_storage` installs a point-read of the IBD snapshot.
+    /// `set_storage` installs a point-read of the IBD snapshot, then the
+    /// chainstate table when that snapshot has no rows.
     pub(crate) fn set_snapshot_prevout_lookup(&self, lookup: SnapshotPrevoutLookup) {
         *self
             .snapshot_prevout
@@ -1618,6 +1616,16 @@ impl MempoolManager {
         Ok(self.calculate_transaction_fee(tx, utxo_set))
     }
 
+    /// Script and witness checks admission runs after [`Self::preview_accept`].
+    pub fn script_rejects(
+        &self,
+        tx: &Transaction,
+        witnesses: Option<&[Witness]>,
+        utxo_set: &UtxoSet,
+    ) -> bool {
+        consensus_checks_reject(tx, witnesses, &self.script_prevouts(tx, utxo_set))
+    }
+
     /// Add transaction to mempool
     /// Uses interior mutability so it can be called with Arc<MempoolManager> (re-broadcast, sendrawtransaction)
     pub fn add_transaction(&self, tx: Transaction) -> Result<bool> {
@@ -2436,7 +2444,7 @@ impl MempoolManager {
         if let Some(storage) = storage {
             for tx in self.get_transactions() {
                 for input in &tx.inputs {
-                    if let Ok(Some(utxo)) = storage.utxos().get_utxo(&input.prevout) {
+                    if let Ok(Some(utxo)) = storage.read_chain_prevout(&input.prevout) {
                         utxo_set.insert(input.prevout, std::sync::Arc::new(utxo));
                     }
                 }
@@ -3297,6 +3305,73 @@ mod tests {
         )));
         mempool.set_snapshot_prevout_lookup(Arc::new(|_| None));
         assert!(!mempool.add_transaction(legacy_empty_script()).unwrap());
+    }
+
+    #[test]
+    fn a_chainstate_coin_is_admitted_when_no_snapshot_exists_and_the_shared_set_stays_empty() {
+        use std::sync::Arc;
+
+        use blvm_protocol::opcodes::OP_1;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(crate::storage::Storage::new(temp.path()).unwrap());
+        let tx = legacy_empty_script();
+        let prevout = tx.inputs[0].prevout;
+        let coin = funded(vec![OP_1], 2_000)
+            .get(&prevout)
+            .unwrap()
+            .as_ref()
+            .clone();
+        storage.utxos().add_utxo(&prevout, &coin).unwrap();
+
+        let mempool = MempoolManager::new();
+        let shared = Arc::new(tokio::sync::Mutex::new(blvm_protocol::UtxoSet::default()));
+        mempool.set_utxo_set_arc(Arc::clone(&shared));
+        mempool.set_storage(Arc::clone(&storage));
+
+        assert!(mempool.add_transaction(tx).unwrap());
+        assert!(shared.try_lock().expect("shared set").is_empty());
+    }
+
+    #[test]
+    fn a_snapshot_miss_does_not_read_the_chainstate_table() {
+        use std::sync::Arc;
+
+        use blvm_protocol::opcodes::OP_1;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(crate::storage::Storage::new(temp.path()).unwrap());
+        let tx = legacy_empty_script();
+        let prevout = tx.inputs[0].prevout;
+        let coin = funded(vec![OP_1], 2_000)
+            .get(&prevout)
+            .unwrap()
+            .as_ref()
+            .clone();
+        storage.utxos().add_utxo(&prevout, &coin).unwrap();
+
+        let other = OutPoint {
+            hash: [9u8; 32],
+            index: 0,
+        };
+        let tree_name = crate::storage::ibd_engine::ckpt_tree_for_slot(0);
+        let tree = storage.open_tree(tree_name).unwrap();
+        let key = crate::storage::disk_utxo::outpoint_to_key(&other);
+        let bytes = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+            storage.utxo_value_codec(),
+            &coin,
+        )
+        .unwrap();
+        tree.insert(&key, &bytes).unwrap();
+        assert!(storage.open_engine_resume_snapshot().unwrap().is_some());
+
+        let mempool = MempoolManager::new();
+        let shared = Arc::new(tokio::sync::Mutex::new(blvm_protocol::UtxoSet::default()));
+        mempool.set_utxo_set_arc(Arc::clone(&shared));
+        mempool.set_storage(Arc::clone(&storage));
+
+        assert!(!mempool.add_transaction(tx).unwrap());
+        assert!(shared.try_lock().expect("shared set").is_empty());
     }
 
     #[test]

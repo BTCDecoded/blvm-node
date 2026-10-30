@@ -1026,14 +1026,31 @@ impl MiningCoordinator {
                 ([0u8; 32], 0x1d00ffff, 0, 0)
             };
 
-        // Get UTXO set from storage for fee calculation
+        // Price the pool from the chain. A checkpoint is read by prevout.
+        // The table is loaded whole only when it is the chain.
         let utxo_set = if let Some(ref storage) = self.storage {
-            storage
-                .utxos()
-                .get_all_utxos()
-                .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {}", e))?
+            let pooled = self.mempool.get_transactions();
+            match storage.open_engine_resume_snapshot()? {
+                Some(_) => {
+                    let mut set = blvm_protocol::UtxoSet::default();
+                    for tx in &pooled {
+                        for input in &tx.inputs {
+                            if set.contains_key(&input.prevout) {
+                                continue;
+                            }
+                            if let Some(utxo) = storage.read_chain_prevout(&input.prevout)? {
+                                set.insert(input.prevout, std::sync::Arc::new(utxo));
+                            }
+                        }
+                    }
+                    set
+                }
+                None => storage
+                    .utxos()
+                    .get_all_utxos()
+                    .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {}", e))?,
+            }
         } else {
-            // No storage - use empty UTXO set (will result in 0 fees)
             blvm_protocol::UtxoSet::default()
         };
 
@@ -1326,10 +1343,13 @@ impl MiningCoordinator {
             .map_err(|e| anyhow::anyhow!("Failed to get chain tip: {e}"))?;
         let connect_height = tip_height + 1;
 
-        let mut utxo = storage
-            .utxos()
-            .get_all_utxos()
-            .map_err(|e| anyhow::anyhow!("Failed to load UTXO set: {e}"))?;
+        let mut utxo = match storage.open_engine_resume_snapshot()? {
+            Some(_) => blvm_protocol::UtxoSet::default(),
+            None => storage
+                .utxos()
+                .get_all_utxos()
+                .map_err(|e| anyhow::anyhow!("Failed to load UTXO set: {e}"))?,
+        };
 
         let witnesses = self.build_witnesses_for_block(&block, &utxo)?;
 
@@ -2802,6 +2822,83 @@ mod tests {
             .unwrap()
             .expect("height after connect");
         assert_eq!(height, 1, "mined block extends chain from genesis");
+    }
+
+    #[tokio::test]
+    async fn an_empty_connect_keeps_table_coins_the_block_does_not_spend() {
+        use blvm_protocol::types::{OutPoint, UTXO};
+        use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion, UtxoSet};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(crate::storage::Storage::new(temp_dir.path()).unwrap());
+        let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap());
+        let genesis = protocol.get_network_params().genesis_block.header.clone();
+        storage.chain().initialize(&genesis).unwrap();
+        let genesis_hash = storage.chain().get_tip_hash().unwrap().unwrap();
+        storage
+            .blocks()
+            .store_header(&genesis_hash, &genesis)
+            .unwrap();
+        storage.blocks().store_height(0, &genesis_hash).unwrap();
+
+        let kept = OutPoint {
+            hash: [7u8; 32],
+            index: 0,
+        };
+        storage
+            .utxos()
+            .add_utxo(
+                &kept,
+                &UTXO {
+                    value: 40_000,
+                    script_pubkey: vec![0x51].into(),
+                    height: 0,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+
+        let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
+        let mut coordinator =
+            MiningCoordinator::new(Arc::clone(&mempool), Some(Arc::clone(&storage)));
+        coordinator.set_protocol_engine(Arc::clone(&protocol));
+        let mut template = coordinator.generate_block_template().await.unwrap();
+        template.header.version = 4;
+        let mined = coordinator
+            .mining_engine_mut()
+            .mine_template(template)
+            .await
+            .unwrap();
+
+        let mut utxo = UtxoSet::default();
+        let witnesses = coordinator
+            .build_witnesses_for_block(&mined, &utxo)
+            .unwrap();
+        let mut sync = crate::node::sync::SyncCoordinator::new();
+        let accepted = sync
+            .connect_mined_block(
+                storage.blocks().as_ref(),
+                protocol.as_ref(),
+                &storage,
+                &mined,
+                &witnesses,
+                1,
+                &mut utxo,
+            )
+            .unwrap();
+        assert!(accepted);
+        assert_eq!(storage.chain().get_height().unwrap(), Some(1));
+        assert_eq!(
+            storage.utxos().get_utxo(&kept).unwrap().unwrap().value,
+            40_000
+        );
+        assert!(
+            storage.utxos().get_all_utxos().unwrap().len() >= 2,
+            "coinbase output must be added beside the untouched coin"
+        );
+        assert!(utxo.is_empty());
     }
 
     struct HoldCommons;

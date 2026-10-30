@@ -400,6 +400,64 @@ impl BlockchainRpc {
         crate::rpc::rawtx::address_string_to_script_pubkey(address)
     }
 
+    /// Count, money total, and MuHash of the chain UTXO set.
+    ///
+    /// A snapshot with rows is the chain. The `utxos` table is the chain only
+    /// when that snapshot is absent.
+    fn chain_txout_figures(storage: &Storage) -> Result<(u64, u128, [u8; 32])> {
+        if let Some((_, tree)) = storage.open_engine_resume_snapshot()? {
+            return Self::figures_from_snapshot(storage, tree.as_ref());
+        }
+        let utxos = storage.utxos().get_all_utxos()?;
+        let total =
+            crate::storage::chainstate::utxo_money_total(utxos.values().map(|utxo| utxo.value));
+        Ok((
+            utxos.len() as u64,
+            total,
+            Self::calculate_utxo_muhash(&utxos),
+        ))
+    }
+
+    fn figures_from_snapshot(
+        storage: &Storage,
+        tree: &dyn crate::storage::database::Tree,
+    ) -> Result<(u64, u128, [u8; 32])> {
+        use crate::storage::database::Tree;
+        use crate::storage::disk_utxo::key_to_outpoint;
+        use crate::storage::utxo_value_codec::decode_utxo_with_codec;
+        use blvm_muhash::{MuHash3072, serialize_coin_for_muhash};
+
+        let max = blvm_protocol::constants::MAX_MONEY;
+        let codec = storage.utxo_value_codec();
+        let mut muhash = MuHash3072::new();
+        let mut txouts = 0u64;
+        let mut total = 0u128;
+        for item in tree.iter() {
+            let (key, bytes) = item?;
+            if key.len() != 40 {
+                continue;
+            }
+            let mut arr = [0u8; 40];
+            arr.copy_from_slice(&key);
+            let outpoint = key_to_outpoint(&arr);
+            let utxo = decode_utxo_with_codec(codec, &bytes)?;
+            txouts += 1;
+            if (0..=max).contains(&utxo.value) {
+                total = total.saturating_add(utxo.value as u128);
+            }
+            let serialized = serialize_coin_for_muhash(
+                &outpoint.hash,
+                outpoint.index,
+                utxo.height.min(u32::MAX as u64) as u32,
+                utxo.is_coinbase,
+                utxo.value,
+                utxo.script_pubkey.as_ref(),
+            );
+            muhash.insert_mut(&serialized);
+        }
+        Ok((txouts, total, muhash.finalize()))
+    }
+
     /// Calculate MuHash3072 for UTXO set (Core gettxoutsetinfo muhash).
     fn calculate_utxo_muhash(utxo_set: &blvm_protocol::UtxoSet) -> [u8; 32] {
         crate::storage::assumeutxo::AssumeUtxoManager::calculate_utxo_hash(utxo_set)
@@ -898,7 +956,17 @@ impl BlockchainRpc {
                 (h, hash)
             };
 
-            if let Ok(Some(stats)) = storage.chain().get_latest_utxo_stats() {
+            // Stats are reusable only when they were counted from the store
+            // that is the chain now. An unmarked entry is the table. A
+            // checkpoint with rows must not answer from that entry.
+            let snapshot_is_chain = storage.open_engine_resume_snapshot()?.is_some();
+            let marked_snapshot = storage
+                .chain()
+                .utxo_stats_from_snapshot(&best_hash)
+                .unwrap_or(false);
+            if let Ok(Some(stats)) = storage.chain().get_latest_utxo_stats()
+                && snapshot_is_chain == marked_snapshot
+            {
                 Ok(json!({
                     "height": stats.height,
                     "bestblock": encode_hash32_rpc(&best_hash),
@@ -910,17 +978,24 @@ impl BlockchainRpc {
                     "total_amount": stats.total_amount as f64 / 100_000_000.0
                 }))
             } else {
-                let utxos = storage.utxos().get_all_utxos()?;
-                let txouts = utxos.len();
-                let total_amount = crate::storage::chainstate::utxo_money_total(
-                    utxos.values().map(|utxo| utxo.value),
-                );
-                let muhash = Self::calculate_utxo_muhash(&utxos);
+                let (txouts, total_amount, muhash) = Self::chain_txout_figures(storage)?;
+                let transactions = storage.transaction_count().unwrap_or(0) as u64;
+                let stats = crate::storage::chainstate::UTXOStats {
+                    height,
+                    txouts,
+                    total_amount,
+                    muhash,
+                    transactions,
+                };
+                storage.chain().store_utxo_stats(&best_hash, &stats)?;
+                storage
+                    .chain()
+                    .set_utxo_stats_from_snapshot(&best_hash, snapshot_is_chain)?;
 
                 Ok(json!({
                     "height": height,
                     "bestblock": encode_hash32_rpc(&best_hash),
-                    "transactions": storage.transaction_count().unwrap_or(0),
+                    "transactions": transactions,
                     "txouts": txouts,
                     "bogosize": txouts * 180,
                     "muhash": hex::encode(muhash),
@@ -974,10 +1049,17 @@ impl BlockchainRpc {
             }
         }
 
+        // A checkpoint with rows is the chain. Leave it in place and the loaded
+        // coins stay invisible while the old checkpoint coins remain spendable.
+        storage.clear_ibd_snapshot_trees();
+        storage.chain().force_reset_engine_checkpoint_metadata()?;
         storage.utxos().store_utxo_set(&utxo_set)?;
         storage
             .chain()
             .set_snapshot_tip(&metadata.block_hash, metadata.block_height)?;
+        storage
+            .chain()
+            .force_set_ibd_utxo_watermark(metadata.block_height)?;
         let total_amount =
             crate::storage::chainstate::utxo_money_total(utxo_set.values().map(|utxo| utxo.value));
         let stats = crate::storage::chainstate::UTXOStats {
@@ -1046,8 +1128,7 @@ impl BlockchainRpc {
                 if let Some(_engine_arc) = engine_arc_opt {
                     // Load the current tip UTXO set
                     let mut utxo_set = storage
-                        .utxos()
-                        .get_all_utxos()
+                        .load_chain_utxo_set()
                         .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {}", e))?;
 
                     // Rewind UTXO set from tip down to start_height using undo logs.
@@ -1822,6 +1903,10 @@ impl BlockchainRpc {
                 "invalidateblock target is not in the active chain"
             ));
         }
+        // A snapshot with rows is the chain. The table is the chain only when
+        // that snapshot is absent. Undoing the table while the snapshot still
+        // has the block's outputs leaves those coins spendable.
+        let snapshot = storage.open_engine_resume_snapshot()?;
         for hash in chain {
             let header = storage
                 .blocks()
@@ -1831,17 +1916,29 @@ impl BlockchainRpc {
                 .blocks()
                 .get_undo_log(&hash)?
                 .ok_or_else(|| anyhow::anyhow!("missing undo log for invalidated block"))?;
-            for entry in &undo.entries {
-                if entry.new_utxo.is_some() {
-                    storage.utxos().remove_utxo(&entry.outpoint)?;
-                }
-                if let Some(prev) = &entry.previous_utxo {
-                    storage.utxos().add_utxo(&entry.outpoint, prev.as_ref())?;
+            if let Some((_, tree)) = &snapshot {
+                crate::node::reorg_executor::commit_utxo_snapshot_delta(
+                    tree.as_ref(),
+                    storage.utxo_value_codec(),
+                    &[&undo],
+                    &[],
+                )?;
+            } else {
+                for entry in &undo.entries {
+                    if entry.new_utxo.is_some() {
+                        storage.utxos().remove_utxo(&entry.outpoint)?;
+                    }
+                    if let Some(prev) = &entry.previous_utxo {
+                        storage.utxos().add_utxo(&entry.outpoint, prev.as_ref())?;
+                    }
                 }
             }
             let height = storage.chain().get_height()?.unwrap_or(0);
             if height == 0 {
                 if hash == *target {
+                    if snapshot.is_some() {
+                        crate::node::reorg_executor::rewind_snapshot_height(storage, 0)?;
+                    }
                     break;
                 }
                 return Err(anyhow::anyhow!(
@@ -1857,6 +1954,9 @@ impl BlockchainRpc {
             storage
                 .chain()
                 .update_tip(&parent, &parent_header, height - 1)?;
+            if snapshot.is_some() {
+                crate::node::reorg_executor::rewind_snapshot_height(storage, height - 1)?;
+            }
             if hash != *target {
                 storage.chain().mark_invalid(&hash)?;
             }
@@ -2275,7 +2375,12 @@ impl BlockchainRpc {
                         hash: txid,
                         index: idx as u32,
                     };
-                    if storage.utxos().get_utxo(&outpoint).ok().flatten().is_some() {
+                    if storage
+                        .read_chain_prevout(&outpoint)
+                        .ok()
+                        .flatten()
+                        .is_some()
+                    {
                         balance += output.value;
                     } else {
                         sent += output.value;
@@ -2499,7 +2604,7 @@ impl BlockchainRpc {
                             hash: txid,
                             index: idx as u32,
                         };
-                        match storage.utxos().get_utxo(&outpoint) {
+                        match storage.read_chain_prevout(&outpoint) {
                             Ok(Some(_)) => {
                                 balance += output.value;
                                 utxo_count += 1;
@@ -2626,6 +2731,157 @@ mod txoutset_tests {
         let sats = (info["total_amount"].as_f64().unwrap() * 100_000_000.0).round() as u128;
         assert_eq!(info["txouts"], 2);
         assert_eq!(sats, 50_000);
+    }
+
+    #[tokio::test]
+    async fn txoutset_total_counts_a_snapshot_coin_the_table_does_not_hold() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let tree = storage.open_tree("ibd_utxos_ckpt_a").unwrap();
+        let prevout = OutPoint {
+            hash: [3u8; 32],
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        let key = crate::storage::disk_utxo::outpoint_to_key(&prevout);
+        let bytes = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+            storage.utxo_value_codec(),
+            &utxo,
+        )
+        .unwrap();
+        tree.insert(&key, &bytes).unwrap();
+
+        let info = BlockchainRpc::with_dependencies(storage)
+            .get_txoutset_info()
+            .await
+            .unwrap();
+        let sats = (info["total_amount"].as_f64().unwrap() * 100_000_000.0).round() as u128;
+        assert_eq!(info["txouts"], 1);
+        assert_eq!(sats, 50_000);
+    }
+
+    #[tokio::test]
+    async fn txoutset_ignores_cached_stats_when_a_snapshot_is_the_chain() {
+        use crate::storage::chainstate::UTXOStats;
+        use blvm_protocol::BlockHeader;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        storage
+            .chain()
+            .initialize(&BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                timestamp: 1_600_000_000,
+                bits: 0,
+                nonce: 1,
+            })
+            .unwrap();
+        let tip = storage.chain().get_tip_hash().unwrap().unwrap();
+        storage
+            .chain()
+            .store_utxo_stats(
+                &tip,
+                &UTXOStats {
+                    height: 0,
+                    txouts: 9,
+                    total_amount: 1,
+                    muhash: [0u8; 32],
+                    transactions: 9,
+                },
+            )
+            .unwrap();
+        let tree = storage.open_tree("ibd_utxos_ckpt_a").unwrap();
+        let prevout = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        let key = crate::storage::disk_utxo::outpoint_to_key(&prevout);
+        let bytes = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+            storage.utxo_value_codec(),
+            &utxo,
+        )
+        .unwrap();
+        tree.insert(&key, &bytes).unwrap();
+
+        let info = BlockchainRpc::with_dependencies(storage)
+            .get_txoutset_info()
+            .await
+            .unwrap();
+        let sats = (info["total_amount"].as_f64().unwrap() * 100_000_000.0).round() as u128;
+        assert_eq!(info["txouts"], 1);
+        assert_eq!(sats, 50_000);
+    }
+
+    #[tokio::test]
+    async fn txoutset_reuses_the_snapshot_count_it_just_stored() {
+        use blvm_protocol::BlockHeader;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        storage
+            .chain()
+            .initialize(&BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                timestamp: 1_600_000_000,
+                bits: 0,
+                nonce: 1,
+            })
+            .unwrap();
+        let tree = storage.open_tree("ibd_utxos_ckpt_a").unwrap();
+        let prevout = OutPoint {
+            hash: [8u8; 32],
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        let key = crate::storage::disk_utxo::outpoint_to_key(&prevout);
+        let bytes = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+            storage.utxo_value_codec(),
+            &utxo,
+        )
+        .unwrap();
+        tree.insert(&key, &bytes).unwrap();
+
+        let rpc = BlockchainRpc::with_dependencies(Arc::clone(&storage));
+        let first = rpc.get_txoutset_info().await.unwrap();
+        assert_eq!(first["txouts"], 1);
+
+        let replaced = UTXO {
+            value: 1,
+            script_pubkey: vec![OP_1].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        let replaced_bytes = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+            storage.utxo_value_codec(),
+            &replaced,
+        )
+        .unwrap();
+        tree.insert(&key, &replaced_bytes).unwrap();
+
+        let second = rpc.get_txoutset_info().await.unwrap();
+        let sats = (second["total_amount"].as_f64().unwrap() * 100_000_000.0).round() as u128;
+        assert_eq!(second["txouts"], 1);
+        assert_eq!(sats, 50_000, "{second}");
     }
 }
 
@@ -3330,6 +3586,270 @@ mod block_stats_tests {
         assert_eq!(storage.chain().get_height().unwrap().unwrap(), 0);
     }
 
+    fn put_snapshot_coin(storage: &Storage, prevout: &OutPoint, utxo: &blvm_protocol::UTXO) {
+        let tree_name = crate::storage::ibd_engine::ckpt_tree_for_slot(0);
+        let tree = storage.open_tree(tree_name).unwrap();
+        let key = crate::storage::disk_utxo::outpoint_to_key(prevout);
+        let bytes = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+            storage.utxo_value_codec(),
+            utxo,
+        )
+        .unwrap();
+        tree.insert(&key, &bytes).unwrap();
+    }
+
+    #[tokio::test]
+    async fn loadtxoutset_replaces_a_checkpoint_with_the_loaded_coins() {
+        use blvm_protocol::UTXO;
+        use std::sync::Arc;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        storage
+            .chain()
+            .initialize(&BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                timestamp: 1_600_000_000,
+                bits: 0,
+                nonce: 1,
+            })
+            .unwrap();
+        storage.chain().force_set_ibd_utxo_watermark(50).unwrap();
+        storage.chain().force_set_engine_export_height(50).unwrap();
+
+        let stale = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let loaded = OutPoint {
+            hash: [8u8; 32],
+            index: 0,
+        };
+        let stale_utxo = UTXO {
+            value: 1,
+            script_pubkey: vec![OP_1].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        let loaded_utxo = UTXO {
+            value: 10_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 3,
+            is_coinbase: false,
+        };
+        put_snapshot_coin(&storage, &stale, &stale_utxo);
+        put_snapshot_coin_in(&storage, "ibd_utxos_ckpt_b", &stale, &stale_utxo);
+
+        let snap_dir = tempfile::TempDir::new().unwrap();
+        let mut file_set = blvm_protocol::UtxoSet::default();
+        file_set.insert(loaded, Arc::new(loaded_utxo));
+        let block_hash = [0x11u8; 32];
+        AssumeUtxoManager::new(snap_dir.path())
+            .create_snapshot(&file_set, block_hash, 3)
+            .unwrap();
+        let path = snap_dir.path().join("utxo_snapshot_3.dat");
+
+        BlockchainRpc::with_dependencies(Arc::clone(&storage))
+            .load_txout_set(&json!([path.to_str().unwrap()]))
+            .await
+            .unwrap();
+
+        assert!(storage.open_engine_resume_snapshot().unwrap().is_none());
+        assert!(storage.read_chain_prevout(&stale).unwrap().is_none());
+        assert_eq!(
+            storage.read_chain_prevout(&loaded).unwrap().unwrap().value,
+            10_000
+        );
+        assert_eq!(storage.chain().get_height().unwrap(), Some(3));
+        assert_eq!(storage.chain().get_utxo_watermark().unwrap(), Some(3));
+        assert_eq!(storage.chain().get_engine_export_height().unwrap(), Some(0));
+    }
+
+    fn put_snapshot_coin_in(
+        storage: &Storage,
+        tree: &str,
+        prevout: &OutPoint,
+        utxo: &blvm_protocol::UTXO,
+    ) {
+        let tree = storage.open_tree(tree).unwrap();
+        let key = crate::storage::disk_utxo::outpoint_to_key(prevout);
+        let bytes = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+            storage.utxo_value_codec(),
+            utxo,
+        )
+        .unwrap();
+        tree.insert(&key, &bytes).unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalidate_undoes_the_snapshot_and_does_not_rewrite_the_chainstate_table() {
+        use blvm_consensus::reorganization::{BlockUndoLog, UndoEntry};
+        use blvm_protocol::UTXO;
+        use std::sync::Arc;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let parent = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            timestamp: 1_600_000_000,
+            bits: 0,
+            nonce: 1,
+        };
+        storage.chain().initialize(&parent).unwrap();
+        let parent_hash = storage.chain().get_tip_hash().unwrap().unwrap();
+        storage
+            .blocks()
+            .store_header(&parent_hash, &parent)
+            .unwrap();
+        let created = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let spent = OutPoint {
+            hash: [5u8; 32],
+            index: 0,
+        };
+        let untouched = OutPoint {
+            hash: [6u8; 32],
+            index: 0,
+        };
+        let created_utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 1,
+            is_coinbase: true,
+        };
+        let spent_utxo = UTXO {
+            value: 25_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 0,
+            is_coinbase: false,
+        };
+        put_snapshot_coin(&storage, &created, &created_utxo);
+        storage.utxos().add_utxo(&untouched, &spent_utxo).unwrap();
+
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: parent_hash,
+                merkle_root: [0u8; 32],
+                timestamp: 1_600_000_001,
+                bits: 0,
+                nonce: 2,
+            },
+            transactions: vec![tx_with_output(50_000)].into_boxed_slice(),
+        };
+        let hash = storage.blocks().get_block_hash(&block);
+        storage.blocks().store_block(&block).unwrap();
+        storage.blocks().store_header(&hash, &block.header).unwrap();
+        storage.blocks().store_height(1, &hash).unwrap();
+        let mut undo = BlockUndoLog::new();
+        undo.push(UndoEntry {
+            outpoint: created,
+            previous_utxo: None,
+            new_utxo: Some(Arc::new(created_utxo)),
+        });
+        undo.push(UndoEntry {
+            outpoint: spent,
+            previous_utxo: Some(Arc::new(spent_utxo.clone())),
+            new_utxo: None,
+        });
+        storage.blocks().store_undo_log(&hash, &undo).unwrap();
+        storage.chain().update_tip(&hash, &block.header, 1).unwrap();
+        storage.chain().force_set_ibd_utxo_watermark(1).unwrap();
+        storage.chain().force_set_engine_export_height(1).unwrap();
+
+        BlockchainRpc::with_dependencies(Arc::clone(&storage))
+            .invalidate_block(&json!([crate::storage::hashing::hash_to_rpc_hex(&hash)]))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage.chain().get_tip_hash().unwrap().unwrap(),
+            parent_hash
+        );
+        assert_eq!(storage.chain().get_utxo_watermark().unwrap(), Some(0));
+        assert_eq!(storage.chain().get_engine_export_height().unwrap(), Some(0));
+        assert!(storage.read_chain_prevout(&created).unwrap().is_none());
+        let restored = storage.read_chain_prevout(&spent).unwrap().unwrap();
+        assert_eq!(restored.value, 25_000);
+        assert!(storage.utxos().get_utxo(&spent).unwrap().is_none());
+        assert!(storage.utxos().get_utxo(&untouched).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn invalidate_without_a_snapshot_undoes_the_chainstate_table() {
+        use blvm_consensus::reorganization::{BlockUndoLog, UndoEntry};
+        use blvm_protocol::UTXO;
+        use std::sync::Arc;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let parent = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            timestamp: 1_600_000_000,
+            bits: 0,
+            nonce: 1,
+        };
+        storage.chain().initialize(&parent).unwrap();
+        let parent_hash = storage.chain().get_tip_hash().unwrap().unwrap();
+        storage
+            .blocks()
+            .store_header(&parent_hash, &parent)
+            .unwrap();
+        let created = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let created_utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 1,
+            is_coinbase: true,
+        };
+        storage.utxos().add_utxo(&created, &created_utxo).unwrap();
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: parent_hash,
+                merkle_root: [0u8; 32],
+                timestamp: 1_600_000_001,
+                bits: 0,
+                nonce: 2,
+            },
+            transactions: vec![tx_with_output(50_000)].into_boxed_slice(),
+        };
+        let hash = storage.blocks().get_block_hash(&block);
+        storage.blocks().store_block(&block).unwrap();
+        storage.blocks().store_header(&hash, &block.header).unwrap();
+        storage.blocks().store_height(1, &hash).unwrap();
+        let mut undo = BlockUndoLog::new();
+        undo.push(UndoEntry {
+            outpoint: created,
+            previous_utxo: None,
+            new_utxo: Some(Arc::new(created_utxo)),
+        });
+        storage.blocks().store_undo_log(&hash, &undo).unwrap();
+        storage.chain().update_tip(&hash, &block.header, 1).unwrap();
+
+        BlockchainRpc::with_dependencies(Arc::clone(&storage))
+            .invalidate_block(&json!([crate::storage::hashing::hash_to_rpc_hex(&hash)]))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage.chain().get_tip_hash().unwrap().unwrap(),
+            parent_hash
+        );
+        assert!(storage.utxos().get_utxo(&created).unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn reconsider_clears_the_mark_and_leaves_the_tip() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -3475,6 +3995,68 @@ mod block_stats_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("utxo read failed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn address_balance_counts_a_snapshot_coin_the_table_does_not_hold() {
+        use blvm_protocol::block::calculate_tx_id;
+
+        let script = vec![OP_1];
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut indexing = crate::config::IndexingConfig::default();
+        indexing.enable_address_index = true;
+        let storage = Arc::new(
+            Storage::with_backend_pruning_and_indexing(
+                temp.path(),
+                crate::storage::database::default_backend(),
+                None,
+                Some(indexing),
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let mut paying = tx_with_output(50_000);
+        paying.outputs[0].script_pubkey = script.clone();
+        paying.outputs[0].value = 50_000;
+        let txid = calculate_tx_id(&paying);
+        storage
+            .transactions()
+            .index_transaction(&paying, &[2u8; 32], 1, 0)
+            .unwrap();
+        let prevout = blvm_protocol::OutPoint {
+            hash: txid,
+            index: 0,
+        };
+        let tree = storage.open_tree("ibd_utxos_ckpt_a").unwrap();
+        let utxo = blvm_protocol::UTXO {
+            value: 50_000,
+            script_pubkey: script.clone().into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        let key = crate::storage::disk_utxo::outpoint_to_key(&prevout);
+        let bytes = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+            storage.utxo_value_codec(),
+            &utxo,
+        )
+        .unwrap();
+        tree.insert(&key, &bytes).unwrap();
+
+        let rpc = BlockchainRpc::with_dependencies(Arc::clone(&storage));
+        let balance = rpc
+            .getaddressbalance(&json!([hex::encode(&script)]))
+            .await
+            .unwrap();
+        assert_eq!(balance["balance"], 50_000, "{balance}");
+        assert_eq!(balance["sent"], 0, "{balance}");
+        let info = rpc
+            .get_address_info(&json!([hex::encode(&script)]))
+            .await
+            .unwrap();
+        assert_eq!(info["balance"].as_f64(), Some(0.0005), "{info}");
+        assert_eq!(info["utxo_count"], 1, "{info}");
     }
 
     #[tokio::test]

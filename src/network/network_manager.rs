@@ -3505,7 +3505,13 @@ impl NetworkManager {
         let Some(ref storage) = self.storage else {
             return Ok(());
         };
-        let snapshot = storage.utxos().get_all_utxos()?;
+        // Filling the shared set from the table hides checkpoint coins and
+        // keeps spent table coins spendable. Misses are read from the chain.
+        let snapshot = if storage.open_engine_resume_snapshot()?.is_some() {
+            UtxoSet::default()
+        } else {
+            storage.utxos().get_all_utxos()?
+        };
         self.replace_utxo_snapshot(snapshot).await;
         Ok(())
     }

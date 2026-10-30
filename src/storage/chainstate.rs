@@ -867,6 +867,37 @@ impl ChainState {
         }
     }
 
+    /// `true` when the stats stored for `block_hash` were counted from a checkpoint.
+    ///
+    /// An absent marker is a table-era entry. `gettxoutsetinfo` must not treat
+    /// that entry as the checkpoint.
+    pub fn utxo_stats_from_snapshot(&self, block_hash: &Hash) -> Result<bool> {
+        let key = Self::utxo_stats_source_key(block_hash);
+        Ok(self.utxo_stats_cache.get(&key)?.as_deref() == Some(&[1u8][..]))
+    }
+
+    /// Record whether the stats for `block_hash` came from a checkpoint.
+    pub fn set_utxo_stats_from_snapshot(
+        &self,
+        block_hash: &Hash,
+        from_snapshot: bool,
+    ) -> Result<()> {
+        let key = Self::utxo_stats_source_key(block_hash);
+        if from_snapshot {
+            self.utxo_stats_cache.insert(&key, &[1u8])?;
+        } else if self.utxo_stats_cache.get(&key)?.is_some() {
+            self.utxo_stats_cache.remove(&key)?;
+        }
+        Ok(())
+    }
+
+    fn utxo_stats_source_key(block_hash: &Hash) -> [u8; 33] {
+        let mut key = [0u8; 33];
+        key[0] = 1;
+        key[1..].copy_from_slice(block_hash.as_slice());
+        key
+    }
+
     /// Store network hashrate for a block height
     /// Caches expensive hashrate calculation for fast getmininginfo RPC calls
     pub fn store_network_hashrate(&self, height: u64, hashrate: f64) -> Result<()> {

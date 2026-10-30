@@ -395,8 +395,10 @@ impl MiningRpc {
             .ok_or_else(|| RpcError::internal_error("No chain tip"))?;
         let prev_headers = self.headers_for_work(template_block_height.saturating_sub(1))?;
 
-        // One UTXO read prices the pool and builds the template.
-        let utxo_set = self.get_utxo_set()?;
+        // One table scan when the table is the chain. A checkpoint is priced
+        // from the inputs the pool actually spends.
+        let pooled = self.pooled_transactions();
+        let utxo_set = self.template_utxos(&pooled)?;
         let mempool_txs: Vec<Transaction> = self.mempool_transactions_priced(&utxo_set)?;
 
         // 4. Extract coinbase parameters from request or use defaults
@@ -574,8 +576,46 @@ impl MiningRpc {
             })
     }
 
+    fn pooled_transactions(&self) -> Vec<Transaction> {
+        self.mempool
+            .as_ref()
+            .map(|mempool| mempool.get_transactions())
+            .unwrap_or_default()
+    }
+
+    /// Coins the template needs. The full table when that table is the chain.
+    /// Otherwise only the prevouts of `txs`, read from the checkpoint.
+    fn template_utxos(&self, txs: &[Transaction]) -> RpcResult<UtxoSet> {
+        let Some(storage) = self.storage.as_ref() else {
+            return Ok(UtxoSet::default());
+        };
+        match storage.open_engine_resume_snapshot() {
+            Ok(Some(_)) => Ok(self.utxos_for_prevouts(txs)),
+            Ok(None) => self.get_utxo_set(),
+            Err(err) => Err(RpcError::internal_error(format!(
+                "Failed to open UTXO snapshot: {err}"
+            ))),
+        }
+    }
+
+    /// Set passed into block connect. Empty when a checkpoint is the chain, so
+    /// connect writes that checkpoint instead of replacing it with a fragment.
+    fn connect_utxos(&self) -> RpcResult<UtxoSet> {
+        let Some(storage) = self.storage.as_ref() else {
+            return Ok(UtxoSet::default());
+        };
+        match storage.open_engine_resume_snapshot() {
+            Ok(Some(_)) => Ok(UtxoSet::default()),
+            Ok(None) => self.get_utxo_set(),
+            Err(err) => Err(RpcError::internal_error(format!(
+                "Failed to open UTXO snapshot: {err}"
+            ))),
+        }
+    }
+
     fn get_mempool_transactions(&self) -> RpcResult<Vec<Transaction>> {
-        let utxo_set = self.get_utxo_set()?;
+        let pooled = self.pooled_transactions();
+        let utxo_set = self.template_utxos(&pooled)?;
         self.mempool_transactions_priced(&utxo_set)
     }
 
@@ -679,7 +719,7 @@ impl MiningRpc {
                 if set.contains_key(&input.prevout) {
                     continue;
                 }
-                if let Ok(Some(utxo)) = storage.utxos().get_utxo(&input.prevout) {
+                if let Ok(Some(utxo)) = storage.read_chain_prevout(&input.prevout) {
                     set.insert(input.prevout, Arc::new(utxo));
                 }
             }
@@ -752,7 +792,7 @@ impl MiningRpc {
         let Some(mempool) = self.mempool.as_ref() else {
             return 0;
         };
-        let Ok(utxo_set) = self.get_utxo_set() else {
+        let Ok(utxo_set) = self.template_utxos(std::slice::from_ref(tx)) else {
             return 0;
         };
         mempool.calculate_transaction_fee(tx, &utxo_set)
@@ -768,9 +808,9 @@ impl MiningRpc {
                 .inputs
                 .iter()
                 .map(|input| {
-                    self.storage
-                        .as_ref()
-                        .and_then(|storage| storage.utxos().get_utxo(&input.prevout).ok().flatten())
+                    self.storage.as_ref().and_then(|storage| {
+                        storage.read_chain_prevout(&input.prevout).ok().flatten()
+                    })
                 })
                 .collect();
             let refs: Vec<Option<&UTXO>> = owned.iter().map(|utxo| utxo.as_ref()).collect();
@@ -956,10 +996,18 @@ impl MiningRpc {
         if let Some(ref ep) = self.event_publisher {
             coord.set_event_publisher(Some(Arc::clone(ep)));
         }
-        let mut utxo = storage
-            .utxos()
-            .get_all_utxos()
-            .map_err(|e| RpcError::internal_error(format!("Failed to load UTXO set: {e}")))?;
+        let uses_snapshot = storage
+            .open_engine_resume_snapshot()
+            .map(|snapshot| snapshot.is_some())
+            .unwrap_or(false);
+        let mut connect_utxo = if uses_snapshot {
+            UtxoSet::default()
+        } else {
+            storage
+                .utxos()
+                .get_all_utxos()
+                .map_err(|e| RpcError::internal_error(format!("Failed to load UTXO set: {e}")))?
+        };
 
         let mut out_hashes: Vec<Value> = Vec::with_capacity(nblocks as usize);
 
@@ -986,9 +1034,18 @@ impl MiningRpc {
 
             let coinbase_script =
                 blvm_protocol::bip_validation::encode_bip34_coinbase_script(connect_height);
-            let pool_txs = self.get_mempool_transactions()?;
+            // The table was loaded once, into `connect_utxo`. Pricing the pool
+            // through `template_utxos` would load it again on every block.
+            let pooled = self.pooled_transactions();
+            let snapshot_prevouts = if uses_snapshot {
+                Some(self.utxos_for_prevouts(&pooled))
+            } else {
+                None
+            };
+            let template_utxos = snapshot_prevouts.as_ref().unwrap_or(&connect_utxo);
+            let pool_txs = self.mempool_transactions_priced(template_utxos)?;
             let mempool_witnesses =
-                mempool_witnesses_for_template(self.mempool.as_deref(), &utxo, &pool_txs)
+                mempool_witnesses_for_template(self.mempool.as_deref(), template_utxos, &pool_txs)
                     .map_err(|e| RpcError::internal_error(format!("generatetoaddress: {e}")))?;
 
             let outputs = match self.try_commons_gbt_outputs().await? {
@@ -998,7 +1055,7 @@ impl MiningRpc {
             let template = self
                 .consensus
                 .create_block_template_with_outputs(
-                    &utxo,
+                    &template_utxos,
                     &pool_txs,
                     connect_height,
                     &prev_header,
@@ -1088,7 +1145,7 @@ impl MiningRpc {
                     &mined,
                     &witnesses,
                     connect_height,
-                    &mut utxo,
+                    &mut connect_utxo,
                 )
                 .map_err(|e| RpcError::internal_error(format!("generatetoaddress: {e}")))?;
             if !accepted {
@@ -1216,7 +1273,7 @@ impl MiningRpc {
             )
         })?;
         let connect_height = tip_height.saturating_add(1);
-        let mut utxo = self.get_utxo_set()?;
+        let mut utxo = self.connect_utxos()?;
         let mut coord = SyncCoordinator::new();
         if let Some(ref mempool) = self.mempool {
             coord.set_mempool(Some(Arc::clone(mempool)));
@@ -1849,6 +1906,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn estimate_smart_fee_prices_a_snapshot_coin_the_table_does_not_hold() {
+        use blvm_protocol::segwit::transaction_weight_from_stacks;
+
+        let (_dir, storage, mempool, mining) = regtest_mining();
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        let funding = OutPoint {
+            hash: [5u8; 32],
+            index: 0,
+        };
+        let mut tx = spend(funding, 50_000);
+        tx.inputs[0].script_sig = vec![OP_1];
+        let vsize = transaction_weight_from_stacks(&tx, None)
+            .unwrap()
+            .div_ceil(4)
+            .max(1) as i64;
+        tx.outputs[0].value = 50_000;
+        let utxo = UTXO {
+            value: 50_000 + vsize,
+            script_pubkey: vec![OP_1].into(),
+            height: 0,
+            is_coinbase: false,
+        };
+        let tree = storage.open_tree("ibd_utxos_ckpt_a").unwrap();
+        let key = crate::storage::disk_utxo::outpoint_to_key(&funding);
+        let bytes = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+            storage.utxo_value_codec(),
+            &utxo,
+        )
+        .unwrap();
+        tree.insert(&key, &bytes).unwrap();
+        mempool.set_storage(Arc::clone(&storage));
+        mempool.set_policy_config(Some(policy));
+        assert!(mempool.add_transaction(tx).unwrap());
+
+        let quote = mining
+            .estimate_smart_fee(&serde_json::json!([6u64, "unset"]))
+            .await
+            .unwrap();
+        assert!(
+            (quote["feerate"].as_f64().unwrap() - 0.00001).abs() < 1e-12,
+            "{quote}"
+        );
+    }
+
+    #[tokio::test]
     async fn economical_estimate_stays_at_the_relay_floor() {
         use blvm_protocol::segwit::transaction_weight_from_stacks;
 
@@ -1932,6 +2037,21 @@ mod tests {
         crate::storage::utxostore::reset_get_all_utxos_calls();
         mining
             .get_block_template(&serde_json::json!([]))
+            .await
+            .unwrap();
+        assert_eq!(crate::storage::utxostore::get_all_utxos_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn generatetoaddress_loads_the_utxo_table_once() {
+        let (_dir, _storage, _mempool, mining) = regtest_mining();
+        crate::storage::utxostore::reset_get_all_utxos_calls();
+        mining
+            .generate_to_address(&serde_json::json!([
+                2u64,
+                "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+                2_000_000u64
+            ]))
             .await
             .unwrap();
         assert_eq!(crate::storage::utxostore::get_all_utxos_calls(), 1);

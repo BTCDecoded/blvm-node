@@ -304,15 +304,8 @@ impl AssumeUtxoManager {
     pub fn calculate_utxo_hash(utxo_set: &UtxoSet) -> Result<Hash> {
         use blvm_muhash::{MuHash3072, serialize_coin_for_muhash};
 
-        let mut entries: Vec<_> = utxo_set.iter().collect();
-        entries.sort_by(|a, b| {
-            let key_a = Self::outpoint_sort_key(a.0);
-            let key_b = Self::outpoint_sort_key(b.0);
-            key_a.cmp(&key_b)
-        });
-
         let mut muhash = MuHash3072::new();
-        for (outpoint, utxo) in entries {
+        for (outpoint, utxo) in utxo_set {
             let height_u32 = utxo.height.min(u32::MAX as u64) as u32;
             let serialized = serialize_coin_for_muhash(
                 &outpoint.hash,
@@ -322,17 +315,9 @@ impl AssumeUtxoManager {
                 utxo.value,
                 utxo.script_pubkey.as_ref(),
             );
-            muhash = muhash.insert(&serialized);
+            muhash.insert_mut(&serialized);
         }
         Ok(muhash.finalize())
-    }
-
-    /// Create a sort key for deterministic ordering
-    fn outpoint_sort_key(outpoint: &OutPoint) -> Vec<u8> {
-        let mut key = Vec::with_capacity(36);
-        key.extend_from_slice(&outpoint.hash);
-        key.extend_from_slice(&outpoint.index.to_le_bytes());
-        key
     }
 
     /// Create a UTXO snapshot at the current chain tip
@@ -694,6 +679,39 @@ mod tests {
         let hash2 = AssumeUtxoManager::calculate_utxo_hash(&utxo_set).unwrap();
 
         assert_eq!(hash1, hash2, "Hash should be deterministic");
+    }
+
+    #[test]
+    fn utxo_hash_ignores_insertion_order() {
+        use blvm_protocol::{OutPoint, UTXO};
+        use std::sync::Arc;
+
+        let coin = |byte: u8| {
+            (
+                OutPoint {
+                    hash: [byte; 32],
+                    index: 0,
+                },
+                Arc::new(UTXO {
+                    value: 50_000,
+                    script_pubkey: vec![0x51].into(),
+                    height: 1,
+                    is_coinbase: false,
+                }),
+            )
+        };
+        let (left_out, left_coin) = coin(1);
+        let (right_out, right_coin) = coin(2);
+        let mut forward = blvm_protocol::UtxoSet::default();
+        forward.insert(left_out, Arc::clone(&left_coin));
+        forward.insert(right_out, Arc::clone(&right_coin));
+        let mut reverse = blvm_protocol::UtxoSet::default();
+        reverse.insert(right_out, right_coin);
+        reverse.insert(left_out, left_coin);
+        assert_eq!(
+            AssumeUtxoManager::calculate_utxo_hash(&forward).unwrap(),
+            AssumeUtxoManager::calculate_utxo_hash(&reverse).unwrap()
+        );
     }
 
     #[test]

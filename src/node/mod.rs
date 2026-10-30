@@ -1832,15 +1832,7 @@ impl Node {
                             let _ = std::fs::remove_dir_all(std::path::PathBuf::from(segs));
                         }
                     }
-                    if let Ok(tree) = self.storage.open_tree("ibd_utxos") {
-                        let _ = tree.clear();
-                    }
-                    if let Ok(tree) = self.storage.open_tree("ibd_utxos_ckpt_a") {
-                        let _ = tree.clear();
-                    }
-                    if let Ok(tree) = self.storage.open_tree("ibd_utxos_ckpt_b") {
-                        let _ = tree.clear();
-                    }
+                    self.storage.clear_ibd_snapshot_trees();
                     let _ = self.storage.chain().force_set_ibd_utxo_watermark(0);
                     let _ = self
                         .storage
@@ -1901,10 +1893,10 @@ impl Node {
                             }
                         }
                     }
-                    // Clear main-storage ibd_utxos tree and reset watermark to 0.
-                    if let Ok(tree) = self.storage.open_tree("ibd_utxos") {
-                        let _ = tree.clear();
-                    }
+                    // The label reset is not enough. `open_engine_resume_snapshot`
+                    // follows whichever checkpoint still has rows, so a leftover
+                    // `ibd_utxos_ckpt_*` stays spendable after the replay starts.
+                    self.storage.clear_ibd_snapshot_trees();
                     if let Err(e) = self.storage.chain().force_set_ibd_utxo_watermark(0) {
                         warn!("[IBD_RESUME] force_set_ibd_utxo_watermark(0) failed: {e}");
                     }
@@ -2688,5 +2680,101 @@ impl Node {
         }
 
         report
+    }
+}
+
+#[cfg(test)]
+mod resume_snapshot_tests {
+    use super::*;
+    use blvm_protocol::BlockHeader;
+    use blvm_protocol::types::{OutPoint, UTXO};
+    use std::net::SocketAddr;
+
+    fn put_ckpt(storage: &Storage, tree: &str, prevout: &OutPoint, utxo: &UTXO) {
+        let tree = storage.open_tree(tree).unwrap();
+        let key = crate::storage::disk_utxo::outpoint_to_key(prevout);
+        let bytes = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+            storage.utxo_value_codec(),
+            utxo,
+        )
+        .unwrap();
+        tree.insert(&key, &bytes).unwrap();
+    }
+
+    #[tokio::test]
+    async fn watermark_above_the_block_tip_drops_checkpoint_coins() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let network: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let rpc: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let node = Node::new(
+            temp.path().to_str().unwrap(),
+            network,
+            rpc,
+            Some(ProtocolVersion::Regtest),
+        )
+        .unwrap();
+        let storage = node.storage();
+        if storage.chain().get_height().unwrap().is_none() {
+            storage
+                .chain()
+                .initialize(&BlockHeader {
+                    version: 1,
+                    prev_block_hash: [0u8; 32],
+                    merkle_root: [0u8; 32],
+                    timestamp: 1_600_000_000,
+                    bits: 0,
+                    nonce: 1,
+                })
+                .unwrap();
+        }
+        let tip = storage.chain().get_height().unwrap().unwrap();
+        let ahead = tip + 5;
+        storage.chain().force_set_ibd_utxo_watermark(ahead).unwrap();
+        storage
+            .chain()
+            .force_set_engine_export_height(ahead)
+            .unwrap();
+
+        let snapshot_coin = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let other_slot = OutPoint {
+            hash: [5u8; 32],
+            index: 0,
+        };
+        let table_coin = OutPoint {
+            hash: [6u8; 32],
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![0x51].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        put_ckpt(storage, "ibd_utxos_ckpt_a", &snapshot_coin, &utxo);
+        put_ckpt(storage, "ibd_utxos_ckpt_b", &other_slot, &utxo);
+        storage
+            .chain()
+            .set_ibd_utxo_canonical_tree("ibd_utxos_ckpt_b")
+            .unwrap();
+        storage.utxos().add_utxo(&table_coin, &utxo).unwrap();
+
+        let (synced, next) = node.ibd_resume_heights().unwrap();
+
+        assert_eq!(synced, 0);
+        assert_eq!(next, 1);
+        assert!(storage.open_engine_resume_snapshot().unwrap().is_none());
+        assert!(
+            storage
+                .read_chain_prevout(&snapshot_coin)
+                .unwrap()
+                .is_none()
+        );
+        assert!(storage.read_chain_prevout(&other_slot).unwrap().is_none());
+        assert!(storage.utxos().get_utxo(&table_coin).unwrap().is_some());
+        assert_eq!(storage.chain().get_utxo_watermark().unwrap(), Some(0));
+        assert_eq!(storage.chain().get_engine_export_height().unwrap(), Some(0));
     }
 }

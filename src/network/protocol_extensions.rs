@@ -45,7 +45,7 @@ pub async fn handle_get_utxo_set(
     };
 
     // Get UTXO set from storage
-    let utxo_set = storage.utxos().get_all_utxos()?;
+    let utxo_set = storage.load_chain_utxo_set()?;
     let utxo_count = utxo_set.len() as u64;
 
     // Get block hash and height
@@ -314,7 +314,7 @@ pub async fn handle_get_utxo_proof(
     };
 
     // Get UTXO set from storage
-    let utxo_set = storage.utxos().get_all_utxos()?;
+    let utxo_set = storage.load_chain_utxo_set()?;
 
     // Build Merkle tree from UTXO set
     let mut utxo_tree = UtxoMerkleTree::new()
@@ -511,5 +511,68 @@ pub fn deserialize_filtered_block(data: &[u8]) -> Result<FilteredBlockMessage> {
     match ProtocolParser::parse_message(data)? {
         ProtocolMessage::FilteredBlock(msg) => Ok(msg),
         _ => Err(anyhow::anyhow!("Expected FilteredBlock message")),
+    }
+}
+
+#[cfg(all(test, feature = "utxo-commitments"))]
+mod tests {
+    use super::handle_get_utxo_proof;
+    use crate::network::protocol::GetUTXOProofMessage;
+    use crate::storage::Storage;
+    use blvm_protocol::UTXO;
+    use blvm_protocol::opcodes::OP_1;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn utxo_proof_finds_a_snapshot_coin_the_table_does_not_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::new(dir.path()).unwrap());
+        let tx_hash = [6u8; 32];
+        storage
+            .utxos()
+            .add_utxo(
+                &blvm_protocol::OutPoint {
+                    hash: [1u8; 32],
+                    index: 0,
+                },
+                &UTXO {
+                    value: 1,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 1,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+        let tree = storage.open_tree("ibd_utxos_ckpt_a").unwrap();
+        let prevout = blvm_protocol::OutPoint {
+            hash: tx_hash,
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        let key = crate::storage::disk_utxo::outpoint_to_key(&prevout);
+        let bytes = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+            storage.utxo_value_codec(),
+            &utxo,
+        )
+        .unwrap();
+        tree.insert(&key, &bytes).unwrap();
+
+        let proof = handle_get_utxo_proof(
+            GetUTXOProofMessage {
+                request_id: 1,
+                tx_hash,
+                output_index: 0,
+                block_height: 1,
+                block_hash: [0u8; 32],
+            },
+            Some(storage),
+        )
+        .await;
+        assert!(proof.is_ok(), "{proof:?}");
     }
 }

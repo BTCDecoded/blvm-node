@@ -395,11 +395,34 @@ impl NodeApiImpl {
         })?;
         let mempool_txs = mempool_manager.get_transactions();
 
-        let utxo_set = self
-            .storage
-            .utxos()
-            .get_all_utxos()
-            .map_err(|e| ModuleError::op_err("Failed to get UTXO set", e))?;
+        let utxo_set = match self.storage.open_engine_resume_snapshot() {
+            Ok(Some(_)) => {
+                let mut set = blvm_protocol::UtxoSet::default();
+                for tx in &mempool_txs {
+                    for input in &tx.inputs {
+                        if set.contains_key(&input.prevout) {
+                            continue;
+                        }
+                        match self.storage.read_chain_prevout(&input.prevout) {
+                            Ok(Some(utxo)) => {
+                                set.insert(input.prevout, Arc::new(utxo));
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                return Err(ModuleError::op_err("Failed to get UTXO set", err));
+                            }
+                        }
+                    }
+                }
+                set
+            }
+            Ok(None) => self
+                .storage
+                .utxos()
+                .get_all_utxos()
+                .map_err(|e| ModuleError::op_err("Failed to get UTXO set", e))?,
+            Err(err) => return Err(ModuleError::op_err("Failed to get UTXO set", err)),
+        };
 
         let coinbase_script_bytes = coinbase_script.unwrap_or_default();
         let address_bytes = match coinbase_address {

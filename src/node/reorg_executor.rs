@@ -110,6 +110,17 @@ pub(crate) fn note_snapshot_height(storage: &Storage, height: u64) -> Result<()>
     Ok(())
 }
 
+/// Record the snapshot height exactly, including a lower one.
+///
+/// [`note_snapshot_height`] only advances. Invalidate and a shorter reorg move
+/// the tip down, and the next resume treats a higher watermark as a checkpoint
+/// from blocks the store does not have.
+pub(crate) fn rewind_snapshot_height(storage: &Storage, height: u64) -> Result<()> {
+    storage.chain().force_set_ibd_utxo_watermark(height)?;
+    storage.chain().force_set_engine_export_height(height)?;
+    Ok(())
+}
+
 fn headers_on_chain(
     storage: &Storage,
     blockstore: &BlockStore,
@@ -515,7 +526,10 @@ pub fn try_activate_heavier_fork(
         .update_tip(&new_tip_hash, &new_tip_block.header, new_height)?;
     refresh_active_height_index(storage, blockstore, &new_tip_hash)?;
     if snapshot.is_some() {
-        note_snapshot_height(storage, new_height)?;
+        // The delta above leaves the snapshot at `new_height`. The forward-only
+        // setter would keep the old tip and the next start would treat that
+        // checkpoint as ahead of the chain.
+        rewind_snapshot_height(storage, new_height)?;
         // The run loop must keep using the snapshot. The map here is only the
         // coins this reorg touched.
         *utxo_set = UtxoSet::default();
@@ -589,6 +603,30 @@ mod snapshot_delta_tests {
                 new_utxo: Some(Arc::new(created)),
             }],
         }
+    }
+
+    #[test]
+    fn a_shorter_snapshot_tip_rewinds_the_height_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        storage.chain().force_set_ibd_utxo_watermark(10).unwrap();
+        storage.chain().force_set_engine_export_height(10).unwrap();
+        note_snapshot_height(&storage, 4).unwrap();
+        assert_eq!(storage.chain().get_utxo_watermark().unwrap(), Some(10));
+        assert_eq!(
+            storage.chain().get_engine_export_height().unwrap(),
+            Some(10)
+        );
+
+        rewind_snapshot_height(&storage, 4).unwrap();
+
+        assert_eq!(storage.chain().get_utxo_watermark().unwrap(), Some(4));
+        assert_eq!(storage.chain().get_engine_export_height().unwrap(), Some(4));
+
+        rewind_snapshot_height(&storage, 7).unwrap();
+
+        assert_eq!(storage.chain().get_utxo_watermark().unwrap(), Some(7));
+        assert_eq!(storage.chain().get_engine_export_height().unwrap(), Some(7));
     }
 
     #[test]
