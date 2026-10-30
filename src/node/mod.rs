@@ -650,6 +650,12 @@ impl Node {
                 e
             );
         }
+        if let Err(e) = crate::node::reorg_executor::recover_snapshot_commit(
+            self.storage.as_ref(),
+            self.storage.blocks().as_ref(),
+        ) {
+            warn!("[START_COMPONENTS] recover_snapshot_commit failed: {e}");
+        }
 
         // Fresh datadir: no `chain_info` yet — anchor with this network's genesis so RPC mining
         // (`generatetoaddress`, templates) and tip queries work without a prior sync.
@@ -973,11 +979,15 @@ impl Node {
         // Wait for the archive Version start_height before the +1e6 fallback.
         // Immediate fallback (synced_tip+1000000 → 1400287) starts IBD before
         // handshake lands and poisons Mode T rematch (FAIL_TARGET / cold tip30).
-        let mut target_height = match self.network.get_highest_peer_start_height_async().await {
-            Some(peer_height) => peer_height.max(synced_tip),
-            None => 0,
-        };
-        if !serve_only && target_height <= synced_tip {
+        // A peer that is only at our tip is not new work. The old fallback
+        // added a million blocks anyway, which starts parallel IBD on a node
+        // that is already caught up.
+        let mut peer_ahead = self
+            .network
+            .get_highest_peer_start_height_async()
+            .await
+            .filter(|height| *height > synced_tip);
+        if !serve_only && peer_ahead.is_none() {
             let wait_ms: u64 = std::env::var("BLVM_IBD_PEER_HEIGHT_WAIT_MS")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -988,18 +998,27 @@ impl Node {
                 tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                 if let Some(h) = self.network.get_highest_peer_start_height_async().await {
                     if h > synced_tip {
-                        target_height = h.max(synced_tip);
+                        peer_ahead = Some(h);
                         info!("[START_COMPONENTS] peer start_height={h} after Version wait");
                         break;
                     }
                 }
             }
-            if target_height <= synced_tip {
-                target_height = synced_tip.saturating_add(1_000_000);
-                warn!(
-                    "[START_COMPONENTS] no peer start_height after {wait_ms}ms — fallback target={target_height}"
-                );
-            }
+        }
+        let extending_height = crate::node::parallel_ibd::headers::highest_extending_height(
+            self.storage.blocks().as_ref(),
+            synced_tip,
+        )
+        .unwrap_or(synced_tip);
+        let target_height = crate::node::parallel_ibd::headers::ibd_target_height(
+            synced_tip,
+            peer_ahead,
+            extending_height,
+        );
+        if peer_ahead.is_none() && synced_tip > 0 && target_height == synced_tip {
+            info!(
+                "[START_COMPONENTS] no peer ahead of {synced_tip} and no linked headers above it — not starting parallel IBD"
+            );
         }
         let is_ibd = !serve_only && synced_tip < target_height;
 

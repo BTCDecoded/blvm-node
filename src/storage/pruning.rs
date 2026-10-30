@@ -49,6 +49,12 @@ pub struct PruningManager {
     stats: std::sync::Mutex<PruningStats>,
 }
 
+/// Undo is what a reorg disconnects. Without it, the body is the only source
+/// for a rebuild, so pruning that body makes the block impossible to disconnect.
+pub(crate) fn body_is_prunable(has_body: bool, has_undo: bool) -> bool {
+    has_body && has_undo
+}
+
 impl PruningManager {
     /// Create a new pruning manager
     pub fn new(config: PruningConfig, blockstore: Arc<BlockStore>) -> Self {
@@ -378,6 +384,23 @@ impl PruningManager {
     }
 
     /// Normal pruning: Keep recent blocks, remove older blocks
+    /// A body with no undo is the only way to rebuild that undo. Keep it.
+    fn remove_body_if_undo_is_durable(
+        &self,
+        hash: &blvm_protocol::Hash,
+        stats: &mut PruningStats,
+    ) -> Result<()> {
+        let has_body = self.blockstore.get_block(hash)?.is_some();
+        let has_undo = self.blockstore.get_undo_log(hash)?.is_some();
+        if !body_is_prunable(has_body, has_undo) {
+            return Ok(());
+        }
+        self.blockstore.remove_block_body(hash)?;
+        stats.blocks_pruned += 1;
+        stats.storage_freed += 1024;
+        Ok(())
+    }
+
     fn prune_normal(
         &self,
         prune_to_height: u64,
@@ -406,12 +429,7 @@ impl PruningManager {
         // Prune blocks up to actual_prune_height
         for height in 0..actual_prune_height {
             if let Some(hash) = self.blockstore.get_hash_by_height(height)? {
-                // Remove block body (keep header for PoW verification)
-                if let Some(_block) = self.blockstore.get_block(&hash)? {
-                    self.blockstore.remove_block_body(&hash)?;
-                    stats.blocks_pruned += 1;
-                    stats.storage_freed += 1024; // Approximate block size
-                }
+                self.remove_body_if_undo_is_durable(&hash, &mut stats)?;
             }
         }
 
@@ -472,11 +490,7 @@ impl PruningManager {
         for height in 0..actual_prune_height {
             if let Some(hash) = self.blockstore.get_hash_by_height(height)? {
                 // Remove block body (keep header)
-                if let Some(_block) = self.blockstore.get_block(&hash)? {
-                    self.blockstore.remove_block_body(&hash)?;
-                    stats.blocks_pruned += 1;
-                    stats.storage_freed += 1024;
-                }
+                self.remove_body_if_undo_is_durable(&hash, &mut stats)?;
 
                 // Remove witnesses if not keeping filtered blocks
                 if !keep_filtered_blocks {
@@ -535,11 +549,7 @@ impl PruningManager {
             if let Some(hash) = self.blockstore.get_hash_by_height(height)? {
                 // Remove block body if not keeping from this height
                 if height < keep_bodies_from_height {
-                    if let Some(_block) = self.blockstore.get_block(&hash)? {
-                        self.blockstore.remove_block_body(&hash)?;
-                        stats.blocks_pruned += 1;
-                        stats.storage_freed += 1024;
-                    }
+                    self.remove_body_if_undo_is_durable(&hash, &mut stats)?;
                 }
 
                 // Remove witnesses if not keeping
@@ -823,5 +833,17 @@ mod reconstruct_tests {
             err.to_string().contains("not found"),
             "unexpected error: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod prune_undo_tests {
+    use super::body_is_prunable;
+
+    #[test]
+    fn a_body_without_undo_is_kept() {
+        assert!(!body_is_prunable(true, false));
+        assert!(body_is_prunable(true, true));
+        assert!(!body_is_prunable(false, true));
     }
 }

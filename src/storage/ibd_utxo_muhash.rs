@@ -111,6 +111,20 @@ pub fn backfill_engine_export_muhash_if_missing(storage: &Storage) -> Result<boo
 }
 
 #[inline]
+pub(crate) fn apply_snapshot_coin(
+    mh: &mut MuHash3072,
+    outpoint: &blvm_protocol::types::OutPoint,
+    utxo: &UTXO,
+    insert: bool,
+) {
+    let preimage = utxo_muhash_preimage(outpoint, utxo);
+    if insert {
+        mh.insert_mut(&preimage);
+    } else {
+        mh.remove_mut(&preimage);
+    }
+}
+
 fn utxo_muhash_preimage(op: &blvm_protocol::types::OutPoint, utxo: &UTXO) -> Vec<u8> {
     serialize_coin_for_muhash(
         &op.hash,
@@ -324,6 +338,33 @@ pub(crate) fn verify_ibd_utxo_muhash_startup(storage: &Storage) -> Result<()> {
     }
     tracing::info!("BLVM_VERIFY_IBD_UTXO_MUHASH: ibd_utxos MuHash OK");
     Ok(())
+}
+
+#[cfg(test)]
+mod snapshot_muhash_tests {
+    use super::apply_snapshot_coin;
+    use blvm_muhash::MuHash3072;
+    use blvm_protocol::types::{OutPoint, UTXO};
+
+    #[test]
+    fn removing_a_coin_returns_the_muhash_to_the_empty_set() {
+        let outpoint = OutPoint {
+            hash: [9u8; 32],
+            index: 1,
+        };
+        let utxo = UTXO {
+            value: 50,
+            script_pubkey: vec![0x51].into(),
+            height: 3,
+            is_coinbase: false,
+        };
+        let empty = MuHash3072::new().finalize();
+        let mut mh = MuHash3072::new();
+        apply_snapshot_coin(&mut mh, &outpoint, &utxo, true);
+        assert_ne!(mh.clone().finalize(), empty);
+        apply_snapshot_coin(&mut mh, &outpoint, &utxo, false);
+        assert_eq!(mh.finalize(), empty);
+    }
 }
 
 #[cfg(all(test, feature = "heed3"))]

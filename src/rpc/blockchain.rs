@@ -1922,6 +1922,8 @@ impl BlockchainRpc {
                     storage.utxo_value_codec(),
                     &[&undo],
                     &[],
+                    None,
+                    None,
                 )?;
             } else {
                 for entry in &undo.entries {

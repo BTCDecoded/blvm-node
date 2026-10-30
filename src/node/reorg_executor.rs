@@ -60,14 +60,62 @@ pub(crate) fn read_snapshot_inputs(
     Ok(loaded)
 }
 
+/// Where a reorg or connect reads coins when the in-memory set is empty.
+///
+/// An IBD export height means the coins live in the snapshot. The chainstate
+/// table was never that set. Loading it and writing the reorg's fragment back
+/// replaces the database with the coins this fork happened to touch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiskUtxoSource {
+    Snapshot,
+    ChainTable,
+    MissingSnapshot,
+}
+
+pub(crate) fn disk_utxo_source(snapshot_open: bool, export_height_set: bool) -> DiskUtxoSource {
+    if snapshot_open {
+        DiskUtxoSource::Snapshot
+    } else if export_height_set {
+        DiskUtxoSource::MissingSnapshot
+    } else {
+        DiskUtxoSource::ChainTable
+    }
+}
+
+/// Not an outpoint. Scanners that require a 40-byte key skip it.
+pub(crate) const SNAPSHOT_REORG_JOURNAL_KEY: &[u8] = b"blvm-reorg-journal";
+/// Running MuHash after this batch. Startup copies it into chainstate.
+pub(crate) const SNAPSHOT_MUHASH_KEY: &[u8] = b"blvm-muhash-running";
+
+pub(crate) fn encode_reorg_journal(height: u64, tip: &Hash) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(40);
+    bytes.extend_from_slice(&height.to_be_bytes());
+    bytes.extend_from_slice(tip);
+    bytes
+}
+
+pub(crate) fn parse_reorg_journal(bytes: &[u8]) -> Option<(u64, Hash)> {
+    if bytes.len() != 40 {
+        return None;
+    }
+    let mut height = [0u8; 8];
+    height.copy_from_slice(&bytes[..8]);
+    let mut tip = [0u8; 32];
+    tip.copy_from_slice(&bytes[8..]);
+    Some((u64::from_be_bytes(height), tip))
+}
+
 /// Last write wins. Disconnect is tip-first; connect is ancestor-to-tip.
 /// `None` deletes the row. `Some` inserts it. One batch, so a crash does not
-/// leave a half-applied fork.
+/// leave a half-applied fork. The journal and the MuHash bytes are in that
+/// same batch. Startup finishes the tip move if the process dies before it.
 pub(crate) fn commit_utxo_snapshot_delta(
     tree: &dyn Tree,
     codec: ValueCodec,
     disconnect_tip_first: &[&BlockUndoLog],
     connect_low_to_high: &[&BlockUndoLog],
+    journal_tip: Option<(u64, Hash)>,
+    mut muhash: Option<&mut blvm_muhash::MuHash3072>,
 ) -> Result<usize> {
     let mut net: HashMap<[u8; 40], Option<Vec<u8>>> = HashMap::new();
     for undo in disconnect_tip_first {
@@ -93,12 +141,35 @@ pub(crate) fn commit_utxo_snapshot_delta(
         }
     }
     let count = net.len();
+    if let Some(mh) = muhash.as_mut() {
+        for (key, value) in &net {
+            let outpoint = crate::storage::disk_utxo::key_to_outpoint(key);
+            if let Some(old) = tree.get(key)? {
+                let utxo = decode_utxo_with_codec(codec, &old)?;
+                crate::storage::ibd_utxo_muhash::apply_snapshot_coin(mh, &outpoint, &utxo, false);
+            }
+            if let Some(bytes) = value {
+                let utxo = decode_utxo_with_codec(codec, bytes)?;
+                crate::storage::ibd_utxo_muhash::apply_snapshot_coin(mh, &outpoint, &utxo, true);
+            }
+        }
+    }
     let mut batch = tree.batch()?;
     for (key, value) in &net {
         match value {
             None => batch.delete(key),
             Some(bytes) => batch.put(key, bytes),
         }
+    }
+    if let Some((height, tip)) = journal_tip {
+        batch.put(
+            SNAPSHOT_REORG_JOURNAL_KEY,
+            &encode_reorg_journal(height, &tip),
+        );
+    }
+    let muhash_bytes = muhash.map(|mh| mh.serialize_running_state());
+    if let Some(bytes) = muhash_bytes.as_ref() {
+        batch.put(SNAPSHOT_MUHASH_KEY, bytes);
     }
     batch.commit()?;
     Ok(count)
@@ -118,6 +189,50 @@ pub(crate) fn note_snapshot_height(storage: &Storage, height: u64) -> Result<()>
 pub(crate) fn rewind_snapshot_height(storage: &Storage, height: u64) -> Result<()> {
     storage.chain().force_set_ibd_utxo_watermark(height)?;
     storage.chain().force_set_engine_export_height(height)?;
+    Ok(())
+}
+
+/// Finish a snapshot commit whose tip update did not reach disk.
+///
+/// The journal is written in the same batch as the coin delta. A crash after
+/// that batch and before `update_tip` leaves the new coins under the old tip.
+/// Replaying the reorg would then look up coins that are already spent.
+pub(crate) fn recover_snapshot_commit(storage: &Storage, blockstore: &BlockStore) -> Result<()> {
+    let Some((_, tree)) = storage.open_engine_resume_snapshot()? else {
+        return Ok(());
+    };
+    if let Some(bytes) = tree.get(SNAPSHOT_MUHASH_KEY)? {
+        if bytes.len() == blvm_muhash::MUHASH_RUNNING_STATE_BYTES {
+            let mut running = [0u8; blvm_muhash::MUHASH_RUNNING_STATE_BYTES];
+            running.copy_from_slice(&bytes);
+            storage
+                .chain()
+                .persist_ibd_utxo_muhash_running_only(&running)?;
+        }
+        tree.remove(SNAPSHOT_MUHASH_KEY)?;
+    }
+    let Some(raw) = tree.get(SNAPSHOT_REORG_JOURNAL_KEY)? else {
+        return Ok(());
+    };
+    let Some((height, hash)) = parse_reorg_journal(&raw) else {
+        tree.remove(SNAPSHOT_REORG_JOURNAL_KEY)?;
+        return Ok(());
+    };
+    let tip_hash = storage
+        .chain()
+        .get_tip_hash_and_height()
+        .ok()
+        .map(|(hash, _)| hash);
+    if tip_hash != Some(hash) {
+        let header = blockstore
+            .get_header(&hash)?
+            .with_context(|| format!("reorg journal tip {} has no header", hex::encode(hash)))?;
+        storage.chain().update_tip(&hash, &header, height)?;
+        refresh_active_height_index(storage, blockstore, &hash)?;
+        info!("[REORG] finished committed snapshot journal at height {height}");
+    }
+    rewind_snapshot_height(storage, height)?;
+    tree.remove(SNAPSHOT_REORG_JOURNAL_KEY)?;
     Ok(())
 }
 
@@ -161,6 +276,27 @@ fn median_with_overlay(
     Some(blvm_protocol::bip113::get_median_time_past(&headers))
 }
 
+/// Height and parent for a reorg walk.
+///
+/// Side bodies stored before the chain index recorded them still have a header
+/// and a height. The walk follows that header and writes the index row so the
+/// next lookup does not miss it again.
+fn fork_link(storage: &Storage, blockstore: &BlockStore, hash: &Hash) -> Result<(u64, Hash)> {
+    if let Some(entry) = storage.chain().block_index().get(hash)? {
+        return Ok((entry.height, entry.prev_hash));
+    }
+    let header = blockstore
+        .get_header(hash)?
+        .with_context(|| format!("missing index entry {hash:?}"))?;
+    let height = blockstore
+        .get_height_by_hash(hash)?
+        .with_context(|| format!("missing index entry {hash:?}"))?;
+    storage
+        .chain()
+        .record_connected_block(hash, height, &header.prev_block_hash)?;
+    Ok((height, header.prev_block_hash))
+}
+
 /// Blocks from the common ancestor through each tip, oldest first.
 ///
 /// The two slices start on the same block. Walking a fixed number of parents
@@ -172,35 +308,26 @@ pub fn collect_fork_chains(
     active_tip: &Hash,
     candidate_tip: &Hash,
 ) -> Result<(Vec<Block>, Vec<Block>)> {
-    let index = storage.chain().block_index();
-    let active_entry = index
-        .get(active_tip)?
-        .context("active tip missing from block index")?;
-    let candidate_entry = index
-        .get(candidate_tip)?
-        .context("candidate tip missing from block index")?;
+    let (mut active_height, _) = fork_link(storage, blockstore, active_tip)
+        .with_context(|| "active tip missing from block index")?;
+    let (mut candidate_height, _) = fork_link(storage, blockstore, candidate_tip)
+        .with_context(|| "candidate tip missing from block index")?;
 
     let mut active_hash = *active_tip;
     let mut candidate_hash = *candidate_tip;
-    let mut active_height = active_entry.height;
-    let mut candidate_height = candidate_entry.height;
     let mut active_above = Vec::new();
     let mut candidate_above = Vec::new();
 
     while active_height > candidate_height {
         active_above.push(load_reorg_block(blockstore, &active_hash)?);
-        let entry = index
-            .get(&active_hash)?
-            .with_context(|| format!("missing index entry {active_hash:?}"))?;
-        active_hash = entry.prev_hash;
+        let (_, prev) = fork_link(storage, blockstore, &active_hash)?;
+        active_hash = prev;
         active_height -= 1;
     }
     while candidate_height > active_height {
         candidate_above.push(load_reorg_block(blockstore, &candidate_hash)?);
-        let entry = index
-            .get(&candidate_hash)?
-            .with_context(|| format!("missing index entry {candidate_hash:?}"))?;
-        candidate_hash = entry.prev_hash;
+        let (_, prev) = fork_link(storage, blockstore, &candidate_hash)?;
+        candidate_hash = prev;
         candidate_height -= 1;
     }
 
@@ -218,14 +345,10 @@ pub fn collect_fork_chains(
         if active_height == 0 {
             anyhow::bail!("chains do not share a common ancestor");
         }
-        let active_entry = index
-            .get(&active_hash)?
-            .with_context(|| format!("missing index entry {active_hash:?}"))?;
-        let candidate_entry = index
-            .get(&candidate_hash)?
-            .with_context(|| format!("missing index entry {candidate_hash:?}"))?;
-        active_hash = active_entry.prev_hash;
-        candidate_hash = candidate_entry.prev_hash;
+        let (_, active_prev) = fork_link(storage, blockstore, &active_hash)?;
+        let (_, candidate_prev) = fork_link(storage, blockstore, &candidate_hash)?;
+        active_hash = active_prev;
+        candidate_hash = candidate_prev;
         active_height -= 1;
         candidate_height -= 1;
     }
@@ -367,10 +490,25 @@ pub fn try_activate_heavier_fork(
     } else {
         None
     };
-    if snapshot.is_none() && utxo_set.is_empty() {
-        // No checkpoint: the table is the chain. The reorg has to see those
-        // coins, and the set written back is the whole table.
-        *utxo_set = storage.utxos().get_all_utxos()?;
+    if utxo_set.is_empty() {
+        let export_height_set = storage
+            .chain()
+            .get_engine_export_height()
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+            > 0;
+        match disk_utxo_source(snapshot.is_some(), export_height_set) {
+            DiskUtxoSource::MissingSnapshot => {
+                anyhow::bail!("reorg refused: IBD UTXO snapshot is empty");
+            }
+            DiskUtxoSource::ChainTable => {
+                // No checkpoint: the table is the chain. The reorg has to see
+                // those coins, and the set written back is the whole table.
+                *utxo_set = storage.utxos().get_all_utxos()?;
+            }
+            DiskUtxoSource::Snapshot => {}
+        }
     }
 
     let (active_tip, active_height) = storage.chain().get_tip_hash_and_height()?;
@@ -516,20 +654,40 @@ pub fn try_activate_heavier_fork(
                 .with_context(|| format!("missing undo for connected {}", hex::encode(hash)))?;
             connect_refs.push(undo);
         }
-        let written =
-            commit_utxo_snapshot_delta(tree.as_ref(), codec, &disconnect_refs, &connect_refs)?;
+        let mut muhash = storage
+            .chain()
+            .get_ibd_utxo_muhash_running()
+            .ok()
+            .flatten()
+            .map(|bytes| blvm_muhash::MuHash3072::deserialize_running_state(&bytes));
+        let written = commit_utxo_snapshot_delta(
+            tree.as_ref(),
+            codec,
+            &disconnect_refs,
+            &connect_refs,
+            Some((new_height, new_tip_hash)),
+            muhash.as_mut(),
+        )?;
         info!("[REORG] wrote {written} UTXO rows in snapshot {name}");
+        if let Some(mh) = muhash.as_ref() {
+            let bytes = mh.serialize_running_state();
+            storage
+                .chain()
+                .persist_ibd_utxo_muhash_running_only(&bytes)?;
+        }
     }
 
     storage
         .chain()
         .update_tip(&new_tip_hash, &new_tip_block.header, new_height)?;
     refresh_active_height_index(storage, blockstore, &new_tip_hash)?;
-    if snapshot.is_some() {
+    if let Some((_, tree)) = &snapshot {
         // The delta above leaves the snapshot at `new_height`. The forward-only
         // setter would keep the old tip and the next start would treat that
         // checkpoint as ahead of the chain.
         rewind_snapshot_height(storage, new_height)?;
+        let _ = tree.remove(SNAPSHOT_REORG_JOURNAL_KEY);
+        let _ = tree.remove(SNAPSHOT_MUHASH_KEY);
         // The run loop must keep using the snapshot. The map here is only the
         // coins this reorg touched.
         *utxo_set = UtxoSet::default();
@@ -676,7 +834,15 @@ mod snapshot_delta_tests {
                 },
             ],
         };
-        commit_utxo_snapshot_delta(tree.as_ref(), codec, &[&disconnect], &[&connect]).unwrap();
+        commit_utxo_snapshot_delta(
+            tree.as_ref(),
+            codec,
+            &[&disconnect],
+            &[&connect],
+            None,
+            None,
+        )
+        .unwrap();
 
         assert!(tree.get(&outpoint_to_key(&kept)).unwrap().is_some());
         assert!(tree.get(&outpoint_to_key(&spent)).unwrap().is_none());
@@ -740,5 +906,51 @@ mod snapshot_delta_tests {
         assert!(set.contains_key(&spent));
         assert!(!set.contains_key(&other));
         let _ = spend_undo(spent, coin(20, 4));
+    }
+
+    #[test]
+    fn an_export_without_a_snapshot_is_not_the_chainstate_table() {
+        assert_eq!(
+            disk_utxo_source(false, true),
+            DiskUtxoSource::MissingSnapshot
+        );
+        assert_eq!(disk_utxo_source(true, true), DiskUtxoSource::Snapshot);
+        assert_eq!(disk_utxo_source(false, false), DiskUtxoSource::ChainTable);
+    }
+
+    #[test]
+    fn a_committed_journal_finishes_the_tip_after_a_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        storage
+            .chain()
+            .set_ibd_utxo_canonical_tree("ibd_utxos")
+            .unwrap();
+        let tree = storage.open_tree("ibd_utxos").unwrap();
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [5u8; 32],
+            timestamp: 1_700_000_000,
+            bits: 0x1d00ffff,
+            nonce: 7,
+        };
+        let hash = blvm_consensus::block::block_header_hash(&header);
+        storage.blocks().store_header(&hash, &header).unwrap();
+        commit_utxo_snapshot_delta(
+            tree.as_ref(),
+            storage.utxo_value_codec(),
+            &[],
+            &[],
+            Some((0, hash)),
+            None,
+        )
+        .unwrap();
+        recover_snapshot_commit(&storage, storage.blocks().as_ref()).unwrap();
+        let (tip, height) = storage.chain().get_tip_hash_and_height().unwrap();
+        assert_eq!(tip, hash);
+        assert_eq!(height, 0);
+        assert!(tree.get(SNAPSHOT_REORG_JOURNAL_KEY).unwrap().is_none());
+        assert_eq!(storage.chain().get_engine_export_height().unwrap(), Some(0));
     }
 }

@@ -112,6 +112,46 @@ pub(crate) fn empty_headers_is_ibd_tip(
     fetched_tip + 1 > start_height
 }
 
+/// Download target when no peer has advertised a height above the tip.
+///
+/// A caught-up node stays at `synced_tip`. Headers that extend the tip set
+/// the target to that height. A fresh node with neither still uses the
+/// million-block bootstrap so the first IBD can start before a handshake.
+pub(crate) fn ibd_target_height(
+    synced_tip: u64,
+    peer_ahead: Option<u64>,
+    extending_height: u64,
+) -> u64 {
+    if let Some(peer) = peer_ahead.filter(|height| *height > synced_tip) {
+        return peer;
+    }
+    if extending_height > synced_tip {
+        return extending_height;
+    }
+    if synced_tip == 0 {
+        return 1_000_000;
+    }
+    synced_tip
+}
+
+/// Highest stored height whose header links back to `synced_tip`.
+pub(crate) fn highest_extending_height(blockstore: &BlockStore, synced_tip: u64) -> Result<u64> {
+    let mut height = synced_tip;
+    loop {
+        let next = height.saturating_add(1);
+        if next == height {
+            return Ok(height);
+        }
+        let Some(hash) = blockstore.get_hash_by_height(next)? else {
+            return Ok(height);
+        };
+        if !stored_height_extends_active_parent(blockstore, next, &hash)? {
+            return Ok(height);
+        }
+        height = next;
+    }
+}
+
 /// The hash at `height` extends the active chain only when its header's prev is
 /// the active hash at `height - 1`. A side header that shares a height does not.
 pub(crate) fn stored_height_extends_active_parent(
@@ -1144,6 +1184,32 @@ mod n13_tests {
             !stored_height_extends_active_parent(&store, 157905, &child).unwrap(),
             "157905 extends the side header at 157904, not the active hash"
         );
+    }
+}
+
+#[cfg(test)]
+mod ibd_target_tests {
+    use super::ibd_target_height;
+
+    #[test]
+    fn a_caught_up_node_does_not_aim_a_million_blocks_past_the_tip() {
+        assert_eq!(ibd_target_height(158_040, None, 158_040), 158_040);
+        assert_eq!(ibd_target_height(158_040, Some(158_040), 158_040), 158_040);
+    }
+
+    #[test]
+    fn linked_headers_above_the_tip_are_the_target_when_no_peer_is_ahead() {
+        assert_eq!(ibd_target_height(157_910, None, 158_036), 158_036);
+    }
+
+    #[test]
+    fn a_peer_ahead_of_the_tip_wins_over_stored_headers() {
+        assert_eq!(ibd_target_height(100, Some(250), 180), 250);
+    }
+
+    #[test]
+    fn a_fresh_node_still_bootstraps_without_peers_or_headers() {
+        assert_eq!(ibd_target_height(0, None, 0), 1_000_000);
     }
 }
 

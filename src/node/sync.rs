@@ -177,6 +177,7 @@ struct HeldForkBody {
 #[derive(Default)]
 struct ForkBodyHold {
     by_parent: HashMap<blvm_protocol::Hash, Vec<HeldForkBody>>,
+    order: std::collections::VecDeque<blvm_protocol::Hash>,
     len: usize,
 }
 
@@ -195,19 +196,47 @@ impl ForkBodyHold {
             return true;
         }
         if self.len >= FORK_BODY_HOLD_LIMIT {
-            return false;
+            self.drop_oldest();
         }
         self.by_parent
             .entry(parent)
             .or_default()
             .push(HeldForkBody { block, witnesses });
+        self.order.push_back(hash);
         self.len += 1;
         true
     }
 
+    fn drop_oldest(&mut self) {
+        while let Some(hash) = self.order.pop_front() {
+            let mut removed = false;
+            for children in self.by_parent.values_mut() {
+                if let Some(index) = children.iter().position(|item| {
+                    blvm_consensus::block::block_header_hash(&item.block.header) == hash
+                }) {
+                    children.remove(index);
+                    self.len = self.len.saturating_sub(1);
+                    removed = true;
+                    break;
+                }
+            }
+            self.by_parent.retain(|_, children| !children.is_empty());
+            if removed {
+                return;
+            }
+        }
+    }
+
     fn take_children(&mut self, parent: &blvm_protocol::Hash) -> Vec<HeldForkBody> {
         let children = self.by_parent.remove(parent).unwrap_or_default();
-        self.len = self.len.saturating_sub(children.len());
+        if !children.is_empty() {
+            let taken: Vec<blvm_protocol::Hash> = children
+                .iter()
+                .map(|item| blvm_consensus::block::block_header_hash(&item.block.header))
+                .collect();
+            self.order.retain(|hash| !taken.contains(hash));
+            self.len = self.len.saturating_sub(children.len());
+        }
         children
     }
 }
@@ -606,10 +635,23 @@ impl SyncCoordinator {
             let parent_hash = block.header.prev_block_hash;
             let (active_tip, active_height) = storage.chain().get_tip_hash_and_height()?;
 
+            // A side block is stored without claiming the active height, so the
+            // chain index does not contain it. The body is still the parent.
+            // Parking that child drops the heavier chain on the floor.
+            let parent_body_height = if parent_hash != active_tip
+                && storage.chain().block_index().get(&parent_hash)?.is_none()
+                && blockstore.has_block(&parent_hash)?
+            {
+                blockstore.get_height_by_hash(&parent_hash)?
+            } else {
+                None
+            };
             let connect_height = if parent_hash == active_tip {
                 active_height + 1
             } else if let Some(entry) = storage.chain().block_index().get(&parent_hash)? {
                 entry.height + 1
+            } else if let Some(parent_height) = parent_body_height {
+                parent_height.saturating_add(1)
             } else if blockstore.get_header(&parent_hash)?.is_some() {
                 let parked = self
                     .fork_hold
@@ -708,23 +750,60 @@ impl SyncCoordinator {
                     connect_height,
                 )?;
 
-                storage
-                    .chain()
-                    .update_tip(&block_hash, &block.header, connect_height)?;
                 if let Some((name, tree)) = &snapshot {
+                    // Coins first, then the tip. The journal is in the coin
+                    // batch, so a crash here is finished on the next start
+                    // instead of validating against coins that are already spent.
+                    let mut muhash = storage
+                        .chain()
+                        .get_ibd_utxo_muhash_running()
+                        .ok()
+                        .flatten()
+                        .map(|bytes| blvm_muhash::MuHash3072::deserialize_running_state(&bytes));
                     let written = commit_utxo_snapshot_delta(
                         tree.as_ref(),
                         storage.utxo_value_codec(),
                         &[],
                         &[&undo_log],
+                        Some((connect_height, block_hash)),
+                        muhash.as_mut(),
                     )?;
+                    storage
+                        .chain()
+                        .update_tip(&block_hash, &block.header, connect_height)?;
                     note_snapshot_height(storage, connect_height)?;
+                    if let Some(mh) = muhash.as_ref() {
+                        let bytes = mh.serialize_running_state();
+                        storage
+                            .chain()
+                            .persist_ibd_utxo_muhash_running_only(&bytes)?;
+                    }
+                    let _ = tree.remove(crate::node::reorg_executor::SNAPSHOT_REORG_JOURNAL_KEY);
+                    let _ = tree.remove(crate::node::reorg_executor::SNAPSHOT_MUHASH_KEY);
                     info!("[CONNECT] wrote {written} UTXO rows in snapshot {name}");
                     *utxo_set = UtxoSet::default();
                 } else if from_disk {
+                    let export_height_set = storage
+                        .chain()
+                        .get_engine_export_height()
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0)
+                        > 0;
+                    if crate::node::reorg_executor::disk_utxo_source(false, export_height_set)
+                        == crate::node::reorg_executor::DiskUtxoSource::MissingSnapshot
+                    {
+                        anyhow::bail!("connect refused: IBD UTXO snapshot is empty");
+                    }
+                    storage
+                        .chain()
+                        .update_tip(&block_hash, &block.header, connect_height)?;
                     Self::apply_connect_undo_to_chainstate(storage, &undo_log)?;
                     *utxo_set = UtxoSet::default();
                 } else {
+                    storage
+                        .chain()
+                        .update_tip(&block_hash, &block.header, connect_height)?;
                     *utxo_set = connected_utxo;
                     storage.utxos().store_utxo_set(utxo_set)?;
                 }
@@ -1174,10 +1253,33 @@ mod tests {
         for i in 0..FORK_BODY_HOLD_LIMIT {
             assert!(full.park(parent, fork_block(parent, i as u8 + 1), Vec::new()));
         }
-        assert!(!full.park(parent, fork_block(parent, 0xab), Vec::new()));
+        assert!(full.park(parent, fork_block(parent, 0xab), Vec::new()));
         assert!(
-            full.park(parent, fork_block(parent, 1), Vec::new()),
+            full.park(parent, fork_block(parent, 2), Vec::new()),
             "the same child is already held and must not take another slot"
+        );
+        let held = full.take_children(&parent);
+        assert_eq!(held.len(), FORK_BODY_HOLD_LIMIT);
+        assert!(
+            held.iter()
+                .any(|item| item.block.header.merkle_root == [0xab; 32]),
+            "the newest child stays"
+        );
+        assert!(
+            held.iter()
+                .all(|item| item.block.header.merkle_root != [1; 32]),
+            "the oldest child is the one dropped"
+        );
+
+        for i in 0..FORK_BODY_HOLD_LIMIT {
+            assert!(full.park(parent, fork_block(parent, i as u8 + 1), Vec::new()));
+        }
+        assert!(full.park(parent, fork_block(parent, 0xcd), Vec::new()));
+        let refilled = full.take_children(&parent);
+        assert_eq!(
+            refilled.len(),
+            FORK_BODY_HOLD_LIMIT,
+            "taking the held blocks has to free their slots"
         );
     }
 }
