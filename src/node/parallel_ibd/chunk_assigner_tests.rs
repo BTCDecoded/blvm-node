@@ -15422,7 +15422,10 @@ fn covered_window_idle_peer_dups_the_front_immediately() {
     let dup = assigner
         .get_work("p1", 128)
         .expect("idle p1 duplicates the covered front at age 0");
-    assert_eq!(dup, front, "second cover is the same front tile, got {dup:?}");
+    assert_eq!(
+        dup, front,
+        "second cover is the same front tile, got {dup:?}"
+    );
     assert!(
         assigner
             .in_flight_per_peer
