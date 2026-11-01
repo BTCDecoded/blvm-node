@@ -15397,6 +15397,42 @@ fn r376_idle_peer_dups_the_front_without_waiting_for_the_inflated_ema() {
     assert!(!ChunkAssigner::window_front_dup_ok(
         false, false, 0, 1, 30, 1, 30
     ));
+    assert!(ChunkAssigner::window_covered_front_dup_ok(true, true));
+    assert!(!ChunkAssigner::window_covered_front_dup_ok(true, false));
+    assert!(!ChunkAssigner::window_covered_front_dup_ok(false, true));
+}
+
+/// R-397: a covered window and one young front holder left idle peers with
+/// nothing (`busy=4`, `done_ahead=1985`). The second cover must not wait 1s.
+#[serial_test::serial(ibd)]
+#[test]
+fn covered_window_idle_peer_dups_the_front_immediately() {
+    ChunkAssigner::window_test_force(true);
+    let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["p0", "p1"]);
+    let front = assigner
+        .get_work("p0", 128)
+        .expect("p0 takes the front tile");
+    {
+        let mut done = assigner.window_done.lock().unwrap();
+        let now = Instant::now();
+        for h in (front.1 + 1)..=(front.0 + 128) {
+            done.insert(h, now);
+        }
+    }
+    let dup = assigner
+        .get_work("p1", 128)
+        .expect("idle p1 duplicates the covered front at age 0");
+    assert_eq!(dup, front, "second cover is the same front tile, got {dup:?}");
+    assert!(
+        assigner
+            .in_flight_per_peer
+            .lock()
+            .unwrap()
+            .get("p0")
+            .is_some_and(|v| !v.is_empty()),
+        "the first holder keeps the front"
+    );
+    ChunkAssigner::window_test_force(false);
 }
 
 #[test]

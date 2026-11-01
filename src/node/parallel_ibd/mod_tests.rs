@@ -13,8 +13,8 @@ fn a5_tip_admit_tight_aligns_ahead_cap_with_admit() {
         let (_, cap_default) = wan_ahead_policy(true, true, true, 2);
         assert_eq!(
             cap_default,
-            wan_bulk_tip_gap_ahead_cap(),
-            "default tip-starve ahead stays tip-gap cap (256)"
+            wan_bulk_ahead_cap(),
+            "bulk + empty feeder keeps the bulk ahead cap"
         );
         std::env::set_var("BLVM_IBD_TIP_ADMIT_TIGHT", "1");
         let (kind, cap) = wan_ahead_policy(true, true, true, 2);
@@ -3003,9 +3003,10 @@ fn r305_wide_runway_on_allows_8192() {
 
 #[serial_test::serial(ibd)]
 #[test]
-fn w76_wan_ahead_policy_feeder_starve_uses_tip_window_even_when_bulk() {
-    // Mid-chain: headers at network tip ⇒ bulk=true always; feeder empty must not
-    // keep the old 1024 bulk-gap window (live tip never in bridge @ ~350k).
+fn bulk_empty_feeder_keeps_the_bulk_ahead_cap() {
+    // Non-bulk tip crawl stays on the 256 window. Bulk (headers ≥2048 ahead)
+    // keeps wan_bulk_ahead_cap: R-382 clamped 2048→256 for the whole sync
+    // because the feeder was empty, and 1–120k was 151s.
     unsafe {
         std::env::remove_var("BLVM_IBD_WIDE_RUNWAY");
         std::env::remove_var("BLVM_IBD_WAN_BULK_TIP_GAP_AHEAD");
@@ -3013,11 +3014,10 @@ fn w76_wan_ahead_policy_feeder_starve_uses_tip_window_even_when_bulk() {
     }
     let (kind, cap) = wan_ahead_policy(true, true, true, 2);
     assert_eq!(kind, "wan_bulk_gap");
-    assert_eq!(cap, wan_bulk_tip_gap_ahead_cap());
-    assert_eq!(
-        cap,
-        wan_tip_gap_ahead_cap(),
-        "W76 default bulk-gap == tip ahead"
+    assert_eq!(cap, wan_bulk_ahead_cap());
+    assert!(
+        cap > wan_tip_gap_ahead_cap(),
+        "bulk + empty feeder is wider than the 256 tip window"
     );
     let (kind2, cap2) = wan_ahead_policy(false, true, true, 2);
     assert_eq!(kind2, "wan_tip");

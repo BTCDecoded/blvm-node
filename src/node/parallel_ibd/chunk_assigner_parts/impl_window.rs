@@ -134,13 +134,17 @@ impl ChunkAssigner {
         Self::window_bench_secs_for(e.0)
     }
 
-    /// Blocks per tile (`BLVM_IBD_WINDOW_TILE`, default 16, clamp 1–128).
+    /// Blocks per tile (`BLVM_IBD_WINDOW_TILE`, default 64, clamp 1–128).
+    ///
+    /// 64 is one getdata batch. The old default of 16 capped the 1MB byte tile
+    /// once the size estimate fell to 50KB, which is where R-396 sat for the
+    /// whole 1–120k (66s). A 135KB block still sizes to about 7.
     fn window_tile() -> u64 {
         latch_env!(u64, {
             std::env::var("BLVM_IBD_WINDOW_TILE")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(16)
+                .unwrap_or(64)
                 .clamp(1, 128)
         })
     }
@@ -468,6 +472,15 @@ impl ChunkAssigner {
             return true;
         }
         Self::window_dup_taker_ok(taker_inflight, oldest_age, stall)
+    }
+
+    /// R-397: the front tile's round trip is shorter than the 1s dup floor, so the
+    /// floor never fired. Gauges sat in `TIP_HOLE_AHEAD` with one cover, ~1800
+    /// blocks already downloaded, and dozens of idle peers. Once the window is
+    /// covered, an empty pipe takes the second cover immediately.
+    #[inline(never)]
+    pub(crate) fn window_covered_front_dup_ok(idle: bool, window_covered: bool) -> bool {
+        idle && window_covered
     }
 
     /// Resume23: two peers already covered 2861258 and neither had the block.
@@ -957,7 +970,10 @@ impl ChunkAssigner {
                 );
                 return Some((next_needed, next_needed));
             } else if front_covers < 2
-                && Self::window_front_dup_ok(
+                && (Self::window_covered_front_dup_ok(
+                    mine == 0,
+                    covered.iter().all(|c| *c),
+                ) || Self::window_front_dup_ok(
                     mine == 0,
                     slow,
                     oldest_age,
@@ -965,7 +981,7 @@ impl ChunkAssigner {
                     dup_after,
                     mine,
                     stall,
-                )
+                ))
             {
                 if let Some((holder, hold_end)) = oldest_holder {
                     let end = hold_end.min(next_needed + tile - 1);

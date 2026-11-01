@@ -768,7 +768,7 @@ fn download_bytes_peer_store() -> &'static Mutex<HashMap<String, u64>> {
 pub(crate) fn download_est_block_bytes() -> u64 {
     download_est_store()
         .load(std::sync::atomic::Ordering::Relaxed)
-        .max(50_000)
+        .max(1)
 }
 
 /// Cumulative GAP_STREAM / download body bytes (CRAWL `win_mbps` — no PeerManager lock).
@@ -1045,10 +1045,12 @@ fn note_download_block_bytes(peer_id: &str, nbytes: u64) {
         *g.entry(peer_id.to_string()).or_insert(0) += nbytes;
     }
     let est = download_est_store();
-    let old = est.load(std::sync::atomic::Ordering::Relaxed).max(50_000);
-    // EMA: 7/8 old + 1/8 new
+    let old = est.load(std::sync::atomic::Ordering::Relaxed).max(1);
+    // EMA: 7/8 old + 1/8 new. No 50KB floor: R-396 stayed at blk_kb=50 from
+    // height 6k through 64k, so the 1MB tile clamped to 16 blocks while the
+    // wire blocks were smaller. A real 135KB frame still settles near tile 7.
     let next = old.saturating_mul(7).saturating_add(nbytes) / 8;
-    est.store(next.max(50_000), std::sync::atomic::Ordering::Relaxed);
+    est.store(next.max(1), std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(test)]

@@ -1369,6 +1369,23 @@ fn store_hit_does_not_move_tile_estimate() {
     assert_eq!(download_est_block_bytes(), next);
     assert_eq!(download_bytes_total(), bytes + 140_000);
 
+    // R-396: the 50KB floor held blk_kb at 50 and the tile at 16. A run of
+    // small frames must be allowed under 50KB, and a 64-block cap then asks
+    // for more than 16.
+    test_set_download_est(50_000);
+    for _ in 0..40 {
+        note_wire_frame_bytes("wan", Some(&vec![0u8; 2_000]));
+    }
+    let small = download_est_block_bytes();
+    assert!(
+        small < 50_000,
+        "small wire frames must pull the estimate under 50KB, got {small}"
+    );
+    assert!(
+        super::super::chunk_assigner::ChunkAssigner::window_tile_for(small, 1_000_000, 64) > 16,
+        "a 1MB tile of {small} byte blocks is more than 16"
+    );
+
     assert_eq!(
         super::super::chunk_assigner::ChunkAssigner::window_tile_for(140_000, 1_000_000, 64),
         7

@@ -1542,8 +1542,15 @@ pub(crate) fn wan_ahead_policy(
         return ("wan_tip_tight", wan_gap_admit_window());
     }
     if tip_feeder_starve {
-        let kind = if bulk { "wan_bulk_gap" } else { "wan_tip" };
-        (kind, wan_bulk_tip_gap_ahead_cap())
+        if bulk {
+            // R-382 logged `max_ahead 2048 → 256 (wan_bulk_gap)` at height 1 and
+            // again through 146k. Feeder stayed 0, so the 256 tip window never
+            // lifted. Frontier sat near +256 and 1–120k was 151s. Headers are
+            // already ≥2048 ahead on this branch, so the bulk cap is the one
+            // that keeps peers in work. A non-bulk tip crawl still uses 256.
+            return ("wan_bulk_gap", wan_bulk_ahead_cap());
+        }
+        ("wan_tip", wan_bulk_tip_gap_ahead_cap())
     } else if tip_gap_open && !bulk {
         ("wan_tip", wan_tip_gap_ahead_cap())
     } else if bulk {
