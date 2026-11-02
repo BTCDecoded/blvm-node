@@ -15172,13 +15172,14 @@ fn r284_noprog_record_evicted_behind_tip() {
 #[test]
 fn r336_window_assigner_streams_all_ready_peers_lowest_first_and_dups_stalled_front() {
     ChunkAssigner::window_test_force(true);
+    let t = ChunkAssigner::window_tile();
     let peers: Vec<String> = (0..8).map(|i| format!("p{i}")).collect();
     let refs: Vec<&str> = peers.iter().map(String::as_str).collect();
     // next_needed = 210_001, crawl (body_tip < next), window path active (≥120k).
     let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &refs);
     assert!(assigner.window_mode_active(210_001));
 
-    // Every peer gets work, lowest-first, 16-wide, disjoint; per-peer cap 1.
+    // Every peer gets work, lowest-first, one tile wide, disjoint; per-peer cap 1.
     let mut got = Vec::new();
     for p in &peers {
         for _ in 0..3 {
@@ -15190,29 +15191,34 @@ fn r336_window_assigner_streams_all_ready_peers_lowest_first_and_dups_stalled_fr
     assert_eq!(got.len(), 8, "8 peers × cap 1 tile: {got:?}");
     let mut ranges: Vec<(u64, u64)> = got.iter().map(|(_, r)| *r).collect();
     ranges.sort();
-    assert_eq!(ranges[0], (210_001, 210_016));
+    assert_eq!(ranges[0], (210_001, 210_000 + t));
     for w in ranges.windows(2) {
         assert_eq!(w[1].0, w[0].1 + 1, "contiguous disjoint tiles: {ranges:?}");
     }
-    assert_eq!(ranges.last().unwrap().1, 210_001 + 8 * 16 - 1);
+    assert_eq!(ranges.last().unwrap().1, 210_000 + 8 * t);
     assert_eq!(assigner.get_work("p0", 1024), None, "per-peer cap holds");
 
     // Completion marks delivered; those heights are never re-issued.
-    assigner.on_chunk_complete_range("p0", 210_001, 210_016);
-    assigner.window_note_complete("p0", 210_001, 210_016, 16);
+    assigner.on_chunk_complete_range("p0", 210_001, 210_000 + t);
+    assigner.window_note_complete("p0", 210_001, 210_000 + t, t);
     let next = assigner
         .get_work("p0", 1024)
         .expect("p0 has a free slot again");
     assert_eq!(
         next,
-        (210_129, 210_144),
+        (210_001 + 8 * t, 210_000 + 9 * t),
         "continues past the frontier, not the delivered tile"
     );
 
-    // Ownership: p1 017-032, p2 033-048.
+    // Ownership: p1 holds tile 1, p2 tile 2.
     // Failure releases without re-handing the same heights to the failing peer.
-    assigner.on_chunk_complete_range("p1", 210_017, 210_032);
-    assigner.requeue_reason(210_017, 210_032, Some("p1".into()), "chunk_fail");
+    assigner.on_chunk_complete_range("p1", 210_001 + t, 210_000 + 2 * t);
+    assigner.requeue_reason(
+        210_001 + t,
+        210_000 + 2 * t,
+        Some("p1".into()),
+        "chunk_fail",
+    );
     assert!(
         assigner.retry_queue.lock().unwrap().is_empty(),
         "window mode has no retry queue"
@@ -15220,23 +15226,24 @@ fn r336_window_assigner_streams_all_ready_peers_lowest_first_and_dups_stalled_fr
     let p1_next = assigner.get_work("p1", 1024).expect("p1 gets other work");
     assert_eq!(
         p1_next,
-        (210_145, 210_160),
+        (210_001 + 9 * t, 210_000 + 10 * t),
         "failing peer skips its failed heights"
     );
     // p2 frees its slot and takes the released hole first (lowest free run).
-    assigner.on_chunk_complete_range("p2", 210_033, 210_048);
-    assigner.window_note_complete("p2", 210_033, 210_048, 16);
+    assigner.on_chunk_complete_range("p2", 210_001 + 2 * t, 210_000 + 3 * t);
+    assigner.window_note_complete("p2", 210_001 + 2 * t, 210_000 + 3 * t, t);
     let p2_extra = assigner.get_work("p2", 1024).expect("p2 refills");
     assert_eq!(
         p2_extra,
-        (210_017, 210_032),
+        (210_001 + t, 210_000 + 2 * t),
         "released hole is lowest free run"
     );
 
-    // Window clamp: nothing past header tip.
+    // Window clamp: nothing past header tip. The window is covered, so idle b
+    // duplicates the front (R-397) instead of getting heights past the tip.
     let small = wan_tip_assigner(299_990, 299_900, 300_000, &["a", "b"]);
     assert_eq!(small.get_work("a", 1024), Some((299_991, 300_000)));
-    assert_eq!(small.get_work("b", 1024), None);
+    assert_eq!(small.get_work("b", 1024), Some((299_991, 300_000)));
 
     // Coordinator "missing" on a young mark is ignored; unmark needs age.
     small.on_chunk_complete_range("a", 299_991, 300_000);
@@ -15282,6 +15289,7 @@ fn r342_window_peer_cap_for_is_a_byte_budget() {
 #[test]
 fn r344_window_strike_out_releases_front_and_cools_fast_holder() {
     ChunkAssigner::window_test_force(true);
+    let t = ChunkAssigner::window_tile();
     let peers: Vec<String> = (0..2).map(|i| format!("p{i}")).collect();
     let refs: Vec<&str> = peers.iter().map(String::as_str).collect();
     let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &refs);
@@ -15300,7 +15308,7 @@ fn r344_window_strike_out_releases_front_and_cools_fast_holder() {
         .unwrap()
         .insert("p0".to_string(), (100, 10));
     let front = assigner.get_work("p0", 1024).expect("p0 takes the front");
-    assert_eq!(front, (210_001, 210_016));
+    assert_eq!(front, (210_001, 210_000 + t));
     // … whose front tile is now 8 s old with one strike already 4 s ago.
     let old = Instant::now() - Duration::from_secs(8);
     for v in assigner.window_started.lock().unwrap().values_mut() {
@@ -15315,7 +15323,7 @@ fn r344_window_strike_out_releases_front_and_cools_fast_holder() {
     let taken = assigner
         .get_work("p1", 1024)
         .expect("p1 gets the released front");
-    assert_eq!(taken, (210_001, 210_016));
+    assert_eq!(taken, (210_001, 210_000 + t));
     // R-345: every strike-out benches (escalating); first offense = BENCH_SECS/4 = 15 s.
     let until = assigner
         .window_bench
@@ -15452,11 +15460,12 @@ fn r354_window_stall_dup_goes_to_an_empty_pipe_first() {
     // Window path: p0 holds the front for 4 s (stall floor 3 s, one strike max), p1 idle
     // (0 in flight, not slow) polls → gets the dup of the front tile, not fresh work.
     ChunkAssigner::window_test_force(true);
+    let t = ChunkAssigner::window_tile();
     let peers: Vec<String> = (0..2).map(|i| format!("p{i}")).collect();
     let refs: Vec<&str> = peers.iter().map(String::as_str).collect();
     let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &refs);
     let front = assigner.get_work("p0", 1024).expect("p0 takes the front");
-    assert_eq!(front, (210_001, 210_016));
+    assert_eq!(front, (210_001, 210_000 + t));
     let old = Instant::now() - Duration::from_secs(4);
     for v in assigner.window_started.lock().unwrap().values_mut() {
         *v = old;
@@ -15464,7 +15473,11 @@ fn r354_window_stall_dup_goes_to_an_empty_pipe_first() {
     let dup = assigner
         .get_work("p1", 1024)
         .expect("idle p1 takes the stall dup");
-    assert_eq!(dup, (210_001, 210_016), "dup covers the stalled front tile");
+    assert_eq!(
+        dup,
+        (210_001, 210_000 + t),
+        "dup covers the stalled front tile"
+    );
     assert!(
         assigner
             .in_flight_per_peer
@@ -15483,15 +15496,16 @@ fn r354_window_stall_dup_goes_to_an_empty_pipe_first() {
 #[test]
 fn r376_idle_pipe_dups_a_young_front_despite_tile_ema() {
     ChunkAssigner::window_test_force(true);
+    let t = ChunkAssigner::window_tile();
     let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["p0", "p1", "p2", "p3"]);
     let front = assigner.get_work("p0", 1024).expect("p0 takes the front");
-    assert_eq!(front, (210_001, 210_016));
+    assert_eq!(front, (210_001, 210_000 + t));
     let ahead = assigner
         .get_work("p1", 1024)
         .expect("p1 takes the next tile");
-    assert_eq!(ahead, (210_017, 210_032));
+    assert_eq!(ahead, (210_001 + t, 210_000 + 2 * t));
     assigner.window_tile_ms_ema.store(40_000, Ordering::Relaxed);
-    assigner.window_note_complete("p1", ahead.0, ahead.1, 16);
+    assigner.window_note_complete("p1", ahead.0, ahead.1, t);
     {
         let mut started = assigner.window_started.lock().unwrap();
         let key = ("p0".to_string(), front.0, front.1);
@@ -15502,7 +15516,7 @@ fn r376_idle_pipe_dups_a_young_front_despite_tile_ema() {
         .expect("idle p2 duplicates the front");
     assert_eq!(
         next,
-        (210_001, 210_016),
+        (210_001, 210_000 + t),
         "empty pipe duplicates the 4s front, got {next:?}"
     );
     assert!(
@@ -15517,7 +15531,7 @@ fn r376_idle_pipe_dups_a_young_front_despite_tile_ema() {
 
     let cold = wan_tip_assigner(210_000, 209_900, 300_000, &["c0", "c1"]);
     let cold_front = cold.get_work("c0", 1024).expect("c0 takes the front");
-    assert_eq!(cold_front, (210_001, 210_016));
+    assert_eq!(cold_front, (210_001, 210_000 + t));
     cold.window_tile_ms_ema.store(40_000, Ordering::Relaxed);
     {
         let mut started = cold.window_started.lock().unwrap();
@@ -15527,7 +15541,7 @@ fn r376_idle_pipe_dups_a_young_front_despite_tile_ema() {
     let next = cold
         .get_work("c1", 1024)
         .expect("idle peer duplicates the front");
-    assert_eq!(next, (210_001, 210_016));
+    assert_eq!(next, (210_001, 210_000 + t));
     ChunkAssigner::window_test_force(false);
 }
 
@@ -15538,40 +15552,41 @@ fn r376_idle_pipe_dups_a_young_front_despite_tile_ema() {
 #[test]
 fn r376_window_unmarks_hole_span_not_just_the_cursor() {
     ChunkAssigner::window_test_force(true);
+    let t = ChunkAssigner::window_tile();
     let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["p0", "p1"]);
     assigner.set_ibd_ready_peers(HashSet::from(["p0".to_string(), "p1".to_string()]));
     let front = assigner
         .get_work("p0", 1024)
         .expect("p0 holds the front tile");
-    assert_eq!(front, (210_001, 210_016));
+    assert_eq!(front, (210_001, 210_000 + t));
     let old = Instant::now() - Duration::from_secs(6);
     {
         let mut done = assigner.window_done.lock().unwrap();
-        for h in 210_001..=210_020 {
+        for h in 210_001..=210_004 + t {
             done.insert(h, old);
         }
         // Still inside the span, but younger than the unmark threshold.
-        done.insert(210_018, Instant::now());
+        done.insert(210_002 + t, Instant::now());
     }
-    assigner.window_note_missing_span(210_001, 210_021);
+    assigner.window_note_missing_span(210_001, 210_005 + t);
     let done = assigner.window_done.lock().unwrap();
-    for h in 210_001..=210_016 {
+    for h in 210_001..=210_000 + t {
         assert!(done.contains_key(&h), "in-flight {h} stays delivered");
     }
     assert!(
-        !done.contains_key(&210_017),
+        !done.contains_key(&(210_001 + t)),
         "aged hole height is re-issued"
     );
     assert!(
-        done.contains_key(&210_018),
+        done.contains_key(&(210_002 + t)),
         "a fresh mark inside the span is still in transit"
     );
     assert!(
-        !done.contains_key(&210_019),
+        !done.contains_key(&(210_003 + t)),
         "aged hole height is re-issued"
     );
     assert!(
-        !done.contains_key(&210_020),
+        !done.contains_key(&(210_004 + t)),
         "aged hole height is re-issued"
     );
     drop(done);
@@ -16110,6 +16125,7 @@ fn r377_idle_peer_fills_past_the_buffered_body() {
 #[test]
 fn r376_window_skips_peers_that_have_not_handshaked() {
     ChunkAssigner::window_test_force(true);
+    let t = ChunkAssigner::window_tile();
     let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["unready", "ready"]);
     assigner.set_ibd_ready_peers(HashSet::from(["ready".to_string()]));
     assert!(
@@ -16119,7 +16135,7 @@ fn r376_window_skips_peers_that_have_not_handshaked() {
     let front = assigner
         .get_work("ready", 1024)
         .expect("handshook peer takes the front");
-    assert_eq!(front, (210_001, 210_016));
+    assert_eq!(front, (210_001, 210_000 + t));
     ChunkAssigner::window_test_force(false);
 }
 
@@ -16222,9 +16238,10 @@ fn r356_window_stall_dup_fires_before_the_strike_threshold() {
     // Window path: p0 holds the front for 2 s — under the 3 s strike floor, past the 1 s dup
     // floor. Idle p1 gets the dup; p0 keeps its tile and takes no strike.
     ChunkAssigner::window_test_force(true);
+    let t = ChunkAssigner::window_tile();
     let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["p0", "p1"]);
     let front = assigner.get_work("p0", 1024).expect("p0 takes the front");
-    assert_eq!(front, (210_001, 210_016));
+    assert_eq!(front, (210_001, 210_000 + t));
     let old = Instant::now() - Duration::from_secs(2);
     for v in assigner.window_started.lock().unwrap().values_mut() {
         *v = old;
@@ -16232,7 +16249,11 @@ fn r356_window_stall_dup_fires_before_the_strike_threshold() {
     let dup = assigner
         .get_work("p1", 1024)
         .expect("idle p1 takes the early dup");
-    assert_eq!(dup, (210_001, 210_016), "dup covers the stalled front tile");
+    assert_eq!(
+        dup,
+        (210_001, 210_000 + t),
+        "dup covers the stalled front tile"
+    );
     assert!(
         assigner
             .in_flight_per_peer
@@ -16297,9 +16318,10 @@ fn r358_window_tile_grows_with_the_peers_own_rate() {
     );
 
     // Window path: p0 measured fast (20 ms/blk, 5 samples), p1 unknown. Both take the
-    // fixed test tile (16) since the test tile is already the max; the fast peer's run is
+    // fixed test tile (`window_tile()`) since the test tile is already the max; the fast peer's run is
     // never shorter than the base and never longer than WINDOW_TILE.
     ChunkAssigner::window_test_force(true);
+    let t = ChunkAssigner::window_tile();
     let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &["p0", "p1"]);
     assigner
         .window_peer_blk_ms
@@ -16309,18 +16331,19 @@ fn r358_window_tile_grows_with_the_peers_own_rate() {
     let t0 = assigner
         .get_work("p0", 1024)
         .expect("fast p0 takes the front");
-    assert_eq!(t0.1 - t0.0 + 1, 16, "capped at WINDOW_TILE");
+    assert_eq!(t0.1 - t0.0 + 1, t, "capped at WINDOW_TILE");
     let t1 = assigner
         .get_work("p1", 1024)
         .expect("p1 takes the next tile");
     assert_eq!(t1.0, t0.1 + 1, "tiles stay contiguous");
-    assert_eq!(t1.1 - t1.0 + 1, 16);
+    assert_eq!(t1.1 - t1.0 + 1, t);
     ChunkAssigner::window_test_force(false);
 }
 
 #[test]
 fn r341_window_slow_peer_keeps_off_front_reserve() {
     ChunkAssigner::window_test_force(true);
+    let t = ChunkAssigner::window_tile();
     let peers: Vec<String> = (0..2).map(|i| format!("p{i}")).collect();
     let refs: Vec<&str> = peers.iter().map(String::as_str).collect();
     let assigner = wan_tip_assigner(210_000, 209_900, 300_000, &refs);
@@ -16344,7 +16367,7 @@ fn r341_window_slow_peer_keeps_off_front_reserve() {
     let fast = assigner
         .get_work("p1", 1024)
         .expect("fast peer gets the front");
-    assert_eq!(fast, (210_001, 210_016));
+    assert_eq!(fast, (210_001, 210_000 + t));
     // Too few completions → not slow.
     assigner
         .window_peer_blk_ms
