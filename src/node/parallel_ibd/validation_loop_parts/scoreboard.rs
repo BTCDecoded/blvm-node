@@ -1035,7 +1035,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         info!("IBD: tip sync inline (BLVM_IBD_TIP_SYNC=inline; force_sync on the orchestrator, R-361 behaviour)");
         TipSyncer::inline()
     } else {
-        info!("IBD: tip sync thread enabled (ibd-tip-sync; force_sync off the orchestrator; opt out BLVM_IBD_TIP_SYNC=inline)");
+        info!("IBD: tip sync thread enabled (ibd-tip-sync; force_sync off the orchestrator)");
         TipSyncer::spawn(storage_clone.clone())
     };
     let mut _validate_workers: Vec<JoinHandle<()>> = Vec::with_capacity(n_validate_workers);

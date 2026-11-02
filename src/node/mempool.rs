@@ -105,6 +105,10 @@ pub struct MempoolManager {
     snapshot_prevout: RwLock<Option<SnapshotPrevoutLookup>>,
     /// Test tip: next-block height and median time-past. Ignored when `storage` is set.
     chain_tip: RwLock<Option<(u64, u64)>>,
+    /// Transactions in the package being admitted whose descendant fee covers the relay floor.
+    relay_floor_waivers: Mutex<HashSet<Hash>>,
+    /// Zero-fee parents whose single dust output is spent by a later transaction in the package.
+    ephemeral_dust_waivers: Mutex<HashSet<Hash>>,
 }
 
 type SnapshotPrevoutLookup = Arc<dyn Fn(&OutPoint) -> Option<blvm_protocol::UTXO> + Send + Sync>;
@@ -215,21 +219,33 @@ fn p2sh_redeem_is_witness_program(script_pubkey: &[u8], script_sig: &[u8]) -> bo
 /// BIP141 standard transaction weight. A relay transaction above this is non-standard.
 const MAX_STANDARD_TX_WEIGHT: u64 = 400_000;
 
-/// True for a standard output script: P2PKH, P2SH, P2PK, P2WPKH, P2WSH, P2TR, or a short OP_RETURN.
+/// A relay transaction smaller than this, witness excluded, is not admitted.
+/// A 64-byte transaction can collide with a merkle node.
+const MIN_STANDARD_TX_NONWITNESS_SIZE: usize = 65;
+
+/// A standard input's scriptSig is at most this many bytes.
+const MAX_STANDARD_SCRIPTSIG_SIZE: usize = 1_650;
+
+/// A standard `OP_RETURN` output is at most this many bytes.
+/// The budget is the standard transaction weight divided by four.
+const MAX_STANDARD_OP_RETURN_SIZE: usize = (MAX_STANDARD_TX_WEIGHT / 4) as usize;
+
+/// True for a standard output script: P2PKH, P2SH, P2PK, a witness program, or an `OP_RETURN`.
+///
+/// Version 0 is standard only at 20 or 32 bytes. Any other witness version, `OP_1`
+/// through `OP_16`, is standard for a direct push of 2–40 bytes. An `OP_RETURN`
+/// is standard up to [`MAX_STANDARD_OP_RETURN_SIZE`] bytes when every following
+/// byte is a push.
 fn output_script_is_standard(script: &[u8]) -> bool {
     if script.is_empty() {
         return false;
     }
     if script[0] == 0x6a {
-        return script.len() <= 83;
+        return script.len() <= MAX_STANDARD_OP_RETURN_SIZE && op_return_payload_is_push_only(script);
     }
-    if script.len() == 22 && script[0] == 0x00 && script[1] == 0x14 {
-        return true;
-    }
-    if script.len() == 34 && script[0] == 0x00 && script[1] == 0x20 {
-        return true;
-    }
-    if script.len() == 34 && script[0] == 0x51 && script[1] == 0x20 {
+    if blvm_protocol::witness::is_any_witness_program(script)
+        && !blvm_protocol::witness::is_invalid_v0_witness_program(script)
+    {
         return true;
     }
     if script.len() == 25
@@ -252,6 +268,116 @@ fn output_script_is_standard(script: &[u8]) -> bool {
         return true;
     }
     script.len() == 67 && script[0] == 0x41 && script[1] == 0x04 && script[66] == 0xac
+        || bare_multisig_is_standard(script)
+}
+
+/// A spent script Core's solver recognizes. A larger bare multisig is still that type.
+fn spent_script_is_standard(script: &[u8]) -> bool {
+    output_script_is_standard(script) || bare_multisig_within(script, 16)
+}
+
+/// Bare `OP_m <keys> OP_n OP_CHECKMULTISIG` with `1 <= m <= n <= 3`.
+///
+/// Each key is a 33-byte compressed push or a 65-byte uncompressed push.
+fn bare_multisig_is_standard(script: &[u8]) -> bool {
+    bare_multisig_within(script, 3)
+}
+
+fn bare_multisig_within(script: &[u8], max_keys: u8) -> bool {
+    use blvm_protocol::opcodes::{
+        OP_1, OP_16, OP_CHECKMULTISIG, PUSH_33_BYTES, PUSH_65_BYTES,
+    };
+
+    if script.len() < 4 || script[script.len() - 1] != OP_CHECKMULTISIG {
+        return false;
+    }
+    let n_op = script[script.len() - 2];
+    if n_op < OP_1 || n_op > OP_1 + max_keys.saturating_sub(1) {
+        return false;
+    }
+    let n = (n_op - OP_1 + 1) as usize;
+    let m_op = script[0];
+    if m_op < OP_1 || m_op > OP_16 {
+        return false;
+    }
+    let m = (m_op - OP_1 + 1) as usize;
+    if m == 0 || m > n {
+        return false;
+    }
+    let mut i = 1usize;
+    for _ in 0..n {
+        if i >= script.len() - 2 {
+            return false;
+        }
+        let (header, pk_len) = if script[i] == PUSH_33_BYTES {
+            (script.get(i + 1).copied(), 33)
+        } else if script[i] == PUSH_65_BYTES {
+            (script.get(i + 1).copied(), 65)
+        } else {
+            return false;
+        };
+        let Some(header) = header else {
+            return false;
+        };
+        let compressed = header == 0x02 || header == 0x03;
+        let uncompressed = header == 0x04;
+        if pk_len == 33 && !compressed || pk_len == 65 && !uncompressed {
+            return false;
+        }
+        let next = i + 1 + pk_len;
+        if next > script.len() - 2 {
+            return false;
+        }
+        i = next;
+    }
+    i == script.len() - 2
+}
+
+/// Bytes after `OP_RETURN` are a data carrier only when each one is a push.
+///
+/// An opcode above `OP_16` is not a push. A truncated push does not count.
+fn op_return_payload_is_push_only(script: &[u8]) -> bool {
+    let mut i = 1usize;
+    while i < script.len() {
+        let opcode = script[i];
+        if opcode > 0x60 {
+            return false;
+        }
+        if opcode <= 0x4b {
+            let len = opcode as usize;
+            if i + 1 + len > script.len() {
+                return false;
+            }
+            i += 1 + len;
+            continue;
+        }
+        let (header, len) = if opcode == 0x4c {
+            (2usize, script.get(i + 1).copied().map(|n| n as usize))
+        } else if opcode == 0x4d {
+            (
+                3usize,
+                script.get(i + 1..i + 3).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize),
+            )
+        } else if opcode == 0x4e {
+            (
+                5usize,
+                script.get(i + 1..i + 5).map(|b| {
+                    u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize
+                }),
+            )
+        } else {
+            i += 1;
+            continue;
+        };
+        let Some(len) = len else {
+            return false;
+        };
+        if i + header + len > script.len() {
+            return false;
+        }
+        i += header + len;
+    }
+    true
 }
 
 /// Spendable outputs below `n_size * 3` satoshis are dust.
@@ -280,21 +406,322 @@ fn output_is_dust(output: &blvm_protocol::TransactionOutput) -> bool {
     output.value < threshold as i64
 }
 
-/// Structure, coinbase, witness-count, and script checks.
+/// A standard pay-to-script-hash redeem script has at most this many signature checks.
+const MAX_STANDARD_P2SH_SIGOPS: u32 = 15;
+
+/// Non-witness signature opcodes in one standard transaction, including the spent scripts.
+const MAX_TX_LEGACY_SIGOPS: u32 = 2_500;
+
+/// Last data push in a push-only scriptSig. That push is the redeem script.
+fn last_push_payload(script: &[u8]) -> Option<Vec<u8>> {
+    if script.is_empty() {
+        return None;
+    }
+    let mut i = 0usize;
+    let mut last = None;
+    while i < script.len() {
+        let opcode = script[i];
+        if opcode > 0x60 {
+            return None;
+        }
+        if opcode <= 0x4b {
+            let len = opcode as usize;
+            if i + 1 + len > script.len() {
+                return None;
+            }
+            last = Some(script[i + 1..i + 1 + len].to_vec());
+            i += 1 + len;
+            continue;
+        }
+        let (header, len) = if opcode == 0x4c {
+            (2usize, script.get(i + 1).copied().map(|n| n as usize))
+        } else if opcode == 0x4d {
+            (
+                3usize,
+                script
+                    .get(i + 1..i + 3)
+                    .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]) as usize),
+            )
+        } else if opcode == 0x4e {
+            (
+                5usize,
+                script.get(i + 1..i + 5).map(|bytes| {
+                    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize
+                }),
+            )
+        } else {
+            last = Some(Vec::new());
+            i += 1;
+            continue;
+        };
+        let len = len?;
+        if i + header + len > script.len() {
+            return None;
+        }
+        last = Some(script[i + header..i + header + len].to_vec());
+        i += header + len;
+    }
+    last
+}
+
+fn p2sh_redeem_sigops_exceed(tx: &Transaction, prevouts: &[Option<InputPrevout<'_>>]) -> bool {
+    tx.inputs.iter().enumerate().any(|(i, input)| {
+        let Some(prevout) = prevouts.get(i).and_then(|prevout| prevout.as_ref()) else {
+            return false;
+        };
+        if !is_p2sh_script(prevout.script.as_ref()) {
+            return false;
+        }
+        let Some(redeem) = last_push_payload(&input.script_sig) else {
+            return false;
+        };
+        blvm_protocol::sigop::count_sigops_in_script(&redeem, true) > MAX_STANDARD_P2SH_SIGOPS
+    })
+}
+
+fn legacy_sigops_exceed(tx: &Transaction, prevouts: &[Option<InputPrevout<'_>>]) -> bool {
+    let mut total = 0u32;
+    for (i, input) in tx.inputs.iter().enumerate() {
+        total = total.saturating_add(blvm_protocol::sigop::count_sigops_in_script(
+            &input.script_sig,
+            true,
+        ));
+        let Some(prevout) = prevouts.get(i).and_then(|prevout| prevout.as_ref()) else {
+            continue;
+        };
+        let spent = if is_p2sh_script(prevout.script.as_ref()) {
+            last_push_payload(&input.script_sig)
+                .map(|redeem| blvm_protocol::sigop::count_sigops_in_script(&redeem, true))
+                .unwrap_or(0)
+        } else {
+            blvm_protocol::sigop::count_sigops_in_script(&prevout.script.to_vec(), true)
+        };
+        total = total.saturating_add(spent);
+        if total > MAX_TX_LEGACY_SIGOPS {
+            return true;
+        }
+    }
+    false
+}
+
+/// A standard pay-to-witness-script-hash data item is at most this many bytes.
+/// The last stack item is the witness script and is not under this limit.
+const MAX_STANDARD_P2WSH_STACK_ITEM_SIZE: usize = 80;
+
+/// A standard pay-to-witness-script-hash witness script is at most this many bytes.
+const MAX_STANDARD_P2WSH_SCRIPT_SIZE: usize = 3_600;
+
+/// A standard pay-to-witness-script-hash witness has at most this many items before the script.
+const MAX_STANDARD_P2WSH_STACK_ITEMS: usize = 100;
+
+fn is_p2wsh_script(script: &[u8]) -> bool {
+    script.len() == 34 && script[0] == 0x00 && script[1] == 0x20
+}
+
+fn pay_to_anchor_witness_present(
+    prevouts: &[Option<InputPrevout<'_>>],
+    witnesses: Option<&[Witness]>,
+) -> bool {
+    let Some(witnesses) = witnesses else {
+        return false;
+    };
+    prevouts.iter().enumerate().any(|(i, prevout)| {
+        let Some(prevout) = prevout.as_ref() else {
+            return false;
+        };
+        if !blvm_protocol::witness::is_pay_to_anchor(prevout.script.as_ref()) {
+            return false;
+        }
+        witnesses.get(i).is_some_and(|stack| !stack.is_empty())
+    })
+}
+
+fn p2wsh_data_item_exceeds(
+    tx: &Transaction,
+    prevouts: &[Option<InputPrevout<'_>>],
+    witnesses: Option<&[Witness]>,
+) -> bool {
+    let Some(witnesses) = witnesses else {
+        return false;
+    };
+    prevouts.iter().enumerate().any(|(i, prevout)| {
+        let Some(prevout) = prevout.as_ref() else {
+            return false;
+        };
+        let script_sig = tx
+            .inputs
+            .get(i)
+            .map(|input| input.script_sig.as_slice())
+            .unwrap_or(&[]);
+        let native = is_p2wsh_script(prevout.script.as_ref());
+        let wrapped = is_p2sh_script(prevout.script.as_ref())
+            && last_script_push(script_sig).is_some_and(is_p2wsh_script);
+        if !native && !wrapped {
+            return false;
+        }
+        let Some(stack) = witnesses.get(i) else {
+            return false;
+        };
+        let data_items = stack.len().saturating_sub(1);
+        stack
+            .iter()
+            .take(data_items)
+            .any(|item| item.len() > MAX_STANDARD_P2WSH_STACK_ITEM_SIZE)
+    })
+}
+
+fn p2wsh_script_exceeds(
+    tx: &Transaction,
+    prevouts: &[Option<InputPrevout<'_>>],
+    witnesses: Option<&[Witness]>,
+) -> bool {
+    let Some(witnesses) = witnesses else {
+        return false;
+    };
+    prevouts.iter().enumerate().any(|(i, prevout)| {
+        let Some(prevout) = prevout.as_ref() else {
+            return false;
+        };
+        let script_sig = tx
+            .inputs
+            .get(i)
+            .map(|input| input.script_sig.as_slice())
+            .unwrap_or(&[]);
+        let native = is_p2wsh_script(prevout.script.as_ref());
+        let wrapped = is_p2sh_script(prevout.script.as_ref())
+            && last_script_push(script_sig).is_some_and(is_p2wsh_script);
+        if !native && !wrapped {
+            return false;
+        }
+        witnesses
+            .get(i)
+            .and_then(|stack| stack.last())
+            .is_some_and(|script| script.len() > MAX_STANDARD_P2WSH_SCRIPT_SIZE)
+    })
+}
+
+fn p2wsh_stack_count_exceeds(
+    tx: &Transaction,
+    prevouts: &[Option<InputPrevout<'_>>],
+    witnesses: Option<&[Witness]>,
+) -> bool {
+    let Some(witnesses) = witnesses else {
+        return false;
+    };
+    prevouts.iter().enumerate().any(|(i, prevout)| {
+        let Some(prevout) = prevout.as_ref() else {
+            return false;
+        };
+        let script_sig = tx
+            .inputs
+            .get(i)
+            .map(|input| input.script_sig.as_slice())
+            .unwrap_or(&[]);
+        let native = is_p2wsh_script(prevout.script.as_ref());
+        let wrapped = is_p2sh_script(prevout.script.as_ref())
+            && last_script_push(script_sig).is_some_and(is_p2wsh_script);
+        if !native && !wrapped {
+            return false;
+        }
+        witnesses
+            .get(i)
+            .is_some_and(|stack| stack.len().saturating_sub(1) > MAX_STANDARD_P2WSH_STACK_ITEMS)
+    })
+}
+
+/// First byte of a Taproot annex. No meaning is defined for it, so it is not relayed.
+const TAPROOT_ANNEX_TAG: u8 = 0x50;
+
+/// A standard tapscript data item is at most this many bytes.
+/// The witness script and the control block are not under this limit.
+const MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE: usize = 80;
+
+/// Low bit of a control-block header is the output-key parity. The rest is the leaf version.
+const TAPROOT_LEAF_MASK: u8 = 0xfe;
+const TAPROOT_LEAF_TAPSCRIPT: u8 = 0xc0;
+
+fn is_taproot_output(script: &[u8]) -> bool {
+    script.len() == 34 && script[0] == 0x51 && script[1] == 0x20
+}
+
+fn taproot_annex_present(
+    prevouts: &[Option<InputPrevout<'_>>],
+    witnesses: Option<&[Witness]>,
+) -> bool {
+    let Some(witnesses) = witnesses else {
+        return false;
+    };
+    prevouts.iter().enumerate().any(|(i, prevout)| {
+        let Some(prevout) = prevout.as_ref() else {
+            return false;
+        };
+        if !is_taproot_output(prevout.script.as_ref()) {
+            return false;
+        }
+        witnesses.get(i).is_some_and(|stack| {
+            stack.len() >= 2
+                && stack
+                    .last()
+                    .is_some_and(|annex| annex.first().copied() == Some(TAPROOT_ANNEX_TAG))
+        })
+    })
+}
+
+fn tapscript_data_item_exceeds(
+    prevouts: &[Option<InputPrevout<'_>>],
+    witnesses: Option<&[Witness]>,
+) -> bool {
+    let Some(witnesses) = witnesses else {
+        return false;
+    };
+    prevouts.iter().enumerate().any(|(i, prevout)| {
+        let Some(prevout) = prevout.as_ref() else {
+            return false;
+        };
+        if !is_taproot_output(prevout.script.as_ref()) {
+            return false;
+        }
+        let Some(stack) = witnesses.get(i) else {
+            return false;
+        };
+        if stack.len() < 2 {
+            return false;
+        }
+        let Some(control) = stack.last() else {
+            return false;
+        };
+        if control
+            .first()
+            .is_none_or(|header| header & TAPROOT_LEAF_MASK != TAPROOT_LEAF_TAPSCRIPT)
+        {
+            return false;
+        }
+        let data_items = stack.len() - 2;
+        stack
+            .iter()
+            .take(data_items)
+            .any(|item| item.len() > MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE)
+    })
+}
+
+/// Value and script for one spent output.
 ///
-/// `prevouts` is one entry per input. A missing entry was not in the snapshot and
-/// was not created by a transaction already in the pool.
-/// Value and script for one spent output. A UTXO script is borrowed. A mempool
-/// parent script is owned because the pool lock ends before script checks run.
+/// A UTXO script is borrowed. A mempool parent script is owned because the pool
+/// lock ends before script checks run.
 struct InputPrevout<'a> {
     value: i64,
     script: Cow<'a, [u8]>,
 }
 
+/// Structure, coinbase, witness-count, and script checks.
+///
+/// `prevouts` is one entry per input. A missing entry was not in the snapshot and
+/// was not created by a transaction already in the pool.
 fn consensus_checks_reject(
     tx: &Transaction,
     witnesses: Option<&[Witness]>,
     prevouts: &[Option<InputPrevout<'_>>],
+    require_standard: bool,
 ) -> bool {
     use blvm_protocol::ValidationResult;
     use blvm_protocol::block::calculate_script_flags_for_block_network;
@@ -332,12 +759,26 @@ fn consensus_checks_reject(
     let has_witness = needs_witness_flags || witnesses.is_some_and(|stacks| !stacks.is_empty());
     // Policy only. Block connect keeps the consensus flag mask.
     const SCRIPT_VERIFY_MINIMALDATA: u32 = 1 << 6;
-    let flags = calculate_script_flags_for_block_network(
+    let mut flags = calculate_script_flags_for_block_network(
         tx,
         has_witness,
         MEMPOOL_POLICY_HEIGHT,
         Network::Mainnet,
     ) | SCRIPT_VERIFY_MINIMALDATA;
+    if require_standard {
+        flags |= blvm_protocol::script::flags::SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_NOPS
+            | blvm_protocol::script::flags::SCRIPT_VERIFY_MINIMALIF
+            | blvm_protocol::script::flags::SCRIPT_VERIFY_CLEANSTACK
+            | blvm_protocol::script::flags::SCRIPT_VERIFY_NULLFAIL
+            | blvm_protocol::script::flags::SCRIPT_VERIFY_LOW_S
+            | blvm_protocol::script::flags::SCRIPT_VERIFY_WITNESS_PUBKEYTYPE
+            | blvm_protocol::script::flags::SCRIPT_VERIFY_DISCOURAGE_OP_SUCCESS
+            | blvm_protocol::script::flags::SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION
+            | blvm_protocol::script::flags::SCRIPT_VERIFY_CONST_SCRIPTCODE
+            | blvm_protocol::script::flags::SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM
+            | blvm_protocol::script::flags::SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_PUBKEYTYPE
+            | blvm_protocol::script::flags::SCRIPT_VERIFY_STRICTENC;
+    }
     let mut prevout_values = Vec::with_capacity(prevouts.len());
     let mut prevout_scripts: Vec<&[u8]> = Vec::with_capacity(prevouts.len());
     for prevout in prevouts {
@@ -471,6 +912,8 @@ impl MempoolManager {
             storage: RwLock::new(None),
             snapshot_prevout: RwLock::new(None),
             chain_tip: RwLock::new(None),
+            relay_floor_waivers: Mutex::new(HashSet::new()),
+            ephemeral_dust_waivers: Mutex::new(HashSet::new()),
         };
         #[cfg(test)]
         {
@@ -512,6 +955,8 @@ impl MempoolManager {
             storage: RwLock::new(None),
             snapshot_prevout: RwLock::new(None),
             chain_tip: RwLock::new(None),
+            relay_floor_waivers: Mutex::new(HashSet::new()),
+            ephemeral_dust_waivers: Mutex::new(HashSet::new()),
         }
     }
 
@@ -823,9 +1268,11 @@ impl MempoolManager {
                 }
             }
 
+            // The expired transaction's in-mempool descendants spend it. Remove
+            // that package with it. Ancestors are not in the package.
             for hash in to_remove {
                 debug!("Removing expired transaction {}", hex::encode(hash));
-                self.remove_transaction(&hash);
+                self.evict_with_descendants(&hash);
             }
         }
 
@@ -1140,17 +1587,20 @@ impl MempoolManager {
         let spam_filter = SpamFilter::new();
         let mut spam_txs: Vec<(Hash, u64)> = Vec::new();
         let mut non_spam_txs: Vec<(Hash, u64)> = Vec::new();
-        let entries: Vec<(Hash, Transaction)> = {
+        let entries: Vec<(Hash, Transaction, Option<Vec<Witness>>)> = {
             let pool = self.pool_lock();
             pool.transactions
                 .iter()
-                .map(|(h, t)| (*h, t.clone()))
+                .map(|(h, t)| (*h, t.clone(), pool.tx_witnesses.get(h).cloned()))
                 .collect()
         };
         let fee_cache = self.fee_cache.read().unwrap_or_else(|e| e.into_inner());
-        for (hash, tx) in &entries {
+        for (hash, tx, wits) in &entries {
             let fee_rate = fee_cache.get(hash).copied().unwrap_or(0);
-            if spam_filter.is_spam(tx).is_spam {
+            if spam_filter
+                .is_spam_with_witness(tx, wits.as_deref(), None)
+                .is_spam
+            {
                 spam_txs.push((*hash, fee_rate));
             } else {
                 non_spam_txs.push((*hash, fee_rate));
@@ -1241,26 +1691,12 @@ impl MempoolManager {
     ) -> Result<bool> {
         use blvm_protocol::block::calculate_tx_id;
 
-        let rbf_config = match self
+        let rbf_config = self
             .rbf_config
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            Some(config) => config.clone(),
-            None => {
-                // No RBF config - use default BIP125 behavior
-                return replacement_checks_with_witness(
-                    new_tx,
-                    existing_tx,
-                    utxo_set,
-                    &self.mempool.read().unwrap_or_else(|e| e.into_inner()),
-                    new_witnesses,
-                    None,
-                )
-                .map_err(|e| anyhow::anyhow!("RBF check failed: {}", e));
-            }
-        };
+            .clone()
+            .unwrap_or_default();
 
         // Check if RBF is disabled
         if matches!(rbf_config.mode, crate::config::RbfMode::Disabled) {
@@ -1276,7 +1712,6 @@ impl MempoolManager {
         }
 
         let existing_tx_hash = calculate_tx_id(existing_tx);
-        let new_tx_hash = calculate_tx_id(new_tx);
 
         // Check replacement count limit
         if let Some(tracking) = self
@@ -1307,18 +1742,24 @@ impl MempoolManager {
             }
         }
 
-        // Calculate fees and fee rates. Aggressive package mode compares against the
-        // full in-mempool package (root + descendants), not the root tx alone.
-        let use_package_fees = matches!(rbf_config.mode, crate::config::RbfMode::Aggressive)
-            && rbf_config.allow_package_replacements;
-        let package = if use_package_fees {
-            self.replacement_package(&existing_tx_hash)
-        } else {
-            HashSet::from([existing_tx_hash])
-        };
-
-        let (existing_fee, existing_tx_size) = if package.len() > 1 {
-            self.package_fee_and_vsize(&package, utxo_set)
+        // Price every transaction this replacement removes. That is the conflicting
+        // transaction plus its in-mempool descendants. A fee that beats only the
+        // parent still deletes the child.
+        let stored = self
+            .pool_lock()
+            .transactions
+            .contains_key(&existing_tx_hash);
+        let (existing_fee, existing_tx_size) = if stored {
+            let package = self.replacement_package(&existing_tx_hash);
+            let totals = self.package_fee_and_vsize(&package, utxo_set);
+            if package.len() > 1 {
+                debug!(
+                    "RBF replacement: comparing against {} txs ({} sat total fee)",
+                    package.len(),
+                    totals.0
+                );
+            }
+            totals
         } else {
             (
                 self.calculate_transaction_fee(existing_tx, utxo_set) as i64,
@@ -1331,14 +1772,6 @@ impl MempoolManager {
 
         if new_tx_size == 0 || existing_tx_size == 0 {
             return Ok(false);
-        }
-
-        if use_package_fees && package.len() > 1 {
-            debug!(
-                "Aggressive package replacement: comparing against {} txs ({} sat total fee)",
-                package.len(),
-                existing_fee
-            );
         }
 
         // Check fee rate multiplier (mode-specific)
@@ -1362,19 +1795,22 @@ impl MempoolManager {
             return Ok(false);
         }
 
-        // Check absolute fee bump
-        let incremental = self
+        // The replacement pays for its own relay. The incremental relay fee is
+        // satoshis per kilovirtualbyte, rounded up across the replacement's virtual size.
+        let rate_sat_per_kvb = self
             .policy_config
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map(|policy| policy.incremental_relay_fee)
-            .unwrap_or(1000) as i64;
-        let min_fee_bump = (rbf_config.min_fee_bump_satoshis as i64).max(incremental);
-        if new_fee <= existing_fee + min_fee_bump {
+            .unwrap_or(100) as u128;
+        let bandwidth = rate_sat_per_kvb
+            .saturating_mul(new_tx_size as u128)
+            .div_ceil(1000);
+        if (new_fee as i128) < existing_fee as i128 + bandwidth as i128 {
             warn!(
                 "RBF replacement rejected: absolute fee bump insufficient (required: {} sat, got: {} sat) for tx {}",
-                min_fee_bump,
+                bandwidth,
                 new_fee - existing_fee,
                 hex::encode(existing_tx_hash)
             );
@@ -1623,13 +2059,322 @@ impl MempoolManager {
         witnesses: Option<&[Witness]>,
         utxo_set: &UtxoSet,
     ) -> bool {
-        consensus_checks_reject(tx, witnesses, &self.script_prevouts(tx, utxo_set))
+        let require_standard = self
+            .policy_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_none_or(|policy| policy.require_standard);
+        consensus_checks_reject(
+            tx,
+            witnesses,
+            &self.script_prevouts(tx, utxo_set),
+            require_standard,
+        )
     }
 
     /// Add transaction to mempool
     /// Uses interior mutability so it can be called with Arc<MempoolManager> (re-broadcast, sendrawtransaction)
     pub fn add_transaction(&self, tx: Transaction) -> Result<bool> {
         self.add_transaction_with_witness(tx, None)
+    }
+
+    /// Admit an ordered package. A transaction below the relay floor is kept when a
+    /// later transaction in this package spends it and their combined fee covers both.
+    pub fn add_package(&self, txs: Vec<Transaction>) -> Result<bool> {
+        let flags = self.add_package_with_witnesses(txs.into_iter().map(|tx| (tx, None)).collect())?;
+        Ok(!flags.is_empty() && flags.into_iter().all(|ok| ok))
+    }
+
+    /// Same as [`Self::add_package`], keeping each transaction's witness stacks.
+    pub fn add_package_with_witnesses(
+        &self,
+        txs: Vec<(Transaction, Option<Vec<Witness>>)>,
+    ) -> Result<Vec<bool>> {
+        if txs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let wired = self
+            .utxo_set_arc
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        if wired {
+            let mut package_utxo = {
+                let slot = self.utxo_set_arc.read().unwrap_or_else(|e| e.into_inner());
+                match slot.as_ref().and_then(|arc| arc.try_lock().ok()) {
+                    Some(guard) => guard.clone(),
+                    None => UtxoSet::default(),
+                }
+            };
+            for (tx, _) in &txs {
+                let txid = blvm_protocol::block::calculate_tx_id(tx);
+                for (index, output) in tx.outputs.iter().enumerate() {
+                    package_utxo.insert(
+                        OutPoint {
+                            hash: txid,
+                            index: index as u32,
+                        },
+                        std::sync::Arc::new(blvm_protocol::UTXO {
+                            value: output.value,
+                            script_pubkey: output.script_pubkey.clone().into(),
+                            height: 0,
+                            is_coinbase: false,
+                        }),
+                    );
+                }
+            }
+            let rate = self
+                .policy_config
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|policy| policy.min_relay_fee_rate)
+                .unwrap_or(100);
+            *self
+                .relay_floor_waivers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) =
+                self.package_relay_waivers(&txs, &package_utxo, rate);
+            *self
+                .ephemeral_dust_waivers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) =
+                self.ephemeral_dust_parents(&txs, &package_utxo);
+        }
+        let ids: Vec<Hash> = txs
+            .iter()
+            .map(|(tx, _)| blvm_protocol::block::calculate_tx_id(tx))
+            .collect();
+        let closures: Vec<HashSet<Hash>> = (0..txs.len())
+            .map(|start| Self::package_descendants(&txs, start))
+            .collect();
+        let package_ids: HashSet<Hash> = ids.iter().copied().collect();
+        let spends_package: Vec<Vec<Hash>> = txs
+            .iter()
+            .map(|(tx, _)| {
+                tx.inputs
+                    .iter()
+                    .map(|input| input.prevout.hash)
+                    .filter(|hash| package_ids.contains(hash))
+                    .collect()
+            })
+            .collect();
+        let waived = {
+            let relay = self
+                .relay_floor_waivers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let dust = self
+                .ephemeral_dust_waivers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let mut waived = relay;
+            waived.extend(dust);
+            waived
+        };
+        let mut flags = Vec::with_capacity(txs.len());
+        let mut outcome = Ok(());
+        for (tx, witnesses) in txs {
+            match self.add_transaction_with_witness(tx, witnesses) {
+                Ok(admitted) => flags.push(admitted),
+                Err(error) => {
+                    outcome = Err(error);
+                    break;
+                }
+            }
+        }
+        self.relay_floor_waivers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.ephemeral_dust_waivers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        let admitted: HashSet<Hash> = ids
+            .iter()
+            .zip(flags.iter())
+            .filter(|(_, ok)| **ok)
+            .map(|(id, _)| *id)
+            .collect();
+        for (index, id) in ids.iter().enumerate() {
+            if !waived.contains(id) || !admitted.contains(id) {
+                continue;
+            }
+            if closures[index]
+                .iter()
+                .any(|member| !admitted.contains(member))
+            {
+                for member in &closures[index] {
+                    if !admitted.contains(member) {
+                        continue;
+                    }
+                    self.remove_transaction(member);
+                    if let Some(flag_index) = ids.iter().position(|candidate| candidate == member) {
+                        if flag_index < flags.len() {
+                            flags[flag_index] = false;
+                        }
+                    }
+                }
+            }
+        }
+        loop {
+            let mut removed_any = false;
+            for (index, parents) in spends_package.iter().enumerate() {
+                if index >= flags.len() || !flags[index] {
+                    continue;
+                }
+                let parent_missing = parents.iter().any(|parent| {
+                    ids.iter()
+                        .position(|candidate| candidate == parent)
+                        .is_some_and(|parent_index| {
+                            parent_index >= flags.len() || !flags[parent_index]
+                        })
+                });
+                if parent_missing {
+                    self.remove_transaction(&ids[index]);
+                    flags[index] = false;
+                    removed_any = true;
+                }
+            }
+            if !removed_any {
+                break;
+            }
+        }
+        outcome?;
+        Ok(flags)
+    }
+
+    /// Parents and the last transaction whose own fee is below `rate` satoshis per
+    /// 1,000 virtual bytes, when those parents and that child together meet it.
+    /// The child is counted once.
+    fn package_relay_waivers(
+        &self,
+        txs: &[(Transaction, Option<Vec<Witness>>)],
+        utxo: &UtxoSet,
+        rate: u64,
+    ) -> HashSet<Hash> {
+        let ids: Vec<Hash> = txs
+            .iter()
+            .map(|(tx, _)| blvm_protocol::block::calculate_tx_id(tx))
+            .collect();
+        let spent_by_last: HashSet<Hash> = txs
+            .last()
+            .map(|(tx, _)| tx.inputs.iter().map(|input| input.prevout.hash).collect())
+            .unwrap_or_default();
+        let mut waive = HashSet::new();
+        let mut fee = 0u64;
+        let mut vsize = 0u64;
+        let mut below = Vec::new();
+        for (index, (tx, witnesses)) in txs.iter().enumerate() {
+            let is_last = index + 1 == txs.len();
+            let is_parent = spent_by_last.contains(&ids[index]);
+            if !is_last && !is_parent {
+                continue;
+            }
+            let tx_fee = self.calculate_transaction_fee(tx, utxo);
+            let tx_vsize = self.admit_vsize(tx, witnesses.as_deref(), utxo).0;
+            fee = fee.saturating_add(tx_fee);
+            vsize = vsize.saturating_add(tx_vsize);
+            let own_required = (rate as u128).saturating_mul(tx_vsize as u128).div_ceil(1000);
+            if (tx_fee as u128) < own_required {
+                below.push(ids[index]);
+            }
+        }
+        let required = (rate as u128).saturating_mul(vsize as u128).div_ceil(1000);
+        if vsize == 0 || (fee as u128) < required {
+            return waive;
+        }
+        waive.extend(below);
+        waive
+    }
+
+    /// `txs[start]` plus every later transaction in the package that spends one of those.
+    fn package_descendants(
+        txs: &[(Transaction, Option<Vec<Witness>>)],
+        start: usize,
+    ) -> HashSet<Hash> {
+        let ids: Vec<Hash> = txs
+            .iter()
+            .map(|(tx, _)| blvm_protocol::block::calculate_tx_id(tx))
+            .collect();
+        let mut members = HashSet::new();
+        if start >= ids.len() {
+            return members;
+        }
+        members.insert(ids[start]);
+        loop {
+            let before = members.len();
+            for (index, (tx, _)) in txs.iter().enumerate() {
+                if members.contains(&ids[index]) {
+                    continue;
+                }
+                if tx
+                    .inputs
+                    .iter()
+                    .any(|input| members.contains(&input.prevout.hash))
+                {
+                    members.insert(ids[index]);
+                }
+            }
+            if members.len() == before {
+                break;
+            }
+        }
+        members
+    }
+
+    /// A zero-fee parent with exactly one dust output, spent by a later package transaction.
+    fn ephemeral_dust_parents(
+        &self,
+        txs: &[(Transaction, Option<Vec<Witness>>)],
+        utxo: &UtxoSet,
+    ) -> HashSet<Hash> {
+        let mut waive = HashSet::new();
+        for (index, (tx, _)) in txs.iter().enumerate() {
+            if self.calculate_transaction_fee(tx, utxo) != 0 {
+                continue;
+            }
+            let dust: Vec<u32> = tx
+                .outputs
+                .iter()
+                .enumerate()
+                .filter(|(_, output)| output_is_dust(output))
+                .map(|(output_index, _)| output_index as u32)
+                .collect();
+            if dust.len() != 1 {
+                continue;
+            }
+            let txid = blvm_protocol::block::calculate_tx_id(tx);
+            let spent = OutPoint {
+                hash: txid,
+                index: dust[0],
+            };
+            let child_spends = txs.iter().skip(index + 1).any(|(later, _)| {
+                later
+                    .inputs
+                    .iter()
+                    .any(|input| input.prevout == spent)
+            });
+            if child_spends {
+                waive.insert(txid);
+            }
+        }
+        waive
+    }
+
+    /// One dust output is allowed only for the package parent recorded in [`Self::ephemeral_dust_parents`].
+    fn ephemeral_dust_allowed(&self, tx: &Transaction, tx_hash: Hash) -> bool {
+        let dust = tx.outputs.iter().filter(|output| output_is_dust(output)).count();
+        dust == 1
+            && self
+                .ephemeral_dust_waivers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&tx_hash)
     }
 
     /// Add transaction with optional SegWit witness stacks (one per input).
@@ -1701,6 +2446,14 @@ impl MempoolManager {
             .clone()
             .unwrap_or_default();
 
+        if effective_policy.require_standard && !(1..=2).contains(&tx.version) {
+            warn!(
+                "Transaction {} rejected: non-standard version {}",
+                hex::encode(tx_hash),
+                tx.version
+            );
+            return Ok(false);
+        }
         let weight = self.transaction_weight(&tx, witnesses.as_deref());
         if effective_policy.require_standard && weight > MAX_STANDARD_TX_WEIGHT {
             warn!(
@@ -1708,6 +2461,18 @@ impl MempoolManager {
                 hex::encode(tx_hash),
                 weight,
                 MAX_STANDARD_TX_WEIGHT
+            );
+            return Ok(false);
+        }
+        let nonwitness_size = blvm_protocol::wire::serialize_tx(&tx)
+            .map(|bytes| bytes.len())
+            .unwrap_or(0);
+        if nonwitness_size < MIN_STANDARD_TX_NONWITNESS_SIZE {
+            warn!(
+                "Transaction {} rejected: non-witness size {} is below {}",
+                hex::encode(tx_hash),
+                nonwitness_size,
+                MIN_STANDARD_TX_NONWITNESS_SIZE
             );
             return Ok(false);
         }
@@ -1723,6 +2488,35 @@ impl MempoolManager {
             );
             return Ok(false);
         }
+        if effective_policy.require_standard
+            && tx
+                .inputs
+                .iter()
+                .any(|input| !blvm_protocol::script::p2sh_push_only_check(&input.script_sig))
+        {
+            warn!(
+                "Transaction {} rejected: scriptSig is not push-only",
+                hex::encode(tx_hash)
+            );
+            return Ok(false);
+        }
+        if effective_policy.require_standard
+            && tx
+                .inputs
+                .iter()
+                .any(|input| input.script_sig.len() > MAX_STANDARD_SCRIPTSIG_SIZE)
+        {
+            warn!(
+                "Transaction {} rejected: scriptSig is {} bytes",
+                hex::encode(tx_hash),
+                tx.inputs
+                    .iter()
+                    .map(|input| input.script_sig.len())
+                    .max()
+                    .unwrap_or(0)
+            );
+            return Ok(false);
+        }
 
         if effective_policy.reject_spam_in_mempool {
             use blvm_protocol::spam_filter::SpamFilter;
@@ -1731,7 +2525,10 @@ impl MempoolManager {
                 .as_ref()
                 .map(|cfg| SpamFilter::with_config(cfg.clone().into()))
                 .unwrap_or_default();
-            if filter.is_spam(&tx).is_spam {
+            if filter
+                .is_spam_with_witness(&tx, witnesses.as_deref(), None)
+                .is_spam
+            {
                 warn!(
                     "Transaction {} rejected: classified as spam",
                     hex::encode(tx_hash)
@@ -1783,7 +2580,7 @@ impl MempoolManager {
             );
             return Ok(false);
         }
-        if tx.outputs.iter().any(output_is_dust) {
+        if tx.outputs.iter().any(output_is_dust) && !self.ephemeral_dust_allowed(&tx, tx_hash) {
             warn!(
                 "Transaction {} rejected: output value is below the dust floor",
                 hex::encode(tx_hash)
@@ -1818,7 +2615,136 @@ impl MempoolManager {
             );
             return Ok(false);
         }
-        if consensus_checks_reject(&tx, witness_ref, &self.script_prevouts(&tx, &utxo_snapshot)) {
+        if effective_policy.require_standard
+            && p2sh_redeem_sigops_exceed(&tx, &self.script_prevouts(&tx, &utxo_snapshot))
+        {
+            warn!(
+                "Transaction {} rejected: P2SH redeem script exceeds {} sigops",
+                hex::encode(tx_hash),
+                MAX_STANDARD_P2SH_SIGOPS
+            );
+            return Ok(false);
+        }
+        if effective_policy.require_standard
+            && legacy_sigops_exceed(&tx, &self.script_prevouts(&tx, &utxo_snapshot))
+        {
+            warn!(
+                "Transaction {} rejected: legacy sigops exceed {}",
+                hex::encode(tx_hash),
+                MAX_TX_LEGACY_SIGOPS
+            );
+            return Ok(false);
+        }
+        if effective_policy.require_standard
+            && self
+                .script_prevouts(&tx, &utxo_snapshot)
+                .iter()
+                .any(|prevout| {
+                    prevout.as_ref().is_some_and(|prevout| {
+                        let script = prevout.script.as_ref();
+                        blvm_protocol::witness::is_upgradable_witness_program(script)
+                            && !blvm_protocol::witness::is_pay_to_anchor(script)
+                    })
+                })
+        {
+            warn!(
+                "Transaction {} rejected: spent witness program is undefined",
+                hex::encode(tx_hash)
+            );
+            return Ok(false);
+        }
+        if effective_policy.require_standard
+            && pay_to_anchor_witness_present(
+                &self.script_prevouts(&tx, &utxo_snapshot),
+                witness_ref,
+            )
+        {
+            warn!(
+                "Transaction {} rejected: pay-to-anchor witness is not empty",
+                hex::encode(tx_hash)
+            );
+            return Ok(false);
+        }
+        if effective_policy.require_standard
+            && self.script_prevouts(&tx, &utxo_snapshot).iter().any(|prevout| {
+                prevout
+                    .as_ref()
+                    .is_some_and(|prevout| !spent_script_is_standard(prevout.script.as_ref()))
+            })
+        {
+            warn!(
+                "Transaction {} rejected: spent script is not standard",
+                hex::encode(tx_hash)
+            );
+            return Ok(false);
+        }
+        if effective_policy.require_standard
+            && p2wsh_data_item_exceeds(
+                &tx,
+                &self.script_prevouts(&tx, &utxo_snapshot),
+                witness_ref,
+            )
+        {
+            warn!(
+                "Transaction {} rejected: P2WSH witness data item exceeds {} bytes",
+                hex::encode(tx_hash),
+                MAX_STANDARD_P2WSH_STACK_ITEM_SIZE
+            );
+            return Ok(false);
+        }
+        if effective_policy.require_standard
+            && p2wsh_script_exceeds(
+                &tx,
+                &self.script_prevouts(&tx, &utxo_snapshot),
+                witness_ref,
+            )
+        {
+            warn!(
+                "Transaction {} rejected: P2WSH witness script exceeds {} bytes",
+                hex::encode(tx_hash),
+                MAX_STANDARD_P2WSH_SCRIPT_SIZE
+            );
+            return Ok(false);
+        }
+        if effective_policy.require_standard
+            && p2wsh_stack_count_exceeds(
+                &tx,
+                &self.script_prevouts(&tx, &utxo_snapshot),
+                witness_ref,
+            )
+        {
+            warn!(
+                "Transaction {} rejected: P2WSH witness has more than {} stack items",
+                hex::encode(tx_hash),
+                MAX_STANDARD_P2WSH_STACK_ITEMS
+            );
+            return Ok(false);
+        }
+        if effective_policy.require_standard
+            && taproot_annex_present(&self.script_prevouts(&tx, &utxo_snapshot), witness_ref)
+        {
+            warn!(
+                "Transaction {} rejected: Taproot annex is non-standard",
+                hex::encode(tx_hash)
+            );
+            return Ok(false);
+        }
+        if effective_policy.require_standard
+            && tapscript_data_item_exceeds(&self.script_prevouts(&tx, &utxo_snapshot), witness_ref)
+        {
+            warn!(
+                "Transaction {} rejected: tapscript witness data item exceeds {} bytes",
+                hex::encode(tx_hash),
+                MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE
+            );
+            return Ok(false);
+        }
+        if consensus_checks_reject(
+            &tx,
+            witness_ref,
+            &self.script_prevouts(&tx, &utxo_snapshot),
+            effective_policy.require_standard,
+        ) {
             warn!(
                 "Transaction {} rejected: failed consensus checks",
                 hex::encode(tx_hash)
@@ -1843,11 +2769,20 @@ impl MempoolManager {
             fee_sats = fee;
             let tx_size = candidate_vsize;
             fee_rate_sat_vb = if tx_size > 0 { fee / tx_size } else { 0 };
-            if fee_rate_sat_vb < effective_policy.min_relay_fee_rate {
+            let required_fee = (effective_policy.min_relay_fee_rate as u128)
+                .saturating_mul(tx_size as u128)
+                .div_ceil(1000);
+            let waived = self
+                .relay_floor_waivers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&tx_hash);
+            if !waived && (fee as u128) < required_fee {
                 warn!(
-                    "Transaction {} rejected: fee rate {} sat/vB below min relay fee rate {} sat/vB",
+                    "Transaction {} rejected: fee {} sat below relay minimum {} sat ({} sat/kvB)",
                     hex::encode(tx_hash),
-                    fee_rate_sat_vb,
+                    fee,
+                    required_fee,
                     effective_policy.min_relay_fee_rate
                 );
                 return Ok(false);
@@ -2947,13 +3882,13 @@ impl MempoolManager {
             .saturating_mul(1_048_576)
     }
 
-    /// Relay floor as BTC per kvB. Rate 1 sat/vB is 0.00001.
+    /// Relay floor as BTC per kvB. 100 sat/kvB is 0.000001.
     pub(crate) fn min_relay_fee_btc_per_kvb(&self) -> f64 {
-        self.min_relay_fee_rate_sat_per_vb() as f64 * 1_000.0 / 100_000_000.0
+        self.min_relay_fee_sat_per_kvb() as f64 / 100_000_000.0
     }
 
-    /// Configured relay floor in satoshis per virtual byte. An unset policy uses the default of 1.
-    pub(crate) fn min_relay_fee_rate_sat_per_vb(&self) -> u64 {
+    /// Configured relay floor in satoshis per 1,000 virtual bytes. An unset policy uses 100.
+    pub(crate) fn min_relay_fee_sat_per_kvb(&self) -> u64 {
         self.policy_config
             .read()
             .unwrap_or_else(|e| e.into_inner())
@@ -3047,7 +3982,21 @@ impl MempoolManager {
 #[cfg(test)]
 mod tests {
     use super::MempoolManager;
+    use crate::config::MempoolPolicyConfig;
     use blvm_protocol::serialization::transaction::serialize_transaction;
+
+    #[test]
+    fn policy_cap_is_file_size_and_unset_policy_is_300_mib() {
+        let unset = MempoolManager::new();
+        assert_eq!(unset.max_mempool_bytes(), 300 * 1_048_576);
+
+        let set = MempoolManager::new();
+        let mut policy = MempoolPolicyConfig::default();
+        policy.max_mempool_mb = 50;
+        set.set_policy_config(Some(policy));
+        assert_eq!(set.max_mempool_bytes(), 50 * 1_048_576);
+    }
+
     use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput};
 
     fn legacy_empty_script() -> Transaction {
@@ -3119,6 +4068,17 @@ mod tests {
         funded_at(script_pubkey, value, 0)
     }
 
+    /// P2SH of `OP_1`, spent by a direct push of that redeem. Standard under default policy.
+    fn p2sh_of_op_1() -> (Vec<u8>, Vec<u8>) {
+        let mut prevout = vec![0xa9, 0x14];
+        prevout.extend_from_slice(&[
+            0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99, 0x71, 0xc7,
+            0x7e, 0xba, 0x30, 0xcd, 0x5a, 0x4b,
+        ]);
+        prevout.push(0x87);
+        (prevout, vec![0x01, 0x51])
+    }
+
     fn funded_coinbase(height: u64, is_coinbase: bool) -> blvm_protocol::UtxoSet {
         use std::sync::Arc;
         let tx = legacy_empty_script();
@@ -3161,7 +4121,7 @@ mod tests {
                 prevout,
                 Arc::new(blvm_protocol::UTXO {
                     value: 50_000,
-                    script_pubkey: vec![OP_1].into(),
+                    script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                     height: 1,
                     is_coinbase: false,
                 }),
@@ -3178,7 +4138,7 @@ mod tests {
             .into(),
             outputs: vec![TransactionOutput {
                 value: 40_000,
-                script_pubkey: vec![OP_1],
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61],
             }]
             .into(),
             lock_time: 0,
@@ -3209,7 +4169,7 @@ mod tests {
             fresh,
             Arc::new(blvm_protocol::UTXO {
                 value: 1,
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                 height: 1,
                 is_coinbase: false,
             }),
@@ -3391,7 +4351,7 @@ mod tests {
 
         let mut tx = legacy_empty_script();
         tx.outputs[0].value = 50_000;
-        tx.outputs[0].script_pubkey = vec![OP_1];
+        tx.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
 
         let mempool = MempoolManager::new();
         mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded(
@@ -3533,7 +4493,7 @@ mod tests {
                 prevout,
                 Arc::new(blvm_protocol::UTXO {
                     value: 40_000,
-                    script_pubkey: vec![OP_1].into(),
+                    script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                     height: 1,
                     is_coinbase: false,
                 }),
@@ -3558,7 +4518,7 @@ mod tests {
             .into(),
             outputs: vec![TransactionOutput {
                 value: 49_000,
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
             }]
             .into(),
             lock_time: 0,
@@ -3590,7 +4550,7 @@ mod tests {
                 },
                 Arc::new(blvm_protocol::UTXO {
                     value: 50_000,
-                    script_pubkey: vec![OP_1].into(),
+                    script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                     height: 1,
                     is_coinbase: false,
                 }),
@@ -3607,7 +4567,7 @@ mod tests {
                 op,
                 Arc::new(blvm_protocol::UTXO {
                     value: 50_001,
-                    script_pubkey: vec![OP_1].into(),
+                    script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                     height: 1,
                     is_coinbase: false,
                 }),
@@ -3629,7 +4589,7 @@ mod tests {
             .into(),
             outputs: vec![TransactionOutput {
                 value: 40_000,
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
             }]
             .into(),
             lock_time: 0,
@@ -3644,7 +4604,7 @@ mod tests {
             spend,
             Arc::new(blvm_protocol::UTXO {
                 value: 80_000,
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                 height: 1,
                 is_coinbase: false,
             }),
@@ -3665,7 +4625,7 @@ mod tests {
             .into(),
             outputs: vec![TransactionOutput {
                 value,
-                script_pubkey: vec![blvm_protocol::opcodes::OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
             }]
             .into(),
             lock_time: 0,
@@ -3687,7 +4647,7 @@ mod tests {
             funding,
             Arc::new(blvm_protocol::UTXO {
                 value: 2_000_000,
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                 height: 0,
                 is_coinbase: false,
             }),
@@ -3706,7 +4666,7 @@ mod tests {
             outputs: (0..26)
                 .map(|_| TransactionOutput {
                     value: 3_000,
-                    script_pubkey: vec![OP_1].into(),
+                    script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                 })
                 .collect::<Vec<_>>()
                 .into(),
@@ -3754,7 +4714,7 @@ mod tests {
             funding,
             Arc::new(blvm_protocol::UTXO {
                 value: 2_000_000,
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                 height: 0,
                 is_coinbase: false,
             }),
@@ -3772,7 +4732,7 @@ mod tests {
             .into(),
             outputs: vec![TransactionOutput {
                 value: 50_000,
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
             }]
             .into(),
             lock_time: 0,
@@ -3816,7 +4776,7 @@ mod tests {
             funding,
             Arc::new(blvm_protocol::UTXO {
                 value: 2_000_000,
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                 height: 0,
                 is_coinbase: false,
             }),
@@ -3835,7 +4795,7 @@ mod tests {
             outputs: (0..25)
                 .map(|_| TransactionOutput {
                     value: 4_000,
-                    script_pubkey: vec![OP_1].into(),
+                    script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                 })
                 .collect::<Vec<_>>()
                 .into(),
@@ -3857,7 +4817,7 @@ mod tests {
             .into(),
             outputs: vec![TransactionOutput {
                 value: 3_000,
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
             }]
             .into(),
             lock_time: 0,
@@ -3964,19 +4924,2453 @@ mod tests {
         ));
         assert!(admit(spend_to(294, program, Vec::new()), vec![OP_1]));
         assert!(admit(
-            spend_to(1, vec![OP_RETURN, 0x01, 0x00], Vec::new()),
+            spend_to(1, vec![OP_RETURN, 0x03, 0x00, 0x00, 0x00], Vec::new()),
             vec![OP_1]
         ));
 
         let drop_true = vec![OP_DROP, OP_1];
         assert!(!admit(
-            spend_to(1_000, vec![OP_1], vec![0x4c, 0x01, 0x51]),
+            spend_to(1_000, vec![0x51, 0x61, 0x61, 0x61, 0x61], vec![0x4c, 0x01, 0x51]),
             drop_true.clone()
         ));
         assert!(admit(
-            spend_to(1_000, vec![OP_1], vec![0x01, 0x51]),
+            spend_to(1_000, vec![0x51, 0x61, 0x61, 0x61, 0x61], vec![0x01, 0x51]),
             drop_true
         ));
+    }
+
+    #[test]
+    fn op_return_of_84_bytes_is_standard() {
+        let carrier = |payload: usize| {
+            let mut s = vec![0x6a, 0x4c, payload as u8];
+            s.extend(std::iter::repeat(0u8).take(payload));
+            s
+        };
+        let admit = |script: Vec<u8>| {
+            let (prevout, script_sig) = p2sh_of_op_1();
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = script;
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let eighty_three = admit(carrier(80));
+        let eighty_four = admit(carrier(81));
+        let mut not_carrier = carrier(81);
+        not_carrier[0] = 0x00;
+        let not_return = admit(not_carrier);
+        eprintln!(
+            "83-byte op_return admitted={eighty_three}; 84-byte op_return admitted={eighty_four}; 84-byte non-return admitted={not_return}"
+        );
+        assert!(eighty_three);
+        assert!(eighty_four);
+        assert!(!not_return);
+    }
+
+    #[test]
+    fn op_return_with_a_non_push_is_not_standard() {
+        let admit = |script: Vec<u8>| {
+            let (prevout, script_sig) = p2sh_of_op_1();
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = script;
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let push = admit(vec![0x6a, 0x03, 0x00, 0x00, 0x00]);
+        let nop = admit(vec![0x6a, 0x61, 0x00, 0x00, 0x00]);
+        eprintln!("op_return push admitted={push}; op_return nop admitted={nop}");
+        assert!(push);
+        assert!(!nop);
+    }
+
+    #[test]
+    fn p2sh_redeem_with_sixteen_sigops_is_not_standard() {
+        use blvm_protocol::opcodes::{OP_0, OP_1, OP_CHECKSIG, OP_ENDIF, OP_EQUAL, OP_HASH160, OP_IF};
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        fn hash160(data: &[u8]) -> [u8; 20] {
+            Ripemd160::digest(Sha256::digest(data)).into()
+        }
+
+        let admit = |sigops: usize| {
+            let mut redeem = vec![OP_0, OP_IF];
+            redeem.extend(std::iter::repeat(OP_CHECKSIG).take(sigops));
+            redeem.extend_from_slice(&[OP_ENDIF, OP_1]);
+            let hash = hash160(&redeem);
+            let mut prev = vec![OP_HASH160, 0x14];
+            prev.extend_from_slice(&hash);
+            prev.push(OP_EQUAL);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = {
+                let mut script_sig = Vec::with_capacity(redeem.len() + 1);
+                script_sig.push(redeem.len() as u8);
+                script_sig.extend_from_slice(&redeem);
+                script_sig
+            };
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prev, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let fifteen = admit(15);
+        let sixteen = admit(16);
+        eprintln!("15 sigops admitted={fifteen}; 16 sigops admitted={sixteen}");
+        assert!(fifteen);
+        assert!(!sixteen);
+    }
+
+    #[test]
+    fn undefined_witness_program_spend_is_not_standard() {
+        use blvm_protocol::opcodes::{OP_0, OP_1, OP_2};
+        use blvm_protocol::segwit::Witness;
+        use sha2::{Digest, Sha256};
+
+        let program: [u8; 32] = Sha256::digest([OP_1]).into();
+        let script = |version: u8| {
+            let mut out = vec![version, 0x20];
+            out.extend_from_slice(&program);
+            out
+        };
+        let admit = |prevout: Vec<u8>| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let witness: Vec<Witness> = vec![vec![vec![OP_1]]];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let version_zero = admit(script(OP_0));
+        let version_two = admit(script(OP_2));
+        eprintln!("v0 p2wsh admitted={version_zero}; v2 witness program admitted={version_two}");
+        assert!(version_zero);
+        assert!(!version_two);
+    }
+
+    #[test]
+    fn p2wsh_data_item_of_81_bytes_is_not_standard() {
+        use blvm_protocol::segwit::Witness;
+        use sha2::{Digest, Sha256};
+
+        const OP_0: u8 = 0x00;
+        const OP_1: u8 = 0x51;
+        const OP_DROP: u8 = 0x75;
+        let script = vec![OP_DROP, OP_1];
+        let program: [u8; 32] = Sha256::digest(&script).into();
+        let mut prevout = vec![OP_0, 0x20];
+        prevout.extend_from_slice(&program);
+        let admit = |item_len: usize| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let witness: Vec<Witness> = vec![vec![vec![0u8; item_len], script.clone()]];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let eighty = admit(80);
+        let eighty_one = admit(81);
+        eprintln!(
+            "80-byte p2wsh item admitted={eighty}; 81-byte p2wsh item admitted={eighty_one}"
+        );
+        assert!(eighty);
+        assert!(!eighty_one);
+    }
+
+    #[test]
+    fn wrapped_p2wsh_data_item_of_81_bytes_is_not_standard() {
+        use blvm_protocol::segwit::Witness;
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let script = vec![0x75, 0x51];
+        let program: [u8; 32] = Sha256::digest(&script).into();
+        let mut redeem = vec![0x00, 0x20];
+        redeem.extend_from_slice(&program);
+        let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+        let mut prevout = vec![0xa9, 0x14];
+        prevout.extend_from_slice(&hash);
+        prevout.push(0x87);
+        let mut script_sig = vec![redeem.len() as u8];
+        script_sig.extend_from_slice(&redeem);
+        let admit = |item_len: usize| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig.clone();
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let witness: Vec<Witness> = vec![vec![vec![0u8; item_len], script.clone()]];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let eighty = admit(80);
+        let eighty_one = admit(81);
+        eprintln!(
+            "wrapped 80-byte item admitted={eighty}; wrapped 81-byte item admitted={eighty_one}"
+        );
+        assert!(eighty);
+        assert!(!eighty_one);
+    }
+
+    #[test]
+    fn p2wsh_script_of_3601_bytes_is_not_standard() {
+        use blvm_protocol::segwit::Witness;
+        use sha2::{Digest, Sha256};
+
+        const OP_0: u8 = 0x00;
+        const OP_1: u8 = 0x51;
+        const OP_DROP: u8 = 0x75;
+        let script_of = |script_len: usize| {
+            let mut script = Vec::with_capacity(script_len);
+            let mut left = script_len - 1;
+            while left > 524 {
+                script.push(0x4d);
+                script.extend_from_slice(&520u16.to_le_bytes());
+                script.extend(std::iter::repeat(0u8).take(520));
+                script.push(OP_DROP);
+                left -= 524;
+            }
+            let payload = left - 4;
+            script.push(0x4d);
+            script.extend_from_slice(&(payload as u16).to_le_bytes());
+            script.extend(std::iter::repeat(0u8).take(payload));
+            script.push(OP_DROP);
+            script.push(OP_1);
+            script
+        };
+        let admit = |script_len: usize| {
+            let script = script_of(script_len);
+            let program: [u8; 32] = Sha256::digest(&script).into();
+            let mut prevout = vec![OP_0, 0x20];
+            prevout.extend_from_slice(&program);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let witness: Vec<Witness> = vec![vec![script]];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let at_limit = admit(3_600);
+        let over = admit(3_601);
+        eprintln!(
+            "3600-byte p2wsh script admitted={at_limit}; 3601-byte p2wsh script admitted={over}"
+        );
+        assert!(at_limit);
+        assert!(!over);
+    }
+
+    #[test]
+    fn wrapped_p2wsh_script_of_3601_bytes_is_not_standard() {
+        use blvm_protocol::segwit::Witness;
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        const OP_1: u8 = 0x51;
+        const OP_DROP: u8 = 0x75;
+        let script_of = |script_len: usize| {
+            let mut script = Vec::with_capacity(script_len);
+            let mut left = script_len - 1;
+            while left > 524 {
+                script.push(0x4d);
+                script.extend_from_slice(&520u16.to_le_bytes());
+                script.extend(std::iter::repeat(0u8).take(520));
+                script.push(OP_DROP);
+                left -= 524;
+            }
+            let payload = left - 4;
+            script.push(0x4d);
+            script.extend_from_slice(&(payload as u16).to_le_bytes());
+            script.extend(std::iter::repeat(0u8).take(payload));
+            script.push(OP_DROP);
+            script.push(OP_1);
+            script
+        };
+        let admit = |script_len: usize| {
+            let script = script_of(script_len);
+            let program: [u8; 32] = Sha256::digest(&script).into();
+            let mut redeem = vec![0x00, 0x20];
+            redeem.extend_from_slice(&program);
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let witness: Vec<Witness> = vec![vec![script]];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let at_limit = admit(3_600);
+        let over = admit(3_601);
+        eprintln!(
+            "wrapped 3600-byte script admitted={at_limit}; wrapped 3601-byte script admitted={over}"
+        );
+        assert!(at_limit);
+        assert!(!over);
+    }
+
+    #[test]
+    fn p2wsh_stack_of_101_items_is_not_standard() {
+        use blvm_protocol::segwit::Witness;
+        use sha2::{Digest, Sha256};
+
+        const OP_0: u8 = 0x00;
+        const OP_1: u8 = 0x51;
+        const OP_DROP: u8 = 0x75;
+        let admit = |items: usize| {
+            let mut script = vec![OP_DROP; items];
+            script.push(OP_1);
+            let program: [u8; 32] = Sha256::digest(&script).into();
+            let mut prevout = vec![OP_0, 0x20];
+            prevout.extend_from_slice(&program);
+            let mut stack = vec![Vec::new(); items];
+            stack.push(script);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let witness: Vec<Witness> = vec![stack];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let hundred = admit(100);
+        let hundred_one = admit(101);
+        eprintln!(
+            "100 p2wsh items admitted={hundred}; 101 p2wsh items admitted={hundred_one}"
+        );
+        assert!(hundred);
+        assert!(!hundred_one);
+    }
+
+    #[test]
+    fn wrapped_p2wsh_stack_of_101_items_is_not_standard() {
+        use blvm_protocol::segwit::Witness;
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |items: usize| {
+            let mut script = vec![0x75; items];
+            script.push(0x51);
+            let program: [u8; 32] = Sha256::digest(&script).into();
+            let mut redeem = vec![0x00, 0x20];
+            redeem.extend_from_slice(&program);
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut stack = vec![Vec::new(); items];
+            stack.push(script);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let witness: Vec<Witness> = vec![stack];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let hundred = admit(100);
+        let hundred_one = admit(101);
+        eprintln!(
+            "wrapped 100 items admitted={hundred}; wrapped 101 items admitted={hundred_one}"
+        );
+        assert!(hundred);
+        assert!(!hundred_one);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_add_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x51, 0x00, 0x93]);
+        let padded = admit(vec![0x02, 0x01, 0x00, 0x00, 0x93]);
+        eprintln!("minimal add admitted={minimal}; padded add admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_sub_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x51, 0x00, 0x94]);
+        let padded = admit(vec![0x02, 0x01, 0x00, 0x00, 0x94]);
+        eprintln!("minimal sub admitted={minimal}; padded sub admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_booland_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x51, 0x51, 0x9a]);
+        let padded = admit(vec![0x02, 0x01, 0x00, 0x51, 0x9a]);
+        eprintln!("minimal booland admitted={minimal}; padded booland admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_boolor_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x51, 0x51, 0x9b]);
+        let padded = admit(vec![0x02, 0x01, 0x00, 0x51, 0x9b]);
+        eprintln!("minimal boolor admitted={minimal}; padded boolor admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_numequal_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x51, 0x51, 0x9c]);
+        let padded = admit(vec![0x02, 0x01, 0x00, 0x51, 0x9c]);
+        eprintln!("minimal numequal admitted={minimal}; padded numequal admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_numequalverify_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x51, 0x51, 0x9d, 0x51]);
+        let padded = admit(vec![0x02, 0x01, 0x00, 0x51, 0x9d, 0x51]);
+        eprintln!(
+            "minimal numequalverify admitted={minimal}; padded numequalverify admitted={padded}"
+        );
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_numnotequal_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x51, 0x00, 0x9e]);
+        let padded = admit(vec![0x02, 0x01, 0x00, 0x00, 0x9e]);
+        eprintln!("minimal numnotequal admitted={minimal}; padded numnotequal admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_lessthan_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x00, 0x51, 0x9f]);
+        let padded = admit(vec![0x00, 0x02, 0x01, 0x00, 0x9f]);
+        eprintln!("minimal lessthan admitted={minimal}; padded lessthan admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_greaterthan_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x51, 0x00, 0xa0]);
+        let padded = admit(vec![0x02, 0x01, 0x00, 0x00, 0xa0]);
+        eprintln!("minimal greaterthan admitted={minimal}; padded greaterthan admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_lessthanorequal_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x00, 0x51, 0xa1]);
+        let padded = admit(vec![0x00, 0x02, 0x01, 0x00, 0xa1]);
+        eprintln!(
+            "minimal lessthanorequal admitted={minimal}; padded lessthanorequal admitted={padded}"
+        );
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_greaterthanorequal_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x51, 0x00, 0xa2]);
+        let padded = admit(vec![0x02, 0x01, 0x00, 0x00, 0xa2]);
+        eprintln!(
+            "minimal greaterthanorequal admitted={minimal}; padded greaterthanorequal admitted={padded}"
+        );
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_min_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x51, 0x51, 0xa3]);
+        let padded = admit(vec![0x02, 0x01, 0x00, 0x51, 0xa3]);
+        eprintln!("minimal min admitted={minimal}; padded min admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_max_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x51, 0x51, 0xa4]);
+        let padded = admit(vec![0x02, 0x01, 0x00, 0x51, 0xa4]);
+        eprintln!("minimal max admitted={minimal}; padded max admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_within_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x51, 0x00, 0x52, 0xa5]);
+        let padded = admit(vec![0x02, 0x01, 0x00, 0x00, 0x52, 0xa5]);
+        eprintln!("minimal within admitted={minimal}; padded within admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_1sub_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x52, 0x8c]);
+        let padded = admit(vec![0x02, 0x02, 0x00, 0x8c]);
+        eprintln!("minimal 1sub admitted={minimal}; padded 1sub admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_negate_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x51, 0x8f]);
+        let padded = admit(vec![0x02, 0x01, 0x00, 0x8f]);
+        eprintln!("minimal negate admitted={minimal}; padded negate admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_abs_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x51, 0x90]);
+        let padded = admit(vec![0x02, 0x01, 0x00, 0x90]);
+        eprintln!("minimal abs admitted={minimal}; padded abs admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_not_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x00, 0x91]);
+        let padded = admit(vec![0x02, 0x00, 0x00, 0x91]);
+        eprintln!("minimal not admitted={minimal}; padded not admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_0notequal_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x51, 0x92]);
+        let padded = admit(vec![0x02, 0x01, 0x00, 0x92]);
+        eprintln!("minimal 0notequal admitted={minimal}; padded 0notequal admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_pick_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x51, 0x00, 0x79, 0x75]);
+        let padded = admit(vec![0x51, 0x02, 0x00, 0x00, 0x79, 0x75]);
+        eprintln!("minimal pick admitted={minimal}; padded pick admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_roll_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let minimal = admit(vec![0x51, 0x00, 0x7a]);
+        let padded = admit(vec![0x51, 0x02, 0x00, 0x00, 0x7a]);
+        eprintln!("minimal roll admitted={minimal}; padded roll admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_checkmultisig_is_not_standard() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![0xa9, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(0x87);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let pubkey = {
+            let mut key = vec![0x02];
+            key.extend(std::iter::repeat(0u8).take(32));
+            key
+        };
+        let with_pubkey = |head: &[u8]| {
+            let mut redeem = head.to_vec();
+            redeem.push(0x21);
+            redeem.extend_from_slice(&pubkey);
+            redeem.extend_from_slice(&[0x51, 0xae]);
+            redeem
+        };
+        let minimal = admit(with_pubkey(&[0x00, 0x00]));
+        let padded = admit(with_pubkey(&[0x00, 0x02, 0x00, 0x00]));
+        eprintln!(
+            "minimal checkmultisig admitted={minimal}; padded checkmultisig admitted={padded}"
+        );
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_multisig_key_count_is_not_standard() {
+        use blvm_protocol::segwit::Witness;
+        use sha2::{Digest, Sha256};
+
+        let pubkey = {
+            let mut key = vec![0x02];
+            key.extend(std::iter::repeat(0u8).take(32));
+            key
+        };
+        let script_of = |key_count: &[u8]| {
+            let mut script = vec![0x00, 0x00, 0x21];
+            script.extend_from_slice(&pubkey);
+            script.extend_from_slice(key_count);
+            script.push(0xae);
+            script
+        };
+        let admit = |script: Vec<u8>| {
+            let program: [u8; 32] = Sha256::digest(&script).into();
+            let mut prevout = vec![0x00, 0x20];
+            prevout.extend_from_slice(&program);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let witness: Vec<Witness> = vec![vec![script]];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let minimal = admit(script_of(&[0x51]));
+        let padded = admit(script_of(&[0x02, 0x01, 0x00]));
+        eprintln!("minimal key count admitted={minimal}; padded key count admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn nonminimal_script_number_in_checksigadd_is_not_standard() {
+        use blvm_consensus::secp256k1_backend::taproot_output_key_with_parity;
+        use blvm_consensus::taproot::{TAPROOT_LEAF_VERSION_TAPSCRIPT, compute_script_merkle_root};
+        use blvm_protocol::segwit::Witness;
+
+        let internal = [
+            0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
+            0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
+            0x16, 0xf8, 0x17, 0x98,
+        ];
+        let mut tapscript = vec![0x20];
+        tapscript.extend_from_slice(&internal);
+        tapscript.push(0xba);
+        let admit = |number: Vec<u8>| {
+            let root =
+                compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT).unwrap();
+            let (output_key, parity) = taproot_output_key_with_parity(&internal, &root).unwrap();
+            let mut prevout = vec![0x51, 0x20];
+            prevout.extend_from_slice(&output_key);
+            let mut control = vec![TAPROOT_LEAF_VERSION_TAPSCRIPT | parity];
+            control.extend_from_slice(&internal);
+            let stack = vec![Vec::new(), number, tapscript.clone(), control];
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let witness: Vec<Witness> = vec![stack];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let minimal = admit(vec![0x01]);
+        let padded = admit(vec![0x01, 0x00]);
+        eprintln!("minimal checksigadd admitted={minimal}; padded checksigadd admitted={padded}");
+        assert!(minimal);
+        assert!(!padded);
+    }
+
+    #[test]
+    fn empty_anchor_is_standard_and_a_witness_is_not() {
+        use blvm_protocol::segwit::Witness;
+
+        let prevout = vec![0x51, 0x02, 0x4e, 0x73];
+        let admit = |witness: Option<Vec<Witness>>| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, witness)
+                .unwrap()
+        };
+        let empty = admit(None);
+        let stuffed = admit(Some(vec![vec![vec![0x00]]]));
+        eprintln!("empty anchor admitted={empty}; stuffed anchor admitted={stuffed}");
+        assert!(empty);
+        assert!(!stuffed);
+    }
+
+    #[test]
+    fn fee_of_999_sats_is_standard() {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let admit = |output_value: i64| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig.clone();
+            tx.outputs[0].value = output_value;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                1_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let at_thousand = admit(0);
+        let at_999 = admit(1);
+        eprintln!("fee 1000 admitted={at_thousand}; fee 999 admitted={at_999}");
+        assert!(at_thousand);
+        assert!(at_999);
+    }
+
+    #[test]
+    fn relay_fee_of_seven_sats_is_standard() {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let mut sample = legacy_empty_script();
+        sample.inputs[0].script_sig = script_sig.clone();
+        sample.outputs[0].value = 0;
+        sample.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+        let vsize = blvm_protocol::wire::serialize_tx(&sample).unwrap().len() as i64;
+        let core_fee = vsize * 100 / 1000 + i64::from(vsize * 100 % 1000 != 0);
+        let admit = |fee: i64| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig.clone();
+            tx.outputs[0].value = 10_000 - fee;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                10_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let at_one = admit(vsize);
+        let at_core = admit(core_fee);
+        let under = admit(core_fee - 1);
+        eprintln!(
+            "vsize={vsize}; fee {vsize} admitted={at_one}; fee {core_fee} admitted={at_core}; fee {} admitted={under}",
+            core_fee - 1
+        );
+        assert_eq!(vsize, 67);
+        assert_eq!(core_fee, 7);
+        assert!(at_one);
+        assert!(at_core);
+        assert!(!under);
+    }
+
+    #[test]
+    fn a_second_replacement_is_not_on_a_timer() {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let spend = |fee: i64| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig.clone();
+            tx.inputs[0].sequence = 0xfffffffd;
+            tx.outputs[0].value = 10_000 - fee;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            tx
+        };
+        let mempool = MempoolManager::new();
+        mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+            prevout,
+            10_000,
+        ))));
+        let original = mempool.add_transaction(spend(1_000)).unwrap();
+        let first = mempool.add_transaction(spend(1_100)).unwrap();
+        let second = mempool.add_transaction(spend(1_200)).unwrap();
+        eprintln!(
+            "original admitted={original}; first replacement admitted={first}; second replacement admitted={second}"
+        );
+        assert!(original);
+        assert!(first);
+        assert!(second);
+    }
+
+    #[test]
+    fn child_fee_carries_a_zero_fee_parent() {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let pair = |parent_fee: i64| {
+            let mut parent = legacy_empty_script();
+            parent.inputs[0].script_sig = script_sig.clone();
+            parent.outputs[0].value = 10_000 - parent_fee;
+            parent.outputs[0].script_pubkey = prevout.clone();
+            let mut child = legacy_empty_script();
+            child.inputs[0].prevout = OutPoint {
+                hash: blvm_protocol::block::calculate_tx_id(&parent),
+                index: 0,
+            };
+            child.inputs[0].script_sig = script_sig.clone();
+            child.outputs[0].value = 0;
+            child.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            (parent, child)
+        };
+        let admit = |parent_fee: i64| {
+            let (parent, child) = pair(parent_fee);
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                10_000,
+            ))));
+            let parent_id = blvm_protocol::block::calculate_tx_id(&parent);
+            let child_id = blvm_protocol::block::calculate_tx_id(&child);
+            mempool
+                .add_package(vec![parent, child])
+                .unwrap();
+            (
+                mempool.get_transaction(&parent_id).is_some(),
+                mempool.get_transaction(&child_id).is_some(),
+            )
+        };
+        let (pays, pays_child) = admit(1_000);
+        let (zero, zero_child) = admit(0);
+        let lone = {
+            let (parent, _) = pair(0);
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout,
+                10_000,
+            ))));
+            mempool.add_transaction(parent).unwrap()
+        };
+        eprintln!(
+            "parent fee 1000 admitted={pays}; its child admitted={pays_child}; parent fee 0 admitted={zero}; its child admitted={zero_child}; alone admitted={lone}"
+        );
+        assert!(pays);
+        assert!(pays_child);
+        assert!(zero);
+        assert!(zero_child);
+        assert!(!lone);
+    }
+
+    #[test]
+    fn zero_fee_parent_may_have_one_dust_output() {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let admit = |value: i64, change: i64| {
+            let mut parent = legacy_empty_script();
+            parent.inputs[0].script_sig = script_sig.clone();
+            parent.outputs[0].value = value;
+            parent.outputs[0].script_pubkey = prevout.clone();
+            parent.outputs.push(TransactionOutput {
+                value: change,
+                script_pubkey: vec![0x6a, 0x03, 0x00, 0x00, 0x00],
+            });
+            let mut child = legacy_empty_script();
+            child.inputs[0].prevout = OutPoint {
+                hash: blvm_protocol::block::calculate_tx_id(&parent),
+                index: 0,
+            };
+            child.inputs[0].script_sig = script_sig.clone();
+            child.outputs[0].value = 0;
+            child.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                10_000,
+            ))));
+            mempool.add_package(vec![parent, child]).unwrap()
+        };
+        let at_floor = admit(540, 9_460);
+        let under = admit(539, 9_461);
+        let paid = admit(539, 9_460);
+        eprintln!("output 540 admitted={at_floor}; output 539 admitted={under}; paid dust admitted={paid}");
+        assert!(at_floor);
+        assert!(under);
+        assert!(!paid);
+    }
+
+    #[test]
+    fn a_rejected_child_does_not_leave_its_parent() {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let keeps_parent = |parent_fee: i64, child_sig: Vec<u8>| {
+            let mut parent = legacy_empty_script();
+            parent.inputs[0].script_sig = script_sig.clone();
+            parent.outputs[0].value = 10_000 - parent_fee;
+            parent.outputs[0].script_pubkey = prevout.clone();
+            let mut child = legacy_empty_script();
+            child.inputs[0].prevout = OutPoint {
+                hash: blvm_protocol::block::calculate_tx_id(&parent),
+                index: 0,
+            };
+            child.inputs[0].script_sig = child_sig;
+            child.outputs[0].value = 0;
+            child.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let parent_id = blvm_protocol::block::calculate_tx_id(&parent);
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                10_000,
+            ))));
+            let _ = mempool.add_package(vec![parent, child]);
+            mempool.get_transaction(&parent_id).is_some()
+        };
+        let valid = keeps_parent(0, script_sig.clone());
+        let rejected = keeps_parent(0, vec![0x01, 0x00]);
+        let paying = keeps_parent(1_000, script_sig.clone());
+        let paying_rejected = keeps_parent(1_000, vec![0x01, 0x00]);
+        eprintln!("valid child keeps parent={valid}; rejected child keeps parent={rejected}; paying parent with valid child={paying}; paying parent with rejected child={paying_rejected}");
+        assert!(valid);
+        assert!(!rejected);
+        assert!(paying);
+        assert!(paying_rejected);
+    }
+
+    #[test]
+    fn a_rejected_sibling_does_not_leave_the_paying_child() {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let keeps = |sibling_sig: Vec<u8>| {
+            let mut parent = legacy_empty_script();
+            parent.inputs[0].script_sig = script_sig.clone();
+            parent.outputs[0].value = 10_000;
+            parent.outputs[0].script_pubkey = prevout.clone();
+            parent.outputs.push(TransactionOutput {
+                value: 10_000,
+                script_pubkey: prevout.clone(),
+            });
+            let parent_id = blvm_protocol::block::calculate_tx_id(&parent);
+            let mut child = legacy_empty_script();
+            child.inputs[0].prevout = OutPoint {
+                hash: parent_id,
+                index: 0,
+            };
+            child.inputs[0].script_sig = script_sig.clone();
+            child.outputs[0].value = 0;
+            child.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let child_id = blvm_protocol::block::calculate_tx_id(&child);
+            let mut sibling = legacy_empty_script();
+            sibling.inputs[0].prevout = OutPoint {
+                hash: parent_id,
+                index: 1,
+            };
+            sibling.inputs[0].script_sig = sibling_sig;
+            sibling.outputs[0].value = 0;
+            sibling.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                20_000,
+            ))));
+            let _ = mempool.add_package(vec![parent, child, sibling]);
+            (
+                mempool.get_transaction(&parent_id).is_some(),
+                mempool.get_transaction(&child_id).is_some(),
+            )
+        };
+        let valid = keeps(script_sig.clone());
+        let rejected = keeps(vec![0x01, 0x00]);
+        eprintln!(
+            "valid sibling parent={} child={}; rejected sibling parent={} child={}",
+            valid.0, valid.1, rejected.0, rejected.1
+        );
+        assert!(valid.0 && valid.1);
+        assert!(!rejected.0 && !rejected.1);
+    }
+
+    #[test]
+    fn a_grandchild_does_not_carry_a_zero_fee_grandparent() {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let keeps_grandparent = |grand_out: i64| {
+            let mut grand = legacy_empty_script();
+            grand.inputs[0].script_sig = script_sig.clone();
+            grand.outputs[0].value = grand_out;
+            grand.outputs[0].script_pubkey = prevout.clone();
+            let grand_id = blvm_protocol::block::calculate_tx_id(&grand);
+            let mut parent = legacy_empty_script();
+            parent.inputs[0].prevout = OutPoint {
+                hash: grand_id,
+                index: 0,
+            };
+            parent.inputs[0].script_sig = script_sig.clone();
+            parent.outputs[0].value = 5_000;
+            parent.outputs[0].script_pubkey = prevout.clone();
+            let parent_id = blvm_protocol::block::calculate_tx_id(&parent);
+            let mut child = legacy_empty_script();
+            child.inputs[0].prevout = OutPoint {
+                hash: parent_id,
+                index: 0,
+            };
+            child.inputs[0].script_sig = script_sig.clone();
+            child.outputs[0].value = 0;
+            child.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                10_000,
+            ))));
+            let _ = mempool.add_package(vec![grand, parent, child]);
+            mempool.get_transaction(&grand_id).is_some()
+        };
+        let paying = keeps_grandparent(9_000);
+        let carried = keeps_grandparent(10_000);
+        eprintln!("paying grandparent={paying}; zero-fee grandparent={carried}");
+        assert!(paying);
+        assert!(!carried);
+    }
+
+    #[test]
+    fn two_parents_are_priced_once() {
+        use std::sync::Arc;
+
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let mut left = legacy_empty_script();
+        left.inputs[0].script_sig = script_sig.clone();
+        left.outputs[0].value = 50_000;
+        left.outputs[0].script_pubkey = prevout.clone();
+        let mut right = legacy_empty_script();
+        right.inputs[0].prevout.hash = [2u8; 32];
+        right.inputs[0].script_sig = script_sig.clone();
+        right.outputs[0].value = 50_000;
+        right.outputs[0].script_pubkey = prevout.clone();
+        let left_id = blvm_protocol::block::calculate_tx_id(&left);
+        let right_id = blvm_protocol::block::calculate_tx_id(&right);
+        let mut child = legacy_empty_script();
+        child.inputs[0].prevout = OutPoint {
+            hash: left_id,
+            index: 0,
+        };
+        child.inputs[0].script_sig = script_sig.clone();
+        child.inputs.push(TransactionInput {
+            prevout: OutPoint {
+                hash: right_id,
+                index: 0,
+            },
+            script_sig: script_sig,
+            sequence: 0xffffffff,
+        });
+        child.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+        let mut measure = blvm_protocol::UtxoSet::default();
+        let coin = |value: i64| {
+            Arc::new(blvm_protocol::UTXO {
+                value,
+                script_pubkey: prevout.clone().into(),
+                height: 0,
+                is_coinbase: false,
+            })
+        };
+        measure.insert(left.inputs[0].prevout, coin(50_000));
+        measure.insert(right.inputs[0].prevout, coin(50_000));
+        measure.insert(OutPoint { hash: left_id, index: 0 }, coin(50_000));
+        measure.insert(OutPoint { hash: right_id, index: 0 }, coin(50_000));
+        let meter = MempoolManager::new();
+        meter.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+        let left_vsize = meter.admit_vsize(&left, None, &measure).0;
+        let right_vsize = meter.admit_vsize(&right, None, &measure).0;
+        let child_vsize = meter.admit_vsize(&child, None, &measure).0;
+        let package_vsize = left_vsize + right_vsize + child_vsize;
+        let package_fee = (100u128 * package_vsize as u128).div_ceil(1000) as i64;
+        let keeps = |fee: i64| {
+            let mut child = child.clone();
+            child.outputs[0].value = 100_000 - fee;
+            let mut funded = blvm_protocol::UtxoSet::default();
+            funded.insert(left.inputs[0].prevout, coin(50_000));
+            funded.insert(right.inputs[0].prevout, coin(50_000));
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded)));
+            let _ = mempool.add_package(vec![left.clone(), right.clone(), child]);
+            (
+                mempool.get_transaction(&left_id).is_some(),
+                mempool.get_transaction(&right_id).is_some(),
+            )
+        };
+        let covered = keeps(package_fee);
+        let short = keeps(package_fee - 1);
+        eprintln!(
+            "vsize package={package_vsize}; fee {package_fee} parents={} {}; fee {} parents={} {}",
+            covered.0,
+            covered.1,
+            package_fee - 1,
+            short.0,
+            short.1
+        );
+        assert!(covered.0 && covered.1);
+        assert!(!short.0 && !short.1);
+    }
+
+    #[test]
+    fn a_parent_may_carry_a_child_under_the_relay_floor() {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let keeps_child = |child_fee: i64| {
+            let mut parent = legacy_empty_script();
+            parent.inputs[0].script_sig = script_sig.clone();
+            parent.outputs[0].value = 10_000;
+            parent.outputs[0].script_pubkey = prevout.clone();
+            let parent_id = blvm_protocol::block::calculate_tx_id(&parent);
+            let mut child = legacy_empty_script();
+            child.inputs[0].prevout = OutPoint {
+                hash: parent_id,
+                index: 0,
+            };
+            child.inputs[0].script_sig = script_sig.clone();
+            child.outputs[0].value = 10_000 - child_fee;
+            child.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let child_id = blvm_protocol::block::calculate_tx_id(&child);
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                50_000,
+            ))));
+            let _ = mempool.add_package(vec![parent, child]);
+            mempool.get_transaction(&child_id).is_some()
+        };
+        let paying = keeps_child(100);
+        let carried = keeps_child(0);
+        eprintln!("child fee 100 admitted={paying}; child fee 0 admitted={carried}");
+        assert!(paying);
+        assert!(carried);
+    }
+
+    #[test]
+    fn nonwitness_size_below_65_is_not_relayed() {
+        use blvm_protocol::segwit::Witness;
+        use sha2::{Digest, Sha256};
+
+        const OP_0: u8 = 0x00;
+        const OP_1: u8 = 0x51;
+        let script = vec![OP_1];
+        let program: [u8; 32] = Sha256::digest(&script).into();
+        let mut prevout = vec![OP_0, 0x20];
+        prevout.extend_from_slice(&program);
+        let admit = |payload: usize| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 0;
+            let mut out = vec![0x6a, payload as u8];
+            out.extend(std::iter::repeat(0u8).take(payload));
+            tx.outputs[0].script_pubkey = out;
+            let size = blvm_protocol::wire::serialize_tx(&tx).unwrap().len();
+            let witness: Vec<Witness> = vec![vec![script.clone()]];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                100_000,
+            ))));
+            let admitted = mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap();
+            (size, admitted)
+        };
+        let (at_limit_size, at_limit) = admit(3);
+        let (under_size, under) = admit(2);
+        eprintln!(
+            "nonwitness {at_limit_size} admitted={at_limit}; nonwitness {under_size} admitted={under}"
+        );
+        assert_eq!(at_limit_size, 65);
+        assert_eq!(under_size, 64);
+        assert!(at_limit);
+        assert!(!under);
+    }
+
+    #[test]
+    fn taproot_annex_is_not_standard() {
+        use blvm_consensus::secp256k1_backend::taproot_output_key_with_parity;
+        use blvm_consensus::taproot::{TAPROOT_LEAF_VERSION_TAPSCRIPT, compute_script_merkle_root};
+        use blvm_protocol::segwit::Witness;
+
+        let tapscript = vec![0x51u8];
+        let internal = [
+            0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
+            0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
+            0x16, 0xf8, 0x17, 0x98,
+        ];
+        let root =
+            compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT).unwrap();
+        let (output_key, parity) = taproot_output_key_with_parity(&internal, &root).unwrap();
+        let mut prevout = vec![0x51, 0x20];
+        prevout.extend_from_slice(&output_key);
+        let mut control = vec![TAPROOT_LEAF_VERSION_TAPSCRIPT | parity];
+        control.extend_from_slice(&internal);
+        let admit = |annex: bool| {
+            let mut stack = vec![tapscript.clone(), control.clone()];
+            if annex {
+                stack.push(vec![0x50]);
+            }
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let witness: Vec<Witness> = vec![stack];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let plain = admit(false);
+        let with_annex = admit(true);
+        eprintln!("taproot script path admitted={plain}; annex admitted={with_annex}");
+        assert!(plain);
+        assert!(!with_annex);
+    }
+
+    #[test]
+    fn tapscript_item_of_81_bytes_is_not_standard() {
+        use blvm_consensus::secp256k1_backend::taproot_output_key_with_parity;
+        use blvm_consensus::taproot::{TAPROOT_LEAF_VERSION_TAPSCRIPT, compute_script_merkle_root};
+        use blvm_protocol::segwit::Witness;
+
+        let tapscript = vec![0x75u8, 0x51];
+        let internal = [
+            0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
+            0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
+            0x16, 0xf8, 0x17, 0x98,
+        ];
+        let root =
+            compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT).unwrap();
+        let (output_key, parity) = taproot_output_key_with_parity(&internal, &root).unwrap();
+        let mut prevout = vec![0x51, 0x20];
+        prevout.extend_from_slice(&output_key);
+        let mut control = vec![TAPROOT_LEAF_VERSION_TAPSCRIPT | parity];
+        control.extend_from_slice(&internal);
+        let admit = |item_len: usize| {
+            let stack = vec![vec![0u8; item_len], tapscript.clone(), control.clone()];
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let witness: Vec<Witness> = vec![stack];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let eighty = admit(80);
+        let eighty_one = admit(81);
+        eprintln!(
+            "80-byte tapscript item admitted={eighty}; 81-byte tapscript item admitted={eighty_one}"
+        );
+        assert!(eighty);
+        assert!(!eighty_one);
+    }
+
+    #[test]
+    fn non_empty_failed_signature_is_not_standard() {
+        use blvm_protocol::segwit::Witness;
+        use sha2::{Digest, Sha256};
+
+        const OP_0: u8 = 0x00;
+        let script = vec![0xac, 0x75, 0x51];
+        let program: [u8; 32] = Sha256::digest(&script).into();
+        let mut prevout = vec![OP_0, 0x20];
+        prevout.extend_from_slice(&program);
+        let pubkey = {
+            let mut key = vec![0x02];
+            key.extend_from_slice(&[
+                0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
+                0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
+                0x16, 0xf8, 0x17, 0x98,
+            ]);
+            key
+        };
+        let admit = |sig: Vec<u8>| {
+            let stack = vec![sig, pubkey.clone(), script.clone()];
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let witness: Vec<Witness> = vec![stack];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let empty = admit(Vec::new());
+        let bad = admit(vec![0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01, 0x01]);
+        eprintln!("empty signature admitted={empty}; non-empty failure admitted={bad}");
+        assert!(empty);
+        assert!(!bad);
+    }
+
+    #[test]
+    fn high_s_signature_is_not_standard() {
+        use blvm_protocol::segwit::Witness;
+        use blvm_secp256k1::ecdsa::{
+            ecdsa_sign_compact_rfc6979, ge_to_compressed, pubkey_from_secret,
+        };
+        use blvm_secp256k1::scalar::Scalar;
+        use sha2::{Digest, Sha256};
+
+        fn der_int(value: &[u8]) -> Vec<u8> {
+            let mut start = 0;
+            while start + 1 < value.len() && value[start] == 0 {
+                start += 1;
+            }
+            let mut body = value[start..].to_vec();
+            if body.first().is_some_and(|byte| byte & 0x80 != 0) {
+                body.insert(0, 0x00);
+            }
+            let mut out = vec![0x02, body.len() as u8];
+            out.extend(body);
+            out
+        }
+        fn der_sig(compact: &[u8; 64]) -> Vec<u8> {
+            let mut body = der_int(&compact[..32]);
+            body.extend(der_int(&compact[32..]));
+            let mut out = vec![0x30, body.len() as u8];
+            out.extend(body);
+            out.push(0x01);
+            out
+        }
+        fn negate_scalar(value: &[u8]) -> [u8; 32] {
+            const ORDER: [u8; 32] = [
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                0xFF, 0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C,
+                0xD0, 0x36, 0x41, 0x41,
+            ];
+            let mut out = [0u8; 32];
+            let mut borrow = 0i16;
+            for i in (0..32).rev() {
+                let diff = ORDER[i] as i16 - value[i] as i16 - borrow;
+                if diff < 0 {
+                    out[i] = (diff + 256) as u8;
+                    borrow = 1;
+                } else {
+                    out[i] = diff as u8;
+                    borrow = 0;
+                }
+            }
+            out
+        }
+
+        let script = vec![0xac];
+        let program: [u8; 32] = Sha256::digest(&script).into();
+        let mut prevout_script = vec![0x00, 0x20];
+        prevout_script.extend_from_slice(&program);
+        let mut tx = legacy_empty_script();
+        tx.inputs[0].script_sig = Vec::new();
+        tx.outputs[0].value = 0;
+        tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+        let sighash = blvm_consensus::transaction_hash::calculate_bip143_sighash(
+            &tx, 0, &script, 100_000, 0x01, None,
+        )
+        .unwrap();
+        let seckey = [0x22u8; 32];
+        let low = ecdsa_sign_compact_rfc6979(&sighash, &seckey).unwrap();
+        let mut high = low;
+        high[32..].copy_from_slice(&negate_scalar(&low[32..]));
+        let mut secret = Scalar::zero();
+        assert!(!secret.set_b32(&seckey));
+        let pubkey = ge_to_compressed(&pubkey_from_secret(&secret)).to_vec();
+        let admit = |sig: Vec<u8>| {
+            let stack = vec![sig, pubkey.clone(), script.clone()];
+            let witness: Vec<Witness> = vec![stack];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout_script.clone(),
+                100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx.clone(), Some(witness))
+                .unwrap()
+        };
+        let low_admitted = admit(der_sig(&low));
+        let high_admitted = admit(der_sig(&high));
+        eprintln!("low s admitted={low_admitted}; high s admitted={high_admitted}");
+        assert!(low_admitted);
+        assert!(!high_admitted);
+    }
+
+    #[test]
+    fn uncompressed_witness_pubkey_is_not_standard() {
+        use blvm_protocol::segwit::Witness;
+        use blvm_secp256k1::ecdsa::{
+            ecdsa_sign_compact_rfc6979, ge_to_compressed, ge_to_uncompressed, pubkey_from_secret,
+        };
+        use blvm_secp256k1::scalar::Scalar;
+        use sha2::{Digest, Sha256};
+
+        fn der_int(value: &[u8]) -> Vec<u8> {
+            let mut start = 0;
+            while start + 1 < value.len() && value[start] == 0 {
+                start += 1;
+            }
+            let mut body = value[start..].to_vec();
+            if body.first().is_some_and(|byte| byte & 0x80 != 0) {
+                body.insert(0, 0x00);
+            }
+            let mut out = vec![0x02, body.len() as u8];
+            out.extend(body);
+            out
+        }
+        fn der_sig(compact: &[u8; 64]) -> Vec<u8> {
+            let mut body = der_int(&compact[..32]);
+            body.extend(der_int(&compact[32..]));
+            let mut out = vec![0x30, body.len() as u8];
+            out.extend(body);
+            out.push(0x01);
+            out
+        }
+
+        let script = vec![0xac];
+        let program: [u8; 32] = Sha256::digest(&script).into();
+        let mut prevout_script = vec![0x00, 0x20];
+        prevout_script.extend_from_slice(&program);
+        let mut tx = legacy_empty_script();
+        tx.inputs[0].script_sig = Vec::new();
+        tx.outputs[0].value = 0;
+        tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+        let sighash = blvm_consensus::transaction_hash::calculate_bip143_sighash(
+            &tx, 0, &script, 100_000, 0x01, None,
+        )
+        .unwrap();
+        let seckey = [0x22u8; 32];
+        let compact = ecdsa_sign_compact_rfc6979(&sighash, &seckey).unwrap();
+        let sig = der_sig(&compact);
+        let mut secret = Scalar::zero();
+        assert!(!secret.set_b32(&seckey));
+        let point = pubkey_from_secret(&secret);
+        let compressed = ge_to_compressed(&point).to_vec();
+        let uncompressed = ge_to_uncompressed(&point).to_vec();
+        let admit = |pubkey: Vec<u8>| {
+            let stack = vec![sig.clone(), pubkey, script.clone()];
+            let witness: Vec<Witness> = vec![stack];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout_script.clone(),
+                100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx.clone(), Some(witness))
+                .unwrap()
+        };
+        let compressed_admitted = admit(compressed);
+        let uncompressed_admitted = admit(uncompressed);
+        eprintln!(
+            "compressed pubkey admitted={compressed_admitted}; uncompressed pubkey admitted={uncompressed_admitted}"
+        );
+        assert!(compressed_admitted);
+        assert!(!uncompressed_admitted);
+    }
+
+    #[test]
+    fn tapscript_op_success_is_not_standard() {
+        use blvm_consensus::secp256k1_backend::taproot_output_key_with_parity;
+        use blvm_consensus::taproot::{TAPROOT_LEAF_VERSION_TAPSCRIPT, compute_script_merkle_root};
+        use blvm_protocol::segwit::Witness;
+
+        let internal = [
+            0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
+            0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
+            0x16, 0xf8, 0x17, 0x98,
+        ];
+        let admit = |tapscript: Vec<u8>| {
+            let root =
+                compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT).unwrap();
+            let (output_key, parity) = taproot_output_key_with_parity(&internal, &root).unwrap();
+            let mut prevout = vec![0x51, 0x20];
+            prevout.extend_from_slice(&output_key);
+            let mut control = vec![TAPROOT_LEAF_VERSION_TAPSCRIPT | parity];
+            control.extend_from_slice(&internal);
+            let stack = vec![tapscript, control];
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let witness: Vec<Witness> = vec![stack];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout,
+                100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let plain = admit(vec![0x51]);
+        let success = admit(vec![0xbb]);
+        eprintln!("op_1 tapscript admitted={plain}; op_success admitted={success}");
+        assert!(plain);
+        assert!(!success);
+    }
+
+    #[test]
+    fn unknown_taproot_leaf_is_not_standard() {
+        use blvm_consensus::secp256k1_backend::taproot_output_key_with_parity;
+        use blvm_consensus::taproot::compute_script_merkle_root;
+        use blvm_protocol::segwit::Witness;
+
+        let script = vec![0x51u8];
+        let internal = [
+            0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
+            0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
+            0x16, 0xf8, 0x17, 0x98,
+        ];
+        let admit = |leaf_version: u8| {
+            let root = compute_script_merkle_root(&script, &[], leaf_version).unwrap();
+            let (output_key, parity) = taproot_output_key_with_parity(&internal, &root).unwrap();
+            let mut prevout = vec![0x51, 0x20];
+            prevout.extend_from_slice(&output_key);
+            let mut control = vec![leaf_version | parity];
+            control.extend_from_slice(&internal);
+            let stack = vec![script.clone(), control];
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let witness: Vec<Witness> = vec![stack];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout,
+                100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let tapscript = admit(0xc0);
+        let unknown = admit(0xc2);
+        eprintln!("tapscript leaf admitted={tapscript}; unknown leaf admitted={unknown}");
+        assert!(tapscript);
+        assert!(!unknown);
+    }
+
+    #[test]
+    fn witness_inscription_is_rejected_when_spam_filter_is_on() {
+        use blvm_protocol::segwit::Witness;
+        use sha2::{Digest, Sha256};
+
+        const OP_0: u8 = 0x00;
+        const OP_1: u8 = 0x51;
+        const OP_IF: u8 = 0x63;
+        const OP_ENDIF: u8 = 0x68;
+
+        let admit = |script: Vec<u8>| {
+            let program: [u8; 32] = Sha256::digest(&script).into();
+            let mut prevout = vec![OP_0, 0x20];
+            prevout.extend_from_slice(&program);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 1_000;
+            tx.outputs[0].script_pubkey = {
+                let mut pay = vec![OP_0, 0x14];
+                pay.extend_from_slice(&[0x11; 20]);
+                pay
+            };
+            let witness: Vec<Witness> = vec![vec![script]];
+            let mut policy = crate::config::MempoolPolicyConfig::default();
+            policy.reject_spam_in_mempool = true;
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(policy));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let plain = admit(vec![OP_1]);
+        let envelope = admit(vec![OP_0, OP_IF, OP_ENDIF, OP_1]);
+        eprintln!("plain p2wsh admitted={plain}; inscription envelope admitted={envelope}");
+        assert!(plain);
+        assert!(!envelope);
+    }
+
+    #[test]
+    fn upgradable_nop_is_not_standard() {
+        use blvm_protocol::segwit::Witness;
+        use sha2::{Digest, Sha256};
+
+        const OP_0: u8 = 0x00;
+        const OP_1: u8 = 0x51;
+        const OP_NOP: u8 = 0x61;
+        const OP_NOP1: u8 = 0xb0;
+        let admit = |opcode: u8| {
+            let script = vec![opcode, OP_1];
+            let program: [u8; 32] = Sha256::digest(&script).into();
+            let mut prevout = vec![OP_0, 0x20];
+            prevout.extend_from_slice(&program);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let witness: Vec<Witness> = vec![vec![script]];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let nop = admit(OP_NOP);
+        let nop1 = admit(OP_NOP1);
+        eprintln!("op_nop admitted={nop}; op_nop1 admitted={nop1}");
+        assert!(nop);
+        assert!(!nop1);
+    }
+
+    #[test]
+    fn nonminimal_witness_if_is_not_standard() {
+        use blvm_protocol::segwit::Witness;
+        use sha2::{Digest, Sha256};
+
+        const OP_0: u8 = 0x00;
+        const OP_1: u8 = 0x51;
+        const OP_IF: u8 = 0x63;
+        const OP_ELSE: u8 = 0x67;
+        const OP_ENDIF: u8 = 0x68;
+        let script = vec![OP_IF, OP_1, OP_ELSE, OP_0, OP_ENDIF];
+        let program: [u8; 32] = Sha256::digest(&script).into();
+        let mut prevout = vec![OP_0, 0x20];
+        prevout.extend_from_slice(&program);
+        let admit = |condition: u8| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let witness: Vec<Witness> = vec![vec![vec![condition], script.clone()]];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let minimal = admit(0x01);
+        let nonminimal = admit(0x02);
+        eprintln!("minimal if admitted={minimal}; nonminimal if admitted={nonminimal}");
+        assert!(minimal);
+        assert!(!nonminimal);
+    }
+
+    #[test]
+    fn p2sh_extra_stack_item_is_not_standard() {
+        use blvm_protocol::opcodes::{OP_EQUAL, OP_HASH160};
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        fn hash160(data: &[u8]) -> [u8; 20] {
+            Ripemd160::digest(Sha256::digest(data)).into()
+        }
+
+        let redeem = vec![0x51];
+        let hash = hash160(&redeem);
+        let mut prevout = vec![OP_HASH160, 0x14];
+        prevout.extend_from_slice(&hash);
+        prevout.push(OP_EQUAL);
+        let admit = |script_sig: Vec<u8>| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let clean = admit(vec![0x01, 0x51]);
+        let extra = admit(vec![0x00, 0x01, 0x51]);
+        eprintln!("clean p2sh admitted={clean}; extra stack item admitted={extra}");
+        assert!(clean);
+        assert!(!extra);
+    }
+
+    #[test]
+    fn nonstandard_prevout_spend_is_not_standard() {
+        use blvm_protocol::opcodes::{OP_EQUAL, OP_HASH160};
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let redeem = vec![0x51];
+        let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+        let mut p2sh = vec![OP_HASH160, 0x14];
+        p2sh.extend_from_slice(&hash);
+        p2sh.push(OP_EQUAL);
+        let script_sig = vec![0x01, 0x51];
+        let admit = |prevout: Vec<u8>| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig.clone();
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let standard = admit(p2sh);
+        let bare = admit(vec![0x75, 0x51]);
+        eprintln!("p2sh op_1 admitted={standard}; bare drop op_1 admitted={bare}");
+        assert!(standard);
+        assert!(!bare);
+    }
+
+    #[test]
+    fn signature_inside_script_code_is_not_standard() {
+        use std::sync::Arc;
+
+        use blvm_secp256k1::ecdsa::{
+            ecdsa_sign_compact_rfc6979, ge_to_compressed, pubkey_from_secret,
+        };
+        use blvm_secp256k1::scalar::Scalar;
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        fn der_int(value: &[u8]) -> Vec<u8> {
+            let mut start = 0;
+            while start + 1 < value.len() && value[start] == 0 {
+                start += 1;
+            }
+            let mut body = value[start..].to_vec();
+            if body.first().is_some_and(|byte| byte & 0x80 != 0) {
+                body.insert(0, 0x00);
+            }
+            let mut out = vec![0x02, body.len() as u8];
+            out.extend(body);
+            out
+        }
+        fn der_sig(compact: &[u8; 64]) -> Vec<u8> {
+            let mut body = der_int(&compact[..32]);
+            body.extend(der_int(&compact[32..]));
+            let mut out = vec![0x30, body.len() as u8];
+            out.extend(body);
+            out.push(0x03);
+            out
+        }
+        fn push(data: &[u8]) -> Vec<u8> {
+            let mut out = if data.len() < 76 {
+                vec![data.len() as u8]
+            } else {
+                vec![0x4c, data.len() as u8]
+            };
+            out.extend_from_slice(data);
+            out
+        }
+        fn p2sh(redeem: &[u8]) -> Vec<u8> {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(redeem)).into();
+            let mut script = vec![0xa9, 0x14];
+            script.extend_from_slice(&hash);
+            script.push(0x87);
+            script
+        }
+
+        let mut digest = [0u8; 32];
+        digest[0] = 1;
+        let seckey = [0x22u8; 32];
+        let compact = ecdsa_sign_compact_rfc6979(&digest, &seckey).unwrap();
+        let sig = der_sig(&compact);
+        let mut secret = Scalar::zero();
+        assert!(!secret.set_b32(&seckey));
+        let pubkey = ge_to_compressed(&pubkey_from_secret(&secret)).to_vec();
+        let admit = |redeem: Vec<u8>| {
+            let mut script_sig = push(&sig);
+            script_sig.extend(push(&pubkey));
+            script_sig.extend(push(&redeem));
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = vec![0x01, 0x51];
+            tx.inputs.push(TransactionInput {
+                prevout: OutPoint {
+                    hash: [2u8; 32],
+                    index: 0,
+                },
+                script_sig,
+                sequence: 0xffff_ffff,
+            });
+            tx.outputs[0].value = 50_000;
+            tx.outputs[0].script_pubkey = {
+                let mut script = vec![0x00, 0x14];
+                script.extend_from_slice(&[0x22; 20]);
+                script
+            };
+            let mut utxo = funded(p2sh(&[0x51]), 100_000);
+            utxo.insert(
+                tx.inputs[1].prevout,
+                Arc::new(blvm_protocol::UTXO {
+                    value: 100_000,
+                    script_pubkey: p2sh(&redeem).into(),
+                    height: 0,
+                    is_coinbase: false,
+                }),
+            );
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(utxo)));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let clean = admit(vec![0xac]);
+        let mut embedded_redeem = push(&sig);
+        embedded_redeem.extend_from_slice(&[0x75, 0xac]);
+        let embedded = admit(embedded_redeem);
+        eprintln!("clean checksig admitted={clean}; signature in script admitted={embedded}");
+        assert!(clean);
+        assert!(!embedded);
+    }
+
+    #[test]
+    fn signature_inside_multisig_script_code_is_not_standard() {
+        use std::sync::Arc;
+
+        use blvm_secp256k1::ecdsa::{
+            ecdsa_sign_compact_rfc6979, ge_to_compressed, pubkey_from_secret,
+        };
+        use blvm_secp256k1::scalar::Scalar;
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        fn der_int(value: &[u8]) -> Vec<u8> {
+            let mut start = 0;
+            while start + 1 < value.len() && value[start] == 0 {
+                start += 1;
+            }
+            let mut body = value[start..].to_vec();
+            if body.first().is_some_and(|byte| byte & 0x80 != 0) {
+                body.insert(0, 0x00);
+            }
+            let mut out = vec![0x02, body.len() as u8];
+            out.extend(body);
+            out
+        }
+        fn der_sig(compact: &[u8; 64]) -> Vec<u8> {
+            let mut body = der_int(&compact[..32]);
+            body.extend(der_int(&compact[32..]));
+            let mut out = vec![0x30, body.len() as u8];
+            out.extend(body);
+            out.push(0x03);
+            out
+        }
+        fn push(data: &[u8]) -> Vec<u8> {
+            let mut out = if data.len() < 76 {
+                vec![data.len() as u8]
+            } else {
+                vec![0x4c, data.len() as u8]
+            };
+            out.extend_from_slice(data);
+            out
+        }
+        fn p2sh(redeem: &[u8]) -> Vec<u8> {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(redeem)).into();
+            let mut script = vec![0xa9, 0x14];
+            script.extend_from_slice(&hash);
+            script.push(0x87);
+            script
+        }
+
+        let mut digest = [0u8; 32];
+        digest[0] = 1;
+        let seckey = [0x22u8; 32];
+        let compact = ecdsa_sign_compact_rfc6979(&digest, &seckey).unwrap();
+        let sig = der_sig(&compact);
+        let mut secret = Scalar::zero();
+        assert!(!secret.set_b32(&seckey));
+        let pubkey = ge_to_compressed(&pubkey_from_secret(&secret)).to_vec();
+        let mut multisig = vec![0x51, 0x21];
+        multisig.extend_from_slice(&pubkey);
+        multisig.extend_from_slice(&[0x51, 0xae]);
+        let admit = |redeem: Vec<u8>| {
+            let mut script_sig = vec![0x00];
+            script_sig.extend(push(&sig));
+            script_sig.extend(push(&redeem));
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = vec![0x01, 0x51];
+            tx.inputs.push(TransactionInput {
+                prevout: OutPoint {
+                    hash: [2u8; 32],
+                    index: 0,
+                },
+                script_sig,
+                sequence: 0xffff_ffff,
+            });
+            tx.outputs[0].value = 50_000;
+            tx.outputs[0].script_pubkey = {
+                let mut script = vec![0x00, 0x14];
+                script.extend_from_slice(&[0x22; 20]);
+                script
+            };
+            let mut utxo = funded(p2sh(&[0x51]), 100_000);
+            utxo.insert(
+                tx.inputs[1].prevout,
+                Arc::new(blvm_protocol::UTXO {
+                    value: 100_000,
+                    script_pubkey: p2sh(&redeem).into(),
+                    height: 0,
+                    is_coinbase: false,
+                }),
+            );
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(utxo)));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let clean = admit(multisig.clone());
+        let mut embedded_redeem = push(&sig);
+        embedded_redeem.push(0x75);
+        embedded_redeem.extend_from_slice(&multisig);
+        let embedded = admit(embedded_redeem);
+        eprintln!(
+            "clean multisig admitted={clean}; signature in multisig script admitted={embedded}"
+        );
+        assert!(clean);
+        assert!(!embedded);
     }
 
     #[test]
@@ -3994,7 +7388,7 @@ mod tests {
             let mut tx = legacy_empty_script();
             tx.inputs[0].script_sig = Vec::new();
             tx.outputs[0].value = 50_000;
-            tx.outputs[0].script_pubkey = vec![OP_1];
+            tx.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
             let mempool = MempoolManager::new();
             mempool.set_policy_config(Some(policy.clone()));
             mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
@@ -4006,6 +7400,500 @@ mod tests {
 
         assert!(admit(vec![OP_2, 0x02, 0x00, 0x01]));
         assert!(!admit(vec![OP_2, 0x02, 0x00, 0x00]));
+    }
+
+    #[test]
+    fn version_two_witness_output_is_a_standard_payment() {
+        let admit = |script: Vec<u8>| {
+            let (prevout, script_sig) = p2sh_of_op_1();
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 50_000;
+            tx.outputs[0].script_pubkey = script;
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let mut taproot = vec![0x51, 0x20];
+        taproot.extend_from_slice(&[0x11; 32]);
+        assert!(admit(taproot));
+        let mut program = vec![0x52, 0x20];
+        program.extend_from_slice(&[0x11; 32]);
+        assert!(admit(program));
+        assert!(!admit(vec![0x00, 0x02, 0x00, 0x01]));
+    }
+
+    #[test]
+    fn non_push_script_sig_is_not_standard() {
+        use blvm_protocol::opcodes::{OP_1, OP_EQUAL, OP_HASH160, OP_NOP};
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let redeem = vec![OP_1];
+        let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+        let mut p2sh = vec![OP_HASH160, 0x14];
+        p2sh.extend_from_slice(&hash);
+        p2sh.push(OP_EQUAL);
+        let admit = |script_sig: Vec<u8>, prevout: Vec<u8>, standard: bool| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 50_000;
+            tx.outputs[0].script_pubkey = {
+                let mut script = vec![0x00, 0x14];
+                script.extend_from_slice(&[0x22; 20]);
+                script
+            };
+            let mut policy = crate::config::MempoolPolicyConfig::default();
+            policy.require_standard = standard;
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(policy));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        assert!(admit(vec![0x01, OP_1], p2sh, true));
+        assert!(admit(vec![OP_NOP], vec![OP_1], false));
+        assert!(!admit(vec![OP_NOP], vec![OP_1], true));
+    }
+
+    #[test]
+    fn legacy_codeseparator_is_not_standard() {
+        use blvm_protocol::opcodes::{OP_EQUAL, OP_HASH160};
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let admit = |redeem: Vec<u8>| {
+            let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+            let mut prevout = vec![OP_HASH160, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(OP_EQUAL);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 50_000;
+            tx.outputs[0].script_pubkey = {
+                let mut script = vec![0x00, 0x14];
+                script.extend_from_slice(&[0x22; 20]);
+                script
+            };
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let plain = admit(vec![0x51]);
+        let codesep = admit(vec![0xab, 0x51]);
+        eprintln!("legacy op_1 admitted={plain}; legacy codeseparator admitted={codesep}");
+        assert!(plain);
+        assert!(!codesep);
+    }
+
+    #[test]
+    fn wrapped_undefined_witness_spend_is_not_standard() {
+        use blvm_protocol::opcodes::{OP_EQUAL, OP_HASH160};
+        use blvm_protocol::segwit::Witness;
+        use ripemd::{Digest as _, Ripemd160};
+        use sha2::{Digest, Sha256};
+
+        fn hash160(data: &[u8]) -> [u8; 20] {
+            Ripemd160::digest(Sha256::digest(data)).into()
+        }
+
+        let program: [u8; 32] = Sha256::digest([0x51u8]).into();
+        let admit = |version: u8| {
+            let mut redeem = vec![version, 0x20];
+            redeem.extend_from_slice(&program);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let hash = hash160(&redeem);
+            let mut prevout = vec![OP_HASH160, 0x14];
+            prevout.extend_from_slice(&hash);
+            prevout.push(OP_EQUAL);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let witness: Vec<Witness> = vec![vec![vec![0x51]]];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let wrapped_v0 = admit(0x00);
+        let wrapped_v2 = admit(0x52);
+        eprintln!("wrapped v0 admitted={wrapped_v0}; wrapped v2 admitted={wrapped_v2}");
+        assert!(wrapped_v0);
+        assert!(!wrapped_v2);
+    }
+
+    #[test]
+    fn unknown_tapscript_pubkey_is_not_standard() {
+        use blvm_consensus::secp256k1_backend::taproot_output_key_with_parity;
+        use blvm_consensus::taproot::{
+            TAPROOT_LEAF_VERSION_TAPSCRIPT, compute_script_merkle_root,
+            compute_tapscript_signature_hash,
+        };
+        use blvm_protocol::segwit::Witness;
+        use blvm_secp256k1::schnorr::{Keypair, schnorr_sign};
+
+        let seckey = [0x22u8; 32];
+        let keypair = Keypair::from_seckey(&seckey).unwrap();
+        let compressed_x = keypair.xonly_pubkey();
+        let mut unknown = compressed_x.to_vec();
+        unknown.push(0x02);
+        let internal = [
+            0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
+            0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
+            0x16, 0xf8, 0x17, 0x98,
+        ];
+        let script_for = |pubkey: &[u8]| {
+            let mut script = vec![pubkey.len() as u8];
+            script.extend_from_slice(pubkey);
+            script.push(0xac);
+            script
+        };
+        let known_script = script_for(&compressed_x);
+        let root = compute_script_merkle_root(
+            &known_script,
+            &[],
+            TAPROOT_LEAF_VERSION_TAPSCRIPT,
+        )
+        .unwrap();
+        let (output_key, _parity) = taproot_output_key_with_parity(&internal, &root).unwrap();
+        let mut known_prevout = vec![0x51, 0x20];
+        known_prevout.extend_from_slice(&output_key);
+        let mut tx = legacy_empty_script();
+        tx.inputs[0].script_sig = Vec::new();
+        tx.outputs[0].value = 0;
+        tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+        let sighash = compute_tapscript_signature_hash(
+            &tx,
+            0,
+            &[100_000],
+            &[known_prevout.as_slice()],
+            &known_script,
+            TAPROOT_LEAF_VERSION_TAPSCRIPT,
+            0xffff_ffff,
+            0x00,
+            None,
+        )
+        .unwrap();
+        let sig = schnorr_sign(&seckey, &sighash, &[0u8; 32]).unwrap();
+        let admit = |pubkey: &[u8]| {
+            let tapscript = script_for(pubkey);
+            let root =
+                compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT).unwrap();
+            let (output_key, parity) = taproot_output_key_with_parity(&internal, &root).unwrap();
+            let mut prevout = vec![0x51, 0x20];
+            prevout.extend_from_slice(&output_key);
+            let mut control = vec![TAPROOT_LEAF_VERSION_TAPSCRIPT | parity];
+            control.extend_from_slice(&internal);
+            let stack = vec![sig.to_vec(), tapscript, control];
+            let witness: Vec<Witness> = vec![stack];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout,
+                100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx.clone(), Some(witness))
+                .unwrap()
+        };
+        let known = admit(&compressed_x);
+        let unknown_admitted = admit(&unknown);
+        eprintln!("32-byte pubkey admitted={known}; 33-byte pubkey admitted={unknown_admitted}");
+        assert!(known);
+        assert!(!unknown_admitted);
+    }
+
+    #[test]
+    fn empty_signature_uncompressed_pubkey_is_not_standard() {
+        use blvm_protocol::segwit::Witness;
+        use sha2::{Digest, Sha256};
+
+        let script = vec![0xac, 0x75, 0x51];
+        let program: [u8; 32] = Sha256::digest(&script).into();
+        let mut prevout = vec![0x00, 0x20];
+        prevout.extend_from_slice(&program);
+        let compressed = {
+            let mut key = vec![0x02];
+            key.extend_from_slice(&[0x11; 32]);
+            key
+        };
+        let uncompressed = {
+            let mut key = vec![0x04];
+            key.extend_from_slice(&[0x11; 64]);
+            key
+        };
+        let admit = |pubkey: Vec<u8>| {
+            let stack = vec![Vec::new(), pubkey, script.clone()];
+            let witness: Vec<Witness> = vec![stack];
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = Vec::new();
+            tx.outputs[0].value = 0;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                100_000,
+            ))));
+            mempool
+                .add_transaction_with_witness(tx, Some(witness))
+                .unwrap()
+        };
+        let compressed_admitted = admit(compressed);
+        let uncompressed_admitted = admit(uncompressed);
+        eprintln!(
+            "empty sig compressed admitted={compressed_admitted}; empty sig uncompressed admitted={uncompressed_admitted}"
+        );
+        assert!(compressed_admitted);
+        assert!(!uncompressed_admitted);
+    }
+
+    #[test]
+    fn hybrid_pubkey_is_not_standard() {
+        use blvm_protocol::opcodes::{OP_EQUAL, OP_HASH160};
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let redeem = vec![0xac, 0x75, 0x51];
+        let hash: [u8; 20] = Ripemd160::digest(Sha256::digest(&redeem)).into();
+        let mut prevout = vec![OP_HASH160, 0x14];
+        prevout.extend_from_slice(&hash);
+        prevout.push(OP_EQUAL);
+        let admit = |header: u8| {
+            let mut pubkey = vec![header];
+            pubkey.extend_from_slice(&[0x11; 64]);
+            let mut script_sig = vec![0x00, pubkey.len() as u8];
+            script_sig.extend_from_slice(&pubkey);
+            script_sig.push(redeem.len() as u8);
+            script_sig.extend_from_slice(&redeem);
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 50_000;
+            tx.outputs[0].script_pubkey = {
+                let mut script = vec![0x00, 0x14];
+                script.extend_from_slice(&[0x22; 20]);
+                script
+            };
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let uncompressed = admit(0x04);
+        let hybrid = admit(0x06);
+        eprintln!("uncompressed pubkey admitted={uncompressed}; hybrid pubkey admitted={hybrid}");
+        assert!(uncompressed);
+        assert!(!hybrid);
+    }
+
+    #[test]
+    fn legacy_sigops_over_2500_are_not_standard() {
+        use std::sync::Arc;
+
+        fn sigop_script(checksigs: usize) -> Vec<u8> {
+            let mut script = vec![0x00, 0x63];
+            script.extend(std::iter::repeat(0xac).take(checksigs));
+            script.extend_from_slice(&[0x68, 0x51]);
+            script
+        }
+        fn hash160(data: &[u8]) -> [u8; 20] {
+            use ripemd::Digest as _;
+            use sha2::Digest;
+            ripemd::Ripemd160::digest(sha2::Sha256::digest(data)).into()
+        }
+
+        let admit = |tail: usize| {
+            // Each redeem stays at or under the 15-sigop P2SH cap. 166 * 15 + tail.
+            let mut counts = vec![15usize; 166];
+            counts.push(tail);
+            let mut utxo_set = blvm_protocol::UtxoSet::default();
+            let mut inputs = Vec::new();
+            for (i, count) in counts.iter().enumerate() {
+                let redeem = sigop_script(*count);
+                let hash = hash160(&redeem);
+                let mut prevout_script = vec![0xa9, 0x14];
+                prevout_script.extend_from_slice(&hash);
+                prevout_script.push(0x87);
+                let mut script_sig = vec![redeem.len() as u8];
+                script_sig.extend_from_slice(&redeem);
+                let hash_id = [i as u8 + 1; 32];
+                let prevout = OutPoint {
+                    hash: hash_id,
+                    index: 0,
+                };
+                utxo_set.insert(
+                    prevout,
+                    Arc::new(blvm_protocol::UTXO {
+                        value: 1_000,
+                        script_pubkey: prevout_script.into(),
+                        height: 0,
+                        is_coinbase: false,
+                    }),
+                );
+                inputs.push(TransactionInput {
+                    prevout,
+                    script_sig,
+                    sequence: 0xffff_ffff,
+                });
+            }
+            let tx = Transaction {
+                version: 1,
+                inputs: inputs.into(),
+                outputs: vec![TransactionOutput {
+                    value: 0,
+                    script_pubkey: vec![0x6a, 0x03, 0x00, 0x00, 0x00],
+                }]
+                .into(),
+                lock_time: 0,
+            };
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(utxo_set)));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let at_limit = admit(10);
+        let over = admit(11);
+        eprintln!("2500 legacy sigops admitted={at_limit}; 2501 legacy sigops admitted={over}");
+        assert!(at_limit);
+        assert!(!over);
+    }
+
+    #[test]
+    fn script_sig_over_1650_bytes_is_not_standard() {
+        use blvm_protocol::opcodes::OP_PUSHDATA2;
+
+        fn pushdata2(len: usize) -> Vec<u8> {
+            let mut out = vec![OP_PUSHDATA2, (len & 0xff) as u8, ((len >> 8) & 0xff) as u8];
+            out.extend(std::iter::repeat(0x11).take(len));
+            out
+        }
+        fn script_sig(total: usize) -> Vec<u8> {
+            let redeem = vec![0x75, 0x75, 0x75, 0x75, 0x51];
+            let mut script = Vec::new();
+            for _ in 0..3 {
+                script.extend(pushdata2(520));
+            }
+            let data_len = total - script.len() - 1 - 1 - redeem.len();
+            script.push(data_len as u8);
+            script.extend(std::iter::repeat(0x11).take(data_len));
+            script.push(redeem.len() as u8);
+            script.extend_from_slice(&redeem);
+            assert_eq!(script.len(), total);
+            script
+        }
+
+        let redeem = vec![0x75, 0x75, 0x75, 0x75, 0x51];
+        let hash: [u8; 20] = {
+            use ripemd::Digest as _;
+            use sha2::Digest;
+            ripemd::Ripemd160::digest(sha2::Sha256::digest(&redeem)).into()
+        };
+        let mut prevout = vec![0xa9, 0x14];
+        prevout.extend_from_slice(&hash);
+        prevout.push(0x87);
+        let admit = |script_sig: Vec<u8>, standard: bool| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 50_000;
+            tx.outputs[0].script_pubkey = {
+                let mut script = vec![0x00, 0x14];
+                script.extend_from_slice(&[0x22; 20]);
+                script
+            };
+            let mut policy = crate::config::MempoolPolicyConfig::default();
+            policy.require_standard = standard;
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(policy));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        assert!(admit(script_sig(1_650), true));
+        assert!(admit(script_sig(1_651), false));
+        assert!(!admit(script_sig(1_651), true));
+    }
+
+    #[test]
+    fn bare_one_of_one_is_a_standard_output() {
+        use blvm_protocol::opcodes::{OP_1, OP_4, OP_CHECKMULTISIG, PUSH_33_BYTES};
+
+        let key = [0x02u8; 33];
+        let admit = |script: Vec<u8>| {
+            let (prevout, script_sig) = p2sh_of_op_1();
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 50_000;
+            tx.outputs[0].script_pubkey = script;
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let mut p2pk = vec![PUSH_33_BYTES];
+        p2pk.extend_from_slice(&key);
+        p2pk.push(0xac);
+        assert!(admit(p2pk));
+        let mut bare = vec![OP_1, PUSH_33_BYTES];
+        bare.extend_from_slice(&key);
+        bare.extend_from_slice(&[OP_1, OP_CHECKMULTISIG]);
+        assert!(admit(bare));
+        let mut too_wide = vec![OP_1];
+        for _ in 0..4 {
+            too_wide.push(PUSH_33_BYTES);
+            too_wide.extend_from_slice(&key);
+        }
+        too_wide.extend_from_slice(&[OP_4, OP_CHECKMULTISIG]);
+        assert!(!admit(too_wide));
+    }
+
+    #[test]
+    fn version_zero_is_not_a_standard_transaction() {
+        let admit = |version: u64, standard: bool| {
+            let (prevout, script_sig) = p2sh_of_op_1();
+            let mut tx = legacy_empty_script();
+            tx.version = version;
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 50_000;
+            tx.outputs[0].script_pubkey = {
+                let mut script = vec![0x00, 0x14];
+                script.extend_from_slice(&[0x22; 20]);
+                script
+            };
+            let mut policy = crate::config::MempoolPolicyConfig::default();
+            policy.require_standard = standard;
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(policy));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout, 100_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        assert!(admit(1, true));
+        assert!(admit(2, true));
+        assert!(admit(0, false));
+        assert!(!admit(0, true));
     }
 
     #[test]
@@ -4036,7 +7924,7 @@ mod tests {
             over.inputs[1].prevout,
             Arc::new(UTXO {
                 value: MAX_MONEY,
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                 height: 0,
                 is_coinbase: false,
             }),
@@ -4061,7 +7949,7 @@ mod tests {
             at_cap.inputs[1].prevout,
             Arc::new(UTXO {
                 value: MAX_MONEY - (MAX_MONEY / 2),
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                 height: 0,
                 is_coinbase: false,
             }),
@@ -4081,7 +7969,7 @@ mod tests {
             },
             Arc::new(UTXO {
                 value: MAX_MONEY,
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                 height: 0,
                 is_coinbase: false,
             }),
@@ -4089,7 +7977,7 @@ mod tests {
         mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set)));
         let mut parent = legacy_empty_script();
         parent.outputs[0].value = 50_000;
-        parent.outputs[0].script_pubkey = vec![OP_1];
+        parent.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(parent.clone()).unwrap());
 
         let mut child = legacy_empty_script();
@@ -4123,7 +8011,7 @@ mod tests {
 
         let mut parent = legacy_empty_script();
         parent.outputs[0].value = 190_000;
-        parent.outputs[0].script_pubkey = vec![OP_1];
+        parent.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(parent.clone()).unwrap());
 
         let mut child = legacy_empty_script();
@@ -4171,10 +8059,10 @@ mod tests {
 
         let mut parent = legacy_empty_script();
         parent.outputs[0].value = 59_999;
-        parent.outputs[0].script_pubkey = vec![OP_1];
+        parent.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(parent.clone()).unwrap());
 
-        let selector = TransactionSelector::with_params(1_000_000, 4_000_000, 5);
+        let selector = TransactionSelector::with_params(1_000_000, 4_000_000, 5_000);
         let alone = selector.select_transactions(&mempool, &utxo_set);
         assert!(alone.is_empty());
 
@@ -4184,7 +8072,7 @@ mod tests {
             index: 0,
         };
         child.outputs[0].value = 10_000;
-        child.outputs[0].script_pubkey = vec![OP_1];
+        child.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(child.clone()).unwrap());
 
         let parent_id = calculate_tx_id(&parent);
@@ -4220,7 +8108,7 @@ mod tests {
             },
             Arc::new(blvm_protocol::UTXO {
                 value: 30_000,
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                 height: 0,
                 is_coinbase: false,
             }),
@@ -4231,16 +8119,16 @@ mod tests {
 
         let mut parent_a = legacy_empty_script();
         parent_a.outputs[0].value = 29_999;
-        parent_a.outputs[0].script_pubkey = vec![OP_1];
+        parent_a.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(parent_a.clone()).unwrap());
 
         let mut parent_b = legacy_empty_script();
         parent_b.inputs[0].prevout.hash = [2u8; 32];
         parent_b.outputs[0].value = 29_999;
-        parent_b.outputs[0].script_pubkey = vec![OP_1];
+        parent_b.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(parent_b.clone()).unwrap());
 
-        let selector = TransactionSelector::with_params(1_000_000, 4_000_000, 5);
+        let selector = TransactionSelector::with_params(1_000_000, 4_000_000, 5_000);
         assert!(selector.select_transactions(&mempool, &utxo_set).is_empty());
 
         let parent_a_id = calculate_tx_id(&parent_a);
@@ -4259,7 +8147,7 @@ mod tests {
             sequence: SEQUENCE_FINAL as u64,
         });
         child.outputs[0].value = 10_000;
-        child.outputs[0].script_pubkey = vec![OP_1];
+        child.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(child.clone()).unwrap());
 
         let child_id = calculate_tx_id(&child);
@@ -4300,7 +8188,7 @@ mod tests {
 
         let mut grandparent = legacy_empty_script();
         grandparent.outputs[0].value = 39_999;
-        grandparent.outputs[0].script_pubkey = vec![OP_1];
+        grandparent.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(grandparent.clone()).unwrap());
 
         let mut middle = legacy_empty_script();
@@ -4309,10 +8197,10 @@ mod tests {
             index: 0,
         };
         middle.outputs[0].value = 39_998;
-        middle.outputs[0].script_pubkey = vec![OP_1];
+        middle.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(middle.clone()).unwrap());
 
-        let selector = TransactionSelector::with_params(1_000_000, 4_000_000, 5);
+        let selector = TransactionSelector::with_params(1_000_000, 4_000_000, 5_000);
         assert!(selector.select_transactions(&mempool, &utxo_set).is_empty());
 
         let mut grandchild = legacy_empty_script();
@@ -4321,7 +8209,7 @@ mod tests {
             index: 0,
         };
         grandchild.outputs[0].value = 10_000;
-        grandchild.outputs[0].script_pubkey = vec![OP_1];
+        grandchild.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(grandchild.clone()).unwrap());
 
         let grandparent_id = calculate_tx_id(&grandparent);
@@ -4358,7 +8246,7 @@ mod tests {
             },
             Arc::new(blvm_protocol::UTXO {
                 value: 80_000,
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                 height: 0,
                 is_coinbase: false,
             }),
@@ -4464,7 +8352,7 @@ mod tests {
             },
             Arc::new(blvm_protocol::UTXO {
                 value: 50_000,
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                 height: 0,
                 is_coinbase: false,
             }),
@@ -4474,7 +8362,7 @@ mod tests {
 
         let mut confirmed = legacy_empty_script();
         confirmed.outputs[0].value = 80_000;
-        confirmed.outputs[0].script_pubkey = vec![OP_1];
+        confirmed.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(confirmed.clone()).unwrap());
 
         let mut child = legacy_empty_script();
@@ -4513,7 +8401,7 @@ mod tests {
         ))));
         let mut conflict = legacy_empty_script();
         conflict.outputs[0].value = 80_000;
-        conflict.outputs[0].script_pubkey = vec![OP_1];
+        conflict.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(conflict.clone()).unwrap());
         let mut conflict_child = legacy_empty_script();
         conflict_child.inputs[0].prevout = OutPoint {
@@ -4569,7 +8457,7 @@ mod tests {
             },
             Arc::new(blvm_protocol::UTXO {
                 value: 100_000,
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                 height: 0,
                 is_coinbase: false,
             }),
@@ -4580,7 +8468,7 @@ mod tests {
         let mut conflict = legacy_empty_script();
         conflict.inputs[0].prevout.hash = [2u8; 32];
         conflict.outputs[0].value = 80_000;
-        conflict.outputs[0].script_pubkey = vec![OP_1];
+        conflict.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(conflict.clone()).unwrap());
         let mut conflict_child = legacy_empty_script();
         conflict_child.inputs[0].prevout = OutPoint {
@@ -4598,7 +8486,7 @@ mod tests {
 
         let mut resurrected = legacy_empty_script();
         resurrected.outputs[0].value = 80_000;
-        resurrected.outputs[0].script_pubkey = vec![OP_1];
+        resurrected.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         let mut resurrected_child = legacy_empty_script();
         resurrected_child.inputs[0].prevout = OutPoint {
             hash: calculate_tx_id(&resurrected),
@@ -4680,7 +8568,7 @@ mod tests {
 
         let mut spend = legacy_empty_script();
         spend.outputs[0].value = 80_000;
-        spend.outputs[0].script_pubkey = vec![OP_1];
+        spend.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         let witness: Vec<Witness> = vec![vec![witness_script]];
 
         let mut coinbase = legacy_empty_script();
@@ -4724,7 +8612,7 @@ mod tests {
             },
             Arc::new(blvm_protocol::UTXO {
                 value: 50_000,
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                 height: 0,
                 is_coinbase: false,
             }),
@@ -4735,12 +8623,12 @@ mod tests {
         let mut legacy = legacy_empty_script();
         legacy.inputs[0].prevout.hash = [2u8; 32];
         legacy.outputs[0].value = 40_000;
-        legacy.outputs[0].script_pubkey = vec![OP_1];
+        legacy.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(legacy).unwrap());
 
         let mut spend = legacy_empty_script();
         spend.outputs[0].value = 80_000;
-        spend.outputs[0].script_pubkey = vec![OP_1];
+        spend.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(!mempool.add_transaction(spend.clone()).unwrap());
 
         let witness: Vec<Witness> = vec![vec![witness_script]];
@@ -4814,13 +8702,13 @@ mod tests {
         plain.inputs[0].prevout.hash = [2u8; 32];
         plain.inputs[0].script_sig = push_data(&plain_redeem);
         plain.outputs[0].value = 40_000;
-        plain.outputs[0].script_pubkey = vec![OP_1];
+        plain.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(plain).unwrap());
 
         let mut spend = legacy_empty_script();
         spend.inputs[0].script_sig = push_data(&redeem);
         spend.outputs[0].value = 80_000;
-        spend.outputs[0].script_pubkey = vec![OP_1];
+        spend.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(!mempool.add_transaction(spend.clone()).unwrap());
 
         let witness: Vec<Witness> = vec![vec![witness_script]];
@@ -4867,7 +8755,7 @@ mod tests {
             index: 0,
         };
         child.outputs[0].value = 60_000;
-        child.outputs[0].script_pubkey = vec![OP_1];
+        child.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(!mempool.add_transaction(child.clone()).unwrap());
 
         let witness: Vec<Witness> = vec![vec![witness_script]];
@@ -4907,7 +8795,7 @@ mod tests {
 
         let mut parent = legacy_empty_script();
         parent.outputs[0].value = 3_000;
-        parent.outputs[0].script_pubkey = vec![OP_1];
+        parent.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(parent.clone()).unwrap());
 
         let mut child = legacy_empty_script();
@@ -5070,7 +8958,7 @@ mod tests {
                 prevout,
                 Arc::new(blvm_protocol::UTXO {
                     value: 50_000,
-                    script_pubkey: vec![OP_1].into(),
+                    script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                     height: 0,
                     is_coinbase: false,
                 }),
@@ -5087,7 +8975,7 @@ mod tests {
             .into(),
             outputs: vec![TransactionOutput {
                 value: 40_000,
-                script_pubkey: vec![OP_1],
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61],
             }]
             .into(),
             lock_time: 0,
@@ -5105,11 +8993,11 @@ mod tests {
             outputs: vec![
                 TransactionOutput {
                     value: 1_000,
-                    script_pubkey: vec![OP_1],
+                    script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61],
                 },
                 TransactionOutput {
                     value: -1,
-                    script_pubkey: vec![OP_1],
+                    script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61],
                 },
             ]
             .into(),
@@ -5144,7 +9032,7 @@ mod tests {
         let mut tx = legacy_empty_script();
         tx.inputs[0].prevout.hash = prev;
         tx.outputs[0].value = output_value;
-        tx.outputs[0].script_pubkey = vec![OP_1];
+        tx.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         tx.outputs[0].script_pubkey.extend(vec![0u8; 7_000]);
         tx
     }
@@ -5166,7 +9054,7 @@ mod tests {
                 tx.inputs[0].prevout,
                 std::sync::Arc::new(blvm_protocol::UTXO {
                     value: 1_000_000,
-                    script_pubkey: vec![OP_1].into(),
+                    script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                     height: 1,
                     is_coinbase: false,
                 }),
@@ -5215,7 +9103,7 @@ mod tests {
         ))));
         let mut parent = legacy_empty_script();
         parent.outputs[0].value = 190_000;
-        parent.outputs[0].script_pubkey = vec![OP_1];
+        parent.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(parent.clone()).unwrap());
         let mut child = legacy_empty_script();
         child.inputs[0].prevout = OutPoint {
@@ -5223,7 +9111,7 @@ mod tests {
             index: 0,
         };
         child.outputs[0].value = 100_000;
-        child.outputs[0].script_pubkey = vec![OP_1];
+        child.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(child.clone()).unwrap());
         mempool.process_once().await.unwrap();
         assert!(mempool.get_transaction(&calculate_tx_id(&parent)).is_none());
@@ -5245,7 +9133,7 @@ mod tests {
             young.inputs[0].prevout,
             std::sync::Arc::new(blvm_protocol::UTXO {
                 value: 50_000,
-                script_pubkey: vec![OP_1].into(),
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
                 height: 1,
                 is_coinbase: false,
             }),
@@ -5258,6 +9146,86 @@ mod tests {
         mempool.process_once().await.unwrap();
         assert!(mempool.get_transaction(&calculate_tx_id(&old)).is_none());
         assert!(mempool.get_transaction(&calculate_tx_id(&young)).is_some());
+    }
+
+    #[tokio::test]
+    async fn expiry_removes_descendants_and_keeps_a_young_parent() {
+        use std::sync::Arc;
+
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+
+        let mut policy = open_policy();
+        policy.mempool_expiry_hours = 1;
+        let mempool = MempoolManager::new();
+        mempool.set_policy_config(Some(policy));
+
+        let mut utxo_set = funded(vec![OP_1], 200_000);
+        let kept_prevout = OutPoint {
+            hash: [2u8; 32],
+            index: 0,
+        };
+        utxo_set.insert(
+            kept_prevout,
+            Arc::new(blvm_protocol::UTXO {
+                value: 50_000,
+                script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61].into(),
+                height: 1,
+                is_coinbase: false,
+            }),
+        );
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set)));
+
+        let mut parent = legacy_empty_script();
+        parent.outputs[0].value = 190_000;
+        parent.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
+        assert!(mempool.add_transaction(parent.clone()).unwrap());
+        let parent_id = calculate_tx_id(&parent);
+        let mut child = legacy_empty_script();
+        child.inputs[0].prevout = OutPoint {
+            hash: parent_id,
+            index: 0,
+        };
+        child.outputs[0].value = 180_000;
+        child.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
+        assert!(mempool.add_transaction(child.clone()).unwrap());
+        let child_id = calculate_tx_id(&child);
+        let mut grandchild = legacy_empty_script();
+        grandchild.inputs[0].prevout = OutPoint {
+            hash: child_id,
+            index: 0,
+        };
+        grandchild.outputs[0].value = 100_000;
+        grandchild.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
+        assert!(mempool.add_transaction(grandchild.clone()).unwrap());
+        let grandchild_id = calculate_tx_id(&grandchild);
+
+        let mut kept_parent = legacy_empty_script();
+        kept_parent.inputs[0].prevout = kept_prevout;
+        kept_parent.outputs[0].value = 40_000;
+        kept_parent.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
+        assert!(mempool.add_transaction(kept_parent.clone()).unwrap());
+        let kept_parent_id = calculate_tx_id(&kept_parent);
+        let mut expired_child = legacy_empty_script();
+        expired_child.inputs[0].prevout = OutPoint {
+            hash: kept_parent_id,
+            index: 0,
+        };
+        expired_child.outputs[0].value = 20_000;
+        expired_child.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
+        assert!(mempool.add_transaction(expired_child.clone()).unwrap());
+        let expired_child_id = calculate_tx_id(&expired_child);
+
+        mempool.set_entry_time(&parent_id, 0);
+        mempool.set_entry_time(&expired_child_id, 0);
+        mempool.process_once().await.unwrap();
+
+        assert!(mempool.get_transaction(&parent_id).is_none());
+        assert!(mempool.get_transaction(&child_id).is_none());
+        assert!(mempool.get_transaction(&grandchild_id).is_none());
+        assert!(mempool.get_transaction(&kept_parent_id).is_some());
+        assert!(mempool.get_transaction(&expired_child_id).is_none());
+        assert_eq!(mempool.size(), 1);
     }
 
     #[tokio::test]

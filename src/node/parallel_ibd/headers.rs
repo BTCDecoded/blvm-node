@@ -596,6 +596,16 @@ pub(crate) async fn download_headers(
     let mut last_progress_log = start_height;
     let mut last_progress_event = start_height;
     let start_time = std::time::Instant::now();
+    let consensus_network = crate::network::header_work::network_for_header_work(
+        network
+            .protocol_engine()
+            .map(|engine| engine.get_protocol_version()),
+        network
+            .storage()
+            .as_ref()
+            .map(|storage| storage.chain().consensus_network())
+            .unwrap_or(blvm_protocol::types::Network::Mainnet),
+    );
 
     // Fast-forward through headers already on disk.  During local replay after a UTXO repair,
     // `start_height` may be well below `highest_stored_height`.  For every contiguous run of
@@ -727,22 +737,6 @@ pub(crate) async fn download_headers(
                     Vec::with_capacity(headers.len());
 
                 for header in &headers {
-                    match blvm_protocol::pow::check_proof_of_work(header) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            return Err(anyhow::anyhow!(
-                                "Header at height {} failed PoW — refusing to skip (would corrupt height index)",
-                                current_height
-                            ));
-                        }
-                        Err(e) => {
-                            return Err(anyhow::anyhow!(
-                                "Header at height {} PoW check error: {e}",
-                                current_height
-                            ));
-                        }
-                    }
-
                     if !header_links_to_parent(blockstore, header, current_height, &last_hash)? {
                         // Live 2026-08-20: skip-to-tip + one-hash locator → genesis-start.
                         // leftover-c1t-recv0: peer rotate never rewound last_hash (5976×).
@@ -802,6 +796,43 @@ pub(crate) async fn download_headers(
                             ));
                         }
                         batch_entries.clear();
+                        break;
+                    }
+
+                    let pending: Vec<(u64, u64, u64)> = batch_entries
+                        .iter()
+                        .map(|(_, accepted, accepted_height)| {
+                            (*accepted_height, accepted.bits, accepted.timestamp)
+                        })
+                        .collect();
+                    let stored_at = |h: u64| {
+                        blockstore
+                            .get_header_at_height(h)
+                            .ok()
+                            .flatten()
+                            .map(|found| (found.bits, found.timestamp))
+                    };
+                    let ancestor =
+                        crate::network::header_work::ancestor_seeing_pending(&pending, &stored_at);
+                    if !crate::network::header_work::header_meets_required_work(
+                        header,
+                        current_height,
+                        consensus_network,
+                        &ancestor,
+                    ) {
+                        warn!(
+                            "[IBD_HEADER_WORK] height {} bits {:#x} are not the required work from {} — not storing",
+                            current_height, header.bits, peer_addr
+                        );
+                        current_peer_idx += 1;
+                        consecutive_failures += 1;
+                        if consecutive_failures >= headers_max_failures {
+                            return Err(anyhow::anyhow!(
+                                "Header at height {} does not meet required work ({} peers failed)",
+                                current_height,
+                                consecutive_failures
+                            ));
+                        }
                         break;
                     }
 

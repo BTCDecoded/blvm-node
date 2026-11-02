@@ -1392,10 +1392,10 @@ impl MiningRpc {
                 let floor_sats = self
                     .mempool
                     .as_ref()
-                    .map(|pool| pool.min_relay_fee_rate_sat_per_vb())
-                    .unwrap_or(1)
+                    .map(|pool| pool.min_relay_fee_sat_per_kvb())
+                    .unwrap_or(100)
                     .max(1);
-                let floor = floor_sats as f64 * 1_000.0 / 100_000_000.0;
+                let floor = floor_sats as f64 / 100_000_000.0;
                 (fee_rate * 0.8).max(floor)
             }
             "conservative" => fee_rate * 1.2,

@@ -201,20 +201,26 @@ impl Node {
         #[cfg(feature = "production")]
         {
             let mut consensus_config = blvm_protocol::consensus_config::ConsensusConfig::from_env();
-            let assume_valid_from_env = std::env::var("BLVM_ASSUME_VALID_HEIGHT").is_ok();
+            let env_height = std::env::var("BLVM_ASSUME_VALID_HEIGHT")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok());
+            let assume_valid_from_env = env_height.is_some();
             let file_assume_valid_height = config
                 .block_validation
                 .as_ref()
                 .map(|bv| bv.assume_valid_height)
                 .unwrap_or(0);
-            if let Some(ref bv) = config.block_validation {
-                if std::env::var("BLVM_ASSUME_VALID_HEIGHT").is_err() {
-                    consensus_config.block_validation.assume_valid_height = bv.assume_valid_height;
-                    consensus_config.block_validation.assume_valid_hash = bv.assume_valid_hash;
-                }
-            }
-            let height = consensus_config.block_validation.assume_valid_height;
-            let hash = consensus_config.block_validation.assume_valid_hash;
+            let (height, hash) = crate::config::overlay_assume_valid(
+                env_height,
+                config.block_validation.as_ref(),
+            );
+            consensus_config.block_validation.assume_valid_height = height;
+            consensus_config.block_validation.assume_valid_hash = hash;
+            crate::config::overlay_mempool_onto_consensus(
+                &mut consensus_config.mempool,
+                config.mempool.as_ref(),
+                config.rbf.as_ref(),
+            );
             blvm_protocol::consensus_config::init_consensus_config(consensus_config);
             let source = if assume_valid_from_env {
                 "env"
@@ -227,10 +233,17 @@ impl Node {
             };
             if height > 0 {
                 let hash_s = hash.map(hex::encode).unwrap_or_else(|| "none".to_string());
-                info!(
-                    "Consensus assume-valid: height={} hash={} source={} (blocks before this height may skip script checks per network policy)",
-                    height, hash_s, source
-                );
+                if hash.is_some() {
+                    info!(
+                        "Consensus assume-valid: height={} hash={} source={} (blocks before this height may skip script checks when chainwork is high enough)",
+                        height, hash_s, source
+                    );
+                } else {
+                    info!(
+                        "Consensus assume-valid: height={} hash=none source={} (script checks still run until a hash is set)",
+                        height, source
+                    );
+                }
             } else {
                 info!(
                     "Consensus assume-valid: disabled height=0 source={}",
@@ -1531,9 +1544,6 @@ impl Node {
                     if config.rbf.is_some() {
                         changed_sections.push("rbf".to_string());
                     }
-                    if config.payment.is_some() {
-                        changed_sections.push("payment".to_string());
-                    }
 
                     // Serialize config to JSON for modules that need full config
                     let config_json = serde_json::to_string(config)
@@ -1617,7 +1627,6 @@ impl Node {
 
         // Use config if available, otherwise use defaults
         let default_config = NodeConfig {
-            payment: None,
             rest_api: None,
             listen_addr: Some(self.network_addr),
             ..Default::default()

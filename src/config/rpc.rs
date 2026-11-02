@@ -1,7 +1,6 @@
-//! RPC server, auth, Stratum V2 and merge-mining configuration.
+//! RPC server, auth, and the node Stratum V2 demux switch.
 
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
 
 fn default_max_request_size_bytes() -> usize {
     1_048_576
@@ -208,85 +207,57 @@ impl RpcAuthConfig {
     }
 }
 
-/// Stratum V2 mining configuration
+/// Node-side Stratum V2 switch. Miner TCP belongs to the `blvm-stratum-v2` module file.
 #[cfg(feature = "stratum-v2")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StratumV2Config {
-    pub enabled: bool,
-    pub pool_url: Option<String>,
-    /// Informational / merge-mining; **dedicated miner TCP is served by `blvm-stratum-v2`**, not the node.
-    pub listen_addr: Option<SocketAddr>,
-    pub transport_preference: crate::config::TransportPreferenceConfig,
-    pub merge_mining_enabled: bool,
-    pub secondary_chains: Vec<String>,
-    pub merge_mining_fee: Option<MergeMiningFeeConfig>,
-    /// When **`true`** (default), inbound P2P payloads matching the Stratum V2 TLV heuristic are routed to
-    /// `StratumV2MessageReceived` instead of standard Bitcoin P2P parsing. Set **`false`** to disable that path
-    /// (module miner TCP and `send_peer_transport_payload` outbound are unchanged).
+    /// When true (default), inbound P2P payloads matching the Stratum V2 TLV
+    /// heuristic are routed to `StratumV2MessageReceived`.
     #[serde(default = "crate::config::default_true")]
     pub p2p_stratum_demux: bool,
-}
-
-/// Merge mining fee configuration
-#[cfg(feature = "stratum-v2")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MergeMiningFeeConfig {
-    #[serde(default = "crate::config::default_false")]
-    pub enabled: bool,
-
-    #[serde(default = "default_merge_mining_fee_percentage")]
-    pub fee_percentage: u8,
-
-    pub commons_address: Option<String>,
-    pub contributor_id: Option<String>,
-
-    #[serde(default = "crate::config::default_false")]
-    pub auto_distribute: bool,
-}
-
-#[cfg(feature = "stratum-v2")]
-fn default_merge_mining_fee_percentage() -> u8 {
-    1
 }
 
 #[cfg(feature = "stratum-v2")]
 impl Default for StratumV2Config {
     fn default() -> Self {
         Self {
-            enabled: false,
-            pool_url: None,
-            listen_addr: None,
-            transport_preference: crate::config::TransportPreferenceConfig::TcpOnly,
-            merge_mining_enabled: false,
-            secondary_chains: Vec::new(),
-            merge_mining_fee: None,
             p2p_stratum_demux: true,
         }
     }
 }
 
+/// Absent `[stratum_v2]` keeps the P2P TLV path on.
 #[cfg(feature = "stratum-v2")]
-impl Default for MergeMiningFeeConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            fee_percentage: 1,
-            commons_address: None,
-            contributor_id: None,
-            auto_distribute: false,
-        }
-    }
+pub fn p2p_stratum_demux_enabled(stratum: Option<&StratumV2Config>) -> bool {
+    stratum.map(|section| section.p2p_stratum_demux).unwrap_or(true)
 }
 
 #[cfg(all(test, feature = "stratum-v2"))]
 mod stratum_v2_config_tests {
-    use super::StratumV2Config;
+    use super::{p2p_stratum_demux_enabled, StratumV2Config};
+    use crate::config::NodeConfig;
 
     #[test]
-    fn stratum_v2_config_default_disabled() {
+    fn stratum_v2_config_demux_defaults_on() {
         let c = StratumV2Config::default();
-        assert!(!c.enabled);
-        assert!(c.listen_addr.is_none());
         assert!(c.p2p_stratum_demux);
+        assert!(p2p_stratum_demux_enabled(None));
+    }
+
+    #[test]
+    fn old_stratum_keys_parse_and_demux_false_disables_the_tlv_path() {
+        let config: NodeConfig = toml::from_str(
+            r#"
+            [stratum_v2]
+            listen_addr = "0.0.0.0:3333"
+            pool_url = "tcp://pool.example.com:3333"
+            enabled = true
+            p2p_stratum_demux = false
+            "#,
+        )
+        .expect("old stratum keys are ignored");
+        let section = config.stratum_v2.as_ref().expect("section present");
+        assert!(!section.p2p_stratum_demux);
+        assert!(!p2p_stratum_demux_enabled(Some(section)));
     }
 }

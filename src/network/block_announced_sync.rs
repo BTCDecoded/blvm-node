@@ -395,7 +395,7 @@ impl NetworkManager {
 
     /// Store the prefix of `headers` that connects to the tip or to a known ancestor.
     ///
-    /// A header that fails proof of work or breaks the chain ends the prefix.
+    /// A header that misses the required work or breaks the chain ends the prefix.
     /// A header whose height already names a different block is stored by hash and does
     /// not replace the active height entry. Each stored header caches cumulative
     /// chainwork so a heavier fork can be compared with the active tip.
@@ -424,16 +424,45 @@ impl NetworkManager {
         let Some((start, mut prev, mut height)) = anchor else {
             return StoredProbeHeaders::none();
         };
+        let consensus_network = crate::network::header_work::network_for_header_work(
+            self.protocol_engine()
+                .map(|engine| engine.get_protocol_version()),
+            storage.chain().consensus_network(),
+        );
+        let tip_header = storage.chain().get_tip_header().ok().flatten();
+        let tip_height = storage.chain().get_height().ok().flatten();
+        let mut pending: Vec<(u64, u64, u64)> = Vec::new();
         let mut batch = Vec::new();
         for header in headers.iter().skip(start) {
+            let next_height = height.saturating_add(1);
+            let meets = {
+                let stored_at = |h: u64| {
+                    if let Some(found) = storage.blocks().get_header_at_height(h).ok().flatten() {
+                        return Some((found.bits, found.timestamp));
+                    }
+                    if tip_height == Some(h) {
+                        return tip_header.as_ref().map(|tip| (tip.bits, tip.timestamp));
+                    }
+                    None
+                };
+                let ancestor =
+                    crate::network::header_work::ancestor_seeing_pending(&pending, &stored_at);
+                crate::network::header_work::header_meets_required_work(
+                    header,
+                    next_height,
+                    consensus_network,
+                    &ancestor,
+                )
+            };
             if header.version < 1
                 || header.timestamp == 0
                 || header.prev_block_hash != prev
-                || !blvm_protocol::pow::check_proof_of_work(header).unwrap_or(false)
+                || !meets
             {
                 break;
             }
-            height = height.saturating_add(1);
+            height = next_height;
+            pending.push((height, header.bits, header.timestamp));
             let hash = blvm_consensus::block::block_header_hash(header);
             batch.push((hash, header.clone(), height));
             prev = hash;
@@ -699,6 +728,23 @@ mod tests {
             storage
                 .chain()
                 .cache_block_chainwork(&tip_header.prev_block_hash, tip_header, 0)
+                .unwrap();
+            // Regtest walks minimum-difficulty bits back to the period start. The tip
+            // alone does not answer that lookup. The height-0 row is not the tip's prev.
+            let root = BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [4u8; 32],
+                timestamp: tip_header.timestamp.saturating_sub(1),
+                bits: tip_header.bits,
+                nonce: 0,
+            };
+            storage
+                .blocks()
+                .store_headers_batch(&[
+                    ([0x5a; 32], root, 0),
+                    (*tip_hash, tip_header.clone(), height),
+                ])
                 .unwrap();
         }
         storage

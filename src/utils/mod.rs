@@ -35,7 +35,7 @@ pub use error::{
 pub use lock::{try_with_lock_timeout, with_lock, with_read_lock, with_write_lock};
 #[cfg(feature = "json-logging")]
 pub use logging::init_json_logging;
-pub use logging::{init_logging, init_logging_from_config, init_module_logging};
+pub use logging::{init_logging, init_logging_from_config, init_module_logging, init_node_logging};
 pub use option::{map_or_default, option_to_result, or_else, unwrap_or_default_with};
 pub use request_id::new_request_id;
 pub use retry::{RetryConfig, retry_async_with_backoff, retry_with_backoff};

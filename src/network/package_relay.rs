@@ -93,7 +93,7 @@ pub struct PackageValidator {
     pub max_package_size: usize,
     /// Maximum package weight in WU (BIP 331: 404000)
     pub max_package_weight: usize,
-    /// Minimum package fee rate (sat/vB)
+    /// Minimum package fee rate in satoshis per 1,000 virtual bytes.
     pub min_fee_rate: u64,
 }
 
@@ -102,7 +102,7 @@ impl Default for PackageValidator {
         Self {
             max_package_size: 25,
             max_package_weight: 404_000, // 404k WU = ~101k vB
-            min_fee_rate: 1,             // 1 sat/vB minimum
+            min_fee_rate: 100,
         }
     }
 }
@@ -277,9 +277,15 @@ impl PackageRelay {
             return Err(PackageRejectReason::WeightExceedsLimit);
         }
 
-        // A priced package is held to the minimum even when the fee is zero.
-        if package.fee_known && package.fee_rate() < self.validator.min_fee_rate as f64 {
-            return Err(PackageRejectReason::FeeRateTooLow);
+        // A priced package pays the relay floor, satoshis per 1,000 virtual bytes, rounded up.
+        if package.fee_known {
+            let vsize = (package.combined_weight as u64).div_ceil(4);
+            let required = (self.validator.min_fee_rate as u128)
+                .saturating_mul(vsize as u128)
+                .div_ceil(1000);
+            if (package.combined_fee as u128) < required {
+                return Err(PackageRejectReason::FeeRateTooLow);
+            }
         }
 
         // Check for duplicates by txid
@@ -579,5 +585,44 @@ mod tests {
             PackageRelay::new().validate_package(&free_package),
             Err(PackageRejectReason::FeeRateTooLow)
         ));
+    }
+
+    #[test]
+    fn relay_floor_package_is_not_rejected_for_fee_rate() {
+        let prevout = OutPoint {
+            hash: [9u8; 32],
+            index: 0,
+        };
+        let sample = spend(prevout, 1);
+        let vsize = super::package_transaction_weight_wu(&sample, None).div_ceil(4) as i64;
+        let floor = vsize * 100 / 1000 + i64::from(vsize * 100 % 1000 != 0);
+        let input_value = 50_000i64;
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            prevout,
+            Arc::new(UTXO {
+                value: input_value,
+                script_pubkey: vec![OP_1].into(),
+                height: 1,
+                is_coinbase: false,
+            }),
+        );
+        let priced = |fee: i64| {
+            let tx = spend(prevout, input_value - fee);
+            let package = TransactionPackage::new_with_utxo_set(vec![tx], Some(&utxo_set)).unwrap();
+            PackageRelay::new().validate_package(&package).is_ok()
+        };
+        let at_one = priced(vsize);
+        let at_floor = priced(floor);
+        let under = priced(floor - 1);
+        eprintln!(
+            "vsize={vsize}; fee {vsize} accepted={at_one}; fee {floor} accepted={at_floor}; fee {} accepted={under}",
+            floor - 1
+        );
+        assert_eq!(vsize, 61);
+        assert_eq!(floor, 7);
+        assert!(at_one);
+        assert!(at_floor);
+        assert!(!under);
     }
 }

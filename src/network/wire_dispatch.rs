@@ -48,22 +48,6 @@ pub(crate) fn chunk_inventory<T: Clone>(items: Vec<T>, max_len: usize) -> Vec<Ve
     items.chunks(max_len).map(|chunk| chunk.to_vec()).collect()
 }
 
-/// An unsolicited header is accepted only at the difficulty required for the next height.
-pub(crate) fn unsolicited_header_meets_required_work(
-    header: &BlockHeader,
-    tip_height: u64,
-    network: blvm_protocol::types::Network,
-    ancestor: &dyn Fn(u64) -> Option<(u64, u64)>,
-) -> bool {
-    let next_height = tip_height.saturating_add(1);
-    let Ok(Some(required)) =
-        blvm_protocol::pow::next_required_bits(network, next_height, header.timestamp, ancestor)
-    else {
-        return false;
-    };
-    header.bits == required && blvm_protocol::pow::check_proof_of_work(header).unwrap_or(false)
-}
-
 fn block_hash_from_header(header: &BlockHeader) -> [u8; 32] {
     use crate::storage::hashing::double_sha256;
     let mut header_bytes = [0u8; 80];
@@ -879,24 +863,42 @@ impl NetworkManager {
                     };
                     if let Some(mut prev) = link_hash {
                         let mut height = header_height.max(block_height);
-                        let network = storage.chain().consensus_network();
-                        let ancestor = |h: u64| {
-                            let hash = storage.blocks().get_hash_by_height(h).ok().flatten()?;
-                            let stored = storage.blocks().get_header(&hash).ok().flatten()?;
-                            Some((stored.bits, stored.timestamp))
-                        };
+                        let network = crate::network::header_work::network_for_header_work(
+                            self.protocol_engine()
+                                .map(|engine| engine.get_protocol_version()),
+                            storage.chain().consensus_network(),
+                        );
+                        let mut pending: Vec<(u64, u64, u64)> = Vec::new();
                         let mut batch = Vec::new();
                         for header in &headers_msg.headers {
+                            let next_height = height.saturating_add(1);
+                            let meets = {
+                                let stored = |h: u64| {
+                                    let hash =
+                                        storage.blocks().get_hash_by_height(h).ok().flatten()?;
+                                    let found =
+                                        storage.blocks().get_header(&hash).ok().flatten()?;
+                                    Some((found.bits, found.timestamp))
+                                };
+                                let ancestor = crate::network::header_work::ancestor_seeing_pending(
+                                    &pending, &stored,
+                                );
+                                crate::network::header_work::header_meets_required_work(
+                                    header,
+                                    next_height,
+                                    network,
+                                    &ancestor,
+                                )
+                            };
                             if header.version < 1
                                 || header.timestamp == 0
                                 || header.prev_block_hash != prev
-                                || !unsolicited_header_meets_required_work(
-                                    header, height, network, &ancestor,
-                                )
+                                || !meets
                             {
                                 break;
                             }
-                            height = height.saturating_add(1);
+                            pending.push((next_height, header.bits, header.timestamp));
+                            height = next_height;
                             let hash = blvm_consensus::block::block_header_hash(header);
                             batch.push((hash, header.clone(), height));
                             prev = hash;
@@ -1097,8 +1099,8 @@ impl NetworkManager {
 
                 let fee_rate = self
                     .mempool_manager()
-                    .map(|mm| mm.min_relay_fee_rate_sat_per_vb().saturating_mul(1000))
-                    .unwrap_or(1_000);
+                    .map(|mm| mm.min_relay_fee_sat_per_kvb())
+                    .unwrap_or(100);
                 let fee_msg =
                     ProtocolMessage::FeeFilter(crate::network::protocol::FeeFilterMessage {
                         feerate: fee_rate,
@@ -1221,9 +1223,9 @@ mod plan_wire_locks {
                 None
             }
         };
-        assert!(!unsolicited_header_meets_required_work(
+        assert!(!crate::network::header_work::header_meets_required_work(
             &header,
-            100,
+            101,
             blvm_protocol::types::Network::Mainnet,
             &ancestor,
         ));
@@ -2410,10 +2412,10 @@ mod plan_wire_locks {
             .await
             .unwrap();
         let rate = next_feefilter(&mut node.incoming).await;
-        assert_eq!(rate, 1_000);
+        assert_eq!(rate, 100);
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
         policy.require_standard = false;
-        policy.min_relay_fee_rate = 3;
+        policy.min_relay_fee_rate = 3_000;
         node.mempool.set_policy_config(Some(policy));
         node.manager
             .dispatch_protocol_message(node.peer, &ProtocolMessage::Verack, Vec::new())

@@ -41,7 +41,7 @@ fn create_rbf_tx_spending(prevout: OutPoint, output_value: u64) -> Transaction {
         }],
         outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: output_value as i64,
-            script_pubkey: vec![blvm_protocol::opcodes::OP_1],
+            script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61],
         }],
         lock_time: 0,
     }
@@ -113,7 +113,7 @@ fn test_rbf_mode_standard() {
     let utxo_set = create_test_utxo_set();
     let result = mempool.check_rbf_replacement(&new_tx, &existing_tx, &utxo_set, None);
 
-    // Standard mode requires 1.1x fee rate multiplier and 1000 sat absolute bump
+    // Standard mode requires a strictly higher fee rate.
     // Should pass if BIP125 rules are satisfied
     assert!(result.is_ok());
 }
@@ -220,7 +220,7 @@ fn test_rbf_config_with_mode() {
 
     let standard = RbfConfig::with_mode(RbfMode::Standard);
     assert_eq!(standard.mode, RbfMode::Standard);
-    assert_eq!(standard.min_fee_rate_multiplier, 1.1);
+    assert_eq!(standard.min_fee_rate_multiplier, 1.0);
     assert_eq!(standard.min_fee_bump_satoshis, 1000);
 }
 
@@ -250,8 +250,8 @@ fn test_rbf_package_replacement_uses_descendant_fees() {
     assert!(mempool.add_transaction(child).unwrap());
     assert_eq!(mempool.size(), 2);
 
-    // 20_200 sat fee beats parent alone (15k) but not parent+child package (20k + 500 min bump).
-    let replacement = create_rbf_tx(100_000, 79_800);
+    // 19_000 sat fee beats the parent alone and does not cover the child.
+    let replacement = create_rbf_tx(100_000, 81_000);
     let result = mempool.check_rbf_replacement(&replacement, &parent, &utxo_set, None);
     assert!(result.is_ok());
     assert!(
@@ -259,8 +259,7 @@ fn test_rbf_package_replacement_uses_descendant_fees() {
         "package replacement should require fees covering displaced descendants"
     );
 
-    // The absolute bump is the larger of the aggressive 500 sat setting and the
-    // 1,000 sat incremental relay fee, and the comparison is strict. 22k clears it.
+    // 22_000 covers the 20_000 sat package and the replacement's own relay.
     let sufficient = create_rbf_tx(100_000, 78_000);
     let result2 = mempool.check_rbf_replacement(&sufficient, &parent, &utxo_set, None);
     assert!(result2.is_ok());
@@ -268,6 +267,45 @@ fn test_rbf_package_replacement_uses_descendant_fees() {
 
     // Displacement removes parent and child when replacement is accepted.
     assert!(mempool.add_transaction(sufficient).unwrap());
+    assert_eq!(mempool.size(), 1);
+    assert!(mempool.get_transaction(&parent_hash).is_none());
+    assert!(mempool.get_transaction(&child_hash).is_none());
+}
+
+#[test]
+fn standard_replacement_pays_for_the_descendant() {
+    let mempool = MempoolManager::new();
+    admit_bare_op1(&mempool);
+    mempool.set_rbf_config(Some(RbfConfig::default()));
+
+    let utxo_set = create_test_utxo_set();
+    mempool.set_utxo_set_arc(Arc::new(TokioMutex::new(utxo_set.clone())));
+
+    // Parent fee 15_000, child fee 5_000. The set that will be removed totals 20_000.
+    let parent = create_rbf_tx(100_000, 85_000);
+    let parent_hash = calculate_tx_id(&parent);
+    assert!(mempool.add_transaction(parent).unwrap());
+
+    let child = create_rbf_tx_spending(
+        OutPoint {
+            hash: parent_hash,
+            index: 0,
+        },
+        80_000,
+    );
+    let child_hash = calculate_tx_id(&child);
+    assert!(mempool.add_transaction(child).unwrap());
+
+    // 19_000 beats the parent and does not beat the child as well.
+    let cheap = create_rbf_tx(100_000, 81_000);
+    assert!(!mempool.add_transaction(cheap).unwrap());
+    assert!(mempool.get_transaction(&parent_hash).is_some());
+    assert!(mempool.get_transaction(&child_hash).is_some());
+    assert_eq!(mempool.size(), 2);
+
+    // Covers the 20_000 sat package and the replacement's own relay.
+    let enough = create_rbf_tx(100_000, 78_000);
+    assert!(mempool.add_transaction(enough).unwrap());
     assert_eq!(mempool.size(), 1);
     assert!(mempool.get_transaction(&parent_hash).is_none());
     assert!(mempool.get_transaction(&child_hash).is_none());
@@ -318,4 +356,54 @@ fn opted_in_parent_with_final_child_stays_in_the_pool() {
     assert!(mempool.get_transaction(&parent_hash).is_some());
     assert!(mempool.get_transaction(&child_hash).is_some());
     assert_eq!(mempool.size(), 2);
+}
+
+#[test]
+fn replacement_bump_of_300_sats_is_admitted() {
+    let try_replace = |replacement_output: u64| {
+        let mempool = MempoolManager::new();
+        admit_bare_op1(&mempool);
+        let utxo_set = create_test_utxo_set();
+        mempool.set_utxo_set_arc(Arc::new(TokioMutex::new(utxo_set)));
+        let original = create_rbf_tx(100_000, 98_000);
+        let original_hash = calculate_tx_id(&original);
+        assert!(mempool.add_transaction(original).unwrap());
+        let replacement = create_rbf_tx(100_000, replacement_output);
+        let admitted = mempool.add_transaction(replacement).unwrap();
+        (admitted, mempool.get_transaction(&original_hash).is_none())
+    };
+    let (bump_300, original_gone) = try_replace(97_700);
+    let (bump_1001, control_gone) = try_replace(96_999);
+    let (below_original, _) = try_replace(98_001);
+    eprintln!(
+        "bump 300 admitted={bump_300} original_removed={original_gone}; bump 1001 admitted={bump_1001} original_removed={control_gone}; fee 1999 admitted={below_original}"
+    );
+    assert!(bump_300 && original_gone);
+    assert!(bump_1001 && control_gone);
+    assert!(!below_original);
+}
+
+#[test]
+fn five_percent_fee_increase_is_admitted() {
+    let try_replace = |replacement_output: u64| {
+        let mempool = MempoolManager::new();
+        admit_bare_op1(&mempool);
+        let utxo_set = create_test_utxo_set();
+        mempool.set_utxo_set_arc(Arc::new(TokioMutex::new(utxo_set)));
+        let original = create_rbf_tx(100_000, 90_000);
+        let original_hash = calculate_tx_id(&original);
+        assert!(mempool.add_transaction(original).unwrap());
+        let replacement = create_rbf_tx(100_000, replacement_output);
+        let admitted = mempool.add_transaction(replacement).unwrap();
+        (admitted, mempool.get_transaction(&original_hash).is_none())
+    };
+    let (five_percent, five_removed) = try_replace(89_500);
+    let (twenty_percent, twenty_removed) = try_replace(88_000);
+    let (lower_fee, _) = try_replace(90_001);
+    eprintln!(
+        "fee 10500 admitted={five_percent} original_removed={five_removed}; fee 12000 admitted={twenty_percent} original_removed={twenty_removed}; fee 9999 admitted={lower_fee}"
+    );
+    assert!(five_percent && five_removed);
+    assert!(twenty_percent && twenty_removed);
+    assert!(!lower_fee);
 }

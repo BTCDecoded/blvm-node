@@ -188,6 +188,28 @@ pub struct IbdConfig {
     /// Age-tiered UTXO engine (default on). Opt out with `BLVM_IBD_ENGINE=0` or `utxo_engine = false`.
     #[serde(default = "default_utxo_engine")]
     pub utxo_engine: bool,
+
+    /// Fixed engine checkpoint interval in blocks. Feeds `ibd_engine_durability_config` only.
+    /// `BLVM_IBD_CHECKPOINT_INTERVAL` overrides this. `0` or `adaptive` on that variable
+    /// clears the fixed interval. This is not `ParallelIBDConfig.checkpoint_interval`.
+    #[serde(default = "default_checkpoint_interval")]
+    pub checkpoint_interval: i32,
+
+    /// Adaptive checkpoint lower bound. `BLVM_IBD_CHECKPOINT_MIN_INTERVAL` overrides this.
+    #[serde(default = "default_checkpoint_min_interval")]
+    pub checkpoint_min_interval: i32,
+
+    /// Adaptive checkpoint upper bound. `BLVM_IBD_CHECKPOINT_MAX_INTERVAL` overrides this.
+    #[serde(default = "default_checkpoint_max_interval")]
+    pub checkpoint_max_interval: i32,
+
+    /// Target seconds between adaptive checkpoint exports. `BLVM_IBD_CHECKPOINT_TARGET_SECS` overrides this.
+    #[serde(default = "default_checkpoint_target_secs")]
+    pub checkpoint_target_secs: u64,
+
+    /// Blocks between MuHash persists. `BLVM_IBD_ENGINE_MUHASH_INTERVAL` overrides this.
+    #[serde(default = "default_muhash_persist_interval")]
+    pub muhash_persist_interval: u64,
 }
 
 fn default_utxo_engine() -> bool {
@@ -286,9 +308,28 @@ impl Default for IbdEngineDurabilityConfig {
     }
 }
 
-/// Resolved engine durability knobs: env > defaults (toml fields may be added later).
-pub fn ibd_engine_durability_config(_config: Option<&IbdConfig>) -> IbdEngineDurabilityConfig {
+/// Resolved engine durability knobs: env, then `[ibd]`, then the built-in consts.
+pub fn ibd_engine_durability_config(config: Option<&IbdConfig>) -> IbdEngineDurabilityConfig {
     let mut d = IbdEngineDurabilityConfig::default();
+    if let Some(config) = config {
+        if config.checkpoint_interval > 0 {
+            d.checkpoint_interval = Some(config.checkpoint_interval);
+        }
+        if config.checkpoint_min_interval > 0 {
+            d.checkpoint_min_interval = config.checkpoint_min_interval;
+        }
+        if config.checkpoint_max_interval > 0 {
+            d.checkpoint_max_interval = config
+                .checkpoint_max_interval
+                .max(d.checkpoint_min_interval);
+        }
+        if config.checkpoint_target_secs > 0 {
+            d.checkpoint_target_secs = config.checkpoint_target_secs;
+        }
+        if config.muhash_persist_interval > 0 {
+            d.muhash_persist_interval = config.muhash_persist_interval;
+        }
+    }
     if let Ok(v) = std::env::var("BLVM_IBD_CHECKPOINT_INTERVAL") {
         let v = v.trim();
         if v == "0" || v.eq_ignore_ascii_case("adaptive") {
@@ -433,6 +474,21 @@ fn default_ibd_headers_timeout() -> u64 {
 fn default_ibd_headers_max_failures() -> u32 {
     10
 }
+fn default_checkpoint_interval() -> i32 {
+    200_000
+}
+fn default_checkpoint_min_interval() -> i32 {
+    500
+}
+fn default_checkpoint_max_interval() -> i32 {
+    50_000
+}
+fn default_checkpoint_target_secs() -> u64 {
+    60
+}
+fn default_muhash_persist_interval() -> u64 {
+    200
+}
 
 impl Default for IbdConfig {
     fn default() -> Self {
@@ -456,6 +512,11 @@ impl Default for IbdConfig {
             headers_max_failures: 10,
             dedicated: false,
             utxo_engine: true,
+            checkpoint_interval: default_checkpoint_interval(),
+            checkpoint_min_interval: default_checkpoint_min_interval(),
+            checkpoint_max_interval: default_checkpoint_max_interval(),
+            checkpoint_target_secs: default_checkpoint_target_secs(),
+            muhash_persist_interval: default_muhash_persist_interval(),
         }
     }
 }
@@ -721,6 +782,64 @@ mod ibd_engine_config_tests {
                 assert_eq!(d.checkpoint_interval, Some(200));
                 assert_eq!(d.muhash_persist_interval, 100);
             });
+        });
+    }
+
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn file_checkpoint_interval_then_env() {
+        let file: IbdConfig = toml::from_str(
+            r#"
+            checkpoint_interval = 100000
+            "#,
+        )
+        .expect("[ibd] checkpoint_interval");
+        with_env("BLVM_IBD_CHECKPOINT_INTERVAL", None, || {
+            assert_eq!(
+                ibd_engine_durability_config(Some(&file)).checkpoint_interval,
+                Some(100_000)
+            );
+        });
+        with_env("BLVM_IBD_CHECKPOINT_INTERVAL", Some("50000"), || {
+            assert_eq!(
+                ibd_engine_durability_config(Some(&file)).checkpoint_interval,
+                Some(50_000)
+            );
+        });
+        with_env("BLVM_IBD_CHECKPOINT_INTERVAL", Some("0"), || {
+            assert_eq!(
+                ibd_engine_durability_config(Some(&file)).checkpoint_interval,
+                None
+            );
+        });
+    }
+
+    #[serial_test::serial(ibd)]
+    #[test]
+    fn chunk_size_env_beats_file_and_only_env_is_clamped() {
+        let file = IbdConfig {
+            chunk_size: 64,
+            checkpoint_interval: 100_000,
+            ..IbdConfig::default()
+        };
+        let download = crate::node::parallel_ibd::ParallelIBDConfig::from_config;
+        with_env("BLVM_IBD_CHUNK_SIZE", None, || {
+            let resolved = download(Some(&file));
+            assert_eq!(resolved.chunk_size, 64);
+            assert_eq!(resolved.checkpoint_interval, 10_000);
+        });
+        with_env("BLVM_IBD_CHUNK_SIZE", Some("80"), || {
+            assert_eq!(download(Some(&file)).chunk_size, 80);
+        });
+        let unclamped = IbdConfig {
+            chunk_size: 8,
+            ..IbdConfig::default()
+        };
+        with_env("BLVM_IBD_CHUNK_SIZE", None, || {
+            assert_eq!(download(Some(&unclamped)).chunk_size, 8);
+        });
+        with_env("BLVM_IBD_CHUNK_SIZE", Some("8"), || {
+            assert_eq!(download(Some(&unclamped)).chunk_size, 16);
         });
     }
 

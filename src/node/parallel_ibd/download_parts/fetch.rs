@@ -570,11 +570,20 @@ pub(crate) async fn download_chunk(
     super::tip_stage::note_tip_hole_duty(tip_hole_grown);
     // W32d″: after tip streams, remaining pipe uses a long timeout (not 12s) so mid/deep
     // slots do not thrash while validation walks the buffered runway.
-    let tip_progressive_secs: u64 = std::env::var("BLVM_IBD_TIP_PROGRESSIVE_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(45)
-        .clamp(25, 90);
+    let tip_progressive_secs: u64 = {
+        #[cfg(not(test))]
+        {
+            45
+        }
+        #[cfg(test)]
+        {
+            std::env::var("BLVM_IBD_TIP_PROGRESSIVE_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(45)
+                .clamp(25, 90)
+        }
+    };
     // A6: empty-witness hits on this peer/chunk before demotion / abort.
     // Live soak: peers that only serve MSG_BLOCK re-request forever (~38 hits/s) and pin
     // validation at the gap. Cap retries then abort so the worker excludes/blacklists the peer.

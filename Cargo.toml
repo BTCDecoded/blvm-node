@@ -272,8 +272,9 @@ mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 # jemalloc: preferred for IBD; background purge threads handle cross-thread freed pages.
 # Build with: --features jemalloc (and without --features mimalloc).
 jemalloc = ["dep:tikv-jemallocator"]
-# JSON logging format for structured logging (production/monitoring)
-json-logging = []
+# JSON logging format for structured logging (production/monitoring).
+# Off the default build. `init_json_logging` calls `fmt::layer().json()`.
+json-logging = ["tracing-subscriber/json"]
 # Modern REST API (runs alongside JSON-RPC)
 rest-api = []
 # HTTP BIP70 payment protocol support (requires rest-api)

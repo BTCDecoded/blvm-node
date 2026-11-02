@@ -712,7 +712,7 @@ mod info_locks {
         let mempool = Arc::new(MempoolManager::new());
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
         policy.require_standard = false;
-        policy.min_relay_fee_rate = 5;
+        policy.min_relay_fee_rate = 5_000;
         mempool.set_policy_config(Some(policy));
         let nm = Arc::new(
             NetworkManager::new("127.0.0.1:0".parse().unwrap())
@@ -741,7 +741,7 @@ mod info_locks {
         let mempool = Arc::new(MempoolManager::new());
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
         policy.require_standard = false;
-        policy.min_relay_fee_rate = 5;
+        policy.min_relay_fee_rate = 5_000;
         mempool.set_policy_config(Some(policy));
         let nm = Arc::new(
             NetworkManager::new("127.0.0.1:0".parse().unwrap())

@@ -597,15 +597,24 @@ pub(crate) fn tip_gap_timeout_secs_for_chunk(
     chunk_start: u64,
     chunk_end: u64,
 ) -> u64 {
-    let base = latch_env!(u64, {
-        std::env::var("BLVM_IBD_TIP_GAP_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            // W184: **12→16**. Live W182 354–362k getdata→body p90≈15.4s under CAP=12
-            // → abort-before-delivery → covering=0 → rate-fail @361k.
-            .unwrap_or(16)
-            .clamp(8, 60)
-    });
+    let base = {
+        #[cfg(not(test))]
+        {
+            16
+        }
+        #[cfg(test)]
+        {
+            latch_env!(u64, {
+                std::env::var("BLVM_IBD_TIP_GAP_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    // W184: **12→16**. Live W182 354–362k getdata→body p90≈15.4s under CAP=12
+                    // → abort-before-delivery → covering=0 → rate-fail @361k.
+                    .unwrap_or(16)
+                    .clamp(8, 60)
+            })
+        }
+    };
     let holes = crate::node::parallel_ibd::IBD_TIP_BRIDGE_HOLES.load(Ordering::Relaxed);
     // W103: hole/empty mute CAP default **5s**.
     let hole_cap = {
@@ -639,13 +648,20 @@ pub(crate) fn tip_gap_timeout_secs_for_chunk(
     };
     // W104: empty-bridge trigger default **0** (was 5).
     let empty_trigger = {
-        let raw = latch_env!(u64, {
-            std::env::var("BLVM_IBD_TIP_EMPTY_BRIDGE_CAP_TRIGGER_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0)
-        });
-        raw.clamp(0, base)
+        #[cfg(not(test))]
+        {
+            0
+        }
+        #[cfg(test)]
+        {
+            let raw = latch_env!(u64, {
+                std::env::var("BLVM_IBD_TIP_EMPTY_BRIDGE_CAP_TRIGGER_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0)
+            });
+            raw.clamp(0, base)
+        }
     };
     let awaiting = super::tip_stage::tip_awaiting_secs_for_cap();
     let pending = crate::node::parallel_ibd::memory::BRIDGE_PENDING_COUNT.load(Ordering::Relaxed);
@@ -698,13 +714,20 @@ fn tip_cap_during_export(cap: u64, base: u64) -> u64 {
         return cap;
     }
     let floor = {
-        let raw = latch_env!(u64, {
-            std::env::var("BLVM_IBD_TIP_EXPORT_ACTIVE_CAP_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(16)
-        });
-        raw.clamp(8, base)
+        #[cfg(not(test))]
+        {
+            16
+        }
+        #[cfg(test)]
+        {
+            let raw = latch_env!(u64, {
+                std::env::var("BLVM_IBD_TIP_EXPORT_ACTIVE_CAP_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(16)
+            });
+            raw.clamp(8, base)
+        }
     };
     cap.max(floor).min(base)
 }
@@ -726,13 +749,20 @@ pub(crate) fn far_ahead_timeout_secs() -> u64 {
 /// W24/W28/P1-T: soft-retry budget for the exact validation tip gap (default **3**).
 /// Deep WAN tip owner pipes need several in-place re-requests before peer rotate.
 pub(crate) fn tip_gap_soft_retries() -> u32 {
-    latch_env!(u32, {
-        std::env::var("BLVM_IBD_TIP_GAP_SOFT_RETRIES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(3)
-            .clamp(1, 12)
-    })
+    #[cfg(not(test))]
+    {
+        3
+    }
+    #[cfg(test)]
+    {
+        latch_env!(u32, {
+            std::env::var("BLVM_IBD_TIP_GAP_SOFT_RETRIES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3)
+                .clamp(1, 12)
+        })
+    }
 }
 
 /// W2/N11: Hornet-style download **byte** budget (in addition to block-count caps).
@@ -1253,13 +1283,20 @@ pub(crate) fn tip_covering_fail_is_mute(err_str: &str) -> bool {
 /// P1d: after tip pipe is filled with network GetData and no network body arrives, abort.
 /// Default **3000** ms. Env `BLVM_IBD_MUTE_PIPE_MS` (clamp 1000–15000).
 pub(crate) fn mute_pipe_ms() -> u64 {
-    latch_env!(u64, {
-        std::env::var("BLVM_IBD_MUTE_PIPE_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(3000)
-            .clamp(1000, 15_000)
-    })
+    #[cfg(not(test))]
+    {
+        3000
+    }
+    #[cfg(test)]
+    {
+        latch_env!(u64, {
+            std::env::var("BLVM_IBD_MUTE_PIPE_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3000)
+                .clamp(1000, 15_000)
+        })
+    }
 }
 
 /// P1d clock policy (unit-tested): keep across local tip advances; clear only on tip-band

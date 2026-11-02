@@ -708,18 +708,32 @@ pub(crate) fn tip_stale_cover_should_rerace(
 ///
 /// Default **0** after the R-274 failure documented above.
 pub(crate) fn tip_stale_cover_rerace_ms() -> u64 {
-    std::env::var("BLVM_IBD_TIP_RERACE_MS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0)
+    #[cfg(not(test))]
+    {
+        0
+    }
+    #[cfg(test)]
+    {
+        std::env::var("BLVM_IBD_TIP_RERACE_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
 }
 
 /// Total peers allowed to cover H once a re-race arms (incumbent + one racer).
 pub(crate) fn tip_stale_cover_max_covering() -> usize {
-    std::env::var("BLVM_IBD_TIP_RERACE_MAX_COVER")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2)
+    #[cfg(not(test))]
+    {
+        2
+    }
+    #[cfg(test)]
+    {
+        std::env::var("BLVM_IBD_TIP_RERACE_MAX_COVER")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2)
+    }
 }
 
 /// R-300: extra peers allowed to GetData the same next-needed height H after a
@@ -729,13 +743,22 @@ pub(crate) fn tip_stale_cover_max_covering() -> usize {
 /// stripe on the sticky (A2/A4/tc172), never far-ahead, never the sticky
 /// owner, and it keys off assignment age not the awaiting clock that resets.
 pub(crate) fn tip_hedge_n() -> usize {
-    let v = latch_env!(usize, {
-        std::env::var("BLVM_IBD_TIP_HEDGE_N")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1)
-            .clamp(1, 3)
-    });
+    let v = {
+        #[cfg(not(test))]
+        {
+            1
+        }
+        #[cfg(test)]
+        {
+            latch_env!(usize, {
+                std::env::var("BLVM_IBD_TIP_HEDGE_N")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1)
+                    .clamp(1, 3)
+            })
+        }
+    };
     #[cfg(not(test))]
     {
         static LOGGED: std::sync::Once = std::sync::Once::new();
@@ -749,13 +772,20 @@ pub(crate) fn tip_hedge_n() -> usize {
 /// How long H must have been outstanding before a hedge is allowed.
 /// Unused when [`tip_hedge_n`] is 1. Never hedge immediately.
 pub(crate) fn tip_hedge_ms() -> u64 {
-    latch_env!(u64, {
-        std::env::var("BLVM_IBD_TIP_HEDGE_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(300)
-            .clamp(50, 10_000)
-    })
+    #[cfg(not(test))]
+    {
+        300
+    }
+    #[cfg(test)]
+    {
+        latch_env!(u64, {
+            std::env::var("BLVM_IBD_TIP_HEDGE_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(300)
+                .clamp(50, 10_000)
+        })
+    }
 }
 
 /// Pure hedge gate. Evidence belongs in the assertion message (R-289 style).
@@ -1372,14 +1402,21 @@ pub(crate) fn gap_admit_window() -> u64 {
 /// Dest R-81 uses **192** (hero 64 + two packed 64s). Do not dest default 256 (W28d
 /// throttle-at-half grew reorder ~270 and stalled feeder 37–74s).
 pub(crate) fn wan_gap_admit_window() -> u64 {
-    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("BLVM_IBD_WAN_GAP_ADMIT_WINDOW")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(64)
-            .clamp(32, 256)
-    })
+    #[cfg(not(test))]
+    {
+        64
+    }
+    #[cfg(test)]
+    {
+        static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *CACHED.get_or_init(|| {
+            std::env::var("BLVM_IBD_WAN_GAP_ADMIT_WINDOW")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(64)
+                .clamp(32, 256)
+        })
+    }
 }
 
 /// Mid-chain catch-up past body tip: admit window must track the multi-peer ahead pipe.
@@ -1393,27 +1430,41 @@ pub(crate) fn wan_gap_admit_window() -> u64 {
 /// holes were 60–75% of the feeder hole wait in every band past 200k. Whatever the
 /// assigner is allowed to fetch, the reorder must be allowed to keep.
 pub(crate) fn wan_bulk_admit_window() -> u64 {
-    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("BLVM_IBD_WAN_BULK_ADMIT_WINDOW")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| wan_bulk_ahead_cap().max(1024))
-            .clamp(256, 8192)
-    })
+    #[cfg(not(test))]
+    {
+        wan_bulk_ahead_cap().max(1024).clamp(256, 8192)
+    }
+    #[cfg(test)]
+    {
+        static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *CACHED.get_or_init(|| {
+            std::env::var("BLVM_IBD_WAN_BULK_ADMIT_WINDOW")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| wan_bulk_ahead_cap().max(1024))
+                .clamp(256, 8192)
+        })
+    }
 }
 
 /// Header tip must be at least this far past `next_needed` to treat WAN as bulk catch-up
 /// (multi-peer) rather than near-tip crawl. Env `BLVM_IBD_WAN_BULK_CATCHUP_GAP` (default **2048**).
 pub(crate) fn wan_bulk_catchup_gap() -> u64 {
-    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("BLVM_IBD_WAN_BULK_CATCHUP_GAP")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(2048)
-            .clamp(512, 100_000)
-    })
+    #[cfg(not(test))]
+    {
+        2048
+    }
+    #[cfg(test)]
+    {
+        static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *CACHED.get_or_init(|| {
+            std::env::var("BLVM_IBD_WAN_BULK_CATCHUP_GAP")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2048)
+                .clamp(512, 100_000)
+        })
+    }
 }
 
 /// Past body tip but still far from header tip — open multi-peer pipeline (not tip-crawl).
@@ -1468,14 +1519,21 @@ pub(crate) fn sole_tip_workers_per_peer() -> usize {
 
 /// Ahead cap during bulk catch-up past body tip. Env `BLVM_IBD_WAN_BULK_AHEAD` (default **2048**).
 pub(crate) fn wan_bulk_ahead_cap() -> u64 {
-    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("BLVM_IBD_WAN_BULK_AHEAD")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(2048)
-            .clamp(512, 8192)
-    })
+    #[cfg(not(test))]
+    {
+        2048
+    }
+    #[cfg(test)]
+    {
+        static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *CACHED.get_or_init(|| {
+            std::env::var("BLVM_IBD_WAN_BULK_AHEAD")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2048)
+                .clamp(512, 8192)
+        })
+    }
 }
 
 /// R-305: raise [`wan_bulk_tip_gap_ahead_cap`] ceiling 2048→8192 (`RUNWAY_SPAN`).
@@ -1503,14 +1561,22 @@ pub(crate) fn wide_runway_enabled() -> bool {
 /// **R-305:** clamp hi is 2048 unless [`wide_runway_enabled`] (then 8192 = `RUNWAY_SPAN`).
 /// Does **not** change [`wan_bulk_ahead_cap`] (non-starve path).
 pub(crate) fn wan_bulk_tip_gap_ahead_cap() -> u64 {
-    latch_env!(u64, {
+    #[cfg(not(test))]
+    {
         let hi = if wide_runway_enabled() { 8192 } else { 2048 };
-        std::env::var("BLVM_IBD_WAN_BULK_TIP_GAP_AHEAD")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(wan_tip_gap_ahead_cap)
-            .clamp(128, hi)
-    })
+        wan_tip_gap_ahead_cap().clamp(128, hi)
+    }
+    #[cfg(test)]
+    {
+        latch_env!(u64, {
+            let hi = if wide_runway_enabled() { 8192 } else { 2048 };
+            std::env::var("BLVM_IBD_WAN_BULK_TIP_GAP_AHEAD")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(wan_tip_gap_ahead_cap)
+                .clamp(128, hi)
+        })
+    }
 }
 
 /// W76: choose WAN ahead cap kind past body tip.
@@ -1567,15 +1633,22 @@ pub(crate) fn wan_ahead_policy(
 /// (KEEP mech vs A2 **20.60**), but two public keepconfirms tip60-failed (soft / unconfirmed).
 /// Manual undo of default-on — opt in: `BLVM_IBD_TIP_ADMIT_TIGHT=1` (archive fabric A/B).
 pub(crate) fn tip_admit_tight_enabled() -> bool {
-    latch_env!(bool, {
-        matches!(
-            std::env::var("BLVM_IBD_TIP_ADMIT_TIGHT")
-                .ok()
-                .as_deref()
-                .map(str::trim),
-            Some("1") | Some("true") | Some("on") | Some("yes")
-        )
-    })
+    #[cfg(not(test))]
+    {
+        false
+    }
+    #[cfg(test)]
+    {
+        latch_env!(bool, {
+            matches!(
+                std::env::var("BLVM_IBD_TIP_ADMIT_TIGHT")
+                    .ok()
+                    .as_deref()
+                    .map(str::trim),
+                Some("1") | Some("true") | Some("on") | Some("yes")
+            )
+        })
+    }
 }
 
 /// Effective reorder admit window: near-tip crawl uses tight W29; bulk catch-up uses deeper
@@ -1637,14 +1710,21 @@ pub(crate) fn ibd_active_peer_cap() -> usize {
 
 /// W33d: fewer active workers past body tip — less retry noise, more depth per owner.
 pub(crate) fn ibd_wan_gap_active_peer_cap() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("BLVM_IBD_WAN_GAP_ACTIVE_PEERS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(10)
-            .clamp(4, 24)
-    })
+    #[cfg(not(test))]
+    {
+        10
+    }
+    #[cfg(test)]
+    {
+        static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *CACHED.get_or_init(|| {
+            std::env::var("BLVM_IBD_WAN_GAP_ACTIVE_PEERS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10)
+                .clamp(4, 24)
+        })
+    }
 }
 
 /// L1: when validating inside the on-disk body tip, cap download ahead so workers do not
@@ -1663,14 +1743,21 @@ pub(crate) fn local_body_ahead_cap() -> u64 {
 /// W11: past on-disk body tip, keep WAN download ahead bounded so workers do not open a
 /// 2k window while the tip gap starves (live: soft-retries at 685k–686k with tip≈6849xx).
 pub(crate) fn wan_body_ahead_cap() -> u64 {
-    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("BLVM_IBD_WAN_AHEAD")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(384)
-            .clamp(128, 2048)
-    })
+    #[cfg(not(test))]
+    {
+        384
+    }
+    #[cfg(test)]
+    {
+        static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *CACHED.get_or_init(|| {
+            std::env::var("BLVM_IBD_WAN_AHEAD")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(384)
+                .clamp(128, 2048)
+        })
+    }
 }
 
 /// W11/W35″: when feeder empty / tip gap missing past body tip, bound ahead near the tip.
@@ -1680,28 +1767,42 @@ pub(crate) fn wan_body_ahead_cap() -> u64 {
 /// 256 lets sticky hold tip..tip+127 **and** tip+128..tip+255. Still tighter than
 /// `wan_body_ahead_cap` (384). Env `BLVM_IBD_WAN_TIP_AHEAD`.
 pub(crate) fn wan_tip_gap_ahead_cap() -> u64 {
-    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("BLVM_IBD_WAN_TIP_AHEAD")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(256)
-            .clamp(128, 512)
-    })
+    #[cfg(not(test))]
+    {
+        256
+    }
+    #[cfg(test)]
+    {
+        static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *CACHED.get_or_init(|| {
+            std::env::var("BLVM_IBD_WAN_TIP_AHEAD")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(256)
+                .clamp(128, 512)
+        })
+    }
 }
 
 /// W18: contiguous heights above tip allowed into the bridge during WAN catchup so inject
 /// chains (live mean chained≈30) can flush in one burst. Beyond this band → defer (avoid holes).
 /// Env `BLVM_IBD_WAN_TIP_DISPATCH_BAND` (default 64, clamp 8–256).
 pub(crate) fn wan_tip_dispatch_band() -> u64 {
-    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("BLVM_IBD_WAN_TIP_DISPATCH_BAND")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(64)
-            .clamp(8, 256)
-    })
+    #[cfg(not(test))]
+    {
+        64
+    }
+    #[cfg(test)]
+    {
+        static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *CACHED.get_or_init(|| {
+            std::env::var("BLVM_IBD_WAN_TIP_DISPATCH_BAND")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(64)
+                .clamp(8, 256)
+        })
+    }
 }
 
 /// GAP-7 / L2: refuse dispatch of far-ahead heights into OrderedReadyBridge while the gap
@@ -2556,19 +2657,22 @@ pub(crate) fn skip_ibd_archive_dns_seed() -> bool {
 }
 
 /// R-346: connected-peer count the IBD session keeps topping the roster up to
-/// (`BLVM_IBD_ROSTER_TARGET`; default `BLVM_TARGET_OUTBOUND_PEERS` if set, else **96**;
-/// 0 disables). The roster was filled once at startup and then only drained: R-341 ready
-/// 45 → 38, R-345 40 → 34 with 7–16 benched, busy 21 at 300k. Block wire rate is
-/// Σ per-peer bandwidth (~1.1–1.5 MB/s per busy peer in every band, flat across 0.6–2.1 MB
-/// tiles), so every peer the roster loses is ~5 BPS at 300k. R-346 ran 96: ready 60,
-/// busy 54, block wire 65–70 MB/s (R-345 32–41), 200–370k **283.2** PASS — locked in.
-pub(crate) fn ibd_roster_target() -> Option<usize> {
-    let raw = std::env::var("BLVM_IBD_ROSTER_TARGET")
-        .ok()
-        .or_else(|| std::env::var("BLVM_TARGET_OUTBOUND_PEERS").ok())
-        .and_then(|s| s.trim().parse::<usize>().ok())
+/// (`BLVM_IBD_ROSTER_TARGET`, else **96**; 0 disables; cap 100). This does not
+/// read `BLVM_TARGET_OUTBOUND_PEERS`. The roster was filled once at startup and
+/// then only drained: R-341 ready 45 → 38, R-345 40 → 34 with 7–16 benched,
+/// busy 21 at 300k. Block wire rate is Σ per-peer bandwidth (~1.1–1.5 MB/s per
+/// busy peer in every band, flat across 0.6–2.1 MB tiles), so every peer the
+/// roster loses is ~5 BPS at 300k. R-346 ran 96: ready 60, busy 54, block wire
+/// 65–70 MB/s (R-345 32–41), 200–370k **283.2** PASS — locked in.
+pub(crate) fn roster_target_from_raw(raw: Option<&str>) -> Option<usize> {
+    let count = raw
+        .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(96);
-    (raw > 0).then_some(raw.min(100))
+    (count > 0).then_some(count.min(100))
+}
+
+pub(crate) fn ibd_roster_target() -> Option<usize> {
+    roster_target_from_raw(std::env::var("BLVM_IBD_ROSTER_TARGET").ok().as_deref())
 }
 
 /// Seconds between roster top-up checks (`BLVM_IBD_ROSTER_TOPUP_SECS`, default 30, min 10).
@@ -5856,12 +5960,19 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
     // R-190: covering=0 and H not dispatched (STREAM then drop).
     // W22: bridge cursor ahead of validation (tip emitted, not yet consumed / lost).
     let mut bridge_ahead_since: Option<(u64, std::time::Instant)> = None;
-    let tip_inflight_grace = Duration::from_secs(
-        std::env::var("BLVM_IBD_TIP_INFLIGHT_GRACE_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(10),
-    );
+    let tip_inflight_grace = Duration::from_secs({
+        #[cfg(not(test))]
+        {
+            10
+        }
+        #[cfg(test)]
+        {
+            std::env::var("BLVM_IBD_TIP_INFLIGHT_GRACE_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10)
+        }
+    });
     #[cfg(target_os = "linux")]
     let mut coord_emergency_log = std::time::Instant::now();
     loop {
@@ -10937,3 +11048,15 @@ impl ParallelIBD {
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod roster_target_tests {
+    use super::roster_target_from_raw;
+
+    #[test]
+    fn unset_roster_stays_96() {
+        assert_eq!(roster_target_from_raw(None), Some(96));
+        assert_eq!(roster_target_from_raw(Some("0")), None);
+        assert_eq!(roster_target_from_raw(Some("150")), Some(100));
+    }
+}

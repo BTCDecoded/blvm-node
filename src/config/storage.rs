@@ -276,7 +276,7 @@ fn default_dbcache_mb() -> usize {
     450
 }
 
-/// RocksDB tuning. Config file overrides ENV; ENV overrides defaults.
+/// RocksDB tuning. ENV overrides the file; the file overrides the RAM-tier default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RocksDBConfig {
     /// Parallelism (default: nproc or 4)
@@ -304,7 +304,7 @@ fn default_rocksdb_level0_trigger() -> i32 {
     8
 }
 
-/// heed3 / LMDB tuning (config > ENV > defaults).
+/// heed3 / LMDB tuning. ENV overrides the file; the file overrides auto-tune.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Heed3Config {
     /// LMDB map size in megabytes. When unset, auto-tuned from free disk (70%, clamped
@@ -346,7 +346,7 @@ pub struct StorageConfig {
     #[serde(default = "default_dbcache_mb")]
     pub dbcache_mb: usize,
 
-    /// RocksDB tuning (config > ENV > defaults)
+    /// RocksDB tuning (ENV > file > RAM-tier default)
     #[serde(default)]
     pub rocksdb: Option<RocksDBConfig>,
 

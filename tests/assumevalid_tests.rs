@@ -2,7 +2,11 @@
 //!
 //! Verifies -assumevalid CLI, config wiring, and per-network defaults.
 
-use blvm_node::config::{BlockValidationNodeConfig, default_assume_valid_height_for_network};
+use blvm_node::config::{
+    BlockValidationNodeConfig, assume_valid_hash_from_display_hex,
+    default_assume_valid_hash_for_network, default_assume_valid_height_for_network,
+    overlay_assume_valid,
+};
 
 #[test]
 fn test_default_assume_valid_height_per_network() {
@@ -23,6 +27,25 @@ fn test_default_assume_valid_height_per_network() {
     assert_eq!(default_assume_valid_height_for_network("signet"), 267_665);
     assert_eq!(default_assume_valid_height_for_network("regtest"), 0);
     assert_eq!(default_assume_valid_height_for_network("unknown"), 0);
+}
+
+#[test]
+fn test_default_assume_valid_hash_only_for_checked_mainnet_header() {
+    const DISPLAY: &str = "00000000000000000000611fd22f2df7c8fbd0688745c3a6c3bb5109cc2a12cb";
+    let checked = assume_valid_hash_from_display_hex(DISPLAY).unwrap();
+    assert_eq!(
+        default_assume_valid_hash_for_network("mainnet"),
+        Some(checked)
+    );
+    assert_eq!(
+        default_assume_valid_hash_for_network("bitcoinv1"),
+        Some(checked)
+    );
+    assert!(default_assume_valid_hash_for_network("testnet").is_none());
+    assert!(default_assume_valid_hash_for_network("testnet3").is_none());
+    assert!(default_assume_valid_hash_for_network("testnet4").is_none());
+    assert!(default_assume_valid_hash_for_network("signet").is_none());
+    assert!(default_assume_valid_hash_for_network("regtest").is_none());
 }
 
 #[test]
@@ -87,4 +110,20 @@ fn assume_valid_hash_accepts_display_hex_and_byte_array() {
 
     let err = toml::from_str::<BlockValidationNodeConfig>("assume_valid_hash = \"abcd\"\n");
     assert!(err.is_err());
+
+    let from_parser = assume_valid_hash_from_display_hex(DISPLAY).unwrap();
+    assert_eq!(from_hex.assume_valid_hash.unwrap(), from_parser);
+}
+
+#[test]
+fn env_height_keeps_file_hash() {
+    const DISPLAY: &str = "0000000002368b1e4ee27e2e85676ae6f9f9e69579b29093e9a82c170bf7cf8a";
+    let hash = assume_valid_hash_from_display_hex(DISPLAY).unwrap();
+    let file = BlockValidationNodeConfig {
+        assume_valid_height: 912_683,
+        assume_valid_hash: Some(hash),
+    };
+    let (height, kept) = overlay_assume_valid(Some(100), Some(&file));
+    assert_eq!(height, 100);
+    assert_eq!(kept, Some(hash));
 }

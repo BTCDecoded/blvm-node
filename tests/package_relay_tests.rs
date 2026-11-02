@@ -52,7 +52,7 @@ fn test_package_validator_default() {
     let validator = PackageValidator::default();
     assert_eq!(validator.max_package_size, 25);
     assert_eq!(validator.max_package_weight, 404_000);
-    assert_eq!(validator.min_fee_rate, 1);
+    assert_eq!(validator.min_fee_rate, 100);
 }
 
 #[test]

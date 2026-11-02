@@ -483,15 +483,22 @@ fn pipeline_depth_for_engine_append(nominal: usize) -> usize {
 /// so fewer workers thrash the page cache (opposite of F5c parallel-pread).
 /// Opt-in only (`=1`). C2 default-on under tip-crawl hurt tip30 (`tc220a48h3c21`).
 fn tip_concurrency_adapt_from_env() -> bool {
-    latch_env!(bool, {
-        matches!(
-            std::env::var("BLVM_IBD_TIP_CONCURRENCY_ADAPT")
-                .ok()
-                .as_deref()
-                .map(str::trim),
-            Some("1") | Some("true") | Some("yes") | Some("on")
-        )
-    })
+    #[cfg(not(test))]
+    {
+        false
+    }
+    #[cfg(test)]
+    {
+        latch_env!(bool, {
+            matches!(
+                std::env::var("BLVM_IBD_TIP_CONCURRENCY_ADAPT")
+                    .ok()
+                    .as_deref()
+                    .map(str::trim),
+                Some("1") | Some("true") | Some("yes") | Some("on")
+            )
+        })
+    }
 }
 
 /// Land E: under tip-crawl with healthy supply, treat Critical like Elevated for
@@ -1728,15 +1735,23 @@ impl Drop for DeferredDropper {
 /// write txns) stays inline; the sync moves to one `ibd-tip-sync` thread with a depth-1 queue
 /// (a request that arrives while one is queued is folded into it — `force_sync` covers every
 /// commit before it, so the tip it was asked for is always included). Durability cadence is
-/// unchanged: same syncs, same heights, off the serial thread. `BLVM_IBD_TIP_SYNC=inline`
-/// restores R-361 (`request` returns `false`; the caller flushes inline).
+/// unchanged: same syncs, same heights, off the serial thread. Production always
+/// uses the background thread. Tests may set `BLVM_IBD_TIP_SYNC=inline` so
+/// `request` returns `false` and the caller flushes inline.
 fn tip_sync_inline() -> bool {
-    match std::env::var("BLVM_IBD_TIP_SYNC") {
-        Ok(v) => {
-            let t = v.trim();
-            t.eq_ignore_ascii_case("inline") || t == "0" || t.eq_ignore_ascii_case("off")
+    #[cfg(not(test))]
+    {
+        false
+    }
+    #[cfg(test)]
+    {
+        match std::env::var("BLVM_IBD_TIP_SYNC") {
+            Ok(v) => {
+                let t = v.trim();
+                t.eq_ignore_ascii_case("inline") || t == "0" || t.eq_ignore_ascii_case("off")
+            }
+            Err(_) => false,
         }
-        Err(_) => false,
     }
 }
 

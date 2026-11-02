@@ -14,11 +14,20 @@ impl ChunkAssigner {
         if super::synthetic_wan::bulk_local_disk_stream()
             && super::download::is_local_disk_peer(peer_id)
         {
-            return std::env::var("BLVM_IBD_SYNTH_LOCAL_IN_FLIGHT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(4)
-                .clamp(2, 4);
+            return {
+                #[cfg(not(test))]
+                {
+                    4
+                }
+                #[cfg(test)]
+                {
+                    std::env::var("BLVM_IBD_SYNTH_LOCAL_IN_FLIGHT")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(4)
+                        .clamp(2, 4)
+                }
+            };
         }
         if self.preferred_tip_owner().as_deref() == Some(peer_id) && self.tip_sticky_usable(peer_id)
         {
@@ -745,26 +754,42 @@ impl ChunkAssigner {
     /// C1e: max contiguous assign band from tip while tip body missing (multi-peer stripes).
     /// Default **256**. Env `BLVM_IBD_TIP_RUNWAY_CAP` (clamp 32–256).
     pub(crate) fn tip_runway_cap() -> u64 {
-        latch_env!(u64, {
-            std::env::var("BLVM_IBD_TIP_RUNWAY_CAP")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(256)
-                .clamp(32, 256)
-        })
+        #[cfg(not(test))]
+        {
+            256
+        }
+        #[cfg(test)]
+        {
+            latch_env!(u64, {
+                std::env::var("BLVM_IBD_TIP_RUNWAY_CAP")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(256)
+                    .clamp(32, 256)
+            })
+        }
     }
 
     /// C1e: stripe width for tip-owner / ahead peers inside the runway.
     /// Default **64** hides the next GetData RTT (product batch 64).
     /// Not L2c 512 (R-110 **649**). Not FAST 128 as start.
     pub(crate) fn tip_runway_stripe() -> u64 {
-        let raw = latch_env!(u64, {
-            std::env::var("BLVM_IBD_TIP_RUNWAY_STRIPE")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(64)
-                .clamp(8, 128)
-        });
+        let raw = {
+            #[cfg(not(test))]
+            {
+                64
+            }
+            #[cfg(test)]
+            {
+                latch_env!(u64, {
+                    std::env::var("BLVM_IBD_TIP_RUNWAY_STRIPE")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(64)
+                        .clamp(8, 128)
+                })
+            }
+        };
         raw.min(Self::tip_runway_cap())
     }
 
@@ -779,11 +804,18 @@ impl ChunkAssigner {
 
     /// Raw `TIP_PARTITION_WINDOW` when set (WAN/local apply different defaults/clamps).
     fn tip_partition_window_raw() -> Option<u64> {
-        latch_env!(Option<u64>, {
-            std::env::var("BLVM_IBD_TIP_PARTITION_WINDOW")
-                .ok()
-                .and_then(|s| s.parse().ok())
-        })
+        #[cfg(not(test))]
+        {
+            None
+        }
+        #[cfg(test)]
+        {
+            latch_env!(Option<u64>, {
+                std::env::var("BLVM_IBD_TIP_PARTITION_WINDOW")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+            })
+        }
     }
 
     /// Mousetrap: log assign_F vs pipe_F vs body_F on tip-band secondary opens.

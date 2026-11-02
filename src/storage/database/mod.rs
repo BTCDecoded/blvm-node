@@ -1713,15 +1713,15 @@ pub mod rocksdb_impl {
                 .map(|p| p.get() as i32)
                 .unwrap_or(2)
                 .max(1);
-            let parallelism: i32 = storage_config
-                .and_then(|s| s.rocksdb.as_ref())
-                .and_then(|r| r.parallelism)
-                .or_else(|| {
-                    std::env::var("BLVM_ROCKSDB_PARALLELISM")
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                })
-                .unwrap_or(default_parallelism);
+            let parallelism: i32 = rocksdb_env_over_file(
+                std::env::var("BLVM_ROCKSDB_PARALLELISM")
+                    .ok()
+                    .and_then(|s| s.parse().ok()),
+                storage_config
+                    .and_then(|s| s.rocksdb.as_ref())
+                    .and_then(|r| r.parallelism),
+                default_parallelism,
+            );
             opts.increase_parallelism(parallelism);
             let max_open = if total_ram_gb >= 32 {
                 256
@@ -1750,30 +1750,27 @@ pub mod rocksdb_impl {
                 1
             };
             let rocksdb_cfg = storage_config.and_then(|s| s.rocksdb.as_ref());
-            let max_compactions: i32 = rocksdb_cfg
-                .and_then(|r| r.max_background_compactions)
-                .or_else(|| {
-                    std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_COMPACTIONS")
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                })
-                .unwrap_or(default_compactions);
-            let max_flushes: i32 = rocksdb_cfg
-                .and_then(|r| r.max_background_flushes)
-                .or_else(|| {
-                    std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_FLUSHES")
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                })
-                .unwrap_or(default_flushes);
-            let level0_trigger: i32 = rocksdb_cfg
-                .map(|r| r.level0_compaction_trigger)
-                .or_else(|| {
-                    std::env::var("BLVM_ROCKSDB_LEVEL0_COMPACTION_TRIGGER")
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                })
-                .unwrap_or(8);
+            let max_compactions: i32 = rocksdb_env_over_file(
+                std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_COMPACTIONS")
+                    .ok()
+                    .and_then(|s| s.parse().ok()),
+                rocksdb_cfg.and_then(|r| r.max_background_compactions),
+                default_compactions,
+            );
+            let max_flushes: i32 = rocksdb_env_over_file(
+                std::env::var("BLVM_ROCKSDB_MAX_BACKGROUND_FLUSHES")
+                    .ok()
+                    .and_then(|s| s.parse().ok()),
+                rocksdb_cfg.and_then(|r| r.max_background_flushes),
+                default_flushes,
+            );
+            let level0_trigger: i32 = rocksdb_env_over_file(
+                std::env::var("BLVM_ROCKSDB_LEVEL0_COMPACTION_TRIGGER")
+                    .ok()
+                    .and_then(|s| s.parse().ok()),
+                rocksdb_cfg.map(|r| r.level0_compaction_trigger),
+                8,
+            );
             // RocksDB uses max_background_jobs; it allocates between flushes and compactions
             opts.set_max_background_jobs(max_compactions + max_flushes);
             opts.set_level_zero_file_num_compaction_trigger(level0_trigger);
@@ -1838,15 +1835,14 @@ pub mod rocksdb_impl {
                 32
             };
 
-            // Precedence: config > ENV > default
-            let db_write_buffer_mb: usize = rocksdb_cfg
-                .and_then(|r| r.write_buffer_mb)
-                .or_else(|| {
-                    std::env::var("BLVM_ROCKSDB_WRITE_BUFFER_MB")
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                })
-                .unwrap_or(default_write_buffer);
+            // Precedence: ENV > config > RAM-tier default
+            let db_write_buffer_mb: usize = rocksdb_env_over_file(
+                std::env::var("BLVM_ROCKSDB_WRITE_BUFFER_MB")
+                    .ok()
+                    .and_then(|s| s.parse().ok()),
+                rocksdb_cfg.and_then(|r| r.write_buffer_mb),
+                default_write_buffer,
+            );
             opts.set_db_write_buffer_size(db_write_buffer_mb * 1024 * 1024);
 
             tracing::info!(
@@ -1859,9 +1855,9 @@ pub mod rocksdb_impl {
                 total_ram_gb
             );
 
-            // Block cache: `[storage.cache] block_cache_mb` when that section is set,
-            // otherwise ENV > `dbcache_mb` > RAM-tiered default. The RAM tier is used
-            // only when `dbcache_mb` is 0.
+            // Block cache: BLVM_DBCACHE_MB, then `[storage.cache] block_cache_mb`,
+            // then `dbcache_mb`, then the RAM tier. The RAM tier is used only when
+            // `dbcache_mb` is 0.
             if let Some(header_mb) = storage_config
                 .and_then(|s| s.cache.as_ref())
                 .map(|cache| cache.header_cache_mb)
@@ -1873,19 +1869,14 @@ pub mod rocksdb_impl {
                 .and_then(|s| s.cache.as_ref())
                 .map(|cache| cache.block_cache_mb)
                 .filter(|&n| n > 0);
-            let dbcache_mb: usize = if let Some(mb) = configured_block_cache {
-                mb
-            } else {
+            let dbcache_mb: usize = rocksdb_block_cache_resolved(
                 std::env::var("BLVM_DBCACHE_MB")
                     .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or_else(|| {
-                        super::rocksdb_block_cache_mb(
-                            storage_config.map(|s| s.dbcache_mb).unwrap_or(0),
-                            default_block_cache,
-                        )
-                    })
-            };
+                    .and_then(|s| s.parse().ok()),
+                configured_block_cache,
+                storage_config.map(|s| s.dbcache_mb).unwrap_or(0),
+                default_block_cache,
+            );
             let dbcache_bytes = dbcache_mb.saturating_mul(1024).saturating_mul(1024);
             let cache = Cache::new_lru_cache(dbcache_bytes);
             let mut block_opts = BlockBasedOptions::default();
@@ -1940,31 +1931,27 @@ pub mod rocksdb_impl {
                 .and_then(|s| s.cache.as_ref())
                 .map(|cache| cache.utxo_cache_mb)
                 .filter(|&n| n > 0);
-            let utxo_block_cache_mb: usize = if let Some(mb) = configured_utxo_cache {
-                mb
+            let utxo_ram_default = if total_ram_gb >= 64 {
+                2048
+            } else if total_ram_gb >= 32 {
+                1536
+            } else if total_ram_gb >= 24 {
+                1024
+            } else if total_ram_gb >= 16 {
+                // 256 MB: on 16 GB hosts RSS at h=400k+ is already 8+ GB (79% of budget).
+                // A larger block cache would increase RSS → adaptive cap shrinks the DashMap
+                // → net negative effect. Keep at 256 MB until RSS headroom is confirmed large
+                // enough (e.g. on 32 GB+ hosts or at early heights before UTXO buildup).
+                256
             } else {
-                std::env::var("BLVM_ROCKSDB_UTXO_BLOCK_CACHE_MB")
-                    .ok()
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .filter(|&n| n > 0 && n <= 16_384)
-                    .unwrap_or({
-                        if total_ram_gb >= 64 {
-                            2048
-                        } else if total_ram_gb >= 32 {
-                            1536
-                        } else if total_ram_gb >= 24 {
-                            1024
-                        } else if total_ram_gb >= 16 {
-                            // 256 MB: on 16 GB hosts RSS at h=400k+ is already 8+ GB (79% of budget).
-                            // A larger block cache would increase RSS → adaptive cap shrinks the DashMap
-                            // → net negative effect. Keep at 256 MB until RSS headroom is confirmed large
-                            // enough (e.g. on 32 GB+ hosts or at early heights before UTXO buildup).
-                            256
-                        } else {
-                            64
-                        }
-                    })
+                64
             };
+            let utxo_block_cache_mb: usize = std::env::var("BLVM_ROCKSDB_UTXO_BLOCK_CACHE_MB")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|&n| n > 0 && n <= 16_384)
+                .or(configured_utxo_cache)
+                .unwrap_or(utxo_ram_default);
             let utxo_cache = Cache::new_lru_cache(utxo_block_cache_mb * 1024 * 1024);
             tracing::info!(
                 "[ROCKSDB] utxo_block_cache={}MB (dedicated, ram={}GB)",
@@ -3054,6 +3041,27 @@ pub(crate) mod tidesdb_impl {
     }
 }
 
+/// ENV, then the file, then the built-in default.
+pub(crate) fn rocksdb_env_over_file<T>(env_value: Option<T>, file_value: Option<T>, default: T) -> T {
+    env_value.or(file_value).unwrap_or(default)
+}
+
+/// `BLVM_DBCACHE_MB`, then `[storage.cache].block_cache_mb`, then `dbcache_mb`, then the RAM tier.
+pub(crate) fn rocksdb_block_cache_resolved(
+    env_mb: Option<usize>,
+    file_block_cache_mb: Option<usize>,
+    dbcache_mb: usize,
+    ram_tier_mb: usize,
+) -> usize {
+    if let Some(mb) = env_mb {
+        return mb;
+    }
+    if let Some(mb) = file_block_cache_mb.filter(|&n| n > 0) {
+        return mb;
+    }
+    rocksdb_block_cache_mb(dbcache_mb, ram_tier_mb)
+}
+
 /// RocksDB block-cache size when `[storage.cache] block_cache_mb` and
 /// `BLVM_DBCACHE_MB` are both unset. A positive `dbcache_mb` is used as given.
 pub(crate) fn rocksdb_block_cache_mb(dbcache_mb: usize, ram_tier_mb: usize) -> usize {
@@ -3066,11 +3074,26 @@ pub(crate) fn rocksdb_block_cache_mb(dbcache_mb: usize, ram_tier_mb: usize) -> u
 
 #[cfg(test)]
 mod rocksdb_cache_tests {
-    use super::rocksdb_block_cache_mb;
+    use super::{rocksdb_block_cache_mb, rocksdb_block_cache_resolved, rocksdb_env_over_file};
 
     #[test]
     fn configured_dbcache_is_not_shrunk_to_the_ram_tier() {
         assert_eq!(rocksdb_block_cache_mb(4096, 768), 4096);
         assert_eq!(rocksdb_block_cache_mb(0, 768), 768);
+    }
+
+    #[test]
+    fn parallelism_env_beats_file_and_file_beats_default() {
+        assert_eq!(rocksdb_env_over_file(Some(8), Some(2), 4), 8);
+        assert_eq!(rocksdb_env_over_file(None, Some(2), 4), 2);
+        assert_eq!(rocksdb_env_over_file::<i32>(None, None, 4), 4);
+    }
+
+    #[test]
+    fn block_cache_env_beats_file_cache() {
+        assert_eq!(rocksdb_block_cache_resolved(Some(8), Some(2), 450, 768), 8);
+        assert_eq!(rocksdb_block_cache_resolved(None, Some(2), 450, 768), 2);
+        assert_eq!(rocksdb_block_cache_resolved(None, None, 450, 768), 450);
+        assert_eq!(rocksdb_block_cache_resolved(None, None, 0, 768), 768);
     }
 }

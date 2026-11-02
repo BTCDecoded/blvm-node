@@ -2,7 +2,19 @@
 
 ## Overview
 
-Covers all configuration options for blvm-node, including RBF modes, mempool policies, and other node settings.
+Covers configuration options for blvm-node, including RBF modes, mempool policies, and other node settings.
+
+**Precedence, highest first:** CLI, then environment, then the config file, then the built-in default. An omitted table stays at the built-in default. A present table fills every key from that table's defaults.
+
+RocksDB file settings follow environment, then file, then the built-in default. Heed3 map size follows a caller override, then the environment, then the file, then disk auto-tune.
+
+## Assume-valid
+
+`[block_validation]` has `assume_valid_height` and `assume_valid_hash`. Signatures skip only when the connected block is below that height, chainwork is at least the minimum, and the hash is set. A height with no hash does not skip.
+
+With no `[block_validation]` table, the binary seeds mainnet `912683` with the checked header hash, testnet `4550000`, and signet `267665`. Testnet and signet leave the hash unset. Their log says script checks still run until a hash is set. Testnet4 and regtest seed `0`.
+
+`BLVM_ASSUME_VALID_HEIGHT` overrides the height only. There is no hash environment variable. `--assumevalid` with 64 hex digits sets the hash and keeps the seeded or file height. `--noassumevalid` and `--assumevalid 0` clear both. A 64-character block id in the file or on the CLI is stored in the internal byte order `connect_block` compares.
 
 ## Table of Contents
 
@@ -61,7 +73,7 @@ mempool_persistence_path = "data/mempool.dat"
 ```toml
 listen_addr = "0.0.0.0:8333"
 max_peers = 100
-protocol_version = "BitcoinV1"
+protocol_version = "mainnet"
 transport_preference = "tcponly"
 enable_self_advertisement = true
 ```
@@ -98,11 +110,13 @@ background_indexing = false  # lazy only: txindex-bg thread after block connect
 
 ## Module Configuration
 
-Node config can override module settings via `[modules.<name>]` (e.g. `[modules.selective-sync]`). Node values take precedence over module `config.toml`:
+Each module reads `{modules.data_dir}/{manifest name}/config.toml`. `[modules.<manifest name>]` overrides only fields that module marks for the environment overlay. The manifest name is the table key.
+
+Payment is that module file alone. A `[payment]` table in the node file is ignored. Miner TCP is `[modules.blvm-stratum-v2]`, not `[stratum_v2]` and not `[modules.stratum-v2]`. `[stratum_v2]` only sets `p2p_stratum_demux`.
 
 ```toml
-[modules.selective-sync]
-database_backend = "redb"  # Example override; omit to inherit node / module_subprocess preference
+[modules.blvm-selective-sync]
+witness_mode = "strict"
 ```
 
 ### WebAssembly in-process modules (`wasm-modules`)
@@ -127,7 +141,7 @@ wasm_fuel_per_invocation = "10000000"
 
 ## RPC configuration
 
-**RPC listen address** is determined by the **`blvm`** binary (`--rpc-addr` and `BLVM_RPC_ADDR`), not by a `bind_address` field in the config file.
+**RPC listen address** is `rpc_addr` on `NodeConfig`. The `blvm` binary resolves CLI `--rpc-addr`, then `BLVM_RPC_ADDR`, then that field, then the network default. There is no `bind_address` key.
 
 The optional **`[rpc]`** table configures **limits and rate limits** on the JSON-RPC server:
 

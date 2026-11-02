@@ -812,13 +812,22 @@ pub(crate) fn tip_awaiting_ms_for_cap() -> u64 {
 /// (W96 freeze steal; W97 tip60~15 vs W95 ~80–112). Keep W81 GetData-aware clock.
 #[inline]
 pub(crate) fn tip_ahead_frozen_for_late_body() -> bool {
-    let freeze_secs = super::latch_env!(u64, {
-        std::env::var("BLVM_IBD_TIP_AHEAD_FREEZE_BODY_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(2)
-            .clamp(1, 30)
-    });
+    let freeze_secs = {
+        #[cfg(not(test))]
+        {
+            2
+        }
+        #[cfg(test)]
+        {
+            super::latch_env!(u64, {
+                std::env::var("BLVM_IBD_TIP_AHEAD_FREEZE_BODY_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(2)
+                    .clamp(1, 30)
+            })
+        }
+    };
     let awaiting = if crate::node::parallel_ibd::IBD_TIP_GAP_MISSING.load(Ordering::Relaxed) {
         tip_awaiting_secs_ignore_body()
     } else {
@@ -874,14 +883,21 @@ pub(crate) fn clear_tip_failover() {
 /// were still in flight → tip stuck ≥20s for ~30% of wall, ~2.9 blk/s. Breakthrough peers
 /// finish in ~6s so a longer SLA does not slow the fast path.
 pub(crate) fn tip_sla_secs() -> u64 {
-    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("BLVM_IBD_TIP_SLA_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(90)
-            .clamp(45, 180)
-    })
+    #[cfg(not(test))]
+    {
+        90
+    }
+    #[cfg(test)]
+    {
+        static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *CACHED.get_or_init(|| {
+            std::env::var("BLVM_IBD_TIP_SLA_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(90)
+                .clamp(45, 180)
+        })
+    }
 }
 
 /// Tip-SLA for floor-score sticky owners (≈0.1). Default **15** (W82) — was 25; live
@@ -889,15 +905,22 @@ pub(crate) fn tip_sla_secs() -> u64 {
 /// sat 20 ahead (tip60≈1). Still above tip CAP (12s) so soft-retry can fire once.
 /// Env `BLVM_IBD_TIP_SLA_FLOOR_SECS` (clamp 12–base).
 pub(crate) fn tip_sla_floor_secs() -> u64 {
-    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let base = tip_sla_secs();
-        std::env::var("BLVM_IBD_TIP_SLA_FLOOR_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(15)
-            .clamp(12, base)
-    })
+    #[cfg(not(test))]
+    {
+        15
+    }
+    #[cfg(test)]
+    {
+        static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *CACHED.get_or_init(|| {
+            let base = tip_sla_secs();
+            std::env::var("BLVM_IBD_TIP_SLA_FLOOR_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(15)
+                .clamp(12, base)
+        })
+    }
 }
 
 /// W165: tip-SLA for demoted/unproven sticky (tip_owner_score ≤0.05). Default **5**.
@@ -905,15 +928,22 @@ pub(crate) fn tip_sla_floor_secs() -> u64 {
 /// collapsed (331→334k rate-fail). Rotate before CAP soft-retry window burns tip60.
 /// Env `BLVM_IBD_TIP_SLA_UNPROVEN_SECS` (clamp 3–floor).
 pub(crate) fn tip_sla_unproven_secs() -> u64 {
-    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let floor = tip_sla_floor_secs();
-        std::env::var("BLVM_IBD_TIP_SLA_UNPROVEN_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(5)
-            .clamp(3, floor)
-    })
+    #[cfg(not(test))]
+    {
+        5
+    }
+    #[cfg(test)]
+    {
+        static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *CACHED.get_or_init(|| {
+            let floor = tip_sla_floor_secs();
+            std::env::var("BLVM_IBD_TIP_SLA_UNPROVEN_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5)
+                .clamp(3, floor)
+        })
+    }
 }
 
 /// W170: owner scores at/below this use [`tip_sla_floor_secs`] (default **0.20**).
@@ -921,14 +951,21 @@ pub(crate) fn tip_sla_unproven_secs() -> u64 {
 /// while holes=1 pending=61 covering=3 soft_retries=0 → tip60→0 → rate-fail @321k.
 /// Env `BLVM_IBD_TIP_SLA_FLOOR_SCORE` (clamp 0.12–0.35).
 pub(crate) fn tip_sla_floor_score_threshold() -> f64 {
-    static CACHED: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("BLVM_IBD_TIP_SLA_FLOOR_SCORE")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(0.20_f64)
-            .clamp(0.12_f64, 0.35_f64)
-    })
+    #[cfg(not(test))]
+    {
+        0.20
+    }
+    #[cfg(test)]
+    {
+        static CACHED: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+        *CACHED.get_or_init(|| {
+            std::env::var("BLVM_IBD_TIP_SLA_FLOOR_SCORE")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.20_f64)
+                .clamp(0.12_f64, 0.35_f64)
+        })
+    }
 }
 
 /// True when `owner_score` should use floor tip-SLA (not the 90s mid-tier).

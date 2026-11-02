@@ -65,7 +65,7 @@ impl TransactionSelector {
         Self {
             max_block_size: 1_000_000,   // 1MB
             max_block_weight: 4_000_000, // 4M weight units
-            min_fee_rate: 1,             // 1 satoshi per byte
+            min_fee_rate: 1, // 1 satoshi per 1,000 virtual bytes
         }
     }
 
@@ -212,7 +212,7 @@ impl TransactionSelector {
                     package_fee.saturating_add(self.transaction_fee(parent_tx, utxo_set, mempool));
                 package_vsize = package_vsize.saturating_add(self.tx_vsize(parent_tx, mempool));
             }
-            if package_vsize == 0 || package_fee / (package_vsize as u64) < self.min_fee_rate {
+            if !fee_meets_block_floor(package_fee, package_vsize as u64, self.min_fee_rate) {
                 continue;
             }
             for parent_tx in &parents {
@@ -293,8 +293,8 @@ impl TransactionSelector {
             return BlockSelect::Full;
         }
 
-        let fee_rate = self.calculate_fee_rate_with_utxo(tx, utxo_set, tx_vsize, mempool);
-        if enforce_fee && fee_rate < self.min_fee_rate {
+        let fee = self.transaction_fee(tx, utxo_set, mempool);
+        if enforce_fee && !fee_meets_block_floor(fee, tx_vsize as u64, self.min_fee_rate) {
             return BlockSelect::Skip;
         }
 
@@ -376,7 +376,7 @@ impl TransactionSelector {
                 continue;
             }
             let child_fee = self.transaction_fee(child, utxo_set, mempool);
-            if child_fee / (child_vsize as u64) < self.min_fee_rate {
+            if !fee_meets_block_floor(child_fee, child_vsize as u64, self.min_fee_rate) {
                 continue;
             }
             let Some(parents) = self.unselected_ancestors(child, mempool, utxo_set, selected_ids)
@@ -397,7 +397,7 @@ impl TransactionSelector {
                     package_fee.saturating_add(self.transaction_fee(parent_tx, utxo_set, mempool));
                 package_vsize = package_vsize.saturating_add(self.tx_vsize(parent_tx, mempool));
             }
-            if package_vsize > 0 && package_fee / (package_vsize as u64) >= self.min_fee_rate {
+            if fee_meets_block_floor(package_fee, package_vsize as u64, self.min_fee_rate) {
                 return Some((parents, child.clone()));
             }
         }
@@ -595,6 +595,15 @@ const TEMPLATE_RESERVE_WEIGHT: u64 = 4_000;
 const TEMPLATE_RESERVE_BYTES: usize = (TEMPLATE_RESERVE_WEIGHT / 4) as usize;
 
 /// BIP141 weight: `3 × stripped size + total size`.
+/// Block creation floor. `rate` is satoshis per 1,000 virtual bytes, rounded up.
+fn fee_meets_block_floor(fee: u64, vsize: u64, rate: u64) -> bool {
+    vsize > 0
+        && (fee as u128)
+            >= (rate as u128)
+                .saturating_mul(vsize as u128)
+                .div_ceil(1000)
+}
+
 fn bip141_weight(tx: &Transaction, input_witnesses: Option<&[Witness]>) -> u64 {
     blvm_protocol::segwit::transaction_weight_from_stacks(tx, input_witnesses).unwrap_or(u64::MAX)
 }
@@ -1612,6 +1621,39 @@ mod tests {
         assert_eq!(selector.max_block_size(), 1_000_000);
         assert_eq!(selector.max_block_weight(), 4_000_000);
         assert_eq!(selector.min_fee_rate(), 1);
+    }
+
+    #[test]
+    fn fee_of_seven_sats_is_mined() {
+        let selector = TransactionSelector::new();
+        let utxo_value = 20_000i64;
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            blvm_protocol::OutPoint {
+                hash: [0u8; 32],
+                index: 0,
+            },
+            std::sync::Arc::new(blvm_protocol::UTXO {
+                value: utxo_value,
+                script_pubkey: vec![blvm_protocol::opcodes::OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        let pick = |output: i64| {
+            let mut mempool = MockMempoolProvider::new();
+            mempool.add_transaction(create_test_transaction(1, output as u64));
+            !selector.select_transactions(&mempool, &utxo_set).is_empty()
+        };
+        let pays_ten_thousand = pick(utxo_value - 10_000);
+        let pays_seven = pick(utxo_value - 7);
+        let pays_zero = pick(utxo_value);
+        eprintln!(
+            "fee 10000 selected={pays_ten_thousand}; fee 7 selected={pays_seven}; fee 0 selected={pays_zero}"
+        );
+        assert!(pays_ten_thousand);
+        assert!(pays_seven);
+        assert!(!pays_zero);
     }
 
     #[test]

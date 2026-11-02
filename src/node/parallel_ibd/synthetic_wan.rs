@@ -32,20 +32,34 @@ pub fn body_tip_override() -> Option<u64> {
     if !enabled() {
         return None;
     }
-    std::env::var("BLVM_IBD_SYNTH_WAN_BODY_TIP")
-        .ok()
-        .and_then(|s| s.parse().ok())
+    #[cfg(not(test))]
+    {
+        None
+    }
+    #[cfg(test)]
+    {
+        std::env::var("BLVM_IBD_SYNTH_WAN_BODY_TIP")
+            .ok()
+            .and_then(|s| s.parse().ok())
+    }
 }
 
 pub fn peer_count() -> usize {
     if !enabled() {
         return 0;
     }
-    std::env::var("BLVM_IBD_SYNTH_WAN_PEER_COUNT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(4)
-        .clamp(1, 16)
+    #[cfg(not(test))]
+    {
+        4
+    }
+    #[cfg(test)]
+    {
+        std::env::var("BLVM_IBD_SYNTH_WAN_PEER_COUNT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4)
+            .clamp(1, 16)
+    }
 }
 
 /// RFC 5737 TEST-NET-3 addresses — parse as normal peer SocketAddrs (WAN multi-peer).
@@ -89,30 +103,37 @@ pub fn replay_fixture() -> Option<&'static str> {
     if !enabled() {
         return None;
     }
-    let v = std::env::var("BLVM_IBD_SYNTH_REPLAY").ok()?;
-    match v.trim() {
-        "180-220k" | "180_220k" | "180220k" => Some("180-220k"),
-        _ => None,
+    #[cfg(not(test))]
+    {
+        None
+    }
+    #[cfg(test)]
+    {
+        let v = std::env::var("BLVM_IBD_SYNTH_REPLAY").ok()?;
+        match v.trim() {
+            "180-220k" | "180_220k" | "180220k" => Some("180-220k"),
+            _ => None,
+        }
     }
 }
 
 fn peer_delay_overrides() -> std::collections::HashMap<String, u64> {
     let mut out = std::collections::HashMap::new();
-    let Ok(s) = std::env::var("BLVM_IBD_SYNTH_GETDATA_DELAY_PEER_MS") else {
-        return out;
-    };
-    for part in s.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
+    #[cfg(test)]
+    if let Ok(s) = std::env::var("BLVM_IBD_SYNTH_GETDATA_DELAY_PEER_MS") {
+        for part in s.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let Some((peer, ms)) = part.rsplit_once('=') else {
+                continue;
+            };
+            let Ok(ms) = ms.trim().parse::<u64>() else {
+                continue;
+            };
+            out.insert(peer.trim().to_string(), ms.min(30_000));
         }
-        let Some((peer, ms)) = part.rsplit_once('=') else {
-            continue;
-        };
-        let Ok(ms) = ms.trim().parse::<u64>() else {
-            continue;
-        };
-        out.insert(peer.trim().to_string(), ms.min(30_000));
     }
     out
 }
@@ -122,11 +143,18 @@ pub fn getdata_delay_ms() -> u64 {
     if !enabled() {
         return 0;
     }
-    std::env::var("BLVM_IBD_SYNTH_GETDATA_DELAY_MS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0)
-        .min(30_000)
+    #[cfg(not(test))]
+    {
+        0
+    }
+    #[cfg(test)]
+    {
+        std::env::var("BLVM_IBD_SYNTH_GETDATA_DELAY_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+            .min(30_000)
+    }
 }
 
 /// Per-peer GetData IA. Overlay env beats the named 180–220k fixture; else global.
@@ -168,6 +196,7 @@ pub fn use_fake_download_peers() -> bool {
     if injected_ia() {
         return true;
     }
+    #[cfg(test)]
     if std::env::var("BLVM_IBD_SYNTH_WAN_FORCE_PEERS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)

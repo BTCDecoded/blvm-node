@@ -514,12 +514,21 @@ impl ChunkAssigner {
 
     /// C1i min contig for opening past-H (same bar as tip-fill `c1g_freeze_past_tip`).
     fn c1i_min_contig_for_ahead() -> u64 {
-        let raw = latch_env!(u64, {
-            std::env::var("BLVM_IBD_C1I_MIN_CONTIG")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(8u64)
-        });
+        let raw = {
+            #[cfg(not(test))]
+            {
+                8
+            }
+            #[cfg(test)]
+            {
+                latch_env!(u64, {
+                    std::env::var("BLVM_IBD_C1I_MIN_CONTIG")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(8u64)
+                })
+            }
+        };
         raw.clamp(0, Self::tip_runway_stripe())
     }
 
@@ -2610,13 +2619,22 @@ impl ChunkAssigner {
             .iter()
             .any(|(s, e)| *s <= next_needed && next_needed <= *e);
         if tip_in_map {
-            let tip_band: u64 = latch_env!(u64, {
-                std::env::var("BLVM_IBD_TIP_ASSIGN_BAND")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(64)
-                    .clamp(16, 256)
-            });
+            let tip_band: u64 = {
+                #[cfg(not(test))]
+                {
+                    64
+                }
+                #[cfg(test)]
+                {
+                    latch_env!(u64, {
+                        std::env::var("BLVM_IBD_TIP_ASSIGN_BAND")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(64)
+                            .clamp(16, 256)
+                    })
+                }
+            };
             let covering_next = Self::covering_next_count(&guard, next_needed);
             leftover_get_work_phase(
                 peer_id,
@@ -2788,13 +2806,20 @@ impl ChunkAssigner {
     }
 
     fn wan_tip_claim_keep_enabled() -> bool {
-        matches!(
-            std::env::var("BLVM_IBD_WAN_TIP_CLAIM_KEEP")
-                .ok()
-                .as_deref()
-                .map(str::trim),
-            Some("1") | Some("true") | Some("on") | Some("yes")
-        )
+        #[cfg(not(test))]
+        {
+            false
+        }
+        #[cfg(test)]
+        {
+            matches!(
+                std::env::var("BLVM_IBD_WAN_TIP_CLAIM_KEEP")
+                    .ok()
+                    .as_deref()
+                    .map(str::trim),
+                Some("1") | Some("true") | Some("on") | Some("yes")
+            )
+        }
     }
 
     pub(crate) fn on_chunk_complete_range(&self, peer_id: &str, start: u64, end: u64) {
@@ -2942,12 +2967,21 @@ impl ChunkAssigner {
         }
         // Default 5s: kill complete→reassign storms (tens of ms); true tip-loss (not
         // tip_taken) can still recover via tip-owner. LOCAL_GAP remains the primary path.
-        let grace_ms: u64 = std::env::var("BLVM_IBD_TIP_DEDUP_REARM_MS")
-            .ok()
-            .or_else(|| std::env::var("BLVM_IBD_SYNTH_DEDUP_REARM_MS").ok())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(5_000)
-            .clamp(250, 30_000);
+        let grace_ms: u64 = {
+            #[cfg(not(test))]
+            {
+                5_000
+            }
+            #[cfg(test)]
+            {
+                std::env::var("BLVM_IBD_TIP_DEDUP_REARM_MS")
+                    .ok()
+                    .or_else(|| std::env::var("BLVM_IBD_SYNTH_DEDUP_REARM_MS").ok())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(5_000)
+                    .clamp(250, 30_000)
+            }
+        };
         let since = self.synth_tip_dedup_block_since_ms.load(Ordering::Relaxed);
         if since == 0 {
             self.synth_tip_dedup_block_since_ms

@@ -75,14 +75,21 @@ pub(crate) struct OrderedReadyBridge {
 /// (R-339: 1466 evictions × 32 blocks reloaded from disk and re-parsed).
 #[inline(never)]
 pub(crate) fn wan_bridge_tight_keep() -> u64 {
-    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("BLVM_IBD_WAN_BRIDGE_TIGHT_KEEP")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(128)
-            .clamp(32, 512)
-    })
+    #[cfg(not(test))]
+    {
+        128
+    }
+    #[cfg(test)]
+    {
+        static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *CACHED.get_or_init(|| {
+            std::env::var("BLVM_IBD_WAN_BRIDGE_TIGHT_KEEP")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(128)
+                .clamp(32, 512)
+        })
+    }
 }
 
 struct OrderedReadyInner {
@@ -787,10 +794,17 @@ impl OrderedReadyBridge {
         // WAN peel is separately opt-in (`BLVM_IBD_WAN_B1B_PEEL`) — default ON peel
         // destroyed the tip pipe under next_expected_missing (2026-07-14 wan-bench).
         let b1b_peel = if wan_tip_crawl {
-            matches!(
-                std::env::var("BLVM_IBD_WAN_B1B_PEEL").ok().as_deref(),
-                Some("1") | Some("true") | Some("TRUE")
-            )
+            #[cfg(not(test))]
+            {
+                false
+            }
+            #[cfg(test)]
+            {
+                matches!(
+                    std::env::var("BLVM_IBD_WAN_B1B_PEEL").ok().as_deref(),
+                    Some("1") | Some("true") | Some("TRUE")
+                )
+            }
         } else {
             matches!(
                 std::env::var("BLVM_IBD_B1B_PEEL").ok().as_deref(),

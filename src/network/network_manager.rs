@@ -498,10 +498,8 @@ impl NetworkManager {
             .unwrap_or(30);
 
         #[cfg(feature = "stratum-v2")]
-        let p2p_stratum_demux_enabled = config
-            .and_then(|c| c.stratum_v2.as_ref())
-            .map(|s| s.p2p_stratum_demux)
-            .unwrap_or(true);
+        let p2p_stratum_demux_enabled =
+            crate::config::p2p_stratum_demux_enabled(config.and_then(|c| c.stratum_v2.as_ref()));
 
         Self {
             peer_manager: Arc::new(Mutex::new(PeerManager::new(max_peers))),
@@ -880,7 +878,12 @@ impl NetworkManager {
         {
             let tx = &tx_msg.transaction;
             let spam_filter = SpamFilter::new();
-            let result = spam_filter.is_spam(tx);
+            let witness_ref = if tx_msg.witnesses.is_empty() {
+                None
+            } else {
+                Some(tx_msg.witnesses.as_slice())
+            };
+            let result = spam_filter.is_spam_with_witness(tx, witness_ref, None);
 
             if result.is_spam {
                 let mut violations = self.peer_spam_violations.lock().await;
@@ -2698,18 +2701,14 @@ impl NetworkManager {
         )],
     ) -> Result<()> {
         if let Some(ref mempool_manager) = self.mempool_manager {
-            for (tx, witnesses) in txs {
-                match mempool_manager.add_transaction_with_witness(tx.clone(), witnesses.clone()) {
-                    Ok(true) => {
-                        let txid = blvm_protocol::block::calculate_tx_id(tx);
-                        let fee = mempool_manager.cached_fee_basis(&txid);
-                        self.announce_accepted_transaction(txid, fee).await;
-                    }
-                    Ok(false) => {}
-                    Err(e) => {
-                        tracing::debug!("Transaction rejected by mempool: {}", e);
-                    }
+            let flags = mempool_manager.add_package_with_witnesses(txs.to_vec())?;
+            for ((tx, _), admitted) in txs.iter().zip(flags) {
+                if !admitted {
+                    continue;
                 }
+                let txid = blvm_protocol::block::calculate_tx_id(tx);
+                let fee = mempool_manager.cached_fee_basis(&txid);
+                self.announce_accepted_transaction(txid, fee).await;
             }
             return Ok(());
         }
@@ -3580,14 +3579,14 @@ impl NetworkManager {
         }
     }
 
-    /// Relay floor as BTC per kvB. An unset mempool policy is 1 sat/vB.
+    /// Relay floor as BTC per kvB. An unset mempool policy is 100 sat/kvB.
     pub fn relay_fee_btc_per_kvb(&self) -> f64 {
         let sats = self
             .mempool_manager
             .as_ref()
-            .map(|pool| pool.min_relay_fee_rate_sat_per_vb())
-            .unwrap_or(1);
-        sats as f64 * 1_000.0 / 100_000_000.0
+            .map(|pool| pool.min_relay_fee_sat_per_kvb())
+            .unwrap_or(100);
+        sats as f64 / 100_000_000.0
     }
 
     /// Create version message with service flags for all supported features.

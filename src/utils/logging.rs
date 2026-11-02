@@ -47,40 +47,85 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 /// init_logging(Some("debug"));
 /// ```
 pub fn init_logging(filter: Option<&str>) {
-    // Standard practice: Use EnvFilter::from_default_env() which properly handles RUST_LOG
-    // This respects the standard RUST_LOG environment variable format
-    let mut env_filter = EnvFilter::from_default_env();
+    let resolved = current_node_log_filter(filter, false);
+    install_text_subscriber(&resolved);
+}
 
-    // If config provides a filter and RUST_LOG is not set, use config filter
-    // RUST_LOG always takes precedence (standard practice)
-    if filter.is_some() && std::env::var("RUST_LOG").is_err() {
-        if let Some(f) = filter {
-            env_filter = EnvFilter::new(f);
-        }
+/// Filter string for the node subscriber.
+///
+/// `RUST_LOG`, then `BLVM_LOG_LEVEL`, then the config filter, then `--verbose`
+/// (`blvm=debug,blvm_node=debug`), then `blvm=info,blvm_node=info`.
+pub fn node_log_filter(
+    rust_log: Option<&str>,
+    blvm_log_level: Option<&str>,
+    config_filter: Option<&str>,
+    verbose: bool,
+) -> String {
+    if let Some(value) = rust_log.map(str::trim).filter(|s| !s.is_empty()) {
+        return value.to_string();
     }
-
-    // If neither RUST_LOG nor config filter is set, default to "info"
-    if std::env::var("RUST_LOG").is_err() && filter.is_none() {
-        env_filter = EnvFilter::new("info");
+    if let Some(value) = blvm_log_level.map(str::trim).filter(|s| !s.is_empty()) {
+        return value.to_string();
     }
+    if let Some(value) = config_filter.map(str::trim).filter(|s| !s.is_empty()) {
+        return value.to_string();
+    }
+    if verbose {
+        return "blvm=debug,blvm_node=debug".to_string();
+    }
+    "blvm=info,blvm_node=info".to_string()
+}
 
-    // Standard setup following Rust logging best practices:
-    // - Human-readable format (default)
-    // - Output to stderr (standard for logs)
-    // - Include target (module path) for better debugging
-    // - Thread IDs disabled by default (can be noisy)
-    // - ANSI colors enabled (can be disabled via NO_COLOR env var)
-    // try_init: only one global subscriber per process; ignore if already set (e.g. integration tests).
+fn current_node_log_filter(config_filter: Option<&str>, verbose: bool) -> String {
+    let rust_log = std::env::var("RUST_LOG").ok();
+    let blvm_log_level = std::env::var("BLVM_LOG_LEVEL").ok();
+    node_log_filter(
+        rust_log.as_deref(),
+        blvm_log_level.as_deref(),
+        config_filter,
+        verbose,
+    )
+}
+
+fn install_text_subscriber(filter: &str) {
+    let env_filter = EnvFilter::new(filter);
     let _ = tracing_subscriber::registry()
         .with(
             fmt::layer()
-                .with_target(true) // Include module path - useful for debugging
-                .with_thread_ids(false) // Disable by default (can be noisy)
-                .with_ansi(std::env::var("NO_COLOR").is_err()), // Respect NO_COLOR standard
+                .with_target(true)
+                .with_thread_ids(false)
+                .with_ansi(std::env::var("NO_COLOR").is_err()),
         )
         .with(env_filter)
         .try_init();
 }
+
+/// Install the node subscriber once.
+///
+/// `verbose` is the `--verbose` flag: `blvm=debug,blvm_node=debug` when
+/// `RUST_LOG`, `BLVM_LOG_LEVEL`, and `[logging].filter` are all unset.
+pub fn init_node_logging(config: Option<&crate::config::LoggingConfig>, verbose: bool) {
+    let config_filter = config.and_then(|c| c.filter.as_deref());
+    let resolved = current_node_log_filter(config_filter, verbose);
+    let want_json = config.map(|c| c.json_format).unwrap_or(false);
+    if want_json {
+        #[cfg(feature = "json-logging")]
+        {
+            init_json_logging(Some(&resolved));
+            return;
+        }
+        #[cfg(not(feature = "json-logging"))]
+        {
+            install_text_subscriber(&resolved);
+            tracing::warn!(
+                "logging.json_format is set but the json-logging feature is off; using text logs"
+            );
+            return;
+        }
+    }
+    install_text_subscriber(&resolved);
+}
+
 
 /// Initialize logging for a module
 ///
@@ -173,9 +218,7 @@ pub fn init_json_logging(filter: Option<&str>) {
     // - Include target, spans, and span lists for full context
     // - Standard structured logging practice
     let _ = tracing_subscriber::registry()
-        .with(
-            fmt::layer().with_target(true), // Include module path in JSON
-        )
+        .with(fmt::layer().json().with_target(true))
         .with(env_filter)
         .try_init();
 }
@@ -197,26 +240,42 @@ pub fn init_json_logging(filter: Option<&str>) {
 /// init_logging_from_config(config.logging.as_ref());
 /// ```
 pub fn init_logging_from_config(config: Option<&crate::config::LoggingConfig>) {
-    let filter = config.and_then(|c| c.filter.as_deref());
-
-    if config.map(|c| c.json_format).unwrap_or(false) {
-        #[cfg(feature = "json-logging")]
-        {
-            init_json_logging(filter);
-        }
-        #[cfg(not(feature = "json-logging"))]
-        {
-            // Fall back to regular logging if json-logging feature not enabled
-            init_logging(filter);
-        }
-    } else {
-        init_logging(filter);
-    }
+    init_node_logging(config, false);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logging_filter_uses_config_when_env_unset() {
+        let filter = node_log_filter(None, None, Some("blvm=debug"), false);
+        assert_eq!(filter, "blvm=debug");
+    }
+
+    #[test]
+    fn logging_filter_prefers_rust_log_then_blvm_level() {
+        assert_eq!(
+            node_log_filter(Some("trace"), Some("warn"), Some("blvm=debug"), true),
+            "trace"
+        );
+        assert_eq!(
+            node_log_filter(None, Some("warn"), Some("blvm=debug"), true),
+            "warn"
+        );
+    }
+
+    #[test]
+    fn logging_filter_verbose_when_nothing_else_set() {
+        assert_eq!(
+            node_log_filter(None, None, None, true),
+            "blvm=debug,blvm_node=debug"
+        );
+        assert_eq!(
+            node_log_filter(None, None, None, false),
+            "blvm=info,blvm_node=info"
+        );
+    }
 
     #[test]
     fn test_logging_initialization() {
@@ -239,5 +298,44 @@ mod tests {
 
         // If we can reference the functions, they compile correctly
         // This test will fail if function signatures change
+    }
+
+    /// One event, captured in a buffer. Does not call `init_json_logging`
+    /// (`try_init` installs once per process and discards the line).
+    #[cfg(feature = "json-logging")]
+    #[test]
+    fn json_format_emits_a_level_field() {
+        use std::io::{self, Write};
+        use std::sync::{Arc, Mutex};
+
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for Buf {
+            fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+                self.0.lock().expect("log buffer").extend_from_slice(data);
+                Ok(data.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_target(true)
+            .with_writer(move || Buf(writer.clone()))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("json probe");
+        });
+        let bytes = captured.lock().expect("log buffer").clone();
+        let text = String::from_utf8(bytes).expect("log line is utf-8");
+        let line = text.lines().find(|line| !line.is_empty()).expect("one log line");
+        let value: serde_json::Value = serde_json::from_str(line).expect("json log line");
+        assert!(value.get("level").is_some(), "json log missing level: {line}");
     }
 }

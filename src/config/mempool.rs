@@ -50,7 +50,7 @@ fn default_rbf_mode() -> RbfMode {
 }
 
 fn default_rbf_fee_rate_multiplier() -> f64 {
-    1.1
+    1.0
 }
 
 fn default_rbf_min_fee_bump() -> u64 {
@@ -70,19 +70,19 @@ fn default_rbf_max_replacements() -> u32 {
 }
 
 fn default_rbf_cooldown_seconds() -> u64 {
-    60
+    0
 }
 
 impl Default for RbfConfig {
     fn default() -> Self {
         Self {
             mode: RbfMode::Standard,
-            min_fee_rate_multiplier: 1.1,
+            min_fee_rate_multiplier: 1.0,
             min_fee_bump_satoshis: 1000,
             min_confirmations: 0,
             allow_package_replacements: false,
             max_replacements_per_tx: 10,
-            cooldown_seconds: 60,
+            cooldown_seconds: 0,
         }
     }
 }
@@ -144,6 +144,8 @@ pub struct MempoolPolicyConfig {
     #[serde(default = "default_max_mempool_txs")]
     pub max_mempool_txs: usize,
 
+    /// Satoshis per 1,000 virtual bytes. A 67-virtual-byte transaction at the
+    /// default of 100 pays 7 satoshis, rounded up.
     #[serde(default = "default_min_relay_fee_rate")]
     pub min_relay_fee_rate: u64,
 
@@ -161,6 +163,8 @@ pub struct MempoolPolicyConfig {
     #[serde(default = "default_min_tx_fee")]
     pub min_tx_fee: u64,
 
+    /// Satoshis per kilovirtualbyte that a replacement must add, on top of the
+    /// fees of every transaction it removes, to pay for its own relay.
     #[serde(default = "default_incremental_relay_fee")]
     pub incremental_relay_fee: u64,
 
@@ -224,7 +228,7 @@ fn default_max_mempool_txs() -> usize {
 }
 
 fn default_min_relay_fee_rate() -> u64 {
-    1
+    100
 }
 
 fn default_bytes_per_sigop() -> u64 {
@@ -232,11 +236,11 @@ fn default_bytes_per_sigop() -> u64 {
 }
 
 fn default_min_tx_fee() -> u64 {
-    1000
+    0
 }
 
 fn default_incremental_relay_fee() -> u64 {
-    1000
+    100
 }
 
 fn default_max_ancestor_count() -> u32 {
@@ -295,16 +299,36 @@ fn default_count_sigops() -> bool {
     true
 }
 
+/// Copy a present `[mempool]` onto the consensus mempool, and a present `[rbf]`
+/// fee bump onto `rbf_fee_increment`. Absent sections leave the env-loaded values.
+pub fn overlay_mempool_onto_consensus(
+    consensus: &mut blvm_protocol::consensus_config::MempoolConfig,
+    mempool: Option<&MempoolPolicyConfig>,
+    rbf: Option<&RbfConfig>,
+) {
+    if let Some(policy) = mempool {
+        consensus.max_mempool_mb = policy.max_mempool_mb;
+        consensus.max_mempool_txs = policy.max_mempool_txs;
+        consensus.mempool_expiry_hours = policy.mempool_expiry_hours;
+        consensus.min_relay_fee_rate = policy.min_relay_fee_rate;
+        consensus.min_tx_fee = i64::try_from(policy.min_tx_fee).unwrap_or(i64::MAX);
+    }
+    if let Some(rbf) = rbf {
+        consensus.rbf_fee_increment =
+            i64::try_from(rbf.min_fee_bump_satoshis).unwrap_or(i64::MAX);
+    }
+}
+
 impl Default for MempoolPolicyConfig {
     fn default() -> Self {
         Self {
             max_mempool_mb: 300,
             max_mempool_txs: 100_000,
-            min_relay_fee_rate: 1,
+            min_relay_fee_rate: 100,
             bytes_per_sigop: 20,
             count_sigops: true,
-            min_tx_fee: 1000,
-            incremental_relay_fee: 1000,
+            min_tx_fee: 0,
+            incremental_relay_fee: 100,
             max_ancestor_count: 25,
             max_ancestor_size: 101_000,
             max_descendant_count: 25,
@@ -321,5 +345,39 @@ impl Default for MempoolPolicyConfig {
             reject_spam_in_mempool: false,
             spam_filter: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::{overlay_mempool_onto_consensus, MempoolPolicyConfig, RbfConfig};
+    use blvm_protocol::consensus_config::MempoolConfig;
+
+    #[test]
+    fn file_mempool_replaces_env_size() {
+        let mut consensus = MempoolConfig::default();
+        consensus.max_mempool_mb = 300;
+        let mut policy = MempoolPolicyConfig::default();
+        policy.max_mempool_mb = 50;
+        overlay_mempool_onto_consensus(&mut consensus, Some(&policy), None);
+        assert_eq!(consensus.max_mempool_mb, 50);
+    }
+
+    #[test]
+    fn absent_mempool_keeps_env_size() {
+        let mut consensus = MempoolConfig::default();
+        consensus.max_mempool_mb = 300;
+        overlay_mempool_onto_consensus(&mut consensus, None, None);
+        assert_eq!(consensus.max_mempool_mb, 300);
+    }
+
+    #[test]
+    fn rbf_section_copies_fee_bump() {
+        let mut consensus = MempoolConfig::default();
+        consensus.rbf_fee_increment = 9;
+        let mut rbf = RbfConfig::default();
+        rbf.min_fee_bump_satoshis = 5_000;
+        overlay_mempool_onto_consensus(&mut consensus, None, Some(&rbf));
+        assert_eq!(consensus.rbf_fee_increment, 5_000);
     }
 }

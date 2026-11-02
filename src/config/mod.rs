@@ -431,17 +431,28 @@ impl Default for NetworkTimingConfig {
     }
 }
 
+/// Env value for `[network_timing].target_outbound_peers`.
+///
+/// `BLVM_NETWORK_TARGET_PEER_COUNT` wins when it is set, including `0`.
+/// Otherwise `BLVM_TARGET_OUTBOUND_PEERS` applies when the parsed value is
+/// greater than 0. The CLI write happens after this value is copied onto the
+/// field. The IBD roster does not read either name.
+pub fn target_peer_count_from_env(network: Option<&str>, alias: Option<&str>) -> Option<usize> {
+    if let Some(raw) = network {
+        return raw.trim().parse().ok();
+    }
+    alias
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|count| *count > 0)
+}
+
 impl NetworkTimingConfig {
-    /// TOML `target_peer_count`, default **8** (Bitcoin Core–aligned).
-    /// Override at runtime with `BLVM_TARGET_OUTBOUND_PEERS` (e.g. Zeus IBD soak).
+    /// TOML `target_peer_count`, default **8**.
+    ///
+    /// The binary writes `BLVM_NETWORK_TARGET_PEER_COUNT` or
+    /// `BLVM_TARGET_OUTBOUND_PEERS` onto this field before start. This method
+    /// does not read the environment.
     pub fn effective_target_outbound_peers(&self) -> usize {
-        if let Ok(v) = std::env::var("BLVM_TARGET_OUTBOUND_PEERS") {
-            if let Ok(n) = v.trim().parse::<usize>() {
-                if n > 0 {
-                    return n;
-                }
-            }
-        }
         self.target_outbound_peers
     }
 }
@@ -716,15 +727,29 @@ pub fn parse_signet_challenge_hex(hex_str: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Per-network default assume-valid height (Core chainparams defaultAssumeValid)
+/// Seeded assume-valid height. Not Bitcoin Core's current `defaultAssumeValid` height.
 pub fn default_assume_valid_height_for_network(network: &str) -> u64 {
     match network.to_lowercase().as_str() {
-        "mainnet" | "bitcoinv1" => 912_683,  // Core mainnet default
-        "testnet" | "testnet3" => 4_550_000, // Core testnet default
-        "testnet4" => 0,                     // full verification; no assume-valid skip
-        "signet" => 267_665,                 // Core signet default
-        _ => 0,                              // Regtest and unknown: validate all
+        "mainnet" | "bitcoinv1" => 912_683,
+        "testnet" | "testnet3" => 4_550_000,
+        "testnet4" => 0,
+        "signet" => 267_665,
+        _ => 0,
     }
+}
+
+/// Checked header hash for a seeded height. Display hex is the Bitcoin block id.
+/// Mainnet `912683` is `hash256` of the 80-byte header on the best chain in a
+/// local block index whose tip was `953236` (2026-11-02). The other networks
+/// have no checked header, so their hash stays unset.
+pub fn default_assume_valid_hash_for_network(network: &str) -> Option<[u8; 32]> {
+    let display = match network.to_lowercase().as_str() {
+        "mainnet" | "bitcoinv1" => {
+            "00000000000000000000611fd22f2df7c8fbd0688745c3a6c3bb5109cc2a12cb"
+        }
+        _ => return None,
+    };
+    assume_valid_hash_from_display_hex(display).ok()
 }
 
 /// Bitcoin display order (the 64-hex block id) reversed into the internal
@@ -751,7 +776,23 @@ where
     }
 }
 
-fn assume_valid_hash_from_display_hex(text: &str) -> Result<[u8; 32], String> {
+/// Env height overrides the file height. The file hash stays. There is no hash env var.
+pub fn overlay_assume_valid(
+    env_height: Option<u64>,
+    file: Option<&BlockValidationNodeConfig>,
+) -> (u64, Option<[u8; 32]>) {
+    let mut height = env_height.unwrap_or(0);
+    let mut hash = None;
+    if let Some(file) = file {
+        if env_height.is_none() {
+            height = file.assume_valid_height;
+        }
+        hash = file.assume_valid_hash;
+    }
+    (height, hash)
+}
+
+pub fn assume_valid_hash_from_display_hex(text: &str) -> Result<[u8; 32], String> {
     let trimmed = text.trim();
     let hex_str = trimmed
         .strip_prefix("0x")
@@ -794,6 +835,10 @@ fn default_modules_option() -> Option<ModuleConfig> {
 pub struct NodeConfig {
     /// Network listening address
     pub listen_addr: Option<SocketAddr>,
+
+    /// RPC bind address. Absent means the network default chosen by the binary.
+    #[serde(default)]
+    pub rpc_addr: Option<SocketAddr>,
 
     /// Block validation configuration (assume-valid height, etc.)
     pub block_validation: Option<BlockValidationNodeConfig>,
@@ -906,9 +951,6 @@ pub struct NodeConfig {
     /// RBF (Replace-By-Fee) configuration
     pub rbf: Option<RbfConfig>,
 
-    /// Payment configuration (BIP70)
-    pub payment: Option<PaymentConfig>,
-
     /// REST API configuration
     pub rest_api: Option<RestApiConfig>,
 }
@@ -962,6 +1004,7 @@ impl Default for NodeConfig {
     fn default() -> Self {
         Self {
             listen_addr: Some("127.0.0.1:8333".parse().unwrap()),
+            rpc_addr: None,
             block_validation: None,
             assumeutxo_blockhash: None,
             transport_preference: TransportPreferenceConfig::TcpOnly,
@@ -998,7 +1041,6 @@ impl Default for NodeConfig {
             logging: None,
             mempool: None,
             rbf: None,
-            payment: None,
             rest_api: None,
         }
     }
@@ -1042,9 +1084,6 @@ impl NodeConfig {
             if let Some(ref d) = ibd.snapshot_dir {
                 ibd.snapshot_dir = Some(expand_tilde_path(d));
             }
-        }
-        if let Some(ref mut payment) = self.payment {
-            payment.payment_store_path = expand_tilde_path(&payment.payment_store_path);
         }
         if let Some(ref mut mempool) = self.mempool {
             mempool.mempool_persistence_path = expand_tilde_path(&mempool.mempool_persistence_path);
@@ -1518,4 +1557,43 @@ pub struct LoggingConfig {
     /// Enable JSON logging format (for log aggregation systems)
     #[serde(default)]
     pub json_format: bool,
+}
+
+#[cfg(test)]
+mod peer_count_tests {
+    use super::target_peer_count_from_env;
+    use crate::node::parallel_ibd::roster_target_from_raw;
+
+    #[test]
+    fn network_count_wins_and_alias_zero_is_unset() {
+        assert_eq!(target_peer_count_from_env(None, Some("8")), Some(8));
+        assert_eq!(target_peer_count_from_env(Some("4"), Some("8")), Some(4));
+        assert_eq!(target_peer_count_from_env(None, Some("0")), None);
+        assert_eq!(target_peer_count_from_env(Some("0"), Some("8")), Some(0));
+    }
+
+    #[test]
+    fn roster_unset_stays_96_without_the_outbound_alias() {
+        assert_eq!(roster_target_from_raw(None), Some(96));
+        assert_eq!(roster_target_from_raw(Some("0")), None);
+        assert_eq!(roster_target_from_raw(Some("150")), Some(100));
+    }
+}
+
+#[cfg(test)]
+mod payment_table_tests {
+    use super::NodeConfig;
+
+    #[test]
+    fn leftover_payment_table_still_parses() {
+        let config: NodeConfig = toml::from_str(
+            r#"
+            [payment]
+            merchant_key = "aa"
+            payment_store_path = "data/payments"
+            "#,
+        )
+        .expect("a leftover [payment] table is an ignored unknown table");
+        assert!(config.rest_api.is_none());
+    }
 }

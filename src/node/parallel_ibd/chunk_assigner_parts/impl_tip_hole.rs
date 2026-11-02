@@ -321,28 +321,44 @@ impl ChunkAssigner {
     /// buckets). **W123–W125:** sticky feeder-empty latch
     /// (`tip_ahead_hole_freeze`) — set `BLVM_IBD_TIP_AHEAD_MAX_HOLES=0` to disable.
     fn tip_ahead_max_holes_opt() -> Option<u64> {
-        latch_env!(Option<u64>, {
-            match std::env::var("BLVM_IBD_TIP_AHEAD_MAX_HOLES") {
-                Ok(s) if s == "0" || s.eq_ignore_ascii_case("off") => None,
-                Ok(s) => s.parse().ok().map(|v: u64| v.clamp(1, 512)),
-                // W125: restore arm **24**. W124 arm=16 froze 58% of early TIP_CRAWL
-                // samples → crawl≈25 h/s, fail @312k tip60=10.5.
-                Err(_) => Some(24),
-            }
-        })
+        #[cfg(not(test))]
+        {
+            Some(24)
+        }
+        #[cfg(test)]
+        {
+            latch_env!(Option<u64>, {
+                match std::env::var("BLVM_IBD_TIP_AHEAD_MAX_HOLES") {
+                    Ok(s) if s == "0" || s.eq_ignore_ascii_case("off") => None,
+                    Ok(s) => s.parse().ok().map(|v: u64| v.clamp(1, 512)),
+                    // W125: restore arm **24**. W124 arm=16 froze 58% of early TIP_CRAWL
+                    // samples → crawl≈25 h/s, fail @312k tip60=10.5.
+                    Err(_) => Some(24),
+                }
+            })
+        }
     }
 
     /// Clear sticky freeze only below this hole count (hysteresis).
     /// Env: `BLVM_IBD_TIP_AHEAD_HOLE_CLEAR` (default **8**).
     fn tip_ahead_hole_clear_opt(arm: u64) -> u64 {
-        let raw = latch_env!(u64, {
-            std::env::var("BLVM_IBD_TIP_AHEAD_HOLE_CLEAR")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                // W125: keep clear@8 (W123 clear@12 released at holes=10–11 → W35 flood).
-                // Do not default to arm/2 (that reverts to clear@12 when arm=24).
-                .unwrap_or(8)
-        });
+        let raw = {
+            #[cfg(not(test))]
+            {
+                8
+            }
+            #[cfg(test)]
+            {
+                latch_env!(u64, {
+                    std::env::var("BLVM_IBD_TIP_AHEAD_HOLE_CLEAR")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        // W125: keep clear@8 (W123 clear@12 released at holes=10–11 → W35 flood).
+                        // Do not default to arm/2 (that reverts to clear@12 when arm=24).
+                        .unwrap_or(8)
+                })
+            }
+        };
         raw.clamp(4, arm.saturating_sub(1).max(4))
     }
 
@@ -360,21 +376,37 @@ impl ChunkAssigner {
             return;
         };
         let distress_arm = {
-            let raw = latch_env!(u64, {
-                std::env::var("BLVM_IBD_TIP_AHEAD_DISTRESS_HOLES")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(16u64)
-            });
-            raw.clamp(8, arm_default)
+            #[cfg(not(test))]
+            {
+                16u64.clamp(8, arm_default)
+            }
+            #[cfg(test)]
+            {
+                let raw = latch_env!(u64, {
+                    std::env::var("BLVM_IBD_TIP_AHEAD_DISTRESS_HOLES")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(16u64)
+                });
+                raw.clamp(8, arm_default)
+            }
         };
-        let distress_await_secs = latch_env!(u64, {
-            std::env::var("BLVM_IBD_TIP_AHEAD_DISTRESS_AWAIT_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(3u64)
-                .clamp(0, 30)
-        });
+        let distress_await_secs = {
+            #[cfg(not(test))]
+            {
+                3
+            }
+            #[cfg(test)]
+            {
+                latch_env!(u64, {
+                    std::env::var("BLVM_IBD_TIP_AHEAD_DISTRESS_AWAIT_SECS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(3u64)
+                        .clamp(0, 30)
+                })
+            }
+        };
         let awaiting = super::tip_stage::tip_awaiting_secs_for_cap();
         let arm = if awaiting >= distress_await_secs {
             arm_default.min(distress_arm)
@@ -385,13 +417,22 @@ impl ChunkAssigner {
         // W183: require holes < clear for debounce before releasing sticky (default **5s**).
         // Live W182 330–345k: holes oscillated 0↔24 → freeze clear every tip+1 → W35 flood.
         // Env: `BLVM_IBD_TIP_AHEAD_HOLE_CLEAR_MS` (0 = immediate).
-        let clear_debounce_ms = latch_env!(u64, {
-            std::env::var("BLVM_IBD_TIP_AHEAD_HOLE_CLEAR_MS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(5_000)
-                .clamp(0, 30_000)
-        });
+        let clear_debounce_ms = {
+            #[cfg(not(test))]
+            {
+                5_000
+            }
+            #[cfg(test)]
+            {
+                latch_env!(u64, {
+                    std::env::var("BLVM_IBD_TIP_AHEAD_HOLE_CLEAR_MS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(5_000)
+                        .clamp(0, 30_000)
+                })
+            }
+        };
         let now_ms = Self::unix_now_ms();
         if holes >= arm && feeder_len == 0 {
             self.tip_ahead_hole_freeze.store(true, Ordering::Relaxed);
@@ -509,12 +550,19 @@ impl ChunkAssigner {
     /// tip pipe 128→32 on mid-chain WAN (holes==0 only ~7% of samples).
     /// Env: `BLVM_IBD_TIP_PIPE_SHRINK_HOLES`.
     fn tip_pipe_shrink_holes_opt() -> Option<u64> {
-        latch_env!(Option<u64>, {
-            std::env::var("BLVM_IBD_TIP_PIPE_SHRINK_HOLES")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .map(|v: u64| v.clamp(1, 512))
-        })
+        #[cfg(not(test))]
+        {
+            None
+        }
+        #[cfg(test)]
+        {
+            latch_env!(Option<u64>, {
+                std::env::var("BLVM_IBD_TIP_PIPE_SHRINK_HOLES")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .map(|v: u64| v.clamp(1, 512))
+            })
+        }
     }
 
     /// C1g/C1h: after this many seconds of tip await while tip missing, arm `(H,H)`
@@ -522,13 +570,20 @@ impl ChunkAssigner {
     /// C1g iter with await=2 left fetchers_cap=1 under deep stripe → ~3 BPS EMPTY_TIP.
     /// Env `BLVM_IBD_C1G_TIP_RACE_AWAIT_SECS` (clamp 0–30).
     fn c1g_tip_race_await_secs() -> u64 {
-        latch_env!(u64, {
-            std::env::var("BLVM_IBD_C1G_TIP_RACE_AWAIT_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0)
-                .clamp(0, 30)
-        })
+        #[cfg(not(test))]
+        {
+            0
+        }
+        #[cfg(test)]
+        {
+            latch_env!(u64, {
+                std::env::var("BLVM_IBD_C1G_TIP_RACE_AWAIT_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0)
+                    .clamp(0, 30)
+            })
+        }
     }
 
     /// C1t: tip-height `(H,H)` race after tip missing this many ms (default **120**).
@@ -536,13 +591,20 @@ impl ChunkAssigner {
     /// Integer-second soft-retry / late-body freeze never arm on mid-gaps.
     /// `0` = off. Clamp 0–2000. Mute guard: also requires gd-fast elevated.
     fn c1t_tip_race_ms() -> u64 {
-        latch_env!(u64, {
-            std::env::var("BLVM_IBD_C1T_TIP_RACE_MS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(120)
-                .clamp(0, 2_000)
-        })
+        #[cfg(not(test))]
+        {
+            120
+        }
+        #[cfg(test)]
+        {
+            latch_env!(u64, {
+                std::env::var("BLVM_IBD_C1T_TIP_RACE_MS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(120)
+                    .clamp(0, 2_000)
+            })
+        }
     }
 
     /// PIPE_FILL `received=0` streak that may arm C1t without gd-fast.
@@ -742,13 +804,22 @@ impl ChunkAssigner {
         {
             return false;
         }
-        let trigger = latch_env!(u64, {
-            std::env::var("BLVM_IBD_MUTE_SINGLE_REOPEN_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(3)
-                .clamp(2, 12)
-        });
+        let trigger = {
+            #[cfg(not(test))]
+            {
+                3
+            }
+            #[cfg(test)]
+            {
+                latch_env!(u64, {
+                    std::env::var("BLVM_IBD_MUTE_SINGLE_REOPEN_SECS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(3)
+                        .clamp(2, 12)
+                })
+            }
+        };
         super::tip_stage::tip_awaiting_secs_for_cap() >= trigger
     }
 
@@ -811,24 +882,38 @@ impl ChunkAssigner {
 
     /// W88: tip heights that must advance before another distress failover (default 32).
     fn tip_failover_episode_advance() -> u64 {
-        latch_env!(u64, {
-            std::env::var("BLVM_IBD_TIP_FAILOVER_EPISODE")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(32)
-                .clamp(1, 256)
-        })
+        #[cfg(not(test))]
+        {
+            32
+        }
+        #[cfg(test)]
+        {
+            latch_env!(u64, {
+                std::env::var("BLVM_IBD_TIP_FAILOVER_EPISODE")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(32)
+                    .clamp(1, 256)
+            })
+        }
     }
 
     /// W88: max age of a failover episode before re-arm (default 30s).
     fn tip_failover_episode_ms() -> u64 {
-        latch_env!(u64, {
-            std::env::var("BLVM_IBD_TIP_FAILOVER_EPISODE_MS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(30_000)
-                .clamp(5_000, 120_000)
-        })
+        #[cfg(not(test))]
+        {
+            30_000
+        }
+        #[cfg(test)]
+        {
+            latch_env!(u64, {
+                std::env::var("BLVM_IBD_TIP_FAILOVER_EPISODE_MS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(30_000)
+                    .clamp(5_000, 120_000)
+            })
+        }
     }
 
     #[inline]
@@ -869,13 +954,20 @@ impl ChunkAssigner {
     /// Max non-owner peers with in-flight ranges past tip on WAN (default **8**).
     /// Env: `BLVM_IBD_TIP_AHEAD_PEERS`. Prior hard-cap 3 left ready≈52 idle at ~5 blk/s.
     fn tip_ahead_peer_cap() -> usize {
-        latch_env!(usize, {
-            std::env::var("BLVM_IBD_TIP_AHEAD_PEERS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(8)
-                .clamp(1, 24)
-        })
+        #[cfg(not(test))]
+        {
+            8
+        }
+        #[cfg(test)]
+        {
+            latch_env!(usize, {
+                std::env::var("BLVM_IBD_TIP_AHEAD_PEERS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(8)
+                    .clamp(1, 24)
+            })
+        }
     }
 
     /// WAN tip-band multi-peer ahead: require deep tip cover; freeze on tip distress / starve.
@@ -935,12 +1027,22 @@ impl ChunkAssigner {
         // (`preferred_meets_keep_bps` always false) this fn is false whenever the
         // sticky owner has streamed, so `[IBD_PIPE_F] reason=stripe` is 0 in every
         // crawl R-273–R-335 and `TIP_AHEAD_PEERS` is never evaluated. Default off.
-        if latch_env!(bool, {
-            matches!(
-                std::env::var("BLVM_IBD_WAN_AHEAD_FORCE_HOT").ok().as_deref(),
-                Some("1") | Some("true") | Some("on") | Some("yes")
-            )
-        }) {
+        let force_hot = {
+            #[cfg(not(test))]
+            {
+                false
+            }
+            #[cfg(test)]
+            {
+                latch_env!(bool, {
+                    matches!(
+                        std::env::var("BLVM_IBD_WAN_AHEAD_FORCE_HOT").ok().as_deref(),
+                        Some("1") | Some("true") | Some("on") | Some("yes")
+                    )
+                })
+            }
+        };
+        if force_hot {
             return true;
         }
         let Some(pref) = self.preferred_tip_owner() else {
@@ -3179,11 +3281,20 @@ impl ChunkAssigner {
         // This-H 8s failover, not dest-aq 180s keep-hot.
         let protect_decayed = (window_hero && !stream_hero) || just_pinned;
         let (secs, cool_healthy) = if (stream_hero && self.cheese_tip_sitting()) || protect_decayed {
-            let secs = std::env::var("BLVM_IBD_CHEESE_HERO_H_COOLDOWN_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(8)
-                .clamp(5, 15);
+            let secs = {
+                #[cfg(not(test))]
+                {
+                    8
+                }
+                #[cfg(test)]
+                {
+                    std::env::var("BLVM_IBD_CHEESE_HERO_H_COOLDOWN_SECS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(8)
+                        .clamp(5, 15)
+                }
+            };
             if protect_decayed {
                 if just_pinned {
                     tracing::warn!(
@@ -3203,11 +3314,20 @@ impl ChunkAssigner {
         } else {
             // P1e: tip-role ban after mute (PIPE_FILL / CAP). Default **120s**
             // (was 5s) so TIP_PIN cannot re-elect the mute; clamp 60–180.
-            let secs = std::env::var("BLVM_IBD_TIP_OWNER_MUTE_COOLDOWN_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(120)
-                .clamp(60, 180);
+            let secs = {
+                #[cfg(not(test))]
+                {
+                    120
+                }
+                #[cfg(test)]
+                {
+                    std::env::var("BLVM_IBD_TIP_OWNER_MUTE_COOLDOWN_SECS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(120)
+                        .clamp(60, 180)
+                }
+            };
             (secs, false)
         };
         // Drop W88 episode so want_tip_owner can assign failover micro on the next poll.
@@ -3264,11 +3384,18 @@ impl ChunkAssigner {
     /// Default **15s** — escapes CAP same-peer thrash (W91) without burning the mid-score
     /// peer pool into score=0.001 open-slot lottery (live W93 @314596).
     fn tip_owner_fail_cooldown_secs() -> u64 {
-        std::env::var("BLVM_IBD_TIP_OWNER_FAIL_COOLDOWN_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(15)
-            .clamp(5, 300)
+        #[cfg(not(test))]
+        {
+            15
+        }
+        #[cfg(test)]
+        {
+            std::env::var("BLVM_IBD_TIP_OWNER_FAIL_COOLDOWN_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(15)
+                .clamp(5, 300)
+        }
     }
 
     fn mark_tip_owner_fail_cooldown(&self, peer_id: &str, secs: u64) {
@@ -3534,11 +3661,18 @@ impl ChunkAssigner {
     }
 
     fn cheese_hero_abort_ahead_ms() -> u64 {
-        std::env::var("BLVM_IBD_CHEESE_HERO_ABORT_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(2000)
-            .clamp(0, 30_000)
+        #[cfg(not(test))]
+        {
+            2000
+        }
+        #[cfg(test)]
+        {
+            std::env::var("BLVM_IBD_CHEESE_HERO_ABORT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2000)
+                .clamp(0, 30_000)
+        }
     }
 
     /// Preferred ≥80 is fetching start>H while cheese is armed (FEEDER_STARVE
@@ -3927,11 +4061,18 @@ impl ChunkAssigner {
     /// W113: how long a tip GAP_STREAM keeps a peer eligible for empty-tip deep owner.
     /// Default **90s**. Env `BLVM_IBD_TIP_STREAM_OWNER_SECS`.
     fn tip_stream_owner_hot_secs() -> u64 {
-        std::env::var("BLVM_IBD_TIP_STREAM_OWNER_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(90)
-            .clamp(15, 300)
+        #[cfg(not(test))]
+        {
+            90
+        }
+        #[cfg(test)]
+        {
+            std::env::var("BLVM_IBD_TIP_STREAM_OWNER_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(90)
+                .clamp(15, 300)
+        }
     }
 
     /// W113: empty tip + at least one ready tip-STREAM peer → prefer streamers for
@@ -4161,36 +4302,57 @@ impl ChunkAssigner {
         );
     }
 
-    /// P2: tip trials. Default **off** since R-332: TRIAL_START killed the tip owner on
+    /// P2: tip trials. Production is **off**. R-332: TRIAL_START killed the tip owner on
     /// slowness (`covering=0`) and left the tip hole ownerless for 62s (R-331 320–330k
     /// 33.4 BPS). Mute kills ≥200k: R-273 9, R-331 57, R-332 (trials off) 2; THE band
-    /// 61.2→84.0. Opt in: `BLVM_IBD_TIP_TRIAL=1`.
+    /// 61.2→84.0. Tests may still set `BLVM_IBD_TIP_TRIAL=1`.
     fn tip_trial_enabled() -> bool {
-        matches!(
-            std::env::var("BLVM_IBD_TIP_TRIAL")
-                .ok()
-                .as_deref()
-                .map(str::trim),
-            Some("1") | Some("true") | Some("on") | Some("yes")
-        )
+        #[cfg(not(test))]
+        {
+            false
+        }
+        #[cfg(test)]
+        {
+            matches!(
+                std::env::var("BLVM_IBD_TIP_TRIAL")
+                    .ok()
+                    .as_deref()
+                    .map(str::trim),
+                Some("1") | Some("true") | Some("on") | Some("yes")
+            )
+        }
     }
 
-    /// P2: challenger pin duration (default **12s**, clamp 8–20).
+    /// P2: challenger pin duration. Production is **12s**. Tests clamp 8–20.
     fn tip_trial_secs() -> u64 {
-        std::env::var("BLVM_IBD_TIP_TRIAL_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(12)
-            .clamp(8, 20)
+        #[cfg(not(test))]
+        {
+            12
+        }
+        #[cfg(test)]
+        {
+            std::env::var("BLVM_IBD_TIP_TRIAL_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(12)
+                .clamp(8, 20)
+        }
     }
 
-    /// P2: tip awaiting before arming a trial (default **3s**).
+    /// P2: tip awaiting before arming a trial. Production is **3s**.
     fn tip_trial_await_secs() -> u64 {
-        std::env::var("BLVM_IBD_TIP_TRIAL_AWAIT_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(3)
-            .clamp(2, 15)
+        #[cfg(not(test))]
+        {
+            3
+        }
+        #[cfg(test)]
+        {
+            std::env::var("BLVM_IBD_TIP_TRIAL_AWAIT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3)
+                .clamp(2, 15)
+        }
     }
 
     /// Rate-limited skip diagnostic (assigner polls ~50ms; avoid log storms).
@@ -4223,9 +4385,12 @@ impl ChunkAssigner {
         );
     }
 
-    /// Ms await gate for tip trial. Post-OPEN boost uses 500ms (or env) for 20s.
+    /// Ms await gate for tip trial. Production post-OPEN boost is **500ms** for 20s.
     fn tip_trial_need_await_ms(&self) -> u64 {
         let normal = Self::tip_trial_await_secs().saturating_mul(1000);
+        #[cfg(not(test))]
+        let boost_ms = 500u64;
+        #[cfg(test)]
         let boost_ms = std::env::var("BLVM_IBD_TIP_TRIAL_POST_OPEN_MS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -4243,13 +4408,20 @@ impl ChunkAssigner {
         }
     }
 
-    /// P2: min seconds between trial starts (default **30s**).
+    /// P2: min seconds between trial starts. Production is **30s**.
     fn tip_trial_cooldown_secs() -> u64 {
-        std::env::var("BLVM_IBD_TIP_TRIAL_COOLDOWN_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(30)
-            .clamp(15, 300)
+        #[cfg(not(test))]
+        {
+            30
+        }
+        #[cfg(test)]
+        {
+            std::env::var("BLVM_IBD_TIP_TRIAL_COOLDOWN_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30)
+                .clamp(15, 300)
+        }
     }
 
     fn tip_stream_count(&self, peer_id: &str) -> u64 {
@@ -4520,11 +4692,20 @@ impl ChunkAssigner {
         let covering = self.healthy_tip_cover_count(next_needed);
         // Slow-drip: peer keeps covering=1 so await never hits tip_trial_await; arm when
         // short-window crawl stays below A6m min for ≥~6s (0.8×8s window).
-        let drip_window = std::env::var("BLVM_IBD_TIP_SLOW_DRIP_WINDOW_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(8u64)
-            .clamp(5, 20);
+        let drip_window = {
+            #[cfg(not(test))]
+            {
+                8
+            }
+            #[cfg(test)]
+            {
+                std::env::var("BLVM_IBD_TIP_SLOW_DRIP_WINDOW_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(8u64)
+                    .clamp(5, 20)
+            }
+        };
         let slow_drip = feeder == 0
             && gd_slow
             && covering >= 1
@@ -5787,11 +5968,18 @@ impl ChunkAssigner {
     /// (live tip=218: claim 218-224 after promote of ahead 193-224) must not block a new
     /// 128-deep owner through a full soft-retry budget.
     fn tip_deep_cover_min_depth() -> u64 {
-        std::env::var("BLVM_IBD_TIP_DEEP_COVER_MIN")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(16)
-            .clamp(4, 128)
+        #[cfg(not(test))]
+        {
+            16
+        }
+        #[cfg(test)]
+        {
+            std::env::var("BLVM_IBD_TIP_DEEP_COVER_MIN")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(16)
+                .clamp(4, 128)
+        }
     }
 
     #[inline]

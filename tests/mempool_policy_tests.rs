@@ -141,9 +141,9 @@ fn test_policy_config_defaults() {
 
     assert_eq!(policy.max_mempool_mb, 300);
     assert_eq!(policy.max_mempool_txs, 100_000);
-    assert_eq!(policy.min_relay_fee_rate, 1);
+    assert_eq!(policy.min_relay_fee_rate, 100);
     assert_eq!(policy.bytes_per_sigop, 20);
-    assert_eq!(policy.min_tx_fee, 1000);
+    assert_eq!(policy.min_tx_fee, 0);
     assert_eq!(policy.max_ancestor_count, 25);
     assert_eq!(policy.max_ancestor_size, 101_000);
     assert_eq!(policy.max_descendant_count, 25);
@@ -214,7 +214,7 @@ fn sigop_adjusted_vsize_rejects_underpriced_tx() {
     ))));
     let mut policy = MempoolPolicyConfig::default();
     policy.require_standard = false;
-    policy.min_relay_fee_rate = 2;
+    policy.min_relay_fee_rate = 2_000;
     policy.min_tx_fee = 1000;
     mempool.set_policy_config(Some(policy));
     assert!(
@@ -230,7 +230,7 @@ fn sigop_adjusted_vsize_rejects_underpriced_tx() {
     ))));
     let mut loose = MempoolPolicyConfig::default();
     loose.require_standard = false;
-    loose.min_relay_fee_rate = 2;
+    loose.min_relay_fee_rate = 2_000;
     loose.min_tx_fee = 1000;
     loose.bytes_per_sigop = 1;
     mempool_ok.set_policy_config(Some(loose));

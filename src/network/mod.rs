@@ -50,6 +50,7 @@ mod block_announced_sync;
 pub mod filter_service;
 mod getdata_serve;
 mod handlers;
+pub(crate) mod header_work;
 mod network_message_dispatch;
 pub(crate) mod parse_offload;
 mod peer_connections;
