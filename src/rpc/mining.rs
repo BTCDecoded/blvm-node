@@ -201,7 +201,13 @@ impl MiningRpc {
     }
 
     /// `(size, weight, tx count)` for the next block. An empty pool stays at zero.
+    ///
+    /// Size is the non-witness serialization. Weight is the BIP141 weight, including
+    /// witness stacks stored for each pooled transaction.
     fn template_field_snapshot(&self, tip_height: u64) -> (u64, u64, u64) {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::segwit::transaction_weight_from_stacks;
+
         let Some(mempool) = self.mempool.as_ref() else {
             return (0, 0, 0);
         };
@@ -209,15 +215,20 @@ impl MiningRpc {
         if txs.is_empty() {
             return (0, 0, 0);
         }
-        let coinbase_len =
-            serialize_transaction(&Self::template_coinbase(tip_height.saturating_add(1))).len()
-                as u64;
-        let tx_len: u64 = txs
-            .iter()
-            .map(|tx| serialize_transaction(tx).len() as u64)
-            .sum();
-        let size = coinbase_len + tx_len;
-        (size, size.saturating_mul(4), txs.len() as u64 + 1)
+        let coinbase = Self::template_coinbase(tip_height.saturating_add(1));
+        let coinbase_len = serialize_transaction(&coinbase).len() as u64;
+        let mut size = coinbase_len;
+        let mut weight = transaction_weight_from_stacks(&coinbase, None)
+            .unwrap_or(coinbase_len.saturating_mul(4));
+        for tx in &txs {
+            let len = serialize_transaction(tx).len() as u64;
+            size = size.saturating_add(len);
+            let stacks = mempool.get_transaction_witnesses(&calculate_tx_id(tx));
+            let tx_weight = transaction_weight_from_stacks(tx, stacks.as_deref())
+                .unwrap_or(len.saturating_mul(4));
+            weight = weight.saturating_add(tx_weight);
+        }
+        (size, weight, txs.len() as u64 + 1)
     }
 
     /// Get mining information
@@ -401,8 +412,16 @@ impl MiningRpc {
         let utxo_set = self.template_utxos(&pooled)?;
         let mempool_txs: Vec<Transaction> = self.mempool_transactions_priced(&utxo_set)?;
 
-        // 4. Extract coinbase parameters from request or use defaults
-        let coinbase_script = self.extract_coinbase_script(params).unwrap_or_default();
+        // 4. Extract coinbase parameters from request or use defaults.
+        // The script must begin with this block's height and be 2 to 100 bytes.
+        let mut coinbase_script = self.extract_coinbase_script(params).unwrap_or_default();
+        if !(2..=100).contains(&coinbase_script.len())
+            || !Self::coinbase_script_starts_with_height(&coinbase_script, template_block_height)
+        {
+            coinbase_script = blvm_protocol::bip_validation::encode_bip34_coinbase_script(
+                template_block_height,
+            );
+        }
         let coinbase_address = self.extract_coinbase_address(params)?;
 
         let network = self.consensus_network();
@@ -524,11 +543,41 @@ impl MiningRpc {
             "bits": bits_hex,
             "height": template.height
         });
+        if let Some(script) = Self::witness_commitment_script(&template.coinbase_tx) {
+            body["default_witness_commitment"] = json!(hex::encode(script));
+        }
         if include_coinbasetxn {
-            let data = hex::encode(serialize_transaction(&template.coinbase_tx));
+            let data = hex::encode(Self::coinbase_txn_bytes(&template.coinbase_tx));
             body["coinbasetxn"] = json!({ "data": data });
         }
         Ok(body)
+    }
+
+    /// Last BIP141 commitment script on a coinbase, if one was appended.
+    fn witness_commitment_script(tx: &Transaction) -> Option<&[u8]> {
+        tx.outputs.iter().rev().find_map(|output| {
+            let script: &[u8] = output.script_pubkey.as_ref();
+            (script.len() >= 38
+                && script[0] == 0x6a
+                && script[1] == 0x24
+                && script[2..6] == [0xaa, 0x21, 0xa9, 0xed])
+            .then_some(script)
+        })
+    }
+
+    /// BIP141 coinbase for `coinbasetxn`. The commitment was hashed with 32 zero
+    /// bytes, so that reserved value is part of the published transaction.
+    fn coinbase_txn_bytes(tx: &Transaction) -> Vec<u8> {
+        use blvm_protocol::serialization::serialize_transaction_with_witness;
+
+        let committed = Self::witness_commitment_script(tx).is_some();
+        if committed {
+            let reserved: Vec<Witness> = tx.inputs.iter().map(|_| vec![vec![0u8; 32]]).collect();
+            if let Ok(bytes) = serialize_transaction_with_witness(tx, &reserved) {
+                return bytes;
+            }
+        }
+        serialize_transaction(tx)
     }
 
     fn client_wants_coinbasetxn(params: &Value) -> bool {
@@ -750,8 +799,22 @@ impl MiningRpc {
                 }
             }
         }
-        // Default: empty script
+        // Default: empty script. The template replaces a script that skips the height.
         Some(vec![])
+    }
+
+    /// BIP34: height 0 is `OP_0`, heights 1 through 16 are `OP_1` through `OP_16`,
+    /// and a taller height is the length byte plus the minimal little-endian magnitude.
+    fn coinbase_script_starts_with_height(script: &[u8], height: u64) -> bool {
+        if height == 0 {
+            return script.first().copied() == Some(0x00);
+        }
+        if (1..=16).contains(&height) {
+            return script.first().copied() == Some(0x50 + height as u8);
+        }
+        let prefix =
+            blvm_protocol::bip_validation::encode_bip34_coinbase_script(height);
+        script.starts_with(&prefix)
     }
 
     fn extract_coinbase_address(&self, params: &Value) -> RpcResult<ByteString> {
@@ -808,8 +871,22 @@ impl MiningRpc {
                 .inputs
                 .iter()
                 .map(|input| {
-                    self.storage.as_ref().and_then(|storage| {
+                    if let Some(utxo) = self.storage.as_ref().and_then(|storage| {
                         storage.read_chain_prevout(&input.prevout).ok().flatten()
+                    }) {
+                        return Some(utxo);
+                    }
+                    // An output created by a pooled parent is in this template too.
+                    let parent = self
+                        .mempool
+                        .as_ref()
+                        .and_then(|mempool| mempool.get_transaction(&input.prevout.hash))?;
+                    let output = parent.outputs.get(input.prevout.index as usize)?;
+                    Some(UTXO {
+                        value: output.value,
+                        script_pubkey: output.script_pubkey.clone().into(),
+                        height: 0,
+                        is_coinbase: false,
                     })
                 })
                 .collect();
@@ -2156,5 +2233,497 @@ mod tests {
             info["currentblockweight"].as_u64(),
             Some((expected as u64).saturating_mul(4))
         );
+    }
+
+    #[test]
+    fn a_template_sigop_count_sees_a_mempool_parent() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::{OP_0, PUSH_32_BYTES};
+        use sha2::{Digest, Sha256};
+
+        let spend = vec![
+            0xa9, 0x14, 0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99,
+            0x71, 0xc7, 0x7e, 0xba, 0x30, 0xcd, 0x5a, 0x4b, 0x87,
+        ];
+        let mut script = vec![0x00, 0x63];
+        for _ in 0..199 {
+            script.push(0x60);
+            script.push(0xae);
+        }
+        script.push(0x68);
+        script.push(0x51);
+        let mut output_script = vec![OP_0, PUSH_32_BYTES];
+        output_script.extend_from_slice(&Sha256::digest(&script));
+        let witness: blvm_protocol::segwit::Witness = vec![script];
+
+        let child_of = |prevout: OutPoint| Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout,
+                script_sig: Vec::new(),
+                sequence: 0xffffffff,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 50_000,
+                script_pubkey: vec![0x6a, 0x03, 0x00, 0x00, 0x00],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let confirmed_out = OutPoint {
+            hash: [3u8; 32],
+            index: 0,
+        };
+        storage
+            .utxos()
+            .add_utxo(
+                &confirmed_out,
+                &UTXO {
+                    value: 100_000,
+                    script_pubkey: output_script.clone().into(),
+                    height: 1,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+        let confirmed_mining =
+            MiningRpc::with_dependencies(Arc::clone(&storage), Arc::new(MempoolManager::new()));
+        let confirmed = confirmed_mining
+            .count_sigops(&child_of(confirmed_out), Some(std::slice::from_ref(&witness)));
+
+        let funding = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let mempool = Arc::new(MempoolManager::new());
+        let mut utxo_set = UtxoSet::default();
+        utxo_set.insert(
+            funding,
+            Arc::new(UTXO {
+                value: 200_000,
+                script_pubkey: spend.into(),
+                height: 1,
+                is_coinbase: false,
+            }),
+        );
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set)));
+        let parent = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: funding,
+                script_sig: vec![0x01, 0x51],
+                sequence: 0xffffffff,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 100_000,
+                script_pubkey: output_script,
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let parent_id = calculate_tx_id(&parent);
+        assert!(mempool.add_transaction(parent).unwrap());
+        let child = child_of(OutPoint {
+            hash: parent_id,
+            index: 0,
+        });
+        let mining = MiningRpc::with_dependencies(storage, mempool);
+        let reported = mining.count_sigops(&child, Some(std::slice::from_ref(&witness)));
+        eprintln!("confirmed reported={confirmed}; mempool parent reported={reported}");
+        assert_eq!(confirmed, 3184);
+        assert_eq!(reported, 3184);
+    }
+
+    #[tokio::test]
+    async fn a_mining_info_weight_counts_the_witness() {
+        use blvm_protocol::segwit::transaction_weight_from_stacks;
+
+        let tx_of = || {
+            let funding = OutPoint {
+                hash: [7u8; 32],
+                index: 0,
+            };
+            let mut tx = spend(funding, 40_000);
+            tx.inputs[0].script_sig = vec![OP_1];
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            tx
+        };
+        let coinbase = MiningRpc::template_coinbase(1);
+        let coinbase_weight = transaction_weight_from_stacks(&coinbase, None).unwrap();
+
+        let (_plain_dir, _plain_storage, plain_pool, plain_mining) = regtest_mining();
+        let plain_tx = tx_of();
+        assert!(plain_pool.add_transaction(plain_tx.clone()).unwrap());
+        let plain_info = plain_mining.get_mining_info().await.unwrap();
+        let plain_reported = plain_info["currentblockweight"].as_u64().unwrap();
+        let plain_real =
+            coinbase_weight + transaction_weight_from_stacks(&plain_tx, None).unwrap();
+
+        let (_wit_dir, _wit_storage, wit_pool, wit_mining) = regtest_mining();
+        let wit_tx = tx_of();
+        let witnesses = vec![vec![vec![0u8; 400]]];
+        assert!(
+            wit_pool
+                .add_transaction_with_witness(wit_tx.clone(), Some(witnesses.clone()))
+                .unwrap()
+        );
+        let wit_info = wit_mining.get_mining_info().await.unwrap();
+        let wit_reported = wit_info["currentblockweight"].as_u64().unwrap();
+        let wit_real = coinbase_weight
+            + transaction_weight_from_stacks(&wit_tx, Some(witnesses.as_slice())).unwrap();
+        eprintln!(
+            "plain reported={plain_reported} real={plain_real}; witness reported={wit_reported} real={wit_real}"
+        );
+        assert_eq!(plain_reported, plain_real);
+        assert_eq!(wit_reported, wit_real);
+    }
+
+    #[tokio::test]
+    async fn a_gbt_coinbase_carries_the_reserved_witness() {
+        use blvm_protocol::segwit::validate_witness_commitment;
+        use blvm_protocol::serialization::transaction::deserialize_transaction_with_witness;
+
+        let (_dir, _storage, _mempool, mining) = regtest_mining();
+        let template = mining
+            .get_block_template(&serde_json::json!([{
+                "capabilities": ["coinbasetxn"]
+            }]))
+            .await
+            .unwrap();
+        let hex_data = template["coinbasetxn"]["data"].as_str().unwrap();
+        let bytes = hex::decode(hex_data).unwrap();
+        let (tx, witnesses, _) = deserialize_transaction_with_witness(&bytes).unwrap();
+        let root = [0u8; 32];
+        let published_ok = validate_witness_commitment(&tx, &root, &witnesses).unwrap();
+        let empty_ok = validate_witness_commitment(&tx, &root, &[]).unwrap();
+        eprintln!("published_ok={published_ok}; empty_ok={empty_ok}");
+        assert!(published_ok);
+        assert!(!empty_ok);
+    }
+
+    #[tokio::test]
+    async fn a_gbt_coinbase_script_starts_with_the_height() {
+        use blvm_protocol::bip_validation::encode_bip34_coinbase_script;
+        use blvm_protocol::serialization::transaction::deserialize_transaction_with_witness;
+        use blvm_protocol::transaction::check_transaction;
+        use blvm_protocol::ValidationResult;
+
+        let (_dir, _storage, _mempool, mining) = regtest_mining();
+        let template = mining
+            .get_block_template(&serde_json::json!([{
+                "capabilities": ["coinbasetxn"]
+            }]))
+            .await
+            .unwrap();
+        let height = template["height"].as_u64().unwrap();
+        let bytes = hex::decode(template["coinbasetxn"]["data"].as_str().unwrap()).unwrap();
+        let (mut tx, _, _) = deserialize_transaction_with_witness(&bytes).unwrap();
+        assert_eq!(tx.inputs[0].script_sig, encode_bip34_coinbase_script(height));
+        let published_ok = matches!(check_transaction(&tx).unwrap(), ValidationResult::Valid);
+        tx.inputs[0].script_sig.clear();
+        let cleared_ok = matches!(check_transaction(&tx).unwrap(), ValidationResult::Valid);
+        eprintln!("published_ok={published_ok}; cleared_ok={cleared_ok}");
+        assert!(published_ok);
+        assert!(!cleared_ok);
+    }
+
+    #[tokio::test]
+    async fn a_child_sorted_ahead_of_its_parent_is_still_in_the_template() {
+        use crate::storage::hashing::hash_to_rpc_hex;
+        use blvm_protocol::block::calculate_tx_id;
+
+        let redeem = vec![0x51u8];
+        let hash = crate::storage::hashing::hash160(&redeem);
+        let mut spend_script = vec![0xa9, 0x14];
+        spend_script.extend(hash);
+        spend_script.push(0x87);
+        let origin = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let run = |child_value: i64| {
+            let spend_script = spend_script.clone();
+            async move {
+                let (_dir, storage, mempool, mining) = regtest_mining();
+                storage
+                    .utxos()
+                    .add_utxo(
+                        &origin,
+                        &UTXO {
+                            value: 200_000,
+                            script_pubkey: spend_script.clone().into(),
+                            height: 0,
+                            is_coinbase: false,
+                        },
+                    )
+                    .unwrap();
+                mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+                mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new({
+                    let mut set = UtxoSet::default();
+                    set.insert(
+                        origin,
+                        Arc::new(UTXO {
+                            value: 200_000,
+                            script_pubkey: spend_script.clone().into(),
+                            height: 0,
+                            is_coinbase: false,
+                        }),
+                    );
+                    set
+                })));
+                let parent = Transaction {
+                    version: 1,
+                    inputs: vec![TransactionInput {
+                        prevout: origin,
+                        script_sig: vec![0x01, 0x51],
+                        sequence: 0xffffffff,
+                    }]
+                    .into(),
+                    outputs: vec![TransactionOutput {
+                        value: 190_000,
+                        script_pubkey: spend_script.clone(),
+                    }]
+                    .into(),
+                    lock_time: 0,
+                };
+                let parent_id = calculate_tx_id(&parent);
+                let child = Transaction {
+                    version: 1,
+                    inputs: vec![TransactionInput {
+                        prevout: OutPoint {
+                            hash: parent_id,
+                            index: 0,
+                        },
+                        script_sig: vec![0x01, 0x51],
+                        sequence: 0xffffffff,
+                    }]
+                    .into(),
+                    outputs: vec![TransactionOutput {
+                        value: child_value,
+                        script_pubkey: vec![0x6a, 0x03, 0x00, 0x00, 0x00],
+                    }]
+                    .into(),
+                    lock_time: 0,
+                };
+                assert!(mempool.add_transaction(parent).unwrap());
+                assert!(mempool.add_transaction(child.clone()).unwrap());
+                let template = mining
+                    .get_block_template(&serde_json::json!([]))
+                    .await
+                    .unwrap();
+                let ids: Vec<String> = template["transactions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|tx| tx["txid"].as_str().unwrap().to_string())
+                    .collect();
+                let child_id = hash_to_rpc_hex(&calculate_tx_id(&child));
+                (ids.len(), ids.iter().any(|id| id == &child_id))
+            }
+        };
+        let (low_fee_n, low_fee_child) = run(188_000).await;
+        let (high_fee_n, high_fee_child) = run(100_000).await;
+        eprintln!(
+            "child fee 2000 n={low_fee_n} child={low_fee_child}; child fee 90000 n={high_fee_n} child={high_fee_child}"
+        );
+        assert!(low_fee_child);
+        assert!(high_fee_child);
+        assert_eq!(low_fee_n, 2);
+        assert_eq!(high_fee_n, 2);
+    }
+
+    #[tokio::test]
+    async fn a_template_publishes_the_witness_commitment() {
+        use crate::storage::hashing::hash_to_rpc_hex;
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::segwit::{
+            compute_witness_merkle_root_from_nested, witness_commitment_script,
+        };
+        use blvm_protocol::serialization::transaction::deserialize_transaction_with_witness;
+        use blvm_protocol::{Block, BlockHeader};
+        use sha2::{Digest, Sha256};
+
+        let script = vec![0x51u8];
+        let program: [u8; 32] = Sha256::digest(&script).into();
+        let mut spend_script = vec![0x00, 0x20];
+        spend_script.extend(program);
+        let origin = OutPoint {
+            hash: [8u8; 32],
+            index: 0,
+        };
+        let (_dir, storage, mempool, mining) = regtest_mining();
+        storage
+            .utxos()
+            .add_utxo(
+                &origin,
+                &UTXO {
+                    value: 100_000,
+                    script_pubkey: spend_script.clone().into(),
+                    height: 0,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+        mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new({
+            let mut set = UtxoSet::default();
+            set.insert(
+                origin,
+                Arc::new(UTXO {
+                    value: 100_000,
+                    script_pubkey: spend_script.into(),
+                    height: 0,
+                    is_coinbase: false,
+                }),
+            );
+            set
+        })));
+        let tx = Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: origin,
+                script_sig: Vec::new(),
+                sequence: 0xffffffff,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 0,
+                script_pubkey: vec![0x6a, 0x03, 0x00, 0x00, 0x00],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let stored_witness = vec![vec![script]];
+        assert!(
+            mempool
+                .add_transaction_with_witness(tx.clone(), Some(stored_witness.clone()))
+                .unwrap()
+        );
+        let template = mining.get_block_template(&serde_json::json!([])).await.unwrap();
+        let published = template["default_witness_commitment"]
+            .as_str()
+            .expect("default witness commitment");
+        let with_coinbase = mining
+            .get_block_template(&serde_json::json!([{
+                "capabilities": ["coinbasetxn"]
+            }]))
+            .await
+            .unwrap();
+        let (coinbase, _, _) = deserialize_transaction_with_witness(
+            &hex::decode(with_coinbase["coinbasetxn"]["data"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let txid = hash_to_rpc_hex(&calculate_tx_id(&tx));
+        let entry = with_coinbase["transactions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["txid"].as_str() == Some(txid.as_str()))
+            .expect("spend is in the template");
+        let (published_tx, _, _) = deserialize_transaction_with_witness(
+            &hex::decode(entry["data"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            timestamp: 0,
+            bits: 0,
+            nonce: 0,
+        };
+        let matches = |witness: &[blvm_protocol::segwit::Witness]| {
+            let block = Block {
+                header: header.clone(),
+                transactions: vec![coinbase.clone(), published_tx.clone()].into_boxed_slice(),
+            };
+            let nested = vec![vec![vec![vec![0u8; 32]]], witness.to_vec()];
+            let root = compute_witness_merkle_root_from_nested(&block, &nested, None).unwrap();
+            hex::encode(witness_commitment_script(&root, &[0u8; 32])) == published
+        };
+        let stored_ok = matches(&stored_witness);
+        let empty_ok = matches(&[vec![]]);
+        eprintln!("stored_ok={stored_ok}; empty_ok={empty_ok}");
+        assert!(stored_ok);
+        assert!(!empty_ok);
+    }
+
+    #[tokio::test]
+    async fn a_supplied_coinbase_script_still_starts_with_the_height() {
+        use blvm_protocol::bip_validation::check_bip34_network;
+        use blvm_protocol::serialization::transaction::deserialize_transaction_with_witness;
+        use blvm_protocol::{Block, BlockHeader};
+
+        let (_dir, _storage, _mempool, mining) = regtest_mining();
+        let template = mining
+            .get_block_template(&serde_json::json!([{
+                "capabilities": ["coinbasetxn"],
+                "coinbasetxn": { "data": "00ff" }
+            }]))
+            .await
+            .unwrap();
+        let height = template["height"].as_u64().unwrap();
+        let (mut coinbase, _, _) = deserialize_transaction_with_witness(
+            &hex::decode(template["coinbasetxn"]["data"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            timestamp: 0,
+            bits: 0,
+            nonce: 0,
+        };
+        let bip34 = |tx: &Transaction| {
+            let block = Block {
+                header: header.clone(),
+                transactions: vec![tx.clone()].into_boxed_slice(),
+            };
+            check_bip34_network(&block, height, blvm_consensus::Network::Regtest).unwrap()
+        };
+        let supplied_ok = bip34(&coinbase);
+        coinbase.inputs[0].script_sig = vec![0x00, 0xff];
+        let restored_ok = bip34(&coinbase);
+        eprintln!("supplied_ok={supplied_ok}; restored_ok={restored_ok}");
+        assert!(supplied_ok);
+        assert!(!restored_ok);
+    }
+
+    #[tokio::test]
+    async fn a_one_byte_height_prefix_is_a_valid_coinbase_script() {
+        use blvm_protocol::serialization::transaction::deserialize_transaction_with_witness;
+        use blvm_protocol::transaction::check_transaction;
+        use blvm_protocol::ValidationResult;
+
+        let (_dir, _storage, _mempool, mining) = regtest_mining();
+        let template = mining
+            .get_block_template(&serde_json::json!([{
+                "capabilities": ["coinbasetxn"],
+                "coinbasetxn": { "data": "51" }
+            }]))
+            .await
+            .unwrap();
+        let (mut coinbase, _, _) = deserialize_transaction_with_witness(
+            &hex::decode(template["coinbasetxn"]["data"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let published_ok = matches!(
+            check_transaction(&coinbase).unwrap(),
+            ValidationResult::Valid
+        );
+        coinbase.inputs[0].script_sig = vec![0x51];
+        let restored_ok = matches!(
+            check_transaction(&coinbase).unwrap(),
+            ValidationResult::Valid
+        );
+        eprintln!("published_ok={published_ok}; restored_ok={restored_ok}");
+        assert!(published_ok);
+        assert!(!restored_ok);
     }
 }

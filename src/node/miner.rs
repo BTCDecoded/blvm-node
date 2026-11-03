@@ -148,44 +148,32 @@ impl TransactionSelector {
                         if self.package_fits(
                             &package,
                             mempool,
+                            utxo_set,
+                            &selected,
                             current_size,
                             current_weight,
                             current_sigops,
+                        ) && self.add_paying_package(
+                            &parents,
+                            &child,
+                            mempool,
+                            utxo_set,
+                            &mut selected,
+                            &mut selected_ids,
+                            &mut current_size,
+                            &mut current_weight,
+                            &mut current_sigops,
                         ) {
-                            let mut added = false;
-                            for parent_tx in &parents {
-                                if selected_ids
-                                    .contains(&blvm_protocol::block::calculate_tx_id(parent_tx))
-                                {
-                                    continue;
-                                }
-                                if self.try_add_to_block(
-                                    parent_tx,
-                                    mempool,
-                                    utxo_set,
-                                    &mut selected,
-                                    &mut selected_ids,
-                                    &mut current_size,
-                                    &mut current_weight,
-                                    &mut current_sigops,
-                                    false,
-                                ) == BlockSelect::Added
-                                {
-                                    added = true;
-                                }
-                            }
-                            if added {
-                                self.take_ready_dependents(
-                                    mempool,
-                                    utxo_set,
-                                    &mut waiting,
-                                    &mut selected,
-                                    &mut selected_ids,
-                                    &mut current_size,
-                                    &mut current_weight,
-                                    &mut current_sigops,
-                                );
-                            }
+                            self.take_ready_dependents(
+                                mempool,
+                                utxo_set,
+                                &mut waiting,
+                                &mut selected,
+                                &mut selected_ids,
+                                &mut current_size,
+                                &mut current_weight,
+                                &mut current_sigops,
+                            );
                         }
                     }
                 }
@@ -215,23 +203,8 @@ impl TransactionSelector {
             if !fee_meets_block_floor(package_fee, package_vsize as u64, self.min_fee_rate) {
                 continue;
             }
-            for parent_tx in &parents {
-                if selected_ids.contains(&blvm_protocol::block::calculate_tx_id(parent_tx)) {
-                    continue;
-                }
-                let _ = self.try_add_to_block(
-                    parent_tx,
-                    mempool,
-                    utxo_set,
-                    &mut selected,
-                    &mut selected_ids,
-                    &mut current_size,
-                    &mut current_weight,
-                    &mut current_sigops,
-                    false,
-                );
-            }
-            let _ = self.try_add_to_block(
+            let _ = self.add_paying_package(
+                &parents,
                 &child,
                 mempool,
                 utxo_set,
@@ -240,7 +213,6 @@ impl TransactionSelector {
                 &mut current_size,
                 &mut current_weight,
                 &mut current_sigops,
-                false,
             );
         }
 
@@ -283,7 +255,7 @@ impl TransactionSelector {
         let tx_stripped = blvm_consensus::transaction::calculate_transaction_size(tx);
         let tx_weight = bip141_weight(tx, input_witnesses.as_deref());
         let tx_vsize = transaction_vsize(tx, input_witnesses.as_deref());
-        let tx_sigops = tx_sigop_cost(tx, utxo_set, input_witnesses.as_deref());
+        let tx_sigops = tx_sigop_cost(tx, utxo_set, selected, input_witnesses.as_deref());
 
         if *current_size + tx_stripped > self.max_block_size
             || *current_weight + tx_weight > self.max_block_weight
@@ -304,6 +276,79 @@ impl TransactionSelector {
         *current_weight += tx_weight;
         *current_sigops = current_sigops.saturating_add(tx_sigops);
         BlockSelect::Added
+    }
+
+    /// Add `parents` and `child` as one package.
+    ///
+    /// Parents may sit below the block fee floor because `child` pays for them.
+    /// If `child` does not fit, those parents are taken back out.
+    fn add_paying_package(
+        &self,
+        parents: &[Transaction],
+        child: &Transaction,
+        mempool: &dyn MempoolProvider,
+        utxo_set: &blvm_protocol::UtxoSet,
+        selected: &mut Vec<Transaction>,
+        selected_ids: &mut std::collections::HashSet<[u8; 32]>,
+        current_size: &mut usize,
+        current_weight: &mut u64,
+        current_sigops: &mut u64,
+    ) -> bool {
+        use blvm_protocol::block::calculate_tx_id;
+
+        let mark = selected.len();
+        let saved_size = *current_size;
+        let saved_weight = *current_weight;
+        let saved_sigops = *current_sigops;
+        let mut added_ids = Vec::new();
+        let mut parents_ok = true;
+        for parent_tx in parents {
+            let id = calculate_tx_id(parent_tx);
+            if selected_ids.contains(&id) {
+                continue;
+            }
+            if self.try_add_to_block(
+                parent_tx,
+                mempool,
+                utxo_set,
+                selected,
+                selected_ids,
+                current_size,
+                current_weight,
+                current_sigops,
+                false,
+            ) != BlockSelect::Added
+            {
+                parents_ok = false;
+                break;
+            }
+            added_ids.push(id);
+        }
+        let child_id = calculate_tx_id(child);
+        let child_added = parents_ok
+            && (selected_ids.contains(&child_id)
+                || self.try_add_to_block(
+                    child,
+                    mempool,
+                    utxo_set,
+                    selected,
+                    selected_ids,
+                    current_size,
+                    current_weight,
+                    current_sigops,
+                    false,
+                ) == BlockSelect::Added);
+        if child_added {
+            return true;
+        }
+        selected.truncate(mark);
+        for id in added_ids {
+            selected_ids.remove(&id);
+        }
+        *current_size = saved_size;
+        *current_weight = saved_weight;
+        *current_sigops = saved_sigops;
+        false
     }
 
     /// Append deferred spends whose parents are now in the template.
@@ -481,6 +526,8 @@ impl TransactionSelector {
         &self,
         txs: &[&Transaction],
         mempool: &dyn MempoolProvider,
+        utxo_set: &blvm_protocol::UtxoSet,
+        selected: &[Transaction],
         current_size: usize,
         current_weight: u64,
         current_sigops: u64,
@@ -490,12 +537,12 @@ impl TransactionSelector {
         let mut size = current_size;
         let mut weight = current_weight;
         let mut sigops = current_sigops;
+        let mut in_block = selected.to_vec();
         for tx in txs {
             let witnesses = mempool.get_transaction_witnesses(&calculate_tx_id(tx));
             let stripped = blvm_consensus::transaction::calculate_transaction_size(tx);
             let tx_weight = bip141_weight(tx, witnesses.as_deref());
-            let tx_sigops =
-                tx_sigop_cost(tx, &blvm_protocol::UtxoSet::default(), witnesses.as_deref());
+            let tx_sigops = tx_sigop_cost(tx, utxo_set, &in_block, witnesses.as_deref());
             size = size.saturating_add(stripped);
             weight = weight.saturating_add(tx_weight);
             sigops = sigops.saturating_add(tx_sigops);
@@ -505,6 +552,7 @@ impl TransactionSelector {
             {
                 return false;
             }
+            in_block.push((*tx).clone());
         }
         true
     }
@@ -611,10 +659,38 @@ fn bip141_weight(tx: &Transaction, input_witnesses: Option<&[Witness]>) -> u64 {
 fn tx_sigop_cost(
     tx: &Transaction,
     utxo_set: &blvm_protocol::UtxoSet,
+    selected: &[Transaction],
     witnesses: Option<&[Witness]>,
 ) -> u64 {
+    use blvm_consensus::utxo_overlay::UtxoOverlay;
+    use blvm_protocol::block::calculate_tx_id;
+    use blvm_protocol::{OutPoint, UTXO};
+
+    // Outputs already chosen for this block are visible, as they are at connect.
+    // Block sigop cost counts witness programs. P2SH is 0x01. Witness is 0x800.
+    let mut overlay = UtxoOverlay::with_capacity(utxo_set, selected.len().saturating_mul(2), 0);
+    for parent in selected {
+        let id = calculate_tx_id(parent);
+        for (index, output) in parent.outputs.iter().enumerate() {
+            overlay.insert(
+                OutPoint {
+                    hash: id,
+                    index: index as u32,
+                },
+                UTXO {
+                    value: output.value,
+                    script_pubkey: output.script_pubkey.clone().into(),
+                    height: 0,
+                    is_coinbase: false,
+                },
+            );
+        }
+    }
     blvm_protocol::sigop::get_transaction_sigop_cost_with_witness_slices(
-        tx, utxo_set, witnesses, 0x01,
+        tx,
+        &overlay,
+        witnesses,
+        0x01 | 0x800,
     )
     .unwrap_or(u64::MAX)
 }
@@ -1805,7 +1881,7 @@ mod tests {
         assert_eq!(selected.len(), 5);
         let mut cost = 0u64;
         for tx in &selected {
-            cost += tx_sigop_cost(tx, &blvm_protocol::UtxoSet::default(), None);
+            cost += tx_sigop_cost(tx, &blvm_protocol::UtxoSet::default(), &[], None);
         }
         assert!(cost <= 80_000);
         assert_eq!(cost, 80_000);
@@ -3005,5 +3081,499 @@ mod tests {
                 .is_some_and(|o| o.value == 0 && o.script_pubkey.first() == Some(&0x6a)),
             "BIP141 still appended after Commons payouts"
         );
+    }
+
+    #[test]
+    fn a_template_stops_at_the_witness_sigop_limit() {
+        use blvm_protocol::opcodes::{OP_0, PUSH_32_BYTES};
+        use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO};
+        use sha2::{Digest, Sha256};
+
+        let mut script = vec![0x00, 0x63];
+        for _ in 0..199 {
+            script.push(0x60);
+            script.push(0xae);
+        }
+        script.push(0x68);
+        script.push(0x51);
+        let program = Sha256::digest(&script);
+        let mut output_script = vec![OP_0, PUSH_32_BYTES];
+        output_script.extend_from_slice(&program);
+
+        let mut selected_n = [0usize; 2];
+        let mut cost = [0u64; 2];
+        for (index, count) in [25usize, 26].into_iter().enumerate() {
+            let mut utxo_set = blvm_protocol::UtxoSet::default();
+            let mut txs = Vec::new();
+            let mut witnesses = Vec::new();
+            for n in 0..count {
+                let prevout = OutPoint {
+                    hash: [n as u8; 32],
+                    index: 0,
+                };
+                utxo_set.insert(
+                    prevout,
+                    std::sync::Arc::new(UTXO {
+                        value: 100_000,
+                        script_pubkey: output_script.clone().into(),
+                        height: 1,
+                        is_coinbase: false,
+                    }),
+                );
+                txs.push(Transaction {
+                    version: 1,
+                    inputs: vec![TransactionInput {
+                        prevout,
+                        script_sig: Vec::new(),
+                        sequence: 0xffffffff,
+                    }]
+                    .into(),
+                    outputs: vec![TransactionOutput {
+                        value: 50_000,
+                        script_pubkey: vec![0x6a, 0x03, 0x00, 0x00, 0x00],
+                    }]
+                    .into(),
+                    lock_time: 0,
+                });
+                witnesses.push(vec![vec![script.clone()]]);
+            }
+            let mempool = crate::node::mempool::MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(
+                utxo_set.clone(),
+            )));
+            for (tx, witness) in txs.iter().zip(witnesses.iter()) {
+                assert!(
+                    mempool
+                        .add_transaction_with_witness(tx.clone(), Some(witness.clone()))
+                        .unwrap()
+                );
+            }
+            let picked = TransactionSelector::new().select_transactions(&mempool, &utxo_set);
+            selected_n[index] = picked.len();
+            cost[index] = picked
+                .iter()
+                .map(|tx| {
+                    let id = blvm_protocol::block::calculate_tx_id(tx);
+                    let stacks = mempool.get_transaction_witnesses(&id);
+                    blvm_protocol::sigop::get_transaction_sigop_cost_with_witness_slices(
+                        tx,
+                        &utxo_set,
+                        stacks.as_deref(),
+                        0x01 | 0x800,
+                    )
+                    .unwrap()
+                })
+                .sum();
+        }
+        eprintln!(
+            "txs 25 selected={} cost={}; txs 26 selected={} cost={}",
+            selected_n[0], cost[0], selected_n[1], cost[1]
+        );
+        assert_eq!(selected_n[0], 25);
+        assert!(cost[0] <= 80_000);
+        assert_eq!(selected_n[1], 25);
+        assert!(cost[1] <= 80_000);
+    }
+
+    #[test]
+    fn a_template_counts_sigops_of_a_mempool_parent() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::{OP_0, PUSH_32_BYTES};
+        use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO};
+        use sha2::{Digest, Sha256};
+
+        let spend = vec![
+            0xa9, 0x14, 0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99,
+            0x71, 0xc7, 0x7e, 0xba, 0x30, 0xcd, 0x5a, 0x4b, 0x87,
+        ];
+        let mut script = vec![0x00, 0x63];
+        for _ in 0..199 {
+            script.push(0x60);
+            script.push(0xae);
+        }
+        script.push(0x68);
+        script.push(0x51);
+        let program = Sha256::digest(&script);
+        let mut output_script = vec![OP_0, PUSH_32_BYTES];
+        output_script.extend_from_slice(&program);
+        let witness = vec![vec![script]];
+
+        let run = |mempool_parent: bool| {
+            let mut utxo_set = blvm_protocol::UtxoSet::default();
+            let mempool = crate::node::mempool::MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            for n in 0..26u8 {
+                let mut origin_hash = [0u8; 32];
+                origin_hash[0] = n;
+                origin_hash[1] = u8::from(mempool_parent);
+                let prevout = OutPoint {
+                    hash: if mempool_parent {
+                        origin_hash
+                    } else {
+                        [n; 32]
+                    },
+                    index: 0,
+                };
+                let coin_script = if mempool_parent {
+                    spend.clone()
+                } else {
+                    output_script.clone()
+                };
+                let coin_value = if mempool_parent { 200_000 } else { 100_000 };
+                utxo_set.insert(
+                    prevout,
+                    std::sync::Arc::new(UTXO {
+                        value: coin_value,
+                        script_pubkey: coin_script.into(),
+                        height: 1,
+                        is_coinbase: false,
+                    }),
+                );
+                mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(
+                    utxo_set.clone(),
+                )));
+                let child_prevout = if mempool_parent {
+                    let parent = Transaction {
+                        version: 1,
+                        inputs: vec![TransactionInput {
+                            prevout,
+                            script_sig: vec![0x01, 0x51],
+                            sequence: 0xffffffff,
+                        }]
+                        .into(),
+                        outputs: vec![TransactionOutput {
+                            value: 100_000,
+                            script_pubkey: output_script.clone(),
+                        }]
+                        .into(),
+                        lock_time: 0,
+                    };
+                    let parent_id = calculate_tx_id(&parent);
+                    assert!(mempool.add_transaction(parent).unwrap());
+                    OutPoint {
+                        hash: parent_id,
+                        index: 0,
+                    }
+                } else {
+                    prevout
+                };
+                let child = Transaction {
+                    version: 1,
+                    inputs: vec![TransactionInput {
+                        prevout: child_prevout,
+                        script_sig: Vec::new(),
+                        sequence: 0xffffffff,
+                    }]
+                    .into(),
+                    outputs: vec![TransactionOutput {
+                        value: 50_000,
+                        script_pubkey: vec![0x6a, 0x03, 0x00, 0x00, 0x00],
+                    }]
+                    .into(),
+                    lock_time: 0,
+                };
+                assert!(
+                    mempool
+                        .add_transaction_with_witness(child, Some(witness.clone()))
+                        .unwrap()
+                );
+            }
+            let picked = TransactionSelector::new().select_transactions(&mempool, &utxo_set);
+            let mut overlay = utxo_set.clone();
+            for tx in &picked {
+                let id = calculate_tx_id(tx);
+                for (index, output) in tx.outputs.iter().enumerate() {
+                    overlay.insert(
+                        OutPoint {
+                            hash: id,
+                            index: index as u32,
+                        },
+                        std::sync::Arc::new(UTXO {
+                            value: output.value,
+                            script_pubkey: output.script_pubkey.clone().into(),
+                            height: 0,
+                            is_coinbase: false,
+                        }),
+                    );
+                }
+            }
+            let spends: Vec<_> = picked
+                .iter()
+                .filter(|tx| tx.inputs[0].script_sig.is_empty())
+                .cloned()
+                .collect();
+            let cost: u64 = spends
+                .iter()
+                .map(|tx| {
+                    let id = calculate_tx_id(tx);
+                    let stacks = mempool.get_transaction_witnesses(&id);
+                    blvm_protocol::sigop::get_transaction_sigop_cost_with_witness_slices(
+                        tx,
+                        &overlay,
+                        stacks.as_deref(),
+                        0x01 | 0x800,
+                    )
+                    .unwrap()
+                })
+                .sum();
+            (spends.len(), cost)
+        };
+        let confirmed = run(false);
+        let in_pool = run(true);
+        eprintln!(
+            "confirmed selected={} cost={}; mempool parent selected={} cost={}",
+            confirmed.0, confirmed.1, in_pool.0, in_pool.1
+        );
+        assert_eq!(confirmed.0, 25);
+        assert!(confirmed.1 <= 80_000);
+        assert_eq!(in_pool.0, 25);
+        assert!(in_pool.1 <= 80_000);
+    }
+
+    #[test]
+    fn a_below_floor_parent_is_removed_when_the_child_does_not_fit() {
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::{OP_0, PUSH_32_BYTES};
+        use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO};
+        use sha2::{Digest, Sha256};
+
+        let spend = vec![
+            0xa9, 0x14, 0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99,
+            0x71, 0xc7, 0x7e, 0xba, 0x30, 0xcd, 0x5a, 0x4b, 0x87,
+        ];
+        let mut heavy = vec![0x00, 0x63];
+        for _ in 0..199 {
+            heavy.push(0x60);
+            heavy.push(0xae);
+        }
+        heavy.push(0x68);
+        heavy.push(0x51);
+        let program_of = |script: &[u8]| {
+            let mut output_script = vec![OP_0, PUSH_32_BYTES];
+            output_script.extend_from_slice(&Sha256::digest(script));
+            output_script
+        };
+        let heavy_script = program_of(&heavy);
+
+        let run = |child_script: Vec<u8>| {
+            let child_program = program_of(&child_script);
+            let mut utxo_set = blvm_protocol::UtxoSet::default();
+            let mempool = crate::node::mempool::MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            for n in 0..25u8 {
+                let mut hash = [0u8; 32];
+                hash[0] = n;
+                hash[1] = 1;
+                let prevout = OutPoint { hash, index: 0 };
+                utxo_set.insert(
+                    prevout,
+                    std::sync::Arc::new(UTXO {
+                        value: 100_000,
+                        script_pubkey: heavy_script.clone().into(),
+                        height: 1,
+                        is_coinbase: false,
+                    }),
+                );
+                mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(
+                    utxo_set.clone(),
+                )));
+                let filler = Transaction {
+                    version: 1,
+                    inputs: vec![TransactionInput {
+                        prevout,
+                        script_sig: Vec::new(),
+                        sequence: 0xffffffff,
+                    }]
+                    .into(),
+                    outputs: vec![TransactionOutput {
+                        value: 50_000,
+                        script_pubkey: vec![0x6a, 0x03, 0x00, 0x00, 0x00],
+                    }]
+                    .into(),
+                    lock_time: 0,
+                };
+                assert!(
+                    mempool
+                        .add_transaction_with_witness(filler, Some(vec![vec![heavy.clone()]]))
+                        .unwrap()
+                );
+            }
+            let funding = OutPoint {
+                hash: [9u8; 32],
+                index: 0,
+            };
+            utxo_set.insert(
+                funding,
+                std::sync::Arc::new(UTXO {
+                    value: 200_000,
+                    script_pubkey: spend.clone().into(),
+                    height: 1,
+                    is_coinbase: false,
+                }),
+            );
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(
+                utxo_set.clone(),
+            )));
+            let parent = Transaction {
+                version: 1,
+                inputs: vec![TransactionInput {
+                    prevout: funding,
+                    script_sig: vec![0x01, 0x51],
+                    sequence: 0xffffffff,
+                }]
+                .into(),
+                outputs: vec![TransactionOutput {
+                    value: 199_000,
+                    script_pubkey: child_program,
+                }]
+                .into(),
+                lock_time: 0,
+            };
+            let parent_id = calculate_tx_id(&parent);
+            assert!(mempool.add_transaction(parent).unwrap());
+            let child = Transaction {
+                version: 1,
+                inputs: vec![TransactionInput {
+                    prevout: OutPoint {
+                        hash: parent_id,
+                        index: 0,
+                    },
+                    script_sig: Vec::new(),
+                    sequence: 0xffffffff,
+                }]
+                .into(),
+                outputs: vec![TransactionOutput {
+                    value: 50_000,
+                    script_pubkey: vec![0x6a, 0x03, 0x00, 0x00, 0x00],
+                }]
+                .into(),
+                lock_time: 0,
+            };
+            assert!(
+                mempool
+                    .add_transaction_with_witness(child, Some(vec![vec![child_script]]))
+                    .unwrap()
+            );
+            let picked = TransactionSelector::with_params(1_000_000, 4_000_000, 100_000)
+                .select_transactions(&mempool, &utxo_set);
+            let parent_in = picked
+                .iter()
+                .any(|tx| tx.inputs[0].script_sig == [0x01, 0x51]);
+            let child_in = picked.iter().any(|tx| {
+                tx.inputs[0].prevout.hash == parent_id && tx.inputs[0].script_sig.is_empty()
+            });
+            (parent_in, child_in)
+        };
+        let light = run(vec![0x51]);
+        let heavy_result = run(heavy.clone());
+        eprintln!(
+            "light parent={} child={}; heavy parent={} child={}",
+            light.0, light.1, heavy_result.0, heavy_result.1
+        );
+        assert!(light.0);
+        assert!(light.1);
+        assert!(!heavy_result.0);
+        assert!(!heavy_result.1);
+    }
+
+    #[test]
+    fn a_mined_block_stops_at_the_witness_sigop_limit() {
+        use blvm_protocol::opcodes::{OP_0, PUSH_32_BYTES};
+        use blvm_protocol::{
+            BlockHeader, OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO,
+        };
+        use sha2::{Digest, Sha256};
+
+        let mut heavy = vec![0x00, 0x63];
+        for _ in 0..199 {
+            heavy.push(0x60);
+            heavy.push(0xae);
+        }
+        heavy.push(0x68);
+        heavy.push(0x51);
+        let mut output_script = vec![OP_0, PUSH_32_BYTES];
+        output_script.extend_from_slice(&Sha256::digest(&heavy));
+
+        let run = |count: u8| {
+            let mut utxo_set = blvm_protocol::UtxoSet::default();
+            let mut txs = Vec::new();
+            let mut witnesses = Vec::new();
+            for n in 0..count {
+                let mut hash = [0u8; 32];
+                hash[0] = n;
+                let prevout = OutPoint { hash, index: 0 };
+                utxo_set.insert(
+                    prevout,
+                    std::sync::Arc::new(UTXO {
+                        value: 100_000,
+                        script_pubkey: output_script.clone().into(),
+                        height: 1,
+                        is_coinbase: false,
+                    }),
+                );
+                txs.push(Transaction {
+                    version: 1,
+                    inputs: vec![TransactionInput {
+                        prevout,
+                        script_sig: Vec::new(),
+                        sequence: 0xffffffff,
+                    }]
+                    .into(),
+                    outputs: vec![TransactionOutput {
+                        value: 50_000,
+                        script_pubkey: vec![0x6a, 0x03, 0x00, 0x00, 0x00],
+                    }]
+                    .into(),
+                    lock_time: 0,
+                });
+                witnesses.push(Some(vec![vec![heavy.clone()]]));
+            }
+            let parent = BlockHeader {
+                version: 1,
+                prev_block_hash: [0; 32],
+                merkle_root: [0; 32],
+                timestamp: 1_700_000_000,
+                bits: 0x207fffff,
+                nonce: 0,
+            };
+            let block = blvm_consensus::mining::create_new_block_with_time(
+                &utxo_set,
+                &txs,
+                1,
+                &parent,
+                &[parent.clone()],
+                &vec![0x01, 0x51],
+                &vec![0x51],
+                1_700_000_000,
+                blvm_consensus::Network::Regtest,
+                Some(&witnesses),
+            )
+            .unwrap();
+            let selected: Vec<_> = block.transactions.iter().skip(1).cloned().collect();
+            let cost: u64 = selected
+                .iter()
+                .map(|tx| {
+                    blvm_protocol::sigop::get_transaction_sigop_cost_with_witness_slices(
+                        tx,
+                        &utxo_set,
+                        Some(&[vec![heavy.clone()]]),
+                        0x01 | 0x800,
+                    )
+                    .unwrap()
+                })
+                .sum();
+            (selected.len(), cost)
+        };
+        let few = run(25);
+        let many = run(26);
+        eprintln!(
+            "txs 25 selected={} cost={}; txs 26 selected={} cost={}",
+            few.0, few.1, many.0, many.1
+        );
+        assert_eq!(few.0, 25);
+        assert!(few.1 <= 80_000);
+        assert_eq!(many.0, 25);
+        assert!(many.1 <= 80_000);
     }
 }

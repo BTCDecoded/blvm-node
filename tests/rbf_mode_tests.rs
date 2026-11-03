@@ -312,7 +312,7 @@ fn standard_replacement_pays_for_the_descendant() {
 }
 
 #[test]
-fn sequence_fffffffe_is_not_replaced() {
+fn sequence_fffffffe_is_replaced() {
     let mempool = MempoolManager::new();
     admit_bare_op1(&mempool);
     let utxo_set = create_test_utxo_set();
@@ -324,13 +324,13 @@ fn sequence_fffffffe_is_not_replaced() {
     assert!(mempool.add_transaction(existing).unwrap());
 
     let replacement = create_rbf_tx(100_000, 70_000);
-    assert!(!mempool.add_transaction(replacement).unwrap());
-    assert!(mempool.get_transaction(&existing_hash).is_some());
+    assert!(mempool.add_transaction(replacement).unwrap());
+    assert!(mempool.get_transaction(&existing_hash).is_none());
     assert_eq!(mempool.size(), 1);
 }
 
 #[test]
-fn opted_in_parent_with_final_child_stays_in_the_pool() {
+fn final_child_is_replaced_with_its_parent() {
     let mempool = MempoolManager::new();
     admit_bare_op1(&mempool);
     let utxo_set = create_test_utxo_set();
@@ -352,10 +352,10 @@ fn opted_in_parent_with_final_child_stays_in_the_pool() {
     assert!(mempool.add_transaction(child).unwrap());
 
     let replacement = create_rbf_tx(100_000, 70_000);
-    assert!(!mempool.add_transaction(replacement).unwrap());
-    assert!(mempool.get_transaction(&parent_hash).is_some());
-    assert!(mempool.get_transaction(&child_hash).is_some());
-    assert_eq!(mempool.size(), 2);
+    assert!(mempool.add_transaction(replacement).unwrap());
+    assert!(mempool.get_transaction(&parent_hash).is_none());
+    assert!(mempool.get_transaction(&child_hash).is_none());
+    assert_eq!(mempool.size(), 1);
 }
 
 #[test]

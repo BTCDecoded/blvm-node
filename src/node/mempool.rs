@@ -6,7 +6,7 @@ use crate::config::{MempoolPolicyConfig, RbfConfig};
 use crate::node::event_publisher::EventPublisher;
 use anyhow::Result;
 use blvm_protocol::mempool::{
-    Mempool, has_conflict_with_tx, replacement_checks_with_witness, signals_rbf,
+    Mempool, has_conflict_with_tx, replacement_checks_with_witness,
 };
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::{Block, Hash, OutPoint, Transaction, TransactionOutput, UtxoSet};
@@ -109,9 +109,20 @@ pub struct MempoolManager {
     relay_floor_waivers: Mutex<HashSet<Hash>>,
     /// Zero-fee parents whose single dust output is spent by a later transaction in the package.
     ephemeral_dust_waivers: Mutex<HashSet<Hash>>,
+    /// Earlier transactions in a package dry-run, with adjusted virtual size and parent ids.
+    package_preview: Mutex<PackagePreview>,
 }
 
 type SnapshotPrevoutLookup = Arc<dyn Fn(&OutPoint) -> Option<blvm_protocol::UTXO> + Send + Sync>;
+
+/// Transactions already accepted inside the package being previewed.
+#[derive(Clone, Default)]
+struct PackagePreview {
+    /// Transaction id to adjusted virtual size and the parent ids this preview can see.
+    txs: HashMap<Hash, (u64, Vec<Hash>)>,
+    /// Direct children recorded while previewing the package.
+    descendants: HashMap<Hash, HashSet<Hash>>,
+}
 
 fn ibd_snapshot_prevout(
     storage: &crate::storage::Storage,
@@ -409,9 +420,6 @@ fn output_is_dust(output: &blvm_protocol::TransactionOutput) -> bool {
 /// A standard pay-to-script-hash redeem script has at most this many signature checks.
 const MAX_STANDARD_P2SH_SIGOPS: u32 = 15;
 
-/// Non-witness signature opcodes in one standard transaction, including the spent scripts.
-const MAX_TX_LEGACY_SIGOPS: u32 = 2_500;
-
 /// Last data push in a push-only scriptSig. That push is the redeem script.
 fn last_push_payload(script: &[u8]) -> Option<Vec<u8>> {
     if script.is_empty() {
@@ -477,31 +485,6 @@ fn p2sh_redeem_sigops_exceed(tx: &Transaction, prevouts: &[Option<InputPrevout<'
         };
         blvm_protocol::sigop::count_sigops_in_script(&redeem, true) > MAX_STANDARD_P2SH_SIGOPS
     })
-}
-
-fn legacy_sigops_exceed(tx: &Transaction, prevouts: &[Option<InputPrevout<'_>>]) -> bool {
-    let mut total = 0u32;
-    for (i, input) in tx.inputs.iter().enumerate() {
-        total = total.saturating_add(blvm_protocol::sigop::count_sigops_in_script(
-            &input.script_sig,
-            true,
-        ));
-        let Some(prevout) = prevouts.get(i).and_then(|prevout| prevout.as_ref()) else {
-            continue;
-        };
-        let spent = if is_p2sh_script(prevout.script.as_ref()) {
-            last_push_payload(&input.script_sig)
-                .map(|redeem| blvm_protocol::sigop::count_sigops_in_script(&redeem, true))
-                .unwrap_or(0)
-        } else {
-            blvm_protocol::sigop::count_sigops_in_script(&prevout.script.to_vec(), true)
-        };
-        total = total.saturating_add(spent);
-        if total > MAX_TX_LEGACY_SIGOPS {
-            return true;
-        }
-    }
-    false
 }
 
 /// A standard pay-to-witness-script-hash data item is at most this many bytes.
@@ -914,6 +897,7 @@ impl MempoolManager {
             chain_tip: RwLock::new(None),
             relay_floor_waivers: Mutex::new(HashSet::new()),
             ephemeral_dust_waivers: Mutex::new(HashSet::new()),
+            package_preview: Mutex::new(PackagePreview::default()),
         };
         #[cfg(test)]
         {
@@ -957,6 +941,7 @@ impl MempoolManager {
             chain_tip: RwLock::new(None),
             relay_floor_waivers: Mutex::new(HashSet::new()),
             ephemeral_dust_waivers: Mutex::new(HashSet::new()),
+            package_preview: Mutex::new(PackagePreview::default()),
         }
     }
 
@@ -989,6 +974,12 @@ impl MempoolManager {
     pub fn set_chain_tip(&self, next_height: u64, median_time_past: u64) {
         *self.chain_tip.write().unwrap_or_else(|e| e.into_inner()) =
             Some((next_height, median_time_past));
+    }
+
+    /// Height of a coin that is not yet in a block. Relative locks treat a missing
+    /// prevout as created at this height.
+    pub fn unconfirmed_coin_height(&self) -> u64 {
+        self.finality_context().map(|(height, _)| height).unwrap_or(0)
     }
 
     fn finality_context(&self) -> Option<(u64, u64)> {
@@ -1067,13 +1058,17 @@ impl MempoolManager {
     }
 
     fn relative_lock_rejects(&self, tx: &Transaction, utxo_set: &UtxoSet) -> bool {
-        use blvm_protocol::locktime::{extract_sequence_type_flag, is_sequence_disabled};
+        use blvm_protocol::locktime::{
+            extract_sequence_locktime_value, extract_sequence_type_flag, is_sequence_disabled,
+        };
 
         let Some((block_height, block_mtp)) = self.finality_context() else {
+            // A relative lock of 0 is already final. A non-zero lock needs the tip.
             return tx.version >= 2
                 && tx.inputs.iter().any(|input| {
                     let seq = input.sequence as u32;
                     !is_sequence_disabled(seq)
+                        && blvm_protocol::locktime::extract_sequence_locktime_value(seq) != 0
                 });
         };
         let block_mtp_i = i64::try_from(block_mtp).unwrap_or(-1);
@@ -1085,10 +1080,15 @@ impl MempoolManager {
                 continue;
             }
             if let Some(utxo) = utxo_set.get(&input.prevout) {
-                let Some(mtp) = self.prior_median_time(utxo.height) else {
+                if let Some(mtp) = self.prior_median_time(utxo.height) {
+                    prev_mtps.push(mtp);
+                } else if extract_sequence_locktime_value(seq) == 0 && block_mtp_i >= 0 {
+                    // Value 0 is one second before the coin's median time, which
+                    // is already earlier than this tip. The prior header is not required.
+                    prev_mtps.push(block_mtp_i);
+                } else {
                     return true;
-                };
-                prev_mtps.push(mtp);
+                }
             } else if self.mempool_creates(&input.prevout) && block_mtp_i >= 0 {
                 prev_mtps.push(block_mtp_i);
             } else {
@@ -1136,6 +1136,29 @@ impl MempoolManager {
         false
     }
 
+    /// Outputs may consume the inputs. They may not create new coins.
+    fn outputs_exceed_inputs(&self, tx: &Transaction, utxo_set: &UtxoSet) -> bool {
+        let Some(output_total) = output_sum_sats(tx) else {
+            return false;
+        };
+        let mut input_total = 0u64;
+        for input in &tx.inputs {
+            let sats = if let Some(utxo) = utxo_set.get(&input.prevout) {
+                money_sats(utxo.value)
+            } else {
+                self.mempool_input_value(&input.prevout)
+            };
+            let Some(sats) = sats else {
+                return false;
+            };
+            let Some(sum) = add_money(input_total, sats) else {
+                return false;
+            };
+            input_total = sum;
+        }
+        output_total > input_total
+    }
+
     /// Copy snapshot hits into this admission's set only. The shared set is unchanged.
     fn fill_snapshot_misses(&self, tx: &Transaction, utxo_set: &mut UtxoSet) {
         for input in tx.inputs.iter() {
@@ -1166,9 +1189,11 @@ impl MempoolManager {
     }
 
     fn immature_coinbase_spend(&self, tx: &Transaction, utxo_set: &UtxoSet) -> bool {
-        let Some((height, _)) = self.finality_context() else {
-            return false;
-        };
+        // No tip yet: the next block is height 0, where a coinbase is still immature.
+        let height = self
+            .finality_context()
+            .map(|(height, _)| height)
+            .unwrap_or(0);
         tx.inputs.iter().any(|input| {
             utxo_set.get(&input.prevout).is_some_and(|utxo| {
                 !blvm_protocol::transaction::check_coinbase_maturity(
@@ -1615,6 +1640,64 @@ impl MempoolManager {
         Ok(())
     }
 
+    /// Transactions admission deletes before it counts ancestors and descendants.
+    /// Empty when `tx` conflicts with nothing still in the pool.
+    fn txs_this_replacement_removes(&self, tx: &Transaction) -> HashSet<Hash> {
+        let mut direct = Vec::new();
+        for input in &tx.inputs {
+            if let Some(existing_hash) = self.pool_lock().spenders.get(&input.prevout).copied() {
+                if !direct.contains(&existing_hash) {
+                    direct.push(existing_hash);
+                }
+            }
+        }
+        let mut removed = HashSet::new();
+        for hash in &direct {
+            removed.extend(self.replacement_package(hash));
+        }
+        removed
+    }
+
+    /// Distinct connected components among `direct` conflicts.
+    ///
+    /// A parent and its child are one cluster. Independent chains are not.
+    fn conflicting_cluster_count(&self, direct: &[Hash]) -> usize {
+        let descendants_map = self
+            .tx_descendants
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let pool = self.pool_lock();
+        let mut seen = HashSet::new();
+        let mut clusters = 0usize;
+        for start in direct {
+            if !pool.transactions.contains_key(start) || seen.contains(start) {
+                continue;
+            }
+            clusters += 1;
+            let mut stack = vec![*start];
+            while let Some(current) = stack.pop() {
+                if !seen.insert(current) {
+                    continue;
+                }
+                if let Some(children) = descendants_map.get(&current) {
+                    for child in children {
+                        if pool.transactions.contains_key(child) {
+                            stack.push(*child);
+                        }
+                    }
+                }
+                if let Some(tx) = pool.transactions.get(&current) {
+                    for input in &tx.inputs {
+                        if pool.transactions.contains_key(&input.prevout.hash) {
+                            stack.push(input.prevout.hash);
+                        }
+                    }
+                }
+            }
+        }
+        clusters
+    }
+
     /// In-mempool replacement package: `root` plus all transitive descendants.
     fn replacement_package(&self, root: &Hash) -> HashSet<Hash> {
         let descendants_map = self
@@ -1666,6 +1749,52 @@ impl MempoolManager {
             .and_then(|output| money_sats(output.value))
     }
 
+    /// Prevouts `replacement_checks` needs. Confirmed coins are copied from
+    /// `utxo_set`. An output created by a mempool transaction that this
+    /// replacement does not remove is copied too. An output of a transaction
+    /// in the displacement set stays absent, so spending it fails closed.
+    fn replacement_input_view(
+        &self,
+        new_tx: &Transaction,
+        existing_tx: &Transaction,
+        utxo_set: &UtxoSet,
+    ) -> UtxoSet {
+        let existing_id = blvm_protocol::block::calculate_tx_id(existing_tx);
+        let displaced = self.replacement_package(&existing_id);
+        let mut view = UtxoSet::default();
+        let mut missing = Vec::new();
+        for input in new_tx.inputs.iter().chain(existing_tx.inputs.iter()) {
+            if let Some(utxo) = utxo_set.get(&input.prevout) {
+                view.insert(input.prevout, Arc::clone(utxo));
+            } else if !displaced.contains(&input.prevout.hash) {
+                missing.push(input.prevout);
+            }
+        }
+        if missing.is_empty() {
+            return view;
+        }
+        let pool = self.pool_lock();
+        for prevout in missing {
+            let Some(output) = pool
+                .transactions
+                .get(&prevout.hash)
+                .and_then(|parent| parent.outputs.get(prevout.index as usize))
+            else {
+                continue;
+            };
+            view.insert(
+                prevout,
+                Arc::new(blvm_protocol::UTXO {
+                    value: output.value,
+                    script_pubkey: output.script_pubkey.clone().into(),
+                    height: 0,
+                    is_coinbase: false,
+                }),
+            );
+        }
+        view
+    }
+
     /// Check if a transaction can replace an existing one (RBF)
     ///
     /// This wraps the consensus layer replacement_checks with RBF mode-specific logic
@@ -1705,11 +1834,6 @@ impl MempoolManager {
 
         // Use the cloned config for the rest of the function
         let rbf_config = &rbf_config;
-
-        // Check if existing transaction signals RBF
-        if !signals_rbf(existing_tx) {
-            return Ok(false);
-        }
 
         let existing_tx_hash = calculate_tx_id(existing_tx);
 
@@ -1859,15 +1983,13 @@ impl MempoolManager {
             return Ok(false);
         }
 
-        // For the remaining BIP125 checks (new dependencies), use the consensus replacement_checks
-        // but we've already applied our mode-specific fee requirements above
-        // Note: replacement_checks will re-check fee rate, but we've already validated with our multiplier
-        // So we call it to verify the other BIP125 rules (dependencies, etc.)
-        // However, since we've already done stricter checks, if replacement_checks passes, we're good
+        // The consensus helper only prices coins in the set it is given. An unrelated
+        // mempool parent is spendable; an output this replacement removes is not.
+        let replacement_view = self.replacement_input_view(new_tx, existing_tx, utxo_set);
         let bip125_result = replacement_checks_with_witness(
             new_tx,
             existing_tx,
-            utxo_set,
+            &replacement_view,
             &self.mempool.read().unwrap_or_else(|e| e.into_inner()),
             new_witnesses,
             None,
@@ -1889,15 +2011,27 @@ impl MempoolManager {
         policy: &MempoolPolicyConfig,
         candidate_vsize: u64,
     ) -> Result<bool> {
+        // Admission removes this set before the same count. A dry-run has not.
+        let removed = self.txs_this_replacement_removes(tx);
         // The candidate is not in the pool yet. Seed the walk from its inputs.
+        // A package dry-run also sees earlier transactions in that package.
+        let preview = self
+            .package_preview
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let mut ancestors = HashSet::with_capacity(10);
         let mut to_process = Vec::with_capacity(10);
         {
             let pool = self.pool_lock();
             for input in &tx.inputs {
-                if pool.transactions.contains_key(&input.prevout.hash) {
-                    ancestors.insert(input.prevout.hash);
-                    to_process.push(input.prevout.hash);
+                let parent = input.prevout.hash;
+                if removed.contains(&parent) {
+                    continue;
+                }
+                if pool.transactions.contains_key(&parent) || preview.txs.contains_key(&parent) {
+                    ancestors.insert(parent);
+                    to_process.push(parent);
                 }
             }
         }
@@ -1910,20 +2044,31 @@ impl MempoolManager {
             processed.insert(current_hash);
 
             // Single pool critical section — nested pool_lock() would deadlock (non-reentrant Mutex).
-            {
+            let parents = {
                 let pool = self.pool_lock();
                 if let Some(current_tx) = pool.transactions.get(&current_hash) {
-                    let parents: Vec<Hash> = current_tx
+                    current_tx
                         .inputs
                         .iter()
                         .map(|input| input.prevout.hash)
-                        .filter(|parent| pool.transactions.contains_key(parent))
-                        .collect();
-                    for parent_hash in parents {
-                        if ancestors.insert(parent_hash) {
-                            to_process.push(parent_hash);
-                        }
-                    }
+                        .filter(|parent| {
+                            !removed.contains(parent)
+                                && (pool.transactions.contains_key(parent)
+                                    || preview.txs.contains_key(parent))
+                        })
+                        .collect::<Vec<_>>()
+                } else if let Some((_, parents)) = preview.txs.get(&current_hash) {
+                    parents.clone()
+                } else {
+                    Vec::new()
+                }
+            };
+            for parent_hash in parents {
+                if removed.contains(&parent_hash) {
+                    continue;
+                }
+                if ancestors.insert(parent_hash) {
+                    to_process.push(parent_hash);
                 }
             }
         }
@@ -1934,7 +2079,13 @@ impl MempoolManager {
             let pool = self.pool_lock();
             ancestors
                 .iter()
-                .map(|h| pool.adjusted_vsize.get(h).copied().unwrap_or(0))
+                .map(|hash| {
+                    pool.adjusted_vsize
+                        .get(hash)
+                        .copied()
+                        .or_else(|| preview.txs.get(hash).map(|(vsize, _)| *vsize))
+                        .unwrap_or(0)
+                })
                 .sum()
         };
 
@@ -1965,7 +2116,9 @@ impl MempoolManager {
             .read()
             .unwrap_or_else(|e| e.into_inner());
         for ancestor in &ancestors {
-            let existing = descendant_closure(&descendants_map, ancestor);
+            let mut existing = descendant_closure(&descendants_map, ancestor);
+            existing.extend(descendant_closure(&preview.descendants, ancestor));
+            existing.retain(|hash| !removed.contains(hash));
             // The ancestor is part of its own descendant package.
             let descendant_count = existing.len() as u32 + 1;
             if descendant_count + 1 > policy.max_descendant_count {
@@ -1979,11 +2132,15 @@ impl MempoolManager {
             }
             let (ancestor_vsize, descendant_size): (u64, u64) = {
                 let pool = self.pool_lock();
-                let ancestor_vsize = pool.adjusted_vsize.get(ancestor).copied().unwrap_or(0);
-                let descendant_size = existing
-                    .iter()
-                    .map(|h| pool.adjusted_vsize.get(h).copied().unwrap_or(0))
-                    .sum();
+                let vsize_of = |hash: &Hash| {
+                    pool.adjusted_vsize
+                        .get(hash)
+                        .copied()
+                        .or_else(|| preview.txs.get(hash).map(|(vsize, _)| *vsize))
+                        .unwrap_or(0)
+                };
+                let ancestor_vsize = vsize_of(ancestor);
+                let descendant_size = existing.iter().map(vsize_of).sum();
                 (ancestor_vsize, descendant_size)
             };
             if ancestor_vsize + descendant_size + candidate_vsize > policy.max_descendant_size {
@@ -2030,18 +2187,88 @@ impl MempoolManager {
 
     /// Dry-run admission against `utxo_set`. Does not insert the transaction.
     ///
-    /// `Ok(fee_satoshis)` means the prevouts are present and the outputs are not dust.
-    /// `Err` is the reject reason. The fee is zero on a reject.
+    /// `Ok(fee_satoshis)` means the prevouts are present, the outputs are not dust
+    /// unless this is the package's one dust output, the locktime and sequence locks are final, no input spends an immature
+    /// coinbase, the outputs do not exceed the inputs, the input sum is within
+    /// the money limit, the fee meets the relay floor, including the
+    /// signature-operation size of `witnesses`, and the absolute minimum, a
+    /// replacement pays for every transaction it removes plus its own relay,
+    /// the non-witness size is
+    /// at least 65 bytes, the ancestor and descendant packages, including this
+    /// transaction and not the transactions this replacement removes, stay within
+    /// the configured limits, and, when standardness is required, the version is
+    /// 1 or 2, the weight,
+    /// including `witnesses`, is at most 400,000, every scriptSig is push-only
+    /// and at most 1,650 bytes, and every output
+    /// script and spent script is standard, a pay-to-script-hash redeem has at
+    /// most 15 signature operations, and the transaction has at most 2,500
+    /// legacy signature operations. `Err` is the reject reason.
     pub fn preview_accept(
         &self,
         tx: &Transaction,
+        witnesses: Option<&[Witness]>,
         utxo_set: &UtxoSet,
     ) -> Result<u64, &'static str> {
         if tx.inputs.is_empty() || tx.outputs.is_empty() {
             return Err("bad-txns-vin-empty");
         }
-        if tx.outputs.iter().any(output_is_dust) {
+        if tx.outputs.iter().any(output_is_dust)
+            && !self.ephemeral_dust_allowed(tx, blvm_protocol::block::calculate_tx_id(tx))
+        {
             return Err("dust");
+        }
+        let require_standard = self
+            .policy_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|policy| policy.require_standard)
+            .unwrap_or(true);
+        if require_standard && !(1..=2).contains(&tx.version) {
+            return Err("version");
+        }
+        if require_standard && self.transaction_weight(tx, witnesses) > MAX_STANDARD_TX_WEIGHT {
+            return Err("tx-size");
+        }
+        if require_standard
+            && tx
+                .outputs
+                .iter()
+                .any(|output| !output_script_is_standard(output.script_pubkey.as_ref()))
+        {
+            return Err("scriptpubkey");
+        }
+        if require_standard
+            && tx
+                .inputs
+                .iter()
+                .any(|input| input.script_sig.len() > MAX_STANDARD_SCRIPTSIG_SIZE)
+        {
+            return Err("scriptsig-size");
+        }
+        if require_standard
+            && tx.inputs.iter().any(|input| {
+                !blvm_protocol::script::p2sh_push_only_check(&input.script_sig)
+            })
+        {
+            return Err("scriptsig-not-pushonly");
+        }
+        let nonwitness_size = blvm_protocol::wire::serialize_tx(tx)
+            .map(|bytes| bytes.len())
+            .unwrap_or(0);
+        if nonwitness_size < MIN_STANDARD_TX_NONWITNESS_SIZE {
+            return Err("tx-size-small");
+        }
+        // Same next-block height and median admission uses. No tip means height 0.
+        let (height, median_time_past) = self.finality_context().unwrap_or((0, 0));
+        if !blvm_protocol::mempool::is_final_tx(tx, height, median_time_past) {
+            return Err("non-final");
+        }
+        if self.relative_lock_rejects(tx, utxo_set) {
+            return Err("non-BIP68-final");
+        }
+        if self.immature_coinbase_spend(tx, utxo_set) {
+            return Err("bad-txns-premature-spend-of-coinbase");
         }
         let missing = tx.inputs.iter().any(|input| {
             utxo_set.get(&input.prevout).is_none() && !self.mempool_creates(&input.prevout)
@@ -2049,10 +2276,138 @@ impl MempoolManager {
         if missing {
             return Err("missing-inputs");
         }
-        Ok(self.calculate_transaction_fee(tx, utxo_set))
+        if require_standard
+            && self.script_prevouts(tx, utxo_set).iter().any(|prevout| {
+                prevout
+                    .as_ref()
+                    .is_some_and(|prevout| !spent_script_is_standard(prevout.script.as_ref()))
+            })
+        {
+            return Err("bad-txns-nonstandard-inputs");
+        }
+        if require_standard && p2sh_redeem_sigops_exceed(tx, &self.script_prevouts(tx, utxo_set)) {
+            return Err("bad-txns-nonstandard-inputs");
+        }
+        if self.prevout_sum_exceeds_money(tx, utxo_set) {
+            return Err("bad-txns-in-belowout");
+        }
+        if self.outputs_exceed_inputs(tx, utxo_set) {
+            return Err("bad-txns-in-belowout");
+        }
+        let fee = self.calculate_transaction_fee(tx, utxo_set);
+        let rate = self
+            .policy_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|policy| policy.min_relay_fee_rate)
+            .unwrap_or(100);
+        let vsize = self.admit_vsize(tx, witnesses, utxo_set).0;
+        let required = (rate as u128).saturating_mul(vsize as u128).div_ceil(1000);
+        let tx_hash = blvm_protocol::block::calculate_tx_id(tx);
+        let waived = self
+            .relay_floor_waivers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&tx_hash);
+        if !waived && (fee as u128) < required {
+            return Err("min relay fee not met");
+        }
+        let policy = self
+            .policy_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_default();
+        if fee < policy.min_tx_fee {
+            return Err("min relay fee not met");
+        }
+        if !self
+            .check_ancestor_descendant_limits(tx, &tx_hash, &policy, vsize)
+            .unwrap_or(false)
+        {
+            return Err("too-long-mempool-chain");
+        }
+        if self.replacement_rejects(tx, witnesses, utxo_set, vsize) {
+            return Err("insufficient fee");
+        }
+        Ok(fee)
+    }
+
+    /// True when `tx` spends an output a pooled transaction already spends and
+    /// admission would refuse the replacement. Does not remove anything.
+    fn replacement_rejects(
+        &self,
+        tx: &Transaction,
+        witnesses: Option<&[Witness]>,
+        utxo_set: &UtxoSet,
+        candidate_vsize: u64,
+    ) -> bool {
+        let mut direct = Vec::new();
+        for input in &tx.inputs {
+            if let Some(existing_hash) = self.pool_lock().spenders.get(&input.prevout).copied() {
+                if !direct.contains(&existing_hash) {
+                    direct.push(existing_hash);
+                }
+            }
+        }
+        if direct.is_empty() {
+            return false;
+        }
+        let mut displaced = HashSet::new();
+        for hash in &direct {
+            displaced.extend(self.replacement_package(hash));
+        }
+        // One chain is one cluster however many transactions it holds.
+        if self.conflicting_cluster_count(&direct) > 100 {
+            return true;
+        }
+        let incremental = self
+            .policy_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|policy| policy.incremental_relay_fee)
+            .unwrap_or(100);
+        let (displaced_fee, _) = self.package_fee_and_vsize(&displaced, utxo_set);
+        let new_fee = self.calculate_transaction_fee(tx, utxo_set) as i64;
+        let bandwidth = (incremental as u128)
+            .saturating_mul(candidate_vsize as u128)
+            .div_ceil(1000);
+        if (new_fee as i128) < displaced_fee as i128 + bandwidth as i128 {
+            return true;
+        }
+        for existing_hash in &direct {
+            let existing_tx = {
+                let pool = self.pool_lock();
+                pool.transactions.get(existing_hash).cloned()
+            };
+            let Some(existing_tx) = existing_tx else {
+                continue;
+            };
+            match self.check_rbf_replacement_with_witness(
+                tx,
+                &existing_tx,
+                utxo_set,
+                None,
+                witnesses,
+            ) {
+                Ok(true) => {}
+                _ => return true,
+            }
+        }
+        false
     }
 
     /// Script and witness checks admission runs after [`Self::preview_accept`].
+    ///
+    /// When standardness is required, a pay-to-witness-script-hash data item
+    /// longer than 80 bytes, a witness script longer than 3,600 bytes, more
+    /// than 100 items before that script, a pay-to-anchor witness that is not
+    /// empty, a Taproot annex, or a tapscript data item longer than 80 bytes,
+    /// is rejected here. A signature-operation cost above 16,000 is rejected
+    /// here as well. The relay floor in [`Self::preview_accept`] uses these
+    /// stacks for the signature-operation size.
     pub fn script_rejects(
         &self,
         tx: &Transaction,
@@ -2065,18 +2420,147 @@ impl MempoolManager {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .is_none_or(|policy| policy.require_standard);
-        consensus_checks_reject(
+        if require_standard
+            && p2wsh_data_item_exceeds(tx, &self.script_prevouts(tx, utxo_set), witnesses)
+        {
+            return true;
+        }
+        if require_standard
+            && p2wsh_script_exceeds(tx, &self.script_prevouts(tx, utxo_set), witnesses)
+        {
+            return true;
+        }
+        if require_standard
+            && p2wsh_stack_count_exceeds(tx, &self.script_prevouts(tx, utxo_set), witnesses)
+        {
+            return true;
+        }
+        if require_standard
+            && pay_to_anchor_witness_present(&self.script_prevouts(tx, utxo_set), witnesses)
+        {
+            return true;
+        }
+        if require_standard
+            && taproot_annex_present(&self.script_prevouts(tx, utxo_set), witnesses)
+        {
+            return true;
+        }
+        if require_standard
+            && tapscript_data_item_exceeds(&self.script_prevouts(tx, utxo_set), witnesses)
+        {
+            return true;
+        }
+        if consensus_checks_reject(
             tx,
             witnesses,
             &self.script_prevouts(tx, utxo_set),
             require_standard,
-        )
+        ) {
+            return true;
+        }
+        self.admit_vsize(tx, witnesses, utxo_set).1
+            > blvm_protocol::mempool::MAX_STANDARD_TX_SIGOPS_COST
     }
 
     /// Add transaction to mempool
     /// Uses interior mutability so it can be called with Arc<MempoolManager> (re-broadcast, sendrawtransaction)
     pub fn add_transaction(&self, tx: Transaction) -> Result<bool> {
         self.add_transaction_with_witness(tx, None)
+    }
+
+    /// Record the package fee and dust waivers [`Self::add_package_with_witnesses`] uses.
+    ///
+    /// `chain_utxo` holds confirmed coins. Outputs of `txs` are visible to the
+    /// waiver calculation, including a child that spends an earlier transaction
+    /// in this package. [`Self::clear_package_preview`] drops the waivers.
+    pub fn arm_package_preview(
+        &self,
+        txs: &[(Transaction, Option<Vec<Witness>>)],
+        chain_utxo: &UtxoSet,
+    ) {
+        let mut package_utxo = chain_utxo.clone();
+        for (tx, _) in txs {
+            let txid = blvm_protocol::block::calculate_tx_id(tx);
+            for (index, output) in tx.outputs.iter().enumerate() {
+                package_utxo.insert(
+                    OutPoint {
+                        hash: txid,
+                        index: index as u32,
+                    },
+                    std::sync::Arc::new(blvm_protocol::UTXO {
+                        value: output.value,
+                        script_pubkey: output.script_pubkey.clone().into(),
+                        height: 0,
+                        is_coinbase: false,
+                    }),
+                );
+            }
+        }
+        let rate = self
+            .policy_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|policy| policy.min_relay_fee_rate)
+            .unwrap_or(100);
+        *self
+            .relay_floor_waivers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) =
+            self.package_relay_waivers(txs, &package_utxo, rate);
+        *self
+            .ephemeral_dust_waivers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = self.ephemeral_dust_parents(txs, &package_utxo);
+    }
+
+    /// Drop the waivers and ancestor record from [`Self::arm_package_preview`].
+    pub fn clear_package_preview(&self) {
+        self.relay_floor_waivers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.ephemeral_dust_waivers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        *self
+            .package_preview
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = PackagePreview::default();
+    }
+
+    /// Remember an allowed package transaction so a later one in the same dry-run counts it.
+    pub fn note_package_preview(
+        &self,
+        tx: &Transaction,
+        witnesses: Option<&[Witness]>,
+        utxo_set: &UtxoSet,
+    ) {
+        let txid = blvm_protocol::block::calculate_tx_id(tx);
+        let vsize = self.admit_vsize(tx, witnesses, utxo_set).0;
+        let mut preview = self
+            .package_preview
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let parents = {
+            let pool = self.pool_lock();
+            tx.inputs
+                .iter()
+                .map(|input| input.prevout.hash)
+                .filter(|parent| {
+                    pool.transactions.contains_key(parent) || preview.txs.contains_key(parent)
+                })
+                .collect::<Vec<_>>()
+        };
+        for parent in &parents {
+            preview
+                .descendants
+                .entry(*parent)
+                .or_default()
+                .insert(txid);
+        }
+        preview.txs.insert(txid, (vsize, parents));
     }
 
     /// Admit an ordered package. A transaction below the relay floor is kept when a
@@ -2564,14 +3048,14 @@ impl MempoolManager {
         }
 
         let witness_ref = witnesses.as_deref();
-        if let Some((height, median_time_past)) = self.finality_context() {
-            if !blvm_protocol::mempool::is_final_tx(&tx, height, median_time_past) {
-                warn!(
-                    "Transaction {} rejected: locktime is not final",
-                    hex::encode(tx_hash)
-                );
-                return Ok(false);
-            }
+        // No tip yet: only locktime 0, or a final sequence, is final at height 0.
+        let (height, median_time_past) = self.finality_context().unwrap_or((0, 0));
+        if !blvm_protocol::mempool::is_final_tx(&tx, height, median_time_past) {
+            warn!(
+                "Transaction {} rejected: locktime is not final",
+                hex::encode(tx_hash)
+            );
+            return Ok(false);
         }
         if self.relative_lock_rejects(&tx, &utxo_snapshot) {
             warn!(
@@ -2615,6 +3099,13 @@ impl MempoolManager {
             );
             return Ok(false);
         }
+        if self.outputs_exceed_inputs(&tx, &utxo_snapshot) {
+            warn!(
+                "Transaction {} rejected: output sum exceeds input sum",
+                hex::encode(tx_hash)
+            );
+            return Ok(false);
+        }
         if effective_policy.require_standard
             && p2sh_redeem_sigops_exceed(&tx, &self.script_prevouts(&tx, &utxo_snapshot))
         {
@@ -2622,16 +3113,6 @@ impl MempoolManager {
                 "Transaction {} rejected: P2SH redeem script exceeds {} sigops",
                 hex::encode(tx_hash),
                 MAX_STANDARD_P2SH_SIGOPS
-            );
-            return Ok(false);
-        }
-        if effective_policy.require_standard
-            && legacy_sigops_exceed(&tx, &self.script_prevouts(&tx, &utxo_snapshot))
-        {
-            warn!(
-                "Transaction {} rejected: legacy sigops exceed {}",
-                hex::encode(tx_hash),
-                MAX_TX_LEGACY_SIGOPS
             );
             return Ok(false);
         }
@@ -2819,31 +3300,34 @@ impl MempoolManager {
             conflicting_tx_hashes = displacement_set.into_iter().collect();
         }
 
-        // Every displaced transaction has to opt in. A child that did not signal
-        // stays in the pool, and the replacement is rejected.
-        if !conflicting_tx_hashes.is_empty() {
-            let pool = self.pool_lock();
-            for hash in &conflicting_tx_hashes {
-                if let Some(displaced) = pool.transactions.get(hash) {
-                    if !signals_rbf(displaced) {
-                        return Ok(false);
-                    }
-                }
-            }
-        }
-
         // If there are conflicts, attempt RBF replacement.
-        // BIP125 Rule 2: at most 100 displaced transactions.
+        // At most 100 distinct clusters. A chain of 25 still counts as one.
         if !conflicting_tx_hashes.is_empty() {
-            if conflicting_tx_hashes.len() > 100 {
+            let clusters = self.conflicting_cluster_count(&direct_conflicts);
+            if clusters > 100 {
                 debug!(
-                    "Transaction conflicts with {} existing transactions (> 100 limit)",
-                    conflicting_tx_hashes.len()
+                    "Transaction conflicts with {clusters} clusters (> 100 limit)"
                 );
                 return Ok(false);
             }
 
-            // RBF eligibility is checked against each directly conflicting tx only.
+            // Pay for every transaction this replacement removes, once. A fee that
+            // beats each conflict and stays under their sum still deletes both.
+            let displaced: HashSet<Hash> = conflicting_tx_hashes.iter().copied().collect();
+            let (displaced_fee, _) = self.package_fee_and_vsize(&displaced, &utxo_snapshot);
+            let new_fee = self.calculate_transaction_fee(&tx, &utxo_snapshot) as i64;
+            let bandwidth = (effective_policy.incremental_relay_fee as u128)
+                .saturating_mul(candidate_vsize as u128)
+                .div_ceil(1000);
+            if (new_fee as i128) < displaced_fee as i128 + bandwidth as i128 {
+                debug!(
+                    "RBF replacement rejected: fee {} sat is below the {} sat it removes plus {} sat relay",
+                    new_fee, displaced_fee, bandwidth
+                );
+                return Ok(false);
+            }
+
+            // Feerate and dependency checks still run against each directly conflicting tx.
             for &existing_hash in &direct_conflicts {
                 let existing_clone = {
                     let pool = self.pool_lock();
@@ -3455,30 +3939,27 @@ impl MempoolManager {
             }
         };
 
-        // Empty chain snapshot: P2SH and witness terms stay zero. Legacy sigops still count.
-        // Non-empty snapshot: chain UTXO, else the unconfirmed parent's script_pubkey.
-        let owned_utxos: Vec<Option<UTXO>> = if utxo_set.is_empty() {
-            vec![None; tx.inputs.len()]
-        } else {
-            let pool = self.pool_lock();
-            tx.inputs
-                .iter()
-                .map(|input| {
-                    if let Some(utxo) = utxo_set.get(&input.prevout) {
-                        return Some((**utxo).clone());
-                    }
-                    pool.transactions
-                        .get(&input.prevout.hash)
-                        .and_then(|parent| parent.outputs.get(input.prevout.index as usize))
-                        .map(|output| UTXO {
-                            value: output.value,
-                            script_pubkey: output.script_pubkey.clone().into(),
-                            height: 0,
-                            is_coinbase: false,
-                        })
-                })
-                .collect()
-        };
+        // A chain coin wins. An empty snapshot still has to price a mempool parent.
+        // Skipping that lookup counted those pay-to-script-hash and witness sigops as zero.
+        let pool = self.pool_lock();
+        let owned_utxos: Vec<Option<UTXO>> = tx
+            .inputs
+            .iter()
+            .map(|input| {
+                if let Some(utxo) = utxo_set.get(&input.prevout) {
+                    return Some((**utxo).clone());
+                }
+                pool.transactions
+                    .get(&input.prevout.hash)
+                    .and_then(|parent| parent.outputs.get(input.prevout.index as usize))
+                    .map(|output| UTXO {
+                        value: output.value,
+                        script_pubkey: output.script_pubkey.clone().into(),
+                        height: 0,
+                        is_coinbase: false,
+                    })
+            })
+            .collect();
         let refs: Vec<Option<&UTXO>> = owned_utxos.iter().map(|utxo| utxo.as_ref()).collect();
         let sigop_cost = if count_sigops {
             get_transaction_sigop_cost_with_utxos(tx, &refs, witnesses, SEGWIT_STANDARD_FLAGS)
@@ -6224,6 +6705,292 @@ mod tests {
     }
 
     #[test]
+    fn a_final_sequence_can_be_replaced() {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let run = |original_sequence: u64| {
+            let spend = |fee: i64, sequence: u64| {
+                let mut tx = legacy_empty_script();
+                tx.inputs[0].script_sig = script_sig.clone();
+                tx.inputs[0].sequence = sequence;
+                tx.outputs[0].value = 10_000 - fee;
+                tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+                tx
+            };
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                10_000,
+            ))));
+            let original = mempool.add_transaction(spend(1_000, original_sequence)).unwrap();
+            let replacement = mempool.add_transaction(spend(1_100, 0xfffffffd)).unwrap();
+            (original, replacement)
+        };
+        let signaling = run(0xfffffffd);
+        let final_sequence = run(0xffffffff);
+        eprintln!(
+            "signaling original={} replacement={}; final original={} replacement={}",
+            signaling.0, signaling.1, final_sequence.0, final_sequence.1
+        );
+        assert!(signaling.0 && signaling.1);
+        assert!(final_sequence.0 && final_sequence.1);
+    }
+
+    #[test]
+    fn replacement_pays_for_every_conflict() {
+        use std::sync::Arc;
+
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let coin = |value: i64| {
+            Arc::new(blvm_protocol::UTXO {
+                value,
+                script_pubkey: prevout.clone().into(),
+                height: 0,
+                is_coinbase: false,
+            })
+        };
+        let mut utxos = blvm_protocol::UtxoSet::default();
+        for hash in [[1u8; 32], [2u8; 32], [3u8; 32]] {
+            utxos.insert(OutPoint { hash, index: 0 }, coin(50_000));
+        }
+        let spend_one = |hash: [u8; 32]| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].prevout.hash = hash;
+            tx.inputs[0].script_sig = script_sig.clone();
+            tx.outputs[0].value = 45_000;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            tx
+        };
+        let mut replacement = legacy_empty_script();
+        replacement.inputs[0].prevout.hash = [1u8; 32];
+        replacement.inputs[0].script_sig = script_sig.clone();
+        replacement.inputs.push(TransactionInput {
+            prevout: OutPoint {
+                hash: [3u8; 32],
+                index: 0,
+            },
+            script_sig: script_sig.clone(),
+            sequence: 0xffffffff,
+        });
+        replacement.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+        let meter = MempoolManager::new();
+        meter.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+        let old_vsize = meter.admit_vsize(&spend_one([1u8; 32]), None, &utxos).0;
+        let new_vsize = meter.admit_vsize(&replacement, None, &utxos).0;
+        let one_fee = 5_000u128;
+        let feerate_floor = one_fee * new_vsize as u128 / old_vsize as u128 + 1;
+        let bandwidth_floor = one_fee + (100u128 * new_vsize as u128).div_ceil(1000);
+        let fee = feerate_floor.max(bandwidth_floor) as i64;
+        let run = |second: [u8; 32]| {
+            let mut tx = replacement.clone();
+            tx.inputs[1].prevout.hash = second;
+            tx.outputs[0].value = 100_000 - fee;
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(utxos.clone())));
+            let first = mempool.add_transaction(spend_one([1u8; 32])).unwrap();
+            let second_tx = mempool.add_transaction(spend_one([2u8; 32])).unwrap();
+            let replaced = mempool.add_transaction(tx).unwrap();
+            (first, second_tx, replaced)
+        };
+        let one = run([3u8; 32]);
+        let both = run([2u8; 32]);
+        eprintln!(
+            "vsize old={old_vsize} new={new_vsize} fee={fee}; one conflict admitted={}; two conflicts admitted={}",
+            one.2, both.2
+        );
+        assert!(fee < 10_000);
+        assert!(one.0 && one.1 && one.2);
+        assert!(both.0 && both.1 && !both.2);
+    }
+
+    #[test]
+    fn replacement_may_spend_an_unrelated_mempool_output() {
+        use std::sync::Arc;
+
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let admit = |also_spend_other: bool| {
+            let mut coin_y = legacy_empty_script();
+            coin_y.inputs[0].prevout.hash = [2u8; 32];
+            let mut utxo = funded(prevout.clone(), 20_000);
+            utxo.insert(
+                coin_y.inputs[0].prevout,
+                Arc::new(blvm_protocol::UTXO {
+                    value: 20_000,
+                    script_pubkey: prevout.clone().into(),
+                    height: 0,
+                    is_coinbase: false,
+                }),
+            );
+            let mut conflict = legacy_empty_script();
+            conflict.inputs[0].script_sig = script_sig.clone();
+            conflict.outputs[0].value = 10_000;
+            conflict.outputs[0].script_pubkey = prevout.clone();
+            let mut other = coin_y;
+            other.inputs[0].script_sig = script_sig.clone();
+            other.outputs[0].value = 15_000;
+            other.outputs[0].script_pubkey = prevout.clone();
+            let other_id = blvm_protocol::block::calculate_tx_id(&other);
+            let mut replacement = legacy_empty_script();
+            replacement.inputs[0].script_sig = script_sig.clone();
+            replacement.outputs[0].value = 1_000;
+            replacement.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            if also_spend_other {
+                replacement.inputs.push(TransactionInput {
+                    prevout: OutPoint {
+                        hash: other_id,
+                        index: 0,
+                    },
+                    script_sig: script_sig.clone(),
+                    sequence: 0xffffffff,
+                });
+            }
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo)));
+            assert!(mempool.add_transaction(conflict).unwrap());
+            assert!(mempool.add_transaction(other).unwrap());
+            let admitted = mempool.add_transaction(replacement).unwrap();
+            (admitted, mempool.get_transaction(&other_id).is_some())
+        };
+        let plain = admit(false);
+        let with_parent = admit(true);
+        eprintln!(
+            "plain replacement admitted={}; spends unrelated output admitted={} parent_remains={}",
+            plain.0, with_parent.0, with_parent.1
+        );
+        assert!(plain.0 && plain.1);
+        assert!(with_parent.0 && with_parent.1);
+    }
+
+    #[test]
+    fn version_two_sequence_zero_is_final() {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let spend = |sequence: u64| {
+            let mut tx = legacy_empty_script();
+            tx.version = 2;
+            tx.inputs[0].script_sig = script_sig.clone();
+            tx.inputs[0].sequence = sequence;
+            tx.outputs[0].value = 9_000;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            tx
+        };
+        let admit = |sequence: u64| {
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                10_000,
+            ))));
+            mempool.add_transaction(spend(sequence)).unwrap()
+        };
+        let disabled = admit(0xffffffff);
+        let zero = admit(0);
+        let one = admit(1);
+        eprintln!(
+            "sequence disabled admitted={disabled}; sequence 0 admitted={zero}; sequence 1 admitted={one}"
+        );
+        assert!(disabled && zero);
+        assert!(!one);
+    }
+
+    #[test]
+    fn a_zero_time_lock_is_final() {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let spend = |sequence: u64| {
+            let mut tx = legacy_empty_script();
+            tx.version = 2;
+            tx.inputs[0].script_sig = script_sig.clone();
+            tx.inputs[0].sequence = sequence;
+            tx.outputs[0].value = 9_000;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            tx
+        };
+        let admit = |sequence: u64| {
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_chain_tip(500_000, 1_600_000_000);
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                10_000,
+            ))));
+            mempool.add_transaction(spend(sequence)).unwrap()
+        };
+        let blocks = admit(0);
+        let time = admit(0x0040_0000);
+        let one_unit = admit(0x0040_0001);
+        eprintln!(
+            "block lock 0 admitted={blocks}; time lock 0 admitted={time}; time lock 1 admitted={one_unit}"
+        );
+        assert!(blocks && time);
+        assert!(!one_unit);
+    }
+
+    #[test]
+    fn a_future_locktime_needs_a_tip() {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let spend = |lock_time: u64, sequence: u64| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig.clone();
+            tx.inputs[0].sequence = sequence;
+            tx.lock_time = lock_time;
+            tx.outputs[0].value = 9_000;
+            tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            tx
+        };
+        let admit = |lock_time: u64, sequence: u64| {
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                10_000,
+            ))));
+            mempool.add_transaction(spend(lock_time, sequence)).unwrap()
+        };
+        let open = admit(0, 0xfffffffe);
+        let future = admit(200, 0xfffffffe);
+        let ignored = admit(200, 0xffffffff);
+        eprintln!(
+            "locktime 0 admitted={open}; locktime 200 admitted={future}; final sequence admitted={ignored}"
+        );
+        assert!(open && ignored);
+        assert!(!future);
+    }
+
+    #[test]
+    fn a_parent_output_above_its_input_is_not_carried() {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let admit = |parent_value: i64| {
+            let mut parent = legacy_empty_script();
+            parent.inputs[0].script_sig = script_sig.clone();
+            parent.outputs[0].value = parent_value;
+            parent.outputs[0].script_pubkey = prevout.clone();
+            let mut child = legacy_empty_script();
+            child.inputs[0].prevout = OutPoint {
+                hash: blvm_protocol::block::calculate_tx_id(&parent),
+                index: 0,
+            };
+            child.inputs[0].script_sig = script_sig.clone();
+            child.outputs[0].value = 0;
+            child.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+            let parent_id = blvm_protocol::block::calculate_tx_id(&parent);
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                10_000,
+            ))));
+            mempool.add_package(vec![parent, child]).unwrap();
+            mempool.get_transaction(&parent_id).is_some()
+        };
+        let covered = admit(10_000);
+        let over = admit(10_001);
+        eprintln!("output 10000 parent={covered}; output 10001 parent={over}");
+        assert!(covered);
+        assert!(!over);
+    }
+
+    #[test]
     fn child_fee_carries_a_zero_fee_parent() {
         let (prevout, script_sig) = p2sh_of_op_1();
         let pair = |parent_fee: i64| {
@@ -6316,6 +7083,81 @@ mod tests {
         assert!(at_floor);
         assert!(under);
         assert!(!paid);
+    }
+
+    #[test]
+    fn anchor_output_dust_floor_is_240() {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let admit = |value: i64| {
+            let mut tx = legacy_empty_script();
+            tx.inputs[0].script_sig = script_sig.clone();
+            tx.outputs[0].value = value;
+            tx.outputs[0].script_pubkey = vec![0x51, 0x02, 0x4e, 0x73];
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                10_000,
+            ))));
+            mempool.add_transaction(tx).unwrap()
+        };
+        let at_floor = admit(240);
+        let under = admit(239);
+        eprintln!("anchor 240 admitted={at_floor}; anchor 239 admitted={under}");
+        assert!(at_floor);
+        assert!(!under);
+    }
+
+    #[test]
+    fn a_zero_fee_parent_may_not_have_two_dust_outputs() {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let op_return = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+        let admit = |second_is_spendable: bool| {
+            let mut parent = legacy_empty_script();
+            parent.inputs[0].script_sig = script_sig.clone();
+            parent.outputs[0].value = 539;
+            parent.outputs[0].script_pubkey = prevout.clone();
+            parent.outputs.push(TransactionOutput {
+                value: 539,
+                script_pubkey: if second_is_spendable {
+                    prevout.clone()
+                } else {
+                    op_return.clone()
+                },
+            });
+            parent.outputs.push(TransactionOutput {
+                value: 8_922,
+                script_pubkey: op_return.clone(),
+            });
+            let mut child = legacy_empty_script();
+            child.inputs[0].prevout = OutPoint {
+                hash: blvm_protocol::block::calculate_tx_id(&parent),
+                index: 0,
+            };
+            child.inputs[0].script_sig = script_sig.clone();
+            child.outputs[0].value = 0;
+            child.outputs[0].script_pubkey = op_return.clone();
+            let parent_id = blvm_protocol::block::calculate_tx_id(&parent);
+            let child_id = blvm_protocol::block::calculate_tx_id(&child);
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+                prevout.clone(),
+                10_000,
+            ))));
+            let _ = mempool.add_package(vec![parent, child]);
+            (
+                mempool.get_transaction(&parent_id).is_some(),
+                mempool.get_transaction(&child_id).is_some(),
+            )
+        };
+        let (one_parent, one_child) = admit(false);
+        let (two_parent, two_child) = admit(true);
+        eprintln!(
+            "one dust parent={one_parent} child={one_child}; two dust parent={two_parent} child={two_child}"
+        );
+        assert!(one_parent && one_child);
+        assert!(!two_parent && !two_child);
     }
 
     #[test]
@@ -7705,7 +8547,201 @@ mod tests {
     }
 
     #[test]
-    fn legacy_sigops_over_2500_are_not_standard() {
+    fn an_empty_snapshot_counts_a_mempool_parents_sigops() {
+        use blvm_protocol::opcodes::{OP_0, OP_1, OP_CHECKSIG, OP_ENDIF, OP_EQUAL, OP_HASH160, OP_IF};
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+        use std::sync::Arc;
+
+        fn hash160(data: &[u8]) -> [u8; 20] {
+            Ripemd160::digest(Sha256::digest(data)).into()
+        }
+
+        let admit = |input_count: usize, empty_snapshot: bool| {
+            let mut redeem = vec![OP_0, OP_IF];
+            redeem.extend(std::iter::repeat(OP_CHECKSIG).take(15));
+            redeem.extend_from_slice(&[OP_ENDIF, OP_1]);
+            let hash = hash160(&redeem);
+            let mut spend = vec![OP_HASH160, 0x14];
+            spend.extend_from_slice(&hash);
+            spend.push(OP_EQUAL);
+            let mut script_sig = vec![redeem.len() as u8];
+            script_sig.extend_from_slice(&redeem);
+            let (fund_script, fund_sig) = p2sh_of_op_1();
+            let fund = OutPoint {
+                hash: [1u8; 32],
+                index: 0,
+            };
+            let mut coins = blvm_protocol::UtxoSet::default();
+            coins.insert(
+                fund,
+                Arc::new(blvm_protocol::UTXO {
+                    value: (input_count as i64) * 1_000 + 50_000,
+                    script_pubkey: fund_script.into(),
+                    height: 0,
+                    is_coinbase: false,
+                }),
+            );
+            let parent = Transaction {
+                version: 1,
+                inputs: vec![TransactionInput {
+                    prevout: fund,
+                    script_sig: fund_sig,
+                    sequence: 0xffffffff,
+                }]
+                .into(),
+                outputs: vec![
+                    TransactionOutput {
+                        value: 1_000,
+                        script_pubkey: spend.clone(),
+                    };
+                    input_count
+                ]
+                .into(),
+                lock_time: 0,
+            };
+            let parent_id = blvm_protocol::block::calculate_tx_id(&parent);
+            let child = Transaction {
+                version: 1,
+                inputs: (0..input_count)
+                    .map(|index| TransactionInput {
+                        prevout: OutPoint {
+                            hash: parent_id,
+                            index: index as u32,
+                        },
+                        script_sig: script_sig.clone(),
+                        sequence: 0xffffffff,
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+                outputs: vec![TransactionOutput {
+                    value: 0,
+                    script_pubkey: vec![0x6a, 0x03, 0x00, 0x00, 0x00],
+                }]
+                .into(),
+                lock_time: 0,
+            };
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(coins)));
+            assert!(mempool.add_transaction(parent).unwrap());
+            if empty_snapshot {
+                mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(
+                    blvm_protocol::UtxoSet::default(),
+                )));
+            }
+            mempool.add_transaction(child).unwrap()
+        };
+        let small = admit(1, true);
+        let over_empty = admit(267, true);
+        let over_seen = admit(267, false);
+        eprintln!(
+            "1 input on empty snapshot admitted={small}; 267 inputs on empty snapshot admitted={over_empty}; 267 inputs on the funding set admitted={over_seen}"
+        );
+        assert!(small);
+        assert!(!over_empty);
+        assert!(!over_seen);
+    }
+
+    #[test]
+    fn a_replacement_counts_clusters_not_transactions() {
+        use std::sync::Arc;
+
+        let chains = |clusters: usize, depth: usize| {
+            let (script, script_sig) = p2sh_of_op_1();
+            let mut utxo = blvm_protocol::UtxoSet::default();
+            for cluster in 0..clusters {
+                let mut coin = [0u8; 32];
+                coin[0] = cluster as u8;
+                coin[1] = (cluster >> 8) as u8;
+                coin[2] = 0xab;
+                utxo.insert(
+                    OutPoint { hash: coin, index: 0 },
+                    Arc::new(blvm_protocol::UTXO {
+                        value: 300_000,
+                        script_pubkey: script.clone().into(),
+                        height: 0,
+                        is_coinbase: false,
+                    }),
+                );
+            }
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo)));
+            for cluster in 0..clusters {
+                let mut coin = [0u8; 32];
+                coin[0] = cluster as u8;
+                coin[1] = (cluster >> 8) as u8;
+                coin[2] = 0xab;
+                let mut prev = OutPoint { hash: coin, index: 0 };
+                let mut value = 300_000i64;
+                for _ in 0..depth {
+                    value -= 1_000;
+                    let tx = Transaction {
+                        version: 1,
+                        inputs: vec![TransactionInput {
+                            prevout: prev,
+                            script_sig: script_sig.clone(),
+                            sequence: 0xffffffff,
+                        }]
+                        .into(),
+                        outputs: vec![TransactionOutput {
+                            value,
+                            script_pubkey: script.clone(),
+                        }]
+                        .into(),
+                        lock_time: 0,
+                    };
+                    prev = OutPoint {
+                        hash: blvm_protocol::block::calculate_tx_id(&tx),
+                        index: 0,
+                    };
+                    assert!(mempool.add_transaction(tx).unwrap());
+                }
+            }
+            let replacement = Transaction {
+                version: 1,
+                inputs: (0..clusters)
+                    .map(|cluster| {
+                        let mut coin = [0u8; 32];
+                        coin[0] = cluster as u8;
+                        coin[1] = (cluster >> 8) as u8;
+                        coin[2] = 0xab;
+                        TransactionInput {
+                            prevout: OutPoint { hash: coin, index: 0 },
+                            script_sig: script_sig.clone(),
+                            sequence: 0xffffffff,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+                outputs: vec![TransactionOutput {
+                    value: 0,
+                    script_pubkey: vec![0x6a, 0x03, 0x00, 0x00, 0x00],
+                }]
+                .into(),
+                lock_time: 0,
+            };
+            let pooled = mempool.size();
+            let admitted = mempool.add_transaction(replacement).unwrap();
+            (pooled, admitted)
+        };
+        let four = chains(4, 25);
+        let five = chains(5, 25);
+        let at_limit = chains(100, 1);
+        let over = chains(101, 1);
+        eprintln!(
+            "4 clusters of 25 pooled={} admitted={}; 5 clusters of 25 pooled={} admitted={}; 100 clusters admitted={}; 101 clusters admitted={}",
+            four.0, four.1, five.0, five.1, at_limit.1, over.1
+        );
+        assert!(four.1);
+        assert!(five.1);
+        assert!(at_limit.1);
+        assert!(!over.1);
+    }
+
+    #[test]
+    fn sigop_cost_over_16000_is_not_standard() {
         use std::sync::Arc;
 
         fn sigop_script(checksigs: usize) -> Vec<u8> {
@@ -7721,8 +8757,10 @@ mod tests {
         }
 
         let admit = |tail: usize| {
-            // Each redeem stays at or under the 15-sigop P2SH cap. 166 * 15 + tail.
-            let mut counts = vec![15usize; 166];
+            // Each redeem stays at or under the 15-sigop P2SH cap.
+            // 266 * 15 + tail is 4,000 or 4,001 signature operations.
+            // Cost is that count times 4: 16,000 is admitted, 16,004 is not.
+            let mut counts = vec![15usize; 266];
             counts.push(tail);
             let mut utxo_set = blvm_protocol::UtxoSet::default();
             let mut inputs = Vec::new();
@@ -7734,7 +8772,10 @@ mod tests {
                 prevout_script.push(0x87);
                 let mut script_sig = vec![redeem.len() as u8];
                 script_sig.extend_from_slice(&redeem);
-                let hash_id = [i as u8 + 1; 32];
+                let mut hash_id = [0u8; 32];
+                hash_id[0] = i as u8;
+                hash_id[1] = (i >> 8) as u8;
+                hash_id[2] = 0x5a;
                 let prevout = OutPoint {
                     hash: hash_id,
                     index: 0,
@@ -7771,7 +8812,7 @@ mod tests {
         };
         let at_limit = admit(10);
         let over = admit(11);
-        eprintln!("2500 legacy sigops admitted={at_limit}; 2501 legacy sigops admitted={over}");
+        eprintln!("sigop cost 16000 admitted={at_limit}; sigop cost 16004 admitted={over}");
         assert!(at_limit);
         assert!(!over);
     }
@@ -7894,6 +8935,113 @@ mod tests {
         assert!(admit(2, true));
         assert!(admit(0, false));
         assert!(!admit(0, true));
+    }
+
+    #[test]
+    fn preview_rejects_a_nonstandard_version() {
+        let run = |version: u64| {
+            let (prevout, script_sig) = p2sh_of_op_1();
+            let mut tx = legacy_empty_script();
+            tx.version = version;
+            tx.inputs[0].script_sig = script_sig;
+            tx.outputs[0].value = 50_000;
+            tx.outputs[0].script_pubkey = {
+                let mut script = vec![0x00, 0x14];
+                script.extend_from_slice(&[0x22; 20]);
+                script
+            };
+            let utxo = funded(prevout, 100_000);
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(utxo.clone())));
+            let preview = mempool.preview_accept(&tx, None, &utxo).is_ok();
+            let admitted = mempool.add_transaction(tx).unwrap();
+            (preview, admitted)
+        };
+        let standard = run(2);
+        let next = run(3);
+        eprintln!(
+            "version 2 preview={} admitted={}; version 3 preview={} admitted={}",
+            standard.0, standard.1, next.0, next.1
+        );
+        assert!(standard.0 && standard.1);
+        assert!(!next.0 && !next.1);
+    }
+
+    #[test]
+    fn preview_rejects_a_scriptsig_that_is_not_push_only() {
+        use blvm_secp256k1::ecdsa::{
+            ecdsa_sign_compact_rfc6979, ge_to_compressed, pubkey_from_secret,
+        };
+        use blvm_secp256k1::scalar::Scalar;
+
+        fn der_int(value: &[u8]) -> Vec<u8> {
+            let mut start = 0;
+            while start + 1 < value.len() && value[start] == 0 {
+                start += 1;
+            }
+            let mut body = value[start..].to_vec();
+            if body.first().is_some_and(|byte| byte & 0x80 != 0) {
+                body.insert(0, 0x00);
+            }
+            let mut out = vec![0x02, body.len() as u8];
+            out.extend(body);
+            out
+        }
+        fn der_sig(compact: &[u8; 64]) -> Vec<u8> {
+            let mut body = der_int(&compact[..32]);
+            body.extend(der_int(&compact[32..]));
+            let mut out = vec![0x30, body.len() as u8];
+            out.extend(body);
+            out.push(0x01);
+            out
+        }
+
+        let seckey = [0x22u8; 32];
+        let mut secret = Scalar::zero();
+        assert!(!secret.set_b32(&seckey));
+        let pubkey = ge_to_compressed(&pubkey_from_secret(&secret)).to_vec();
+        let mut script_pubkey = vec![0x21];
+        script_pubkey.extend_from_slice(&pubkey);
+        script_pubkey.push(0xac);
+
+        let mut tx = legacy_empty_script();
+        tx.inputs[0].script_sig = Vec::new();
+        tx.outputs[0].value = 0;
+        tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+        let sighash = blvm_consensus::transaction_hash::calculate_transaction_sighash_single_input(
+            &tx,
+            0,
+            &script_pubkey,
+            100_000,
+            blvm_consensus::transaction_hash::SighashType::ALL,
+            None,
+        )
+        .unwrap();
+        let sig = der_sig(&ecdsa_sign_compact_rfc6979(&sighash, &seckey).unwrap());
+        let mut push_only = vec![sig.len() as u8];
+        push_only.extend_from_slice(&sig);
+        let mut with_nop = push_only.clone();
+        with_nop.push(0x61);
+
+        let judge = |script_sig: Vec<u8>| {
+            let mut spend = tx.clone();
+            spend.inputs[0].script_sig = script_sig;
+            let mempool = MempoolManager::new();
+            mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
+            let utxo = funded(script_pubkey.clone(), 100_000);
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(utxo.clone())));
+            let preview = mempool.preview_accept(&spend, None, &utxo).is_ok();
+            let admitted = mempool.add_transaction(spend).unwrap();
+            (preview, admitted)
+        };
+        let (push_preview, push_admitted) = judge(push_only);
+        let (nop_preview, nop_admitted) = judge(with_nop);
+        eprintln!(
+            "push-only preview={push_preview} admitted={push_admitted}; nop preview={nop_preview} admitted={nop_admitted}"
+        );
+        assert!(push_preview && push_admitted);
+        assert!(!nop_preview && !nop_admitted);
     }
 
     #[test]
@@ -8836,6 +9984,23 @@ mod tests {
             funded_coinbase(created, false),
         )));
         assert!(mempool.add_transaction(tx).unwrap());
+    }
+
+    #[test]
+    fn an_immature_coinbase_needs_a_tip() {
+        let tx = legacy_empty_script();
+        let admit = |is_coinbase: bool| {
+            let mempool = MempoolManager::new();
+            mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(
+                funded_coinbase(0, is_coinbase),
+            )));
+            mempool.add_transaction(tx.clone()).unwrap()
+        };
+        let ordinary = admit(false);
+        let coinbase = admit(true);
+        eprintln!("ordinary coin admitted={ordinary}; coinbase coin admitted={coinbase}");
+        assert!(ordinary);
+        assert!(!coinbase);
     }
 
     #[test]
