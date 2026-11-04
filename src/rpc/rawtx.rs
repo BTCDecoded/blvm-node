@@ -632,12 +632,12 @@ impl RawTxRpc {
             );
             let (fee_satoshis, admission_reason) =
                 match mempool.preview_accept(tx, Some(tx_witnesses), &utxo_set) {
-                Ok(fee) if mempool.script_rejects(tx, Some(tx_witnesses), &utxo_set) => {
-                    (0, Some("failed consensus checks".to_string()))
-                }
-                Ok(fee) => (fee, None),
-                Err(reason) => (0, Some(reason.to_string())),
-            };
+                    Ok(fee) if mempool.script_rejects(tx, Some(tx_witnesses), &utxo_set) => {
+                        (0, Some("failed consensus checks".to_string()))
+                    }
+                    Ok(fee) => (fee, None),
+                    Err(reason) => (0, Some(reason.to_string())),
+                };
             let allowed = consensus_ok && admission_reason.is_none();
             let reject_reason = if !allowed {
                 if !consensus_ok {
@@ -4387,8 +4387,11 @@ mod gettxout_tip_tests {
         let mut reported = [false; 2];
         let mut admitted = [false; 2];
         for (index, item_len) in [80usize, 81].into_iter().enumerate() {
-            let witness: Vec<Witness> =
-                vec![vec![vec![0u8; item_len], tapscript.clone(), control.clone()]];
+            let witness: Vec<Witness> = vec![vec![
+                vec![0u8; item_len],
+                tapscript.clone(),
+                control.clone(),
+            ]];
             let temp = tempfile::TempDir::new().unwrap();
             let storage = Arc::new(Storage::new(temp.path()).unwrap());
             snapshot_coin(
@@ -5407,10 +5410,13 @@ mod gettxout_tip_tests {
                     sequence: 0xffffffff,
                 }]
                 .into(),
-                outputs: vec![TransactionOutput {
-                    value: 10_000,
-                    script_pubkey: spend.clone(),
-                }; 24]
+                outputs: vec![
+                    TransactionOutput {
+                        value: 10_000,
+                        script_pubkey: spend.clone(),
+                    };
+                    24
+                ]
                 .into(),
                 lock_time: 0,
             };
@@ -5485,7 +5491,6 @@ mod gettxout_tip_tests {
         assert!(reported[0] && admitted[0]);
         assert!(reported[1] && admitted[1]);
     }
-
 }
 
 #[cfg(test)]

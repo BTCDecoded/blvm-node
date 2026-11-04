@@ -65,7 +65,7 @@ impl TransactionSelector {
         Self {
             max_block_size: 1_000_000,   // 1MB
             max_block_weight: 4_000_000, // 4M weight units
-            min_fee_rate: 1, // 1 satoshi per 1,000 virtual bytes
+            min_fee_rate: 1,             // 1 satoshi per 1,000 virtual bytes
         }
     }
 
@@ -645,11 +645,7 @@ const TEMPLATE_RESERVE_BYTES: usize = (TEMPLATE_RESERVE_WEIGHT / 4) as usize;
 /// BIP141 weight: `3 × stripped size + total size`.
 /// Block creation floor. `rate` is satoshis per 1,000 virtual bytes, rounded up.
 fn fee_meets_block_floor(fee: u64, vsize: u64, rate: u64) -> bool {
-    vsize > 0
-        && (fee as u128)
-            >= (rate as u128)
-                .saturating_mul(vsize as u128)
-                .div_ceil(1000)
+    vsize > 0 && (fee as u128) >= (rate as u128).saturating_mul(vsize as u128).div_ceil(1000)
 }
 
 fn bip141_weight(tx: &Transaction, input_witnesses: Option<&[Witness]>) -> u64 {
@@ -3208,11 +3204,7 @@ mod tests {
                 origin_hash[0] = n;
                 origin_hash[1] = u8::from(mempool_parent);
                 let prevout = OutPoint {
-                    hash: if mempool_parent {
-                        origin_hash
-                    } else {
-                        [n; 32]
-                    },
+                    hash: if mempool_parent { origin_hash } else { [n; 32] },
                     index: 0,
                 };
                 let coin_script = if mempool_parent {

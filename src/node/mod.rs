@@ -210,10 +210,8 @@ impl Node {
                 .as_ref()
                 .map(|bv| bv.assume_valid_height)
                 .unwrap_or(0);
-            let (height, hash) = crate::config::overlay_assume_valid(
-                env_height,
-                config.block_validation.as_ref(),
-            );
+            let (height, hash) =
+                crate::config::overlay_assume_valid(env_height, config.block_validation.as_ref());
             consensus_config.block_validation.assume_valid_height = height;
             consensus_config.block_validation.assume_valid_hash = hash;
             crate::config::overlay_mempool_onto_consensus(

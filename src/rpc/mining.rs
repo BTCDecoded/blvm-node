@@ -418,9 +418,8 @@ impl MiningRpc {
         if !(2..=100).contains(&coinbase_script.len())
             || !Self::coinbase_script_starts_with_height(&coinbase_script, template_block_height)
         {
-            coinbase_script = blvm_protocol::bip_validation::encode_bip34_coinbase_script(
-                template_block_height,
-            );
+            coinbase_script =
+                blvm_protocol::bip_validation::encode_bip34_coinbase_script(template_block_height);
         }
         let coinbase_address = self.extract_coinbase_address(params)?;
 
@@ -812,8 +811,7 @@ impl MiningRpc {
         if (1..=16).contains(&height) {
             return script.first().copied() == Some(0x50 + height as u8);
         }
-        let prefix =
-            blvm_protocol::bip_validation::encode_bip34_coinbase_script(height);
+        let prefix = blvm_protocol::bip_validation::encode_bip34_coinbase_script(height);
         script.starts_with(&prefix)
     }
 
@@ -2292,8 +2290,10 @@ mod tests {
             .unwrap();
         let confirmed_mining =
             MiningRpc::with_dependencies(Arc::clone(&storage), Arc::new(MempoolManager::new()));
-        let confirmed = confirmed_mining
-            .count_sigops(&child_of(confirmed_out), Some(std::slice::from_ref(&witness)));
+        let confirmed = confirmed_mining.count_sigops(
+            &child_of(confirmed_out),
+            Some(std::slice::from_ref(&witness)),
+        );
 
         let funding = OutPoint {
             hash: [4u8; 32],
@@ -2361,8 +2361,7 @@ mod tests {
         assert!(plain_pool.add_transaction(plain_tx.clone()).unwrap());
         let plain_info = plain_mining.get_mining_info().await.unwrap();
         let plain_reported = plain_info["currentblockweight"].as_u64().unwrap();
-        let plain_real =
-            coinbase_weight + transaction_weight_from_stacks(&plain_tx, None).unwrap();
+        let plain_real = coinbase_weight + transaction_weight_from_stacks(&plain_tx, None).unwrap();
 
         let (_wit_dir, _wit_storage, wit_pool, wit_mining) = regtest_mining();
         let wit_tx = tx_of();
@@ -2408,10 +2407,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_gbt_coinbase_script_starts_with_the_height() {
+        use blvm_protocol::ValidationResult;
         use blvm_protocol::bip_validation::encode_bip34_coinbase_script;
         use blvm_protocol::serialization::transaction::deserialize_transaction_with_witness;
         use blvm_protocol::transaction::check_transaction;
-        use blvm_protocol::ValidationResult;
 
         let (_dir, _storage, _mempool, mining) = regtest_mining();
         let template = mining
@@ -2423,7 +2422,10 @@ mod tests {
         let height = template["height"].as_u64().unwrap();
         let bytes = hex::decode(template["coinbasetxn"]["data"].as_str().unwrap()).unwrap();
         let (mut tx, _, _) = deserialize_transaction_with_witness(&bytes).unwrap();
-        assert_eq!(tx.inputs[0].script_sig, encode_bip34_coinbase_script(height));
+        assert_eq!(
+            tx.inputs[0].script_sig,
+            encode_bip34_coinbase_script(height)
+        );
         let published_ok = matches!(check_transaction(&tx).unwrap(), ValidationResult::Valid);
         tx.inputs[0].script_sig.clear();
         let cleared_ok = matches!(check_transaction(&tx).unwrap(), ValidationResult::Valid);
@@ -2604,7 +2606,10 @@ mod tests {
                 .add_transaction_with_witness(tx.clone(), Some(stored_witness.clone()))
                 .unwrap()
         );
-        let template = mining.get_block_template(&serde_json::json!([])).await.unwrap();
+        let template = mining
+            .get_block_template(&serde_json::json!([]))
+            .await
+            .unwrap();
         let published = template["default_witness_commitment"]
             .as_str()
             .expect("default witness commitment");
@@ -2697,9 +2702,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_one_byte_height_prefix_is_a_valid_coinbase_script() {
+        use blvm_protocol::ValidationResult;
         use blvm_protocol::serialization::transaction::deserialize_transaction_with_witness;
         use blvm_protocol::transaction::check_transaction;
-        use blvm_protocol::ValidationResult;
 
         let (_dir, _storage, _mempool, mining) = regtest_mining();
         let template = mining

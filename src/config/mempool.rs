@@ -314,8 +314,7 @@ pub fn overlay_mempool_onto_consensus(
         consensus.min_tx_fee = i64::try_from(policy.min_tx_fee).unwrap_or(i64::MAX);
     }
     if let Some(rbf) = rbf {
-        consensus.rbf_fee_increment =
-            i64::try_from(rbf.min_fee_bump_satoshis).unwrap_or(i64::MAX);
+        consensus.rbf_fee_increment = i64::try_from(rbf.min_fee_bump_satoshis).unwrap_or(i64::MAX);
     }
 }
 
@@ -350,7 +349,7 @@ impl Default for MempoolPolicyConfig {
 
 #[cfg(test)]
 mod overlay_tests {
-    use super::{overlay_mempool_onto_consensus, MempoolPolicyConfig, RbfConfig};
+    use super::{MempoolPolicyConfig, RbfConfig, overlay_mempool_onto_consensus};
     use blvm_protocol::consensus_config::MempoolConfig;
 
     #[test]

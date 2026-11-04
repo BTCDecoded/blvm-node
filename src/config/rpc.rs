@@ -229,12 +229,14 @@ impl Default for StratumV2Config {
 /// Absent `[stratum_v2]` keeps the P2P TLV path on.
 #[cfg(feature = "stratum-v2")]
 pub fn p2p_stratum_demux_enabled(stratum: Option<&StratumV2Config>) -> bool {
-    stratum.map(|section| section.p2p_stratum_demux).unwrap_or(true)
+    stratum
+        .map(|section| section.p2p_stratum_demux)
+        .unwrap_or(true)
 }
 
 #[cfg(all(test, feature = "stratum-v2"))]
 mod stratum_v2_config_tests {
-    use super::{p2p_stratum_demux_enabled, StratumV2Config};
+    use super::{StratumV2Config, p2p_stratum_demux_enabled};
     use crate::config::NodeConfig;
 
     #[test]

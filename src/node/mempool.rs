@@ -5,9 +5,7 @@
 use crate::config::{MempoolPolicyConfig, RbfConfig};
 use crate::node::event_publisher::EventPublisher;
 use anyhow::Result;
-use blvm_protocol::mempool::{
-    Mempool, has_conflict_with_tx, replacement_checks_with_witness,
-};
+use blvm_protocol::mempool::{Mempool, has_conflict_with_tx, replacement_checks_with_witness};
 use blvm_protocol::segwit::Witness;
 use blvm_protocol::{Block, Hash, OutPoint, Transaction, TransactionOutput, UtxoSet};
 use std::borrow::Cow;
@@ -252,7 +250,8 @@ fn output_script_is_standard(script: &[u8]) -> bool {
         return false;
     }
     if script[0] == 0x6a {
-        return script.len() <= MAX_STANDARD_OP_RETURN_SIZE && op_return_payload_is_push_only(script);
+        return script.len() <= MAX_STANDARD_OP_RETURN_SIZE
+            && op_return_payload_is_push_only(script);
     }
     if blvm_protocol::witness::is_any_witness_program(script)
         && !blvm_protocol::witness::is_invalid_v0_witness_program(script)
@@ -295,9 +294,7 @@ fn bare_multisig_is_standard(script: &[u8]) -> bool {
 }
 
 fn bare_multisig_within(script: &[u8], max_keys: u8) -> bool {
-    use blvm_protocol::opcodes::{
-        OP_1, OP_16, OP_CHECKMULTISIG, PUSH_33_BYTES, PUSH_65_BYTES,
-    };
+    use blvm_protocol::opcodes::{OP_1, OP_16, OP_CHECKMULTISIG, PUSH_33_BYTES, PUSH_65_BYTES};
 
     if script.len() < 4 || script[script.len() - 1] != OP_CHECKMULTISIG {
         return false;
@@ -367,14 +364,16 @@ fn op_return_payload_is_push_only(script: &[u8]) -> bool {
         } else if opcode == 0x4d {
             (
                 3usize,
-                script.get(i + 1..i + 3).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize),
+                script
+                    .get(i + 1..i + 3)
+                    .map(|b| u16::from_le_bytes([b[0], b[1]]) as usize),
             )
         } else if opcode == 0x4e {
             (
                 5usize,
-                script.get(i + 1..i + 5).map(|b| {
-                    u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize
-                }),
+                script
+                    .get(i + 1..i + 5)
+                    .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize),
             )
         } else {
             i += 1;
@@ -979,7 +978,9 @@ impl MempoolManager {
     /// Height of a coin that is not yet in a block. Relative locks treat a missing
     /// prevout as created at this height.
     pub fn unconfirmed_coin_height(&self) -> u64 {
-        self.finality_context().map(|(height, _)| height).unwrap_or(0)
+        self.finality_context()
+            .map(|(height, _)| height)
+            .unwrap_or(0)
     }
 
     fn finality_context(&self) -> Option<(u64, u64)> {
@@ -2247,9 +2248,10 @@ impl MempoolManager {
             return Err("scriptsig-size");
         }
         if require_standard
-            && tx.inputs.iter().any(|input| {
-                !blvm_protocol::script::p2sh_push_only_check(&input.script_sig)
-            })
+            && tx
+                .inputs
+                .iter()
+                .any(|input| !blvm_protocol::script::p2sh_push_only_check(&input.script_sig))
         {
             return Err("scriptsig-not-pushonly");
         }
@@ -2440,8 +2442,7 @@ impl MempoolManager {
         {
             return true;
         }
-        if require_standard
-            && taproot_annex_present(&self.script_prevouts(tx, utxo_set), witnesses)
+        if require_standard && taproot_annex_present(&self.script_prevouts(tx, utxo_set), witnesses)
         {
             return true;
         }
@@ -2554,11 +2555,7 @@ impl MempoolManager {
                 .collect::<Vec<_>>()
         };
         for parent in &parents {
-            preview
-                .descendants
-                .entry(*parent)
-                .or_default()
-                .insert(txid);
+            preview.descendants.entry(*parent).or_default().insert(txid);
         }
         preview.txs.insert(txid, (vsize, parents));
     }
@@ -2566,7 +2563,8 @@ impl MempoolManager {
     /// Admit an ordered package. A transaction below the relay floor is kept when a
     /// later transaction in this package spends it and their combined fee covers both.
     pub fn add_package(&self, txs: Vec<Transaction>) -> Result<bool> {
-        let flags = self.add_package_with_witnesses(txs.into_iter().map(|tx| (tx, None)).collect())?;
+        let flags =
+            self.add_package_with_witnesses(txs.into_iter().map(|tx| (tx, None)).collect())?;
         Ok(!flags.is_empty() && flags.into_iter().all(|ok| ok))
     }
 
@@ -2763,7 +2761,9 @@ impl MempoolManager {
             let tx_vsize = self.admit_vsize(tx, witnesses.as_deref(), utxo).0;
             fee = fee.saturating_add(tx_fee);
             vsize = vsize.saturating_add(tx_vsize);
-            let own_required = (rate as u128).saturating_mul(tx_vsize as u128).div_ceil(1000);
+            let own_required = (rate as u128)
+                .saturating_mul(tx_vsize as u128)
+                .div_ceil(1000);
             if (tx_fee as u128) < own_required {
                 below.push(ids[index]);
             }
@@ -2837,12 +2837,10 @@ impl MempoolManager {
                 hash: txid,
                 index: dust[0],
             };
-            let child_spends = txs.iter().skip(index + 1).any(|(later, _)| {
-                later
-                    .inputs
-                    .iter()
-                    .any(|input| input.prevout == spent)
-            });
+            let child_spends = txs
+                .iter()
+                .skip(index + 1)
+                .any(|(later, _)| later.inputs.iter().any(|input| input.prevout == spent));
             if child_spends {
                 waive.insert(txid);
             }
@@ -2852,7 +2850,11 @@ impl MempoolManager {
 
     /// One dust output is allowed only for the package parent recorded in [`Self::ephemeral_dust_parents`].
     fn ephemeral_dust_allowed(&self, tx: &Transaction, tx_hash: Hash) -> bool {
-        let dust = tx.outputs.iter().filter(|output| output_is_dust(output)).count();
+        let dust = tx
+            .outputs
+            .iter()
+            .filter(|output| output_is_dust(output))
+            .count();
         dust == 1
             && self
                 .ephemeral_dust_waivers
@@ -3147,11 +3149,14 @@ impl MempoolManager {
             return Ok(false);
         }
         if effective_policy.require_standard
-            && self.script_prevouts(&tx, &utxo_snapshot).iter().any(|prevout| {
-                prevout
-                    .as_ref()
-                    .is_some_and(|prevout| !spent_script_is_standard(prevout.script.as_ref()))
-            })
+            && self
+                .script_prevouts(&tx, &utxo_snapshot)
+                .iter()
+                .any(|prevout| {
+                    prevout
+                        .as_ref()
+                        .is_some_and(|prevout| !spent_script_is_standard(prevout.script.as_ref()))
+                })
         {
             warn!(
                 "Transaction {} rejected: spent script is not standard",
@@ -3160,11 +3165,7 @@ impl MempoolManager {
             return Ok(false);
         }
         if effective_policy.require_standard
-            && p2wsh_data_item_exceeds(
-                &tx,
-                &self.script_prevouts(&tx, &utxo_snapshot),
-                witness_ref,
-            )
+            && p2wsh_data_item_exceeds(&tx, &self.script_prevouts(&tx, &utxo_snapshot), witness_ref)
         {
             warn!(
                 "Transaction {} rejected: P2WSH witness data item exceeds {} bytes",
@@ -3174,11 +3175,7 @@ impl MempoolManager {
             return Ok(false);
         }
         if effective_policy.require_standard
-            && p2wsh_script_exceeds(
-                &tx,
-                &self.script_prevouts(&tx, &utxo_snapshot),
-                witness_ref,
-            )
+            && p2wsh_script_exceeds(&tx, &self.script_prevouts(&tx, &utxo_snapshot), witness_ref)
         {
             warn!(
                 "Transaction {} rejected: P2WSH witness script exceeds {} bytes",
@@ -3305,9 +3302,7 @@ impl MempoolManager {
         if !conflicting_tx_hashes.is_empty() {
             let clusters = self.conflicting_cluster_count(&direct_conflicts);
             if clusters > 100 {
-                debug!(
-                    "Transaction conflicts with {clusters} clusters (> 100 limit)"
-                );
+                debug!("Transaction conflicts with {clusters} clusters (> 100 limit)");
                 return Ok(false);
             }
 
@@ -5411,7 +5406,11 @@ mod tests {
 
         let drop_true = vec![OP_DROP, OP_1];
         assert!(!admit(
-            spend_to(1_000, vec![0x51, 0x61, 0x61, 0x61, 0x61], vec![0x4c, 0x01, 0x51]),
+            spend_to(
+                1_000,
+                vec![0x51, 0x61, 0x61, 0x61, 0x61],
+                vec![0x4c, 0x01, 0x51]
+            ),
             drop_true.clone()
         ));
         assert!(admit(
@@ -5477,7 +5476,9 @@ mod tests {
 
     #[test]
     fn p2sh_redeem_with_sixteen_sigops_is_not_standard() {
-        use blvm_protocol::opcodes::{OP_0, OP_1, OP_CHECKSIG, OP_ENDIF, OP_EQUAL, OP_HASH160, OP_IF};
+        use blvm_protocol::opcodes::{
+            OP_0, OP_1, OP_CHECKSIG, OP_ENDIF, OP_EQUAL, OP_HASH160, OP_IF,
+        };
         use ripemd::{Digest, Ripemd160};
         use sha2::Sha256;
 
@@ -5580,9 +5581,7 @@ mod tests {
         };
         let eighty = admit(80);
         let eighty_one = admit(81);
-        eprintln!(
-            "80-byte p2wsh item admitted={eighty}; 81-byte p2wsh item admitted={eighty_one}"
-        );
+        eprintln!("80-byte p2wsh item admitted={eighty}; 81-byte p2wsh item admitted={eighty_one}");
         assert!(eighty);
         assert!(!eighty_one);
     }
@@ -5774,9 +5773,7 @@ mod tests {
         };
         let hundred = admit(100);
         let hundred_one = admit(101);
-        eprintln!(
-            "100 p2wsh items admitted={hundred}; 101 p2wsh items admitted={hundred_one}"
-        );
+        eprintln!("100 p2wsh items admitted={hundred}; 101 p2wsh items admitted={hundred_one}");
         assert!(hundred);
         assert!(!hundred_one);
     }
@@ -5817,9 +5814,7 @@ mod tests {
         };
         let hundred = admit(100);
         let hundred_one = admit(101);
-        eprintln!(
-            "wrapped 100 items admitted={hundred}; wrapped 101 items admitted={hundred_one}"
-        );
+        eprintln!("wrapped 100 items admitted={hundred}; wrapped 101 items admitted={hundred_one}");
         assert!(hundred);
         assert!(!hundred_one);
     }
@@ -6561,8 +6556,8 @@ mod tests {
         tapscript.extend_from_slice(&internal);
         tapscript.push(0xba);
         let admit = |number: Vec<u8>| {
-            let root =
-                compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT).unwrap();
+            let root = compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT)
+                .unwrap();
             let (output_key, parity) = taproot_output_key_with_parity(&internal, &root).unwrap();
             let mut prevout = vec![0x51, 0x20];
             prevout.extend_from_slice(&output_key);
@@ -6606,9 +6601,7 @@ mod tests {
                 prevout.clone(),
                 100_000,
             ))));
-            mempool
-                .add_transaction_with_witness(tx, witness)
-                .unwrap()
+            mempool.add_transaction_with_witness(tx, witness).unwrap()
         };
         let empty = admit(None);
         let stuffed = admit(Some(vec![vec![vec![0x00]]]));
@@ -6690,8 +6683,7 @@ mod tests {
         let mempool = MempoolManager::new();
         mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
         mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
-            prevout,
-            10_000,
+            prevout, 10_000,
         ))));
         let original = mempool.add_transaction(spend(1_000)).unwrap();
         let first = mempool.add_transaction(spend(1_100)).unwrap();
@@ -6722,7 +6714,9 @@ mod tests {
                 prevout.clone(),
                 10_000,
             ))));
-            let original = mempool.add_transaction(spend(1_000, original_sequence)).unwrap();
+            let original = mempool
+                .add_transaction(spend(1_000, original_sequence))
+                .unwrap();
             let replacement = mempool.add_transaction(spend(1_100, 0xfffffffd)).unwrap();
             (original, replacement)
         };
@@ -7018,9 +7012,7 @@ mod tests {
             ))));
             let parent_id = blvm_protocol::block::calculate_tx_id(&parent);
             let child_id = blvm_protocol::block::calculate_tx_id(&child);
-            mempool
-                .add_package(vec![parent, child])
-                .unwrap();
+            mempool.add_package(vec![parent, child]).unwrap();
             (
                 mempool.get_transaction(&parent_id).is_some(),
                 mempool.get_transaction(&child_id).is_some(),
@@ -7033,8 +7025,7 @@ mod tests {
             let mempool = MempoolManager::new();
             mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
             mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
-                prevout,
-                10_000,
+                prevout, 10_000,
             ))));
             mempool.add_transaction(parent).unwrap()
         };
@@ -7079,7 +7070,9 @@ mod tests {
         let at_floor = admit(540, 9_460);
         let under = admit(539, 9_461);
         let paid = admit(539, 9_460);
-        eprintln!("output 540 admitted={at_floor}; output 539 admitted={under}; paid dust admitted={paid}");
+        eprintln!(
+            "output 540 admitted={at_floor}; output 539 admitted={under}; paid dust admitted={paid}"
+        );
         assert!(at_floor);
         assert!(under);
         assert!(!paid);
@@ -7190,7 +7183,9 @@ mod tests {
         let rejected = keeps_parent(0, vec![0x01, 0x00]);
         let paying = keeps_parent(1_000, script_sig.clone());
         let paying_rejected = keeps_parent(1_000, vec![0x01, 0x00]);
-        eprintln!("valid child keeps parent={valid}; rejected child keeps parent={rejected}; paying parent with valid child={paying}; paying parent with rejected child={paying_rejected}");
+        eprintln!(
+            "valid child keeps parent={valid}; rejected child keeps parent={rejected}; paying parent with valid child={paying}; paying parent with rejected child={paying_rejected}"
+        );
         assert!(valid);
         assert!(!rejected);
         assert!(paying);
@@ -7333,8 +7328,20 @@ mod tests {
         };
         measure.insert(left.inputs[0].prevout, coin(50_000));
         measure.insert(right.inputs[0].prevout, coin(50_000));
-        measure.insert(OutPoint { hash: left_id, index: 0 }, coin(50_000));
-        measure.insert(OutPoint { hash: right_id, index: 0 }, coin(50_000));
+        measure.insert(
+            OutPoint {
+                hash: left_id,
+                index: 0,
+            },
+            coin(50_000),
+        );
+        measure.insert(
+            OutPoint {
+                hash: right_id,
+                index: 0,
+            },
+            coin(50_000),
+        );
         let meter = MempoolManager::new();
         meter.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
         let left_vsize = meter.admit_vsize(&left, None, &measure).0;
@@ -7756,8 +7763,8 @@ mod tests {
             0x16, 0xf8, 0x17, 0x98,
         ];
         let admit = |tapscript: Vec<u8>| {
-            let root =
-                compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT).unwrap();
+            let root = compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT)
+                .unwrap();
             let (output_key, parity) = taproot_output_key_with_parity(&internal, &root).unwrap();
             let mut prevout = vec![0x51, 0x20];
             prevout.extend_from_slice(&output_key);
@@ -7772,8 +7779,7 @@ mod tests {
             let mempool = MempoolManager::new();
             mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
             mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
-                prevout,
-                100_000,
+                prevout, 100_000,
             ))));
             mempool
                 .add_transaction_with_witness(tx, Some(witness))
@@ -7814,8 +7820,7 @@ mod tests {
             let mempool = MempoolManager::new();
             mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
             mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
-                prevout,
-                100_000,
+                prevout, 100_000,
             ))));
             mempool
                 .add_transaction_with_witness(tx, Some(witness))
@@ -8406,12 +8411,8 @@ mod tests {
             script
         };
         let known_script = script_for(&compressed_x);
-        let root = compute_script_merkle_root(
-            &known_script,
-            &[],
-            TAPROOT_LEAF_VERSION_TAPSCRIPT,
-        )
-        .unwrap();
+        let root =
+            compute_script_merkle_root(&known_script, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT).unwrap();
         let (output_key, _parity) = taproot_output_key_with_parity(&internal, &root).unwrap();
         let mut known_prevout = vec![0x51, 0x20];
         known_prevout.extend_from_slice(&output_key);
@@ -8434,8 +8435,8 @@ mod tests {
         let sig = schnorr_sign(&seckey, &sighash, &[0u8; 32]).unwrap();
         let admit = |pubkey: &[u8]| {
             let tapscript = script_for(pubkey);
-            let root =
-                compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT).unwrap();
+            let root = compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT)
+                .unwrap();
             let (output_key, parity) = taproot_output_key_with_parity(&internal, &root).unwrap();
             let mut prevout = vec![0x51, 0x20];
             prevout.extend_from_slice(&output_key);
@@ -8446,8 +8447,7 @@ mod tests {
             let mempool = MempoolManager::new();
             mempool.set_policy_config(Some(crate::config::MempoolPolicyConfig::default()));
             mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
-                prevout,
-                100_000,
+                prevout, 100_000,
             ))));
             mempool
                 .add_transaction_with_witness(tx.clone(), Some(witness))
@@ -8548,7 +8548,9 @@ mod tests {
 
     #[test]
     fn an_empty_snapshot_counts_a_mempool_parents_sigops() {
-        use blvm_protocol::opcodes::{OP_0, OP_1, OP_CHECKSIG, OP_ENDIF, OP_EQUAL, OP_HASH160, OP_IF};
+        use blvm_protocol::opcodes::{
+            OP_0, OP_1, OP_CHECKSIG, OP_ENDIF, OP_EQUAL, OP_HASH160, OP_IF,
+        };
         use ripemd::{Digest, Ripemd160};
         use sha2::Sha256;
         use std::sync::Arc;
@@ -8656,7 +8658,10 @@ mod tests {
                 coin[1] = (cluster >> 8) as u8;
                 coin[2] = 0xab;
                 utxo.insert(
-                    OutPoint { hash: coin, index: 0 },
+                    OutPoint {
+                        hash: coin,
+                        index: 0,
+                    },
                     Arc::new(blvm_protocol::UTXO {
                         value: 300_000,
                         script_pubkey: script.clone().into(),
@@ -8673,7 +8678,10 @@ mod tests {
                 coin[0] = cluster as u8;
                 coin[1] = (cluster >> 8) as u8;
                 coin[2] = 0xab;
-                let mut prev = OutPoint { hash: coin, index: 0 };
+                let mut prev = OutPoint {
+                    hash: coin,
+                    index: 0,
+                };
                 let mut value = 300_000i64;
                 for _ in 0..depth {
                     value -= 1_000;
@@ -8708,7 +8716,10 @@ mod tests {
                         coin[1] = (cluster >> 8) as u8;
                         coin[2] = 0xab;
                         TransactionInput {
-                            prevout: OutPoint { hash: coin, index: 0 },
+                            prevout: OutPoint {
+                                hash: coin,
+                                index: 0,
+                            },
                             script_sig: script_sig.clone(),
                             sequence: 0xffffffff,
                         }

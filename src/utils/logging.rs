@@ -126,7 +126,6 @@ pub fn init_node_logging(config: Option<&crate::config::LoggingConfig>, verbose:
     install_text_subscriber(&resolved);
 }
 
-
 /// Initialize logging for a module
 ///
 /// Modules get their own logging context with sensible defaults:
@@ -334,8 +333,14 @@ mod tests {
         });
         let bytes = captured.lock().expect("log buffer").clone();
         let text = String::from_utf8(bytes).expect("log line is utf-8");
-        let line = text.lines().find(|line| !line.is_empty()).expect("one log line");
+        let line = text
+            .lines()
+            .find(|line| !line.is_empty())
+            .expect("one log line");
         let value: serde_json::Value = serde_json::from_str(line).expect("json log line");
-        assert!(value.get("level").is_some(), "json log missing level: {line}");
+        assert!(
+            value.get("level").is_some(),
+            "json log missing level: {line}"
+        );
     }
 }

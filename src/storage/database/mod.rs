@@ -3042,7 +3042,11 @@ pub(crate) mod tidesdb_impl {
 }
 
 /// ENV, then the file, then the built-in default.
-pub(crate) fn rocksdb_env_over_file<T>(env_value: Option<T>, file_value: Option<T>, default: T) -> T {
+pub(crate) fn rocksdb_env_over_file<T>(
+    env_value: Option<T>,
+    file_value: Option<T>,
+    default: T,
+) -> T {
     env_value.or(file_value).unwrap_or(default)
 }
 
