@@ -333,6 +333,11 @@ async fn test_missing_prevout_is_rejected_and_a_funded_spend_reports_its_fee() {
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
     let mempool = Arc::new(MempoolManager::new());
+    let mut policy = blvm_node::config::MempoolPolicyConfig::default();
+    policy.require_standard = false;
+    policy.min_tx_fee = 0;
+    policy.min_relay_fee_rate = 0;
+    mempool.set_policy_config(Some(policy));
     let rawtx = RawTxRpc::with_dependencies(storage.clone(), mempool, None, None);
 
     let missing = Transaction {
@@ -383,7 +388,7 @@ async fn test_missing_prevout_is_rejected_and_a_funded_spend_reports_its_fee() {
                 hash: prev,
                 index: 0,
             },
-            script_sig: vec![0x51],
+            script_sig: vec![],
             sequence: 0xffffffff,
         }],
         outputs: blvm_protocol::tx_outputs![TransactionOutput {
