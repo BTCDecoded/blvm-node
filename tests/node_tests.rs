@@ -303,14 +303,14 @@ async fn test_mempool_manager_operations() {
                 hash: random_hash(),
                 index: 1,
             },
-            script_sig: vec![0x42, 0x05], // Different signature
-            sequence: 0xfffffffe,
+            script_sig: vec![0x51],
+            sequence: 0xffffffff,
         }],
         outputs: blvm_protocol::tx_outputs![TransactionOutput {
             value: 25_0000_0000, // Different value
             script_pubkey: p2pkh_script(random_hash20()),
         }],
-        lock_time: 1, // Different lock time
+        lock_time: 0,
     };
 
     let result1 = mempool.add_transaction(tx1).unwrap();
