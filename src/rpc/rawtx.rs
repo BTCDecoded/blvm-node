@@ -2952,7 +2952,11 @@ mod gettxout_tip_tests {
             .into(),
             outputs: vec![TransactionOutput {
                 value: 10_000,
-                script_pubkey: vec![OP_1],
+                script_pubkey: {
+                    let mut script = vec![0x00, 0x14];
+                    script.extend_from_slice(&[0u8; 20]);
+                    script
+                },
             }]
             .into(),
             lock_time: 0,

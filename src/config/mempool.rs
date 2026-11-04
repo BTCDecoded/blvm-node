@@ -13,7 +13,8 @@ pub enum RbfMode {
     /// Conservative RBF - strict BIP125 rules with additional safety checks
     Conservative,
 
-    /// Standard RBF - strict BIP125 compliance (default)
+    /// Standard RBF - Bitcoin Core's default. A fee-paying replacement is admitted
+    /// whether or not the original signals BIP125.
     Standard,
 
     /// Aggressive RBF - relaxed rules for miners

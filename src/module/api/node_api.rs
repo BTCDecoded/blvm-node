@@ -2406,6 +2406,11 @@ mod mempool_size_tests {
             .unwrap();
 
         let mempool = Arc::new(MempoolManager::new());
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        mempool.set_policy_config(Some(policy));
         let parent = spend(funding, 40_000);
         assert!(mempool.add_transaction(parent.clone()).unwrap());
         let child = spend(

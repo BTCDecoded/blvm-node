@@ -126,7 +126,8 @@ mod tests {
             .into(),
             lock_time: 0,
         };
-        let witness = vec![vec![0x11u8; 4_000]];
+        // 50_000 witness bytes puts a 1_000 sat fee under the 100 sat/kvB package floor.
+        let witness = vec![vec![0x11u8; 50_000]];
         let raw = serialize_transaction_with_witness(&tx, &[witness.clone()]).unwrap();
         let (decoded, decoded_witness) = decode_package_transaction(&raw).unwrap();
         assert_eq!(decoded_witness.as_ref().map(|stacks| stacks.len()), Some(1));
@@ -149,7 +150,7 @@ mod tests {
         let mut relay = PackageRelay::new();
         let reject = handle_pkgtxn(&mut relay, &msg, Some(&utxo_set))
             .unwrap()
-            .expect("real witness weight is below 1 sat/vB");
+            .expect("real witness weight is under the package relay floor");
         assert_eq!(reject.reason, PackageRejectReason::FeeRateTooLow as u8);
 
         let dir = tempfile::TempDir::new().unwrap();
@@ -159,7 +160,7 @@ mod tests {
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
         policy.require_standard = false;
         policy.min_tx_fee = 0;
-        policy.min_relay_fee_rate = 1;
+        policy.min_relay_fee_rate = 1_000;
         mempool.set_policy_config(Some(policy));
         mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo_set)));
         let listen: SocketAddr = "127.0.0.1:18581".parse().unwrap();

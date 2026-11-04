@@ -305,7 +305,7 @@ fn bare_multisig_within(script: &[u8], max_keys: u8) -> bool {
     }
     let n = (n_op - OP_1 + 1) as usize;
     let m_op = script[0];
-    if m_op < OP_1 || m_op > OP_16 {
+    if !(OP_1..=OP_16).contains(&m_op) {
         return false;
     }
     let m = (m_op - OP_1 + 1) as usize;
@@ -1832,6 +1832,13 @@ impl MempoolManager {
         if matches!(rbf_config.mode, crate::config::RbfMode::Disabled) {
             return Ok(false);
         }
+        // Conservative mode is strict BIP125. Standard matches Core's default and
+        // replaces an original that does not signal.
+        if matches!(rbf_config.mode, crate::config::RbfMode::Conservative)
+            && !blvm_protocol::mempool::signals_rbf(existing_tx)
+        {
+            return Ok(false);
+        }
 
         // Use the cloned config for the rest of the function
         let rbf_config = &rbf_config;
@@ -2258,7 +2265,7 @@ impl MempoolManager {
         let nonwitness_size = blvm_protocol::wire::serialize_tx(tx)
             .map(|bytes| bytes.len())
             .unwrap_or(0);
-        if nonwitness_size < MIN_STANDARD_TX_NONWITNESS_SIZE {
+        if require_standard && nonwitness_size < MIN_STANDARD_TX_NONWITNESS_SIZE {
             return Err("tx-size-small");
         }
         // Same next-block height and median admission uses. No tip means height 0.
@@ -2953,7 +2960,7 @@ impl MempoolManager {
         let nonwitness_size = blvm_protocol::wire::serialize_tx(&tx)
             .map(|bytes| bytes.len())
             .unwrap_or(0);
-        if nonwitness_size < MIN_STANDARD_TX_NONWITNESS_SIZE {
+        if effective_policy.require_standard && nonwitness_size < MIN_STANDARD_TX_NONWITNESS_SIZE {
             warn!(
                 "Transaction {} rejected: non-witness size {} is below {}",
                 hex::encode(tx_hash),
