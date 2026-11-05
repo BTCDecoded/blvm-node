@@ -1253,6 +1253,9 @@ fn w78_feeder_len_alone_is_not_in_pipeline() {
 fn w79_export_gate_steady_state_ok_and_stall_defers() {
     // Live genesis→250k: gap_missing+feeder=0 forever under W75 → zero exports.
     // Single test: shared atomics race if split across threads.
+    // Also hold the process-wide guard: this test sets env and moves tip_stage HEIGHT /
+    // NEEDED_MS, which tip_stage and other modules' tests read under that guard.
+    let _tip = tip_stage::test_tip_atomics_lock();
     let prev_kill = std::env::var_os("BLVM_PROC_ANON_KILL_MB");
     // SAFETY: test-only env mutation; restored below.
     unsafe {
