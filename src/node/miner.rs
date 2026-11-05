@@ -1174,7 +1174,7 @@ impl MiningCoordinator {
         let mintime = self.template_min_time(height, clock);
         let timestamp = clock.max(mintime);
         let template_height = height.saturating_add(1);
-        let network = self.consensus_network();
+        let network = self.consensus_network()?;
         let bits =
             self.template_work_bits(template_height, timestamp, height, parent_bits, parent_time)?;
         let version = blvm_protocol::mining::template_block_version(network, template_height);
@@ -1230,7 +1230,7 @@ impl MiningCoordinator {
             .await
     }
 
-    fn consensus_network(&self) -> blvm_protocol::types::Network {
+    fn consensus_network(&self) -> anyhow::Result<blvm_protocol::types::Network> {
         crate::storage::resolve_consensus_network(self.protocol.as_deref(), self.storage.as_deref())
     }
 
@@ -1281,7 +1281,7 @@ impl MiningCoordinator {
         } else {
             window_end.saturating_sub(headers.len() as u64 - 1)
         };
-        let network = self.consensus_network();
+        let network = self.consensus_network()?;
         let bits =
             blvm_protocol::pow::next_required_bits(network, template_height, block_time, &|h| {
                 if h == parent_height {
@@ -1309,7 +1309,7 @@ impl MiningCoordinator {
         use blvm_protocol::mining::{create_coinbase_with_outputs, fit_payouts_to_reward};
 
         let consensus = ConsensusProof::new();
-        let subsidy = consensus.get_block_subsidy_for_network(height, self.consensus_network());
+        let subsidy = consensus.get_block_subsidy_for_network(height, self.consensus_network()?);
         let total_fees: i64 = selected_transactions
             .iter()
             .map(|tx| self.mempool.calculate_transaction_fee(tx, utxo_set) as i64)
@@ -1336,7 +1336,7 @@ impl MiningCoordinator {
         // 1. Get block subsidy from consensus layer
         let consensus = ConsensusProof::new();
         let subsidy =
-            consensus.get_block_subsidy_for_network(height, self.consensus_network()) as u64;
+            consensus.get_block_subsidy_for_network(height, self.consensus_network()?) as u64;
 
         // 2. Calculate total fees from selected transactions
         let total_fees: u64 = selected_transactions

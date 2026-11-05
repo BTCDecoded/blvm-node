@@ -995,13 +995,16 @@ impl MempoolManager {
         *self.chain_tip.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn chain_network(&self) -> blvm_protocol::types::Network {
-        self.storage
+    fn chain_network(&self) -> anyhow::Result<blvm_protocol::types::Network> {
+        match self
+            .storage
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
-            .map(|storage| storage.chain().consensus_network())
-            .unwrap_or(blvm_protocol::types::Network::Mainnet)
+        {
+            Some(storage) => storage.chain().consensus_network(),
+            None => Ok(blvm_protocol::types::Network::Mainnet),
+        }
     }
 
     /// Median time of the block before `coin_height`.
@@ -1065,7 +1068,7 @@ impl MempoolManager {
 
         let Some((block_height, block_mtp)) = self.finality_context() else {
             // A relative lock of 0 is already final. A non-zero lock needs the tip.
-            return tx.version >= 2
+            return (tx.version as u32) as i32 >= 2
                 && tx.inputs.iter().any(|input| {
                     let seq = input.sequence as u32;
                     !is_sequence_disabled(seq)
@@ -1096,13 +1099,16 @@ impl MempoolManager {
                 return true;
             }
         }
+        let Ok(network) = self.chain_network() else {
+            return true;
+        };
         blvm_protocol::mempool::relative_lock_unsatisfied(
             tx,
             utxo_set,
             block_height,
             block_mtp,
             Some(&prev_mtps),
-            self.chain_network(),
+            network,
         )
         .unwrap_or(true)
     }

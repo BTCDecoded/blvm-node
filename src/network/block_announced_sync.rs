@@ -369,11 +369,21 @@ impl NetworkManager {
     /// Locator hashes from the tip back to genesis, the same steps as header sync.
     fn tip_follow_locator(&self, local_height: u64, tip_hash: Hash) -> Vec<Hash> {
         use crate::node::parallel_ibd::ibd_header_locator_heights;
-        use blvm_protocol::GENESIS_BLOCK_HASH_INTERNAL;
 
         let Some(storage) = self.storage().as_ref() else {
             return vec![tip_hash];
         };
+        let Ok(stored_network) = storage.chain().consensus_network() else {
+            return vec![tip_hash];
+        };
+        let network = crate::network::header_work::network_for_header_work(
+            self.protocol_engine()
+                .map(|engine| engine.get_protocol_version()),
+            stored_network,
+        );
+        let genesis = blvm_consensus::block::block_header_hash(
+            &blvm_consensus::block::genesis_block(network).header,
+        );
         let blocks = storage.blocks();
         let mut hashes = Vec::new();
         for height in ibd_header_locator_heights(local_height) {
@@ -383,7 +393,7 @@ impl NetworkManager {
             }
             match blocks.get_hash_by_height(height) {
                 Ok(Some(stored)) => hashes.push(stored),
-                Ok(None) if height == 0 => hashes.push(GENESIS_BLOCK_HASH_INTERNAL),
+                Ok(None) if height == 0 => hashes.push(genesis),
                 _ => {}
             }
         }
@@ -424,10 +434,13 @@ impl NetworkManager {
         let Some((start, mut prev, mut height)) = anchor else {
             return StoredProbeHeaders::none();
         };
+        let Ok(stored_network) = storage.chain().consensus_network() else {
+            return StoredProbeHeaders::none();
+        };
         let consensus_network = crate::network::header_work::network_for_header_work(
             self.protocol_engine()
                 .map(|engine| engine.get_protocol_version()),
-            storage.chain().consensus_network(),
+            stored_network,
         );
         let tip_header = storage.chain().get_tip_header().ok().flatten();
         let tip_height = storage.chain().get_height().ok().flatten();

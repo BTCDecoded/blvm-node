@@ -866,7 +866,7 @@ impl NetworkManager {
                         let network = crate::network::header_work::network_for_header_work(
                             self.protocol_engine()
                                 .map(|engine| engine.get_protocol_version()),
-                            storage.chain().consensus_network(),
+                            storage.chain().consensus_network()?,
                         );
                         let mut pending: Vec<(u64, u64, u64)> = Vec::new();
                         let mut batch = Vec::new();

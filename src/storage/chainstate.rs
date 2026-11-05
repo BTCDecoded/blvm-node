@@ -194,13 +194,16 @@ impl ChainState {
         Ok(())
     }
 
-    /// Consensus network recorded in chain info. Missing info is mainnet.
-    pub fn consensus_network(&self) -> Network {
-        self.load_chain_info()
-            .ok()
-            .flatten()
-            .map(|info| consensus_network_from_stored_name(&info.chain_params.network))
-            .unwrap_or(Network::Mainnet)
+    /// Consensus network recorded in chain info.
+    ///
+    /// A missing row is mainnet. A read or decode error is returned.
+    pub fn consensus_network(&self) -> Result<Network> {
+        match self.load_chain_info()? {
+            Some(info) => Ok(consensus_network_from_stored_name(
+                &info.chain_params.network,
+            )),
+            None => Ok(Network::Mainnet),
+        }
     }
 
     /// Load current chain information
@@ -1281,6 +1284,24 @@ mod tests {
         assert_eq!(
             consensus_network_from_stored_name("unknown"),
             Network::Mainnet
+        );
+    }
+
+    #[test]
+    fn damaged_chain_info_is_not_mainnet() {
+        use super::ChainState;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = crate::storage::Storage::new(temp.path()).unwrap();
+        let chain: &ChainState = storage.chain();
+        assert_eq!(chain.consensus_network().unwrap(), Network::Mainnet);
+        chain
+            .chain_info
+            .insert(b"current", b"not a chain info row")
+            .unwrap();
+        assert!(
+            chain.consensus_network().is_err(),
+            "a damaged chain-info row must not be read as mainnet"
         );
     }
 

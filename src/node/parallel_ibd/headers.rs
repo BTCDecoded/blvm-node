@@ -74,7 +74,6 @@ use crate::network::protocol::{GetHeadersMessage, ProtocolMessage, ProtocolParse
 use crate::node::event_publisher::EventPublisher;
 use crate::storage::blockstore::BlockStore;
 use crate::storage::hashing::double_sha256;
-use blvm_protocol::GENESIS_BLOCK_HASH_INTERNAL;
 
 /// Result of a header download pass (sequential or parallel merge).
 pub(crate) struct HeaderSyncResult {
@@ -242,6 +241,7 @@ fn ibd_header_locator_hashes(
     blockstore: &BlockStore,
     last_known_height: u64,
     last_hash: &[u8; 32],
+    genesis_hash: &[u8; 32],
 ) -> Result<Vec<[u8; 32]>> {
     let mut hashes = Vec::with_capacity(32);
     for h in ibd_header_locator_heights(last_known_height) {
@@ -251,7 +251,7 @@ fn ibd_header_locator_hashes(
         }
         match blockstore.get_hash_by_height(h)? {
             Some(stored) => hashes.push(stored),
-            None if h == 0 => hashes.push(GENESIS_BLOCK_HASH_INTERNAL),
+            None if h == 0 => hashes.push(*genesis_hash),
             None => {}
         }
     }
@@ -520,7 +520,18 @@ pub(crate) async fn download_headers(
         peer_addrs.len()
     );
 
-    let genesis_hash = GENESIS_BLOCK_HASH_INTERNAL;
+    let stored_network = match network.storage().as_ref() {
+        Some(storage) => storage.chain().consensus_network()?,
+        None => blvm_protocol::types::Network::Mainnet,
+    };
+    let consensus_network = crate::network::header_work::network_for_header_work(
+        network
+            .protocol_engine()
+            .map(|engine| engine.get_protocol_version()),
+        stored_network,
+    );
+    let genesis = blvm_consensus::block::genesis_block(consensus_network);
+    let genesis_hash = blvm_consensus::block::block_header_hash(&genesis.header);
 
     // `sync_parallel` passes the next block height to fetch. When resuming (start_height > 0),
     // we must anchor GetHeaders to the stored parent hash — not genesis — or peers return
@@ -529,38 +540,8 @@ pub(crate) async fn download_headers(
     let mut last_hash: [u8; 32];
 
     if start_height == 0 {
-        let genesis_header = blvm_protocol::BlockHeader {
-            version: 1,
-            prev_block_hash: [0u8; 32],
-            merkle_root: [
-                0x3b, 0xa3, 0xed, 0xfd, 0x7a, 0x7b, 0x12, 0xb2, 0x7a, 0xc7, 0x2c, 0x3e, 0x67, 0x76,
-                0x8f, 0x61, 0x7f, 0xc8, 0x1b, 0xc3, 0x88, 0x8a, 0x51, 0x32, 0x3a, 0x9f, 0xb8, 0xaa,
-                0x4b, 0x1e, 0x5e, 0x4a,
-            ],
-            timestamp: 1231006505,
-            bits: 0x1d00ffff,
-            nonce: 2083236893,
-        };
-
-        let mut header_data = [0u8; 80];
-        header_data[0..4].copy_from_slice(&(genesis_header.version as i32).to_le_bytes());
-        header_data[4..36].copy_from_slice(&genesis_header.prev_block_hash);
-        header_data[36..68].copy_from_slice(&genesis_header.merkle_root);
-        header_data[68..72].copy_from_slice(&(genesis_header.timestamp as u32).to_le_bytes());
-        header_data[72..76].copy_from_slice(&(genesis_header.bits as u32).to_le_bytes());
-        header_data[76..80].copy_from_slice(&(genesis_header.nonce as u32).to_le_bytes());
-        let computed_hash = double_sha256(&header_data);
-
-        if computed_hash != genesis_hash {
-            warn!(
-                "Genesis hash mismatch! Computed: {}, Expected: {}",
-                hex::encode(computed_hash),
-                hex::encode(genesis_hash)
-            );
-        }
-
         blockstore
-            .store_header(&genesis_hash, &genesis_header)
+            .store_header(&genesis_hash, &genesis.header)
             .context("Failed to store genesis header")?;
         blockstore
             .store_height(0, &genesis_hash)
@@ -596,16 +577,6 @@ pub(crate) async fn download_headers(
     let mut last_progress_log = start_height;
     let mut last_progress_event = start_height;
     let start_time = std::time::Instant::now();
-    let consensus_network = crate::network::header_work::network_for_header_work(
-        network
-            .protocol_engine()
-            .map(|engine| engine.get_protocol_version()),
-        network
-            .storage()
-            .as_ref()
-            .map(|storage| storage.chain().consensus_network())
-            .unwrap_or(blvm_protocol::types::Network::Mainnet),
-    );
 
     // Fast-forward through headers already on disk.  During local replay after a UTXO repair,
     // `start_height` may be well below `highest_stored_height`.  For every contiguous run of
@@ -664,6 +635,7 @@ pub(crate) async fn download_headers(
                 blockstore,
                 current_height.saturating_sub(1),
                 &last_hash,
+                &genesis_hash,
             )?,
             hash_stop: [0; 32],
         };
@@ -758,9 +730,7 @@ pub(crate) async fn download_headers(
                                 break;
                             }
                         }
-                        if header.prev_block_hash == GENESIS_BLOCK_HASH_INTERNAL
-                            && current_height > 1
-                        {
+                        if header.prev_block_hash == genesis_hash && current_height > 1 {
                             let back = 2048u64.min(current_height.saturating_sub(1));
                             let new_h = current_height - back;
                             if let Ok(Some(hh)) =
@@ -1065,6 +1035,26 @@ mod n13_tests {
         assert!(high.len() > 12);
         assert_eq!(*high.last().unwrap(), 0);
         assert!(high.contains(&961_628));
+    }
+
+    #[test]
+    fn missing_height_zero_uses_the_caller_genesis() {
+        use crate::storage::blockstore::BlockStore;
+        use crate::storage::database::{Database, create_database, default_backend};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        let tip = [9u8; 32];
+        let genesis = [0xabu8; 32];
+        store.store_height(1, &tip).unwrap();
+        let hashes = ibd_header_locator_hashes(&store, 1, &tip, &genesis).unwrap();
+        assert_eq!(hashes.first(), Some(&tip));
+        assert!(hashes.contains(&genesis));
+        assert!(!hashes.contains(&blvm_protocol::GENESIS_BLOCK_HASH_INTERNAL));
     }
 
     #[test]

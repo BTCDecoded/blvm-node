@@ -449,7 +449,11 @@ impl NodeApiImpl {
             None => vec![(0, address_bytes)],
         };
 
-        let network = self.storage.chain().consensus_network();
+        let network = self
+            .storage
+            .chain()
+            .consensus_network()
+            .map_err(|err| ModuleError::op_err("Failed to read chain info", err))?;
         if let Some(ids) = declared_txids {
             let declared = blvm_protocol::mining::resolve_declared_txs(&mempool_txs, ids)
                 .map_err(|e| ModuleError::op_err("Declared tx resolve failed", e))?;

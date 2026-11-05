@@ -356,12 +356,15 @@ impl BlockchainRpc {
         }
     }
 
-    fn block_subsidy(&self, height: u64) -> u64 {
+    fn block_subsidy(&self, height: u64) -> Result<u64> {
         let network = crate::storage::resolve_consensus_network(
             self.protocol.as_deref(),
             self.storage.as_deref(),
-        );
-        blvm_protocol::ConsensusProof::new().get_block_subsidy_for_network(height, network) as u64
+        )?;
+        Ok(
+            blvm_protocol::ConsensusProof::new().get_block_subsidy_for_network(height, network)
+                as u64,
+        )
     }
 
     /// Wire-format block sizes for RPC (stripped, total with witness when stored, BIP141 weight).
@@ -1585,7 +1588,7 @@ impl BlockchainRpc {
                 .unwrap_or(u64::MAX);
 
                 // Calculate block subsidy
-                let subsidy = self.block_subsidy(height);
+                let subsidy = self.block_subsidy(height)?;
 
                 // Total fees = coinbase outputs minus block subsidy (satoshis).
                 let total_fees = if !block.transactions.is_empty() {

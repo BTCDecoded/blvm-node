@@ -74,17 +74,18 @@ pub(crate) fn engine_resume_snapshot_name<'a>(
 }
 
 /// Protocol engine when the node has one; otherwise the network stored in chain info.
-/// Missing chain info is mainnet.
+/// Missing chain info is mainnet. A damaged chain-info row is an error.
 pub fn resolve_consensus_network(
     protocol: Option<&blvm_protocol::BitcoinProtocolEngine>,
     storage: Option<&Storage>,
-) -> blvm_protocol::types::Network {
+) -> Result<blvm_protocol::types::Network> {
     if let Some(protocol) = protocol {
-        return protocol.get_protocol_version().consensus_network();
+        return Ok(protocol.get_protocol_version().consensus_network());
     }
-    storage
-        .map(|storage| storage.chain().consensus_network())
-        .unwrap_or(blvm_protocol::types::Network::Mainnet)
+    match storage {
+        Some(storage) => storage.chain().consensus_network(),
+        None => Ok(blvm_protocol::types::Network::Mainnet),
+    }
 }
 
 /// Storage manager that coordinates all storage operations

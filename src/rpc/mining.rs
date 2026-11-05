@@ -423,7 +423,7 @@ impl MiningRpc {
         }
         let coinbase_address = self.extract_coinbase_address(params)?;
 
-        let network = self.consensus_network();
+        let network = self.consensus_network()?;
         let mempool_witnesses =
             self.build_mempool_witnesses_for_template(&utxo_set, &mempool_txs)?;
         // Commons outputs when the module is loaded; else value 0 tops up the caller address.
@@ -510,10 +510,10 @@ impl MiningRpc {
             .collect();
 
         // Calculate coinbase value (subsidy + fees)
-        let coinbase_value = self.calculate_coinbase_value(template, height);
+        let coinbase_value = self.calculate_coinbase_value(template, height)?;
 
         // Get active rules (BIP 9 feature flags)
-        let rules = self.get_active_rules(height);
+        let rules = self.get_active_rules(height)?;
 
         // Get minimum time (median time + 1)
         let min_time = self.get_min_time(height);
@@ -927,9 +927,13 @@ impl MiningRpc {
             .unwrap_or_else(|_| transaction_weight_from_stacks(tx, None).unwrap_or(0))
     }
 
-    fn calculate_coinbase_value(&self, template: &BlockTemplate, _height: Natural) -> u64 {
+    fn calculate_coinbase_value(
+        &self,
+        template: &BlockTemplate,
+        _height: Natural,
+    ) -> RpcResult<u64> {
         // Regtest halves every 150 blocks. Other networks stay on 210,000.
-        let network = self.consensus_network();
+        let network = self.consensus_network()?;
         let subsidy = self
             .consensus
             .get_block_subsidy_for_network(template.height, network) as u64;
@@ -941,15 +945,14 @@ impl MiningRpc {
             .map(|tx| self.calculate_transaction_fee(tx))
             .sum();
 
-        subsidy + fees
+        Ok(subsidy + fees)
     }
 
     /// Active BIP9-style `rules` for `getblocktemplate`, aligned with [`ForkActivationTable`]
     /// (`blvm-consensus::activation`) and shared activation constants.
-    fn get_active_rules(&self, height: Natural) -> Vec<String> {
-        let network = self.consensus_network();
-        // Match `ForkActivationTable::from_network` (Core testnet3 vs mainnet);
-        // regtest activates CSV/segwit/taproot from genesis (0).
+    fn get_active_rules(&self, height: Natural) -> RpcResult<Vec<String>> {
+        let network = self.consensus_network()?;
+        // Match `ForkActivationTable::from_network`. Regtest CSV starts at height 1.
         let (csv_h, segwit_h, taproot_h) = match network {
             ConsensusNetwork::Mainnet => (
                 BIP112_CSV_ACTIVATION_MAINNET,
@@ -977,14 +980,15 @@ impl MiningRpc {
         if height >= taproot_h {
             rules.push("taproot".to_string());
         }
-        rules
+        Ok(rules)
     }
 
-    fn consensus_network(&self) -> ConsensusNetwork {
+    fn consensus_network(&self) -> RpcResult<ConsensusNetwork> {
         crate::storage::resolve_consensus_network(
             self.protocol_engine.as_deref(),
             self.storage.as_deref(),
         )
+        .map_err(|err| RpcError::internal_error(err.to_string()))
     }
 
     fn get_min_time(&self, height: Natural) -> Natural {

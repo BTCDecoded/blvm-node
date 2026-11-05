@@ -1393,6 +1393,12 @@ impl BlockStore {
     pub fn get_height_by_hash(&self, hash: &Hash) -> Result<Option<u64>> {
         // Use reverse index for O(1) lookup instead of O(n) iteration
         if let Some(data) = self.hash_to_height.get(hash.as_slice())? {
+            if data.len() != 8 {
+                return Err(anyhow::anyhow!(
+                    "hash-to-height row is {} bytes",
+                    data.len()
+                ));
+            }
             let mut height_bytes_array = [0u8; 8];
             height_bytes_array.copy_from_slice(&data);
             return Ok(Some(u64::from_be_bytes(height_bytes_array)));
@@ -2021,5 +2027,24 @@ mod header_height_tests {
         assert_eq!(headers.len(), 11);
         assert_eq!(headers[0].timestamp, 1_600_000_010);
         assert_eq!(headers[10].timestamp, 1_600_000_020);
+    }
+
+    #[test]
+    fn short_hash_to_height_row_is_an_error() {
+        let dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        let hash = [3u8; 32];
+        store
+            .hash_to_height_tree()
+            .unwrap()
+            .insert(hash.as_slice(), &[1, 2, 3])
+            .unwrap();
+        let err = store.get_height_by_hash(&hash).unwrap_err();
+        assert!(
+            err.to_string().contains("hash-to-height"),
+            "short row must not panic, got {err}"
+        );
     }
 }
