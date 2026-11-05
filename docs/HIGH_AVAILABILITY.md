@@ -287,4 +287,4 @@ readinessProbe:
 
 - [RPC Reference](RPC_REFERENCE.md) - Complete RPC API
 - [Configuration Guide](CONFIGURATION_GUIDE.md) - Node configuration (this repo)
-- [Production mainnet node](https://docs.thebitcoincommons.org/getting-started/first-node.html#production-mainnet-node) ([BLVM Documentation](https://docs.thebitcoincommons.org/))
+- [Production mainnet node](https://docs.btcdecoded.org/blvm/getting-started/first-node.html#production-mainnet-node) ([BLVM Documentation](https://docs.btcdecoded.org/blvm/))

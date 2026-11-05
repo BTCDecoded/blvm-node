@@ -1,12 +1,12 @@
 # Contributing to blvm-node
 
-Thank you for your interest in contributing to blvm-node! This document contains **repo-specific guidelines only**. For comprehensive contributing guidelines, see the [BLVM Documentation](https://docs.thebitcoincommons.org/development/contributing.html).
+Thank you for your interest in contributing to blvm-node! This document contains **repo-specific guidelines only**. For comprehensive contributing guidelines, see the [BLVM Documentation](https://docs.btcdecoded.org/blvm/development/contributing.html).
 
 ## Quick Links
 
-- **[Complete Contributing Guide](https://docs.thebitcoincommons.org/development/contributing.html)** - Full developer workflow
-- **[PR Process](https://docs.thebitcoincommons.org/development/pr-process.html)** - Governance tiers and review process
-- **[Testing Infrastructure](https://docs.thebitcoincommons.org/development/testing.html)** - Testing guides
+- **[Complete Contributing Guide](https://docs.btcdecoded.org/blvm/development/contributing.html)** - Full developer workflow
+- **[PR Process](https://docs.btcdecoded.org/blvm/development/pr-process.html)** - Governance tiers and review process
+- **[Testing Infrastructure](https://docs.btcdecoded.org/blvm/development/testing.html)** - Testing guides
 
 ## Code of Conduct
 
@@ -81,7 +81,7 @@ On **`iroh`**, **`quinn`**, **`hickory`**, **`time`**, or other security-sensiti
 
 ## Getting Help
 
-- **Documentation**: [docs.thebitcoincommons.org](https://docs.thebitcoincommons.org)
+- **Documentation**: [docs.btcdecoded.org/blvm](https://docs.btcdecoded.org/blvm)
 - **Issues**: Use GitHub issues for bugs and feature requests
 - **Discussions**: Use GitHub discussions for questions
 - **Security**: See [SECURITY.md](SECURITY.md)

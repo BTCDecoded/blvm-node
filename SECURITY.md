@@ -6,7 +6,7 @@ This document covers repo-specific security boundaries. See the [BTCDecoded Secu
 
 This document defines the security boundaries, threat model, and limitations of the BTCDecoded blvm-node implementation. This is critical for understanding what this node can and cannot do safely.
 
-**Operators:** deployment exposure classes (RPC / P2P / modules) and **required vs recommended vs unsupported** combinations are summarized in the BLVM book — **[Deployment posture](https://docs.thebitcoincommons.org/security/deployment-posture.html)** — and in **[RPC transport × authentication](https://docs.thebitcoincommons.org/security/rpc-transport-auth-matrix.html)**.
+**Operators:** deployment exposure classes (RPC / P2P / modules) and **required vs recommended vs unsupported** combinations are summarized in the BLVM book — **[Deployment posture](https://docs.btcdecoded.org/blvm/security/deployment-posture.html)** — and in **[RPC transport × authentication](https://docs.btcdecoded.org/blvm/security/rpc-transport-auth-matrix.html)**.
 
 ## Security Boundaries
 

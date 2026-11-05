@@ -18,7 +18,7 @@ Authentication is optional. When enabled, use:
 - **Token-based**: `Authorization: Bearer <token>`
 - **Certificate-based**: TLS client certificates
 
-For **TCP HTTP vs QUIC JSON-RPC vs REST** and which auth modes apply, see **[RPC transport × authentication](https://docs.thebitcoincommons.org/security/rpc-transport-auth-matrix.html)** (BLVM docs).
+For **TCP HTTP vs QUIC JSON-RPC vs REST** and which auth modes apply, see **[RPC transport × authentication](https://docs.btcdecoded.org/blvm/security/rpc-transport-auth-matrix.html)** (BLVM docs).
 
 ## Rate Limiting
 
@@ -885,5 +885,5 @@ All methods return JSON-RPC 2.0 error responses on failure:
 ## Related Documentation
 
 - [High Availability](HIGH_AVAILABILITY.md) - Health checks and metrics
-- [Configuration reference](https://docs.thebitcoincommons.org/reference/configuration-reference.html) ([BLVM Documentation](https://docs.thebitcoincommons.org/))
+- [Configuration reference](https://docs.btcdecoded.org/blvm/reference/configuration-reference.html) ([BLVM Documentation](https://docs.btcdecoded.org/blvm/))
 - [Module System](MODULE_SYSTEM.md) - Module system documentation

@@ -1,4 +1,4 @@
-# Bitcoin Commons Node
+# BLVM node
 
 [![crates.io](https://img.shields.io/crates/v/blvm-node.svg)](https://crates.io/crates/blvm-node)
 [![docs.rs](https://docs.rs/blvm-node/badge.svg)](https://docs.rs/blvm-node)
@@ -7,14 +7,14 @@
 
 Minimal Bitcoin node implementation using blvm-protocol for protocol abstraction and blvm-consensus for consensus decisions.
 
-> **📚 Comprehensive Documentation**: See [docs.thebitcoincommons.org](https://docs.thebitcoincommons.org/) (source repo: [blvm-docs](https://github.com/BTCDecoded/blvm-docs)).  
+> **📚 Comprehensive Documentation**: See [docs.btcdecoded.org/blvm](https://docs.btcdecoded.org/blvm/) (source repo: [blvm-docs](https://github.com/BTCDecoded/blvm-docs)).  
 > **For verified system status**: See [SYSTEM_STATUS.md](https://github.com/BTCDecoded/.github/blob/main/SYSTEM_STATUS.md) in the BTCDecoded organization repository.
 
 Provides a minimal Bitcoin node implementation using blvm-protocol for protocol abstraction and blvm-consensus for all consensus decisions. Adds only non-consensus infrastructure: storage, networking, RPC, and orchestration.
 
 ## Architecture Position
 
-Tier 4 of the 6-tier Bitcoin Commons architecture (BLVM technology stack):
+Tier 4 of the BLVM stack. Bitcoin Commons is the specification and the governance model. BLVM is one implementation of that spec.
 
 ```
 1. blvm-spec (Orange Paper - mathematical foundation)
@@ -167,7 +167,7 @@ The node binary is `blvm`. The `blvm` crate builds it (`cargo build --release -p
 ./target/release/blvm --network mainnet
 ```
 
-For **release mainnet IBD**, use the **`blvm`** binary — [Mainnet initial sync](https://docs.thebitcoincommons.org/getting-started/mainnet-sync.html).
+For **release mainnet IBD**, use the **`blvm`** binary — [Mainnet initial sync](https://docs.btcdecoded.org/blvm/getting-started/mainnet-sync.html).
 
 ### Programmatic Usage
 
@@ -189,7 +189,7 @@ See [docs/](docs/) for detailed documentation including:
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) for security policies, **[Deployment posture](https://docs.thebitcoincommons.org/security/deployment-posture.html)** for operator exposure guidance, and [BTCDecoded Security Policy](https://github.com/BTCDecoded/.github/blob/main/SECURITY.md) for organization-wide guidelines.
+See [SECURITY.md](SECURITY.md) for security policies, **[Deployment posture](https://docs.btcdecoded.org/blvm/security/deployment-posture.html)** for operator exposure guidance, and [BTCDecoded Security Policy](https://github.com/BTCDecoded/.github/blob/main/SECURITY.md) for organization-wide guidelines.
 
 Additional hardening required for production mainnet use.
 

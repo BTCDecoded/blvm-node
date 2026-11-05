@@ -160,9 +160,9 @@ connection_rate_limit_window_seconds = 60
 
 Optional **`rest_api`** / QUIC RPC are separate features; see node docs for `RestApiConfig` / `quinn` when enabled.
 
-**Transport × authentication** (TCP JSON-RPC, QUIC, REST): [RPC transport × authentication](https://docs.thebitcoincommons.org/security/rpc-transport-auth-matrix.html).
+**Transport × authentication** (TCP JSON-RPC, QUIC, REST): [RPC transport × authentication](https://docs.btcdecoded.org/blvm/security/rpc-transport-auth-matrix.html).
 
-**Deployment posture** (exposure classes, P2P, backups, modules): [Deployment posture](https://docs.thebitcoincommons.org/security/deployment-posture.html).
+**Deployment posture** (exposure classes, P2P, backups, modules): [Deployment posture](https://docs.btcdecoded.org/blvm/security/deployment-posture.html).
 
 ## Example Configurations
 
