@@ -1096,7 +1096,7 @@ impl MempoolManager {
 
         let Some((block_height, block_mtp)) = self.finality_context() else {
             // A relative lock of 0 is already final. A non-zero lock needs the tip.
-            return (tx.version as u32) as i32 >= 2
+            return blvm_consensus::sequence_locks::version_enforces_relative_lock(tx.version)
                 && tx.inputs.iter().any(|input| {
                     let seq = input.sequence as u32;
                     !is_sequence_disabled(seq)
