@@ -8,6 +8,7 @@ pub mod background_validation;
 pub mod block_processor;
 #[cfg(feature = "production")]
 pub mod chain_selector;
+pub mod core_mempool_dat;
 pub mod data_dir_lock;
 pub mod event_publisher;
 pub mod health;
@@ -480,6 +481,18 @@ impl Node {
     /// Start all node components
     async fn start_components(&mut self) -> Result<()> {
         info!("[START_COMPONENTS] Starting node components");
+        if let Ok(Some(info)) = self.storage.chain().load_chain_info() {
+            let params = self.protocol.get_network_params();
+            let running_genesis =
+                blvm_consensus::block::block_header_hash(&params.genesis_block.header);
+            if let Some(message) = crate::storage::chainstate::datadir_network_conflict(
+                &info,
+                &params.network_name,
+                &running_genesis,
+            ) {
+                return Err(anyhow::anyhow!(message));
+            }
+        }
 
         // Validate security configuration and emit warnings
         if let Some(ref config) = self.config {

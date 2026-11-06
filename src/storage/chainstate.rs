@@ -64,6 +64,37 @@ impl Default for ChainParams {
     }
 }
 
+/// A stored chain that belongs to another network. `None` means this datadir
+/// may be opened. A zero genesis hash falls back to the stored network name.
+pub fn datadir_network_conflict(
+    info: &ChainInfo,
+    running_name: &str,
+    running_genesis: &Hash,
+) -> Option<String> {
+    let stored_genesis = info.chain_params.genesis_hash;
+    let stored_name = info.chain_params.network.as_str();
+    if stored_genesis != Hash::default() && stored_genesis != *running_genesis {
+        return Some(format!(
+            "datadir genesis {} ({stored_name}) does not match {running_name} genesis {}",
+            crate::storage::hashing::hash_to_rpc_hex(&stored_genesis),
+            crate::storage::hashing::hash_to_rpc_hex(running_genesis),
+        ));
+    }
+    if stored_genesis == Hash::default()
+        && !stored_name.is_empty()
+        && stored_name != running_name
+        && !matches!(
+            (stored_name, running_name),
+            ("BitcoinV1", "mainnet") | ("mainnet", "BitcoinV1")
+        )
+    {
+        return Some(format!(
+            "datadir network {stored_name} does not match running network {running_name}"
+        ));
+    }
+    None
+}
+
 /// Stored `chain_params.network` string to the consensus network enum.
 /// Unknown names are mainnet, matching a missing chain info record.
 pub fn consensus_network_from_stored_name(name: &str) -> Network {
@@ -1349,5 +1380,38 @@ mod tests {
         let stats = chain.get_utxo_stats(&block_hash).unwrap().unwrap();
         assert_eq!(stats.txouts, 2);
         assert_eq!(stats.total_amount, 50_000);
+    }
+
+    #[test]
+    fn a_different_genesis_refuses_the_datadir() {
+        use super::{ChainInfo, ChainParams, datadir_network_conflict};
+        use blvm_protocol::BlockHeader;
+        let info = ChainInfo {
+            tip_hash: [0u8; 32],
+            tip_header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                timestamp: 0,
+                bits: 0,
+                nonce: 0,
+            },
+            height: 0,
+            total_work: 0,
+            chain_params: ChainParams {
+                network: "mainnet".into(),
+                genesis_hash: [9u8; 32],
+                max_target: 0,
+                subsidy_halving_interval: 210_000,
+            },
+        };
+        assert!(datadir_network_conflict(&info, "testnet4", &[1u8; 32]).is_some());
+        let mut same = info.clone();
+        same.chain_params.genesis_hash = [1u8; 32];
+        assert!(datadir_network_conflict(&same, "mainnet", &[1u8; 32]).is_none());
+        let mut unnamed = info.clone();
+        unnamed.chain_params.genesis_hash = [0u8; 32];
+        unnamed.chain_params.network = "signet".into();
+        assert!(datadir_network_conflict(&unnamed, "mainnet", &[0u8; 32]).is_some());
     }
 }

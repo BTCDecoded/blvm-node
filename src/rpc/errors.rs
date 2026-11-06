@@ -68,13 +68,15 @@ pub enum RpcErrorCode {
     /// Server error (reserved -32000 to -32099)
     ServerError(i32),
     /// Protocol-specific errors
-    /// Transaction already in block chain (-1)
+    /// A spendable output of this transaction is already a coin (-27)
     TxAlreadyInChain,
     /// Transaction rejected (-25)
     TxRejected,
-    /// Transaction missing inputs (-1)
+    /// Policy reject, including a mempool duplicate (-26)
+    VerifyRejected,
+    /// Missing or spent inputs (-25)
     TxMissingInputs,
-    /// Transaction already in mempool (-27)
+    /// Transaction already in mempool (-26)
     TxAlreadyInMempool,
     /// Block not found (-5)
     BlockNotFound,
@@ -94,10 +96,11 @@ impl RpcErrorCode {
             RpcErrorCode::InvalidParams => -32602,
             RpcErrorCode::InternalError => -32603,
             RpcErrorCode::ServerError(code) => *code,
-            RpcErrorCode::TxAlreadyInChain => -1,
+            RpcErrorCode::TxAlreadyInChain => -27,
             RpcErrorCode::TxRejected => -25,
-            RpcErrorCode::TxMissingInputs => -1,
-            RpcErrorCode::TxAlreadyInMempool => -27,
+            RpcErrorCode::VerifyRejected => -26,
+            RpcErrorCode::TxMissingInputs => -25,
+            RpcErrorCode::TxAlreadyInMempool => -26,
             RpcErrorCode::BlockNotFound => -5,
             RpcErrorCode::TxNotFound => -5,
             RpcErrorCode::UtxoNotFound => -5,
@@ -113,10 +116,11 @@ impl RpcErrorCode {
             RpcErrorCode::InvalidParams => "Invalid params",
             RpcErrorCode::InternalError => "Internal error",
             RpcErrorCode::ServerError(_) => "Server error",
-            RpcErrorCode::TxAlreadyInChain => "Transaction already in block chain",
+            RpcErrorCode::TxAlreadyInChain => "Transaction outputs already in utxo set",
             RpcErrorCode::TxRejected => "Transaction rejected",
-            RpcErrorCode::TxMissingInputs => "Missing inputs",
-            RpcErrorCode::TxAlreadyInMempool => "Transaction already in mempool",
+            RpcErrorCode::VerifyRejected => "Transaction rejected",
+            RpcErrorCode::TxMissingInputs => "bad-txns-inputs-missingorspent",
+            RpcErrorCode::TxAlreadyInMempool => "txn-already-in-mempool",
             RpcErrorCode::BlockNotFound => "Block not found",
             RpcErrorCode::TxNotFound => "Transaction not found",
             RpcErrorCode::UtxoNotFound => "No such UTXO",
@@ -214,11 +218,8 @@ impl RpcError {
     }
 
     /// Transaction already in mempool
-    pub fn tx_already_in_mempool(txid: &str) -> Self {
-        Self::new(
-            RpcErrorCode::TxAlreadyInMempool,
-            format!("Transaction already in mempool: {txid}"),
-        )
+    pub fn tx_already_in_mempool(_txid: &str) -> Self {
+        Self::new(RpcErrorCode::TxAlreadyInMempool, "txn-already-in-mempool")
     }
 
     /// Transaction rejected

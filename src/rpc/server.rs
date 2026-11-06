@@ -57,6 +57,8 @@ pub(crate) fn admin_rpc_methods() -> &'static HashSet<&'static str> {
             "sendrawtransaction",
             "createrawtransaction",
             "savemempool",
+            "importmempool",
+            "submitpackage",
             "prioritisetransaction",
         ])
     })
@@ -1406,6 +1408,7 @@ impl RpcServer {
             // Raw Transaction methods
             "getrawtransaction" => self.rawtx.getrawtransaction(&params).await,
             "sendrawtransaction" => self.rawtx.sendrawtransaction(&params).await,
+            "submitpackage" => self.rawtx.submitpackage(&params).await,
             "testmempoolaccept" => self.rawtx.testmempoolaccept(&params).await,
             "decoderawtransaction" => self.rawtx.decoderawtransaction(&params).await,
             "createrawtransaction" => self.rawtx.createrawtransaction(&params).await,
@@ -1417,6 +1420,7 @@ impl RpcServer {
             "getmempoolinfo" => self.mempool.getmempoolinfo(&params).await,
             "getrawmempool" => self.mempool.getrawmempool(&params).await,
             "savemempool" => self.mempool.savemempool(&params).await,
+            "importmempool" => self.mempool.importmempool(&params).await,
             "getmempoolancestors" => self.mempool.getmempoolancestors(&params).await,
             "getmempooldescendants" => self.mempool.getmempooldescendants(&params).await,
             "getmempoolentry" => self.mempool.getmempoolentry(&params).await,

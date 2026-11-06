@@ -292,29 +292,15 @@ impl RawTxRpc {
             let txid = calculate_tx_id(&tx);
             let txid_hex = Self::rpc_txid(&txid);
 
-            // Check if already in mempool
-            if mempool.get_transaction(&txid).is_some() {
-                return Err(RpcError::tx_already_in_mempool(&txid_hex));
+            if spendable_output_already_unspent(storage, &txid, &tx)? {
+                return Err(RpcError::new(
+                    RpcErrorCode::TxAlreadyInChain,
+                    "Transaction outputs already in utxo set",
+                ));
             }
 
-            // Check if in chain
-            if storage
-                .transactions()
-                .has_transaction(&txid)
-                .unwrap_or(false)
-            {
-                return Err(RpcError::with_data(
-                    RpcErrorCode::TxAlreadyInChain,
-                    format!("Transaction already in chain: {txid_hex}"),
-                    json!({
-                        "txid": txid_hex,
-                        "reason": "already_confirmed",
-                        "suggestions": [
-                            "Transaction has already been confirmed in a block",
-                            "Use getrawtransaction to retrieve the transaction from the blockchain"
-                        ]
-                    }),
-                ));
+            if mempool.get_transaction(&txid).is_some() {
+                return Err(RpcError::tx_already_in_mempool(&txid_hex));
             }
 
             // Validate transaction using consensus layer
@@ -373,24 +359,9 @@ impl RawTxRpc {
                                 .is_some()
                             && !mempool.spends_outpoint(&input.prevout);
                         if !in_chain && !in_pool {
-                            let prevout_str = format!(
-                                "{}:{}",
-                                Self::rpc_txid(&input.prevout.hash),
-                                input.prevout.index
-                            );
-                            return Err(RpcError::with_data(
+                            return Err(RpcError::new(
                                 RpcErrorCode::TxMissingInputs,
-                                format!("Input {prevout_str} not found in UTXO set"),
-                                json!({
-                                    "prevout": prevout_str,
-                                    "txid": txid_hex,
-                                    "reason": "missing_input",
-                                    "suggestions": [
-                                        "The referenced output does not exist or has already been spent",
-                                        "Ensure the transaction is spending valid UTXOs",
-                                        "Check that the previous transaction is confirmed"
-                                    ]
-                                }),
+                                "bad-txns-inputs-missingorspent",
                             ));
                         }
                     }
@@ -419,7 +390,7 @@ impl RawTxRpc {
                     if let Some(max_feerate) = max_feerate_cap {
                         if !allowhighfees && fee_rate_btc_per_kvb > max_feerate {
                             return Err(RpcError::with_data(
-                                RpcErrorCode::TxRejected,
+                                RpcErrorCode::VerifyRejected,
                                 format!(
                                     "Fee rate {fee_rate_btc_per_kvb} BTC/kvB exceeds maximum allowed {max_feerate} BTC/kvB"
                                 ),
@@ -453,19 +424,9 @@ impl RawTxRpc {
                             }
                         }
                         Ok(false) => {
-                            return Err(RpcError::tx_rejected_with_context(
-                                "Transaction rejected by mempool policy".to_string(),
-                                Some(&txid_hex),
-                                Some("rejected"),
-                                Some(json!({
-                                    "txid": txid_hex,
-                                    "reason": "policy",
-                                    "suggestions": [
-                                        "Transaction may already be in the mempool",
-                                        "Transaction fee rate may be below min-relay-fee",
-                                        "Transaction conflicts with existing mempool transaction"
-                                    ]
-                                })),
+                            return Err(RpcError::new(
+                                RpcErrorCode::VerifyRejected,
+                                "Transaction rejected by mempool policy",
                             ));
                         }
                         Err(e) => {
@@ -503,6 +464,57 @@ impl RawTxRpc {
                 "RPC not initialized with dependencies",
             ))
         }
+    }
+
+    /// Submit a package. Parents must appear before the children that spend them.
+    ///
+    /// Params: [["hex", ...], maxfeerate (optional)]
+    /// Each result is the txid and, when admission failed, `error`.
+    pub async fn submitpackage(&self, params: &Value) -> RpcResult<Value> {
+        let rawtxs = param_array(params, 0).ok_or_else(|| {
+            RpcError::missing_parameter("package", Some("array of raw transaction hex strings"))
+        })?;
+        if rawtxs.is_empty() {
+            return Err(RpcError::invalid_params("package is empty"));
+        }
+        let mut decoded = Vec::with_capacity(rawtxs.len());
+        for value in rawtxs {
+            let hex_string = value
+                .as_str()
+                .ok_or_else(|| RpcError::invalid_params("package entries must be hex strings"))?;
+            let bytes = hex::decode(hex_string)
+                .map_err(|err| RpcError::invalid_params(format!("Invalid hex string: {err}")))?;
+            let (tx, witnesses) = Self::deserialize_transaction_with_witness(&bytes)?;
+            decoded.push((tx, witnesses));
+        }
+        let txids: Vec<_> = decoded
+            .iter()
+            .map(|(tx, _)| blvm_protocol::block::calculate_tx_id(tx))
+            .collect();
+        for (index, (tx, _)) in decoded.iter().enumerate() {
+            for input in &tx.inputs {
+                if let Some(parent) = txids.iter().position(|id| *id == input.prevout.hash) {
+                    if parent > index {
+                        return Err(RpcError::invalid_params(
+                            "package parents must appear before their children",
+                        ));
+                    }
+                }
+            }
+        }
+        let maxfeerate = params.get(1).cloned().unwrap_or(Value::Null);
+        let mut results = Vec::with_capacity(decoded.len());
+        for (tx, witnesses) in &decoded {
+            let txid = blvm_protocol::block::calculate_tx_id(tx);
+            let txid_hex = Self::rpc_txid(&txid);
+            let bytes = Self::serialize_transaction_with_witness(tx, Some(witnesses));
+            let one = json!([bytes, maxfeerate]);
+            match self.sendrawtransaction(&one).await {
+                Ok(value) => results.push(json!({"txid": value, "error": Value::Null})),
+                Err(err) => results.push(json!({"txid": txid_hex, "error": err.to_string()})),
+            }
+        }
+        Ok(json!(results))
     }
 
     /// Test if a raw transaction would be accepted to the mempool
@@ -902,7 +914,8 @@ impl RawTxRpc {
                 "scriptPubKey": {
                     "asm": "",
                     "hex": hex::encode(&output.script_pubkey),
-                    "type": script_pubkey_type(output.script_pubkey.as_ref())
+                    "type": script_pubkey_type(output.script_pubkey.as_ref()),
+                    "desc": script_pubkey_desc(output.script_pubkey.as_ref())
                 }
             }));
         }
@@ -1028,6 +1041,7 @@ impl RawTxRpc {
                         "hex": hex::encode(&output.script_pubkey),
                         "reqSigs": required_signatures(output.script_pubkey.as_ref()),
                         "type": script_pubkey_type(output.script_pubkey.as_ref()),
+                    "desc": script_pubkey_desc(output.script_pubkey.as_ref()),
                         "addresses": []
                     }
                 })).collect::<Vec<_>>(),
@@ -1154,16 +1168,17 @@ impl RawTxRpc {
                             let output = &tx.outputs[n as usize];
                             let (best_hash, _) = storage.chain().get_tip_hash_and_height()?;
                             return Ok(json!({
-                                "bestblock": Self::rpc_txid(&best_hash),
-                                "confirmations": 0,
-                                "value": output.value as f64 / 100_000_000.0,
-                                "scriptPubKey": {
-                                    "asm": "",
-                                    "hex": hex::encode(&output.script_pubkey),
-                                    "type": script_pubkey_type(output.script_pubkey.as_ref())
-                                },
-                                "coinbase": false
-                            }));
+                                        "bestblock": Self::rpc_txid(&best_hash),
+                                        "confirmations": 0,
+                                        "value": output.value as f64 / 100_000_000.0,
+                                        "scriptPubKey": {
+                                            "asm": "",
+                                            "hex": hex::encode(&output.script_pubkey),
+                                            "type": script_pubkey_type(output.script_pubkey.as_ref()),
+                            "desc": script_pubkey_desc(output.script_pubkey.as_ref())
+                                        },
+                                        "coinbase": false
+                                    }));
                         }
                     }
                 }
@@ -1243,7 +1258,8 @@ impl RawTxRpc {
                         "scriptPubKey": {
                             "asm": "",
                             "hex": hex::encode(&utxo.script_pubkey),
-                            "type": script_pubkey_type(utxo.script_pubkey.as_ref())
+                            "type": script_pubkey_type(utxo.script_pubkey.as_ref()),
+                    "desc": script_pubkey_desc(utxo.script_pubkey.as_ref())
                         },
                         "coinbase": utxo.is_coinbase
                     }))
@@ -1510,7 +1526,8 @@ impl RawTxRpc {
                         "scriptPubKey": {
                             "asm": hex::encode(&output.script_pubkey),
                             "hex": hex::encode(&output.script_pubkey),
-                            "type": script_pubkey_type(output.script_pubkey.as_ref())
+                            "type": script_pubkey_type(output.script_pubkey.as_ref()),
+                    "desc": script_pubkey_desc(output.script_pubkey.as_ref())
                         }
                     })).collect::<Vec<_>>(),
                     "hex": if include_hex { hex::encode(&wire.bytes) } else { "".to_string() },
@@ -1587,7 +1604,8 @@ impl RawTxRpc {
                         "scriptPubKey": {
                             "asm": hex::encode(&output.script_pubkey),
                             "hex": hex::encode(&output.script_pubkey),
-                            "type": script_pubkey_type(output.script_pubkey.as_ref())
+                            "type": script_pubkey_type(output.script_pubkey.as_ref()),
+                    "desc": script_pubkey_desc(output.script_pubkey.as_ref())
                         }
                     })).collect::<Vec<_>>(),
                     "hex": if include_hex { hex::encode(&wire.bytes) } else { "".to_string() },
@@ -2124,6 +2142,54 @@ fn small_push_int(op: u8) -> Option<u64> {
     }
 }
 
+const MAX_SCRIPT_SIZE: usize = 10_000;
+
+fn output_is_unspendable(script: &[u8]) -> bool {
+    script.len() > MAX_SCRIPT_SIZE || script.first() == Some(&blvm_protocol::opcodes::OP_RETURN)
+}
+
+fn spendable_output_already_unspent(
+    storage: &crate::storage::Storage,
+    txid: &blvm_protocol::Hash,
+    tx: &blvm_protocol::Transaction,
+) -> Result<bool, RpcError> {
+    if is_genesis_coinbase(storage, txid) {
+        return Ok(false);
+    }
+    for (index, output) in tx.outputs.iter().enumerate() {
+        if output_is_unspendable(output.script_pubkey.as_ref()) {
+            continue;
+        }
+        let outpoint = blvm_protocol::OutPoint {
+            hash: *txid,
+            index: index as u32,
+        };
+        match storage.read_chain_prevout(&outpoint) {
+            Ok(Some(_)) => return Ok(true),
+            Ok(None) => {}
+            Err(err) => {
+                return Err(RpcError::internal_error(format!(
+                    "sendrawtransaction: output lookup failed: {err}"
+                )));
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn is_genesis_coinbase(storage: &crate::storage::Storage, txid: &blvm_protocol::Hash) -> bool {
+    let Ok(Some(info)) = storage.chain().load_chain_info() else {
+        return false;
+    };
+    let network =
+        crate::storage::chainstate::consensus_network_from_stored_name(&info.chain_params.network);
+    let block = blvm_consensus::block::genesis_block(network);
+    block
+        .transactions
+        .first()
+        .is_some_and(|coinbase| blvm_protocol::block::calculate_tx_id(coinbase) == *txid)
+}
+
 pub(crate) fn script_pubkey_type(script: &[u8]) -> &'static str {
     use blvm_protocol::opcodes::{
         OP_0, OP_1, OP_CHECKSIG, OP_DUP, OP_EQUAL, OP_EQUALVERIFY, OP_HASH160, OP_RETURN,
@@ -2148,16 +2214,185 @@ pub(crate) fn script_pubkey_type(script: &[u8]) -> &'static str {
         "witness_v0_scripthash"
     } else if script.len() == 34 && script[0] == OP_1 && script[1] == 32 {
         "witness_v1_taproot"
-    } else if script.first() == Some(&OP_RETURN) {
+    } else if bare_pubkey(script).is_some() {
+        "pubkey"
+    } else if bare_multisig(script).is_some() {
+        "multisig"
+    } else if is_push_only_nulldata(script) {
         "nulldata"
     } else {
         "nonstandard"
     }
 }
 
+pub(crate) fn script_pubkey_desc(script: &[u8]) -> String {
+    let body = match script_pubkey_type(script) {
+        "pubkeyhash" => format!("pkh({})", hex::encode(&script[3..23])),
+        "scripthash" => format!("sh({})", hex::encode(&script[2..22])),
+        "witness_v0_keyhash" => format!("wpkh({})", hex::encode(&script[2..22])),
+        "witness_v0_scripthash" => format!("wsh({})", hex::encode(&script[2..34])),
+        "witness_v1_taproot" => format!("tr({})", hex::encode(&script[2..34])),
+        "pubkey" => format!(
+            "pk({})",
+            hex::encode(bare_pubkey(script).unwrap_or_default())
+        ),
+        "multisig" => bare_multisig(script)
+            .map(|(required, keys)| {
+                let keys: Vec<String> = keys.iter().map(|key| hex::encode(key)).collect();
+                format!("multi({required},{})", keys.join(","))
+            })
+            .unwrap_or_else(|| format!("raw({})", hex::encode(script))),
+        _ => format!("raw({})", hex::encode(script)),
+    };
+    match descriptor_checksum(&body) {
+        Some(sum) => format!("{body}#{sum}"),
+        None => body,
+    }
+}
+
+fn bare_pubkey(script: &[u8]) -> Option<&[u8]> {
+    let (&len, rest) = script.split_first()?;
+    let (&last, key) = rest.split_last()?;
+    let sized = (len == 33 || len == 65) && key.len() == usize::from(len);
+    if !(sized && last == blvm_protocol::opcodes::OP_CHECKSIG && pubkey_size(key)) {
+        return None;
+    }
+    Some(key)
+}
+
+fn pubkey_size(key: &[u8]) -> bool {
+    match key.first() {
+        Some(2 | 3) => key.len() == 33,
+        Some(4 | 6 | 7) => key.len() == 65,
+        _ => false,
+    }
+}
+
+fn bare_multisig(script: &[u8]) -> Option<(u64, Vec<&[u8]>)> {
+    use blvm_protocol::opcodes::OP_CHECKMULTISIG;
+    if script.last() != Some(&OP_CHECKMULTISIG) || script.len() < 3 {
+        return None;
+    }
+    let required = small_push_int(script[0])?;
+    let keys_n = small_push_int(script[script.len() - 2])?;
+    if required == 0 || required > keys_n || keys_n > 20 {
+        return None;
+    }
+    let mut index = 1;
+    let mut keys = Vec::new();
+    while index < script.len() - 2 {
+        let len = *script.get(index)? as usize;
+        if !(1..=75).contains(&len) {
+            return None;
+        }
+        index += 1;
+        let key = script.get(index..index + len)?;
+        if !pubkey_size(key) {
+            return None;
+        }
+        keys.push(key);
+        index += len;
+    }
+    if index != script.len() - 2 || keys.len() as u64 != keys_n {
+        return None;
+    }
+    Some((required, keys))
+}
+
+fn is_push_only_nulldata(script: &[u8]) -> bool {
+    let Some((&first, mut rest)) = script.split_first() else {
+        return false;
+    };
+    if first != blvm_protocol::opcodes::OP_RETURN {
+        return false;
+    }
+    while !rest.is_empty() {
+        let Some(consumed) = push_len(rest) else {
+            return false;
+        };
+        rest = &rest[consumed..];
+    }
+    true
+}
+
+fn push_len(script: &[u8]) -> Option<usize> {
+    let op = *script.first()?;
+    if op <= 75 {
+        let len = op as usize;
+        (script.len() >= 1 + len).then_some(1 + len)
+    } else if (0x51..=0x60).contains(&op) || op == 0x00 {
+        Some(1)
+    } else if op == 0x4c {
+        let len = *script.get(1)? as usize;
+        (script.len() >= 2 + len).then_some(2 + len)
+    } else if op == 0x4d {
+        let len = u16::from_le_bytes(script.get(1..3)?.try_into().ok()?) as usize;
+        (script.len() >= 3 + len).then_some(3 + len)
+    } else if op == 0x4e {
+        let len = u32::from_le_bytes(script.get(1..5)?.try_into().ok()?) as usize;
+        (script.len() >= 5 + len).then_some(5 + len)
+    } else {
+        None
+    }
+}
+
+const DESC_INPUT_CHARSET: &str = "0123456789()[],'/*abcdefgh@:$%{}\
+IJKLMNOPQRSTUVWXYZ&+-.;<=>?!^_|~\
+ijklmnopqrstuvwxyzABCDEFGH`#\"\\ ";
+const DESC_CHECKSUM_CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+fn descriptor_checksum(body: &str) -> Option<String> {
+    let mut chk = 1u64;
+    let mut class = 0u64;
+    let mut class_count = 0u32;
+    for ch in body.chars() {
+        let pos = DESC_INPUT_CHARSET.find(ch)? as u64;
+        chk = desc_polymod(chk, pos & 31);
+        class = class * 3 + (pos >> 5);
+        class_count += 1;
+        if class_count == 3 {
+            chk = desc_polymod(chk, class);
+            class = 0;
+            class_count = 0;
+        }
+    }
+    if class_count > 0 {
+        chk = desc_polymod(chk, class);
+    }
+    for _ in 0..8 {
+        chk = desc_polymod(chk, 0);
+    }
+    chk ^= 1;
+    Some(
+        (0..8)
+            .map(|i| char::from(DESC_CHECKSUM_CHARSET[((chk >> (5 * (7 - i))) & 31) as usize]))
+            .collect(),
+    )
+}
+
+fn desc_polymod(chk: u64, value: u64) -> u64 {
+    const GENERATOR: [u64; 5] = [
+        0xf5dee51989,
+        0xa9fdca3312,
+        0x1bab10e32d,
+        0x3706b1677a,
+        0x644d626ffd,
+    ];
+    let top = chk >> 35;
+    let mut chk = ((chk & 0x7_ffff_ffff) << 5) ^ value;
+    for (i, generator) in GENERATOR.iter().enumerate() {
+        if top & (1 << i) != 0 {
+            chk ^= generator;
+        }
+    }
+    chk
+}
+
 #[cfg(test)]
 mod createraw_locks {
-    use super::{RawTxRpc, address_string_to_script_pubkey, script_pubkey_type};
+    use super::{
+        RawTxRpc, address_string_to_script_pubkey, script_pubkey_desc, script_pubkey_type,
+    };
     use blvm_protocol::opcodes::{OP_PUSHDATA1, OP_RETURN};
     use serde_json::json;
 
@@ -2214,6 +2449,72 @@ mod createraw_locks {
         assert_eq!(script[2], 80);
         assert_eq!(&script[3..], payload.as_slice());
         assert_eq!(script_pubkey_type(&script), "nulldata");
+        assert!(script_pubkey_desc(&script).starts_with("raw("));
+        let mut key = vec![33, 0x02];
+        key.extend(std::iter::repeat(0x11).take(32));
+        key.push(blvm_protocol::opcodes::OP_CHECKSIG);
+        assert_eq!(script_pubkey_type(&key), "pubkey");
+        assert!(script_pubkey_desc(&key).starts_with("pk("));
+        let bare = vec![
+            0x51,
+            33,
+            0x02,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x11,
+            0x51,
+            blvm_protocol::opcodes::OP_CHECKMULTISIG,
+        ];
+        assert_eq!(script_pubkey_type(&bare), "multisig");
+        assert!(script_pubkey_desc(&bare).contains("#"));
+        assert_eq!(
+            script_pubkey_type(&[
+                blvm_protocol::opcodes::OP_RETURN,
+                blvm_protocol::opcodes::OP_CHECKSIG
+            ]),
+            "nonstandard"
+        );
+        assert_eq!(
+            crate::rpc::errors::RpcErrorCode::TxMissingInputs.code(),
+            -25
+        );
+        assert_eq!(
+            crate::rpc::errors::RpcErrorCode::TxAlreadyInMempool.code(),
+            -26
+        );
+        assert_eq!(
+            crate::rpc::errors::RpcErrorCode::TxAlreadyInChain.code(),
+            -27
+        );
     }
 
     #[tokio::test]

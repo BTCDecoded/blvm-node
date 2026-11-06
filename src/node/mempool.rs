@@ -4468,15 +4468,26 @@ impl MempoolManager {
 
         let transactions = self.get_transactions();
         let write_result = (|| -> Result<()> {
+            use crate::node::core_mempool_dat::{CoreMempoolDat, CoreMempoolTx};
+            let txs = transactions
+                .iter()
+                .map(|tx| {
+                    let hash = calculate_tx_id(tx);
+                    CoreMempoolTx {
+                        tx: tx.clone(),
+                        witnesses: self.get_transaction_witnesses(&hash),
+                        time: 0,
+                        fee_delta: self.get_fee_delta(&hash),
+                    }
+                })
+                .collect();
+            let bytes = crate::node::core_mempool_dat::encode(&CoreMempoolDat {
+                txs,
+                ..CoreMempoolDat::default()
+            })
+            .map_err(|err| anyhow::anyhow!(err))?;
             let mut file = File::create(&tmp_path)?;
-            file.write_all(&(transactions.len() as u32).to_le_bytes())?;
-            for tx in &transactions {
-                let hash = calculate_tx_id(tx);
-                let witnesses = self.get_transaction_witnesses(&hash);
-                let serialized = encode_persisted_tx(tx, witnesses.as_deref())?;
-                file.write_all(&(serialized.len() as u32).to_le_bytes())?;
-                file.write_all(&serialized)?;
-            }
+            file.write_all(&bytes)?;
             file.sync_all()?;
             std::fs::rename(&tmp_path, path)?;
             Ok(())
@@ -4574,24 +4585,75 @@ impl MempoolManager {
     /// read leaves the pool unchanged. An admission refusal rolls back the
     /// transactions this load added and returns the error.
     pub fn load_from_disk<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
+        let bytes = std::fs::read(path)?;
+        if bytes.len() >= 8 {
+            let version = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+            if version == 1 || version == 2 {
+                let dump = crate::node::core_mempool_dat::decode(&bytes)
+                    .map_err(|err| anyhow::anyhow!(err))?;
+                return self.admit_core_dump(dump);
+            }
+        }
+        self.load_legacy_bytes(&bytes)
+    }
+
+    fn admit_core_dump(&self, dump: crate::node::core_mempool_dat::CoreMempoolDat) -> Result<()> {
         use blvm_protocol::block::calculate_tx_id;
-        use std::fs::File;
-        use std::io::Read;
+        let mut added = Vec::with_capacity(dump.txs.len());
+        for entry in dump.txs {
+            let hash = calculate_tx_id(&entry.tx);
+            match self.add_transaction_with_witness(entry.tx, entry.witnesses) {
+                Ok(true) => {
+                    if entry.fee_delta != 0 {
+                        self.prioritise_transaction(&hash, entry.fee_delta);
+                    }
+                    added.push(hash);
+                }
+                Ok(false) => {
+                    for hash in added.iter().rev() {
+                        let _ = self.remove_transaction(hash);
+                    }
+                    return Err(anyhow::anyhow!(
+                        "mempool.dat transaction was refused by policy"
+                    ));
+                }
+                Err(err) => {
+                    for hash in added.iter().rev() {
+                        let _ = self.remove_transaction(hash);
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        for (txid, delta) in dump.deltas {
+            if delta != 0 {
+                self.prioritise_transaction(&txid, delta);
+            }
+        }
+        Ok(())
+    }
 
-        let mut file = File::open(path)?;
-        let mut count_bytes = [0u8; 4];
-        file.read_exact(&mut count_bytes)?;
-        let count = u32::from_le_bytes(count_bytes) as usize;
-
+    fn load_legacy_bytes(&self, data: &[u8]) -> Result<()> {
+        use blvm_protocol::block::calculate_tx_id;
+        if data.len() < 4 {
+            return Err(anyhow::anyhow!("mempool file is shorter than a count"));
+        }
+        let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        let mut offset = 4;
         let mut decoded = Vec::with_capacity(count);
         for _ in 0..count {
-            let mut len_bytes = [0u8; 4];
-            file.read_exact(&mut len_bytes)?;
-            let len = u32::from_le_bytes(len_bytes) as usize;
-
-            let mut tx_bytes = vec![0u8; len];
-            file.read_exact(&mut tx_bytes)?;
-            decoded.push(decode_persisted_tx(&tx_bytes)?);
+            if data.len() < offset + 4 {
+                return Err(anyhow::anyhow!(
+                    "mempool file transaction length is truncated"
+                ));
+            }
+            let len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4;
+            if data.len() < offset + len {
+                return Err(anyhow::anyhow!("mempool file transaction is truncated"));
+            }
+            decoded.push(decode_persisted_tx(&data[offset..offset + len])?);
+            offset += len;
         }
 
         let mut added = Vec::with_capacity(decoded.len());

@@ -48,6 +48,8 @@ pub const CORE_RPC_METHODS: &[&str] = &[
     "getmempoolinfo",
     "getrawmempool",
     "savemempool",
+    "importmempool",
+    "submitpackage",
     "getmempoolancestors",
     "getmempooldescendants",
     "getmempoolentry",

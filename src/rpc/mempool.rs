@@ -285,6 +285,33 @@ impl MempoolRpc {
         }
     }
 
+    /// Load a mempool dump into the live pool.
+    ///
+    /// Params: [] or [filepath]. A Core version 1 or 2 file is loaded. The
+    /// older length-prefixed dump is still accepted. A file that is neither
+    /// leaves the pool unchanged.
+    pub async fn importmempool(&self, params: &Value) -> RpcResult<Value> {
+        let path = param_str(params, 0)
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                self.mempool.as_ref().and_then(|mempool| {
+                    mempool
+                        .configured_persistence_path()
+                        .map(std::path::PathBuf::from)
+                })
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from("data/mempool.dat"));
+        let Some(mempool) = &self.mempool else {
+            return Err(crate::rpc::errors::RpcError::internal_error(
+                "Mempool not initialized".to_string(),
+            ));
+        };
+        mempool.load_from_disk(&path).map_err(|err| {
+            crate::rpc::errors::RpcError::internal_error(format!("importmempool failed: {err}"))
+        })?;
+        Ok(Value::Null)
+    }
+
     /// Get mempool ancestors for a transaction
     ///
     /// Params: ["txid", verbose (optional, default: false)]

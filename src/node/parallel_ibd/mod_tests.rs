@@ -2257,9 +2257,8 @@ fn r97_evict_skips_reserved_key() {
     test_clear_lookahead_reserved();
 }
 
-/// Phase 0b.2 / rbitcoin request-vs-receive: throttle *new* far-ahead admit; do not
+/// Phase 0b.2 request-vs-receive: throttle *new* far-ahead admit; do not
 /// clear already-buffered near-gap heights, and tip (`h == next_needed`) still enqueues.
-/// See docs/RBITCOIN_VS_BLVM_IBD_ARCHITECTURE.md § Request-vs-receive.
 #[serial_test::serial(ibd)]
 #[test]
 fn admit_throttle_preserves_already_buffered_near_gap() {

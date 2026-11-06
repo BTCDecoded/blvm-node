@@ -146,9 +146,8 @@ fn received_drain_all(received: &mut BTreeMap<u64, (SharedBlock, SharedWitnesses
 /// Hard-cap eviction for per-worker `received` (OOM guard).
 ///
 /// Drops farthest-ahead bodies while `len > hard` and `h > need`.
-/// **Never** removes tip-adjacent `h <= need` — deliberate diverge from rbitcoin's soft
-/// "never drop already-received" (we drop far-ahead; we still protect the tip window).
-/// Phase 0b.1 policy surface (docs/RBITCOIN_VS_BLVM_IBD_ARCHITECTURE.md).
+/// **Never** removes tip-adjacent `h <= need`. Far-ahead bodies are dropped.
+/// The tip window stays.
 ///
 /// Leapfrog reserved heights (L1 admit) also stay: persist lookahead is 64 and
 /// LEAD is 8192, so persist-then-drop refuses and hard-trim used to delete the
@@ -254,7 +253,7 @@ fn trim_download_received(
     }
 
     // (3) Hard cap: drop farthest ahead even without persist (OOM guard).
-    // Never removes tip-adjacent `h <= need` (rbitcoin diverge: we *do* drop far-ahead).
+    // Never removes tip-adjacent `h <= need`. Far-ahead bodies are dropped.
     let hard_forced = hard_trim_download_received_far_ahead(received, need, hard);
     trimmed = trimmed.saturating_add(hard_forced);
     forced = forced.saturating_add(hard_forced);

@@ -50,6 +50,8 @@ const HELP_COMMANDS: &[&str] = &[
     "getmempoolinfo",
     "getrawmempool",
     "savemempool",
+    "importmempool",
+    "submitpackage",
     "getnetworkinfo",
     "getpeerinfo",
     "getconnectioncount",
