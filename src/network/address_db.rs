@@ -117,8 +117,10 @@ impl AddressDatabase {
 
     /// Add or update an address.
     ///
-    /// An advertisement older than the relay horizon, including timestamp 0,
-    /// is stored with that time and is not marked as just seen.
+    /// A new advertisement outside the relay horizon, including timestamp 0,
+    /// is stored with that time and is not marked as just seen. An update of a
+    /// stored socket outside the horizon leaves that entry unchanged. An update
+    /// inside the horizon writes the advertised time and refreshes `last_seen`.
     pub fn add_address(&mut self, addr: NetworkAddress, services: u64) {
         let refresh = address_within_relay_horizon(addr.time);
         // Convert NetworkAddress to SocketAddr for key
@@ -126,10 +128,13 @@ impl AddressDatabase {
 
         match self.addresses.get_mut(&socket_addr) {
             Some(entry) => {
-                entry.addr.time = addr.time;
-                if refresh {
-                    entry.update_seen();
+                // A time outside the relay horizon must not poison addr.time.
+                // is_fresh rejects 0 and a time past the horizon even when last_seen is recent.
+                if !refresh {
+                    return;
                 }
+                entry.addr.time = addr.time;
+                entry.update_seen();
                 if services != 0 {
                     // Only OR-merge when the caller has concrete service information.
                     entry.services |= services;
@@ -950,5 +955,20 @@ mod tests {
             .expect("stored");
         assert!(stored.last_seen <= current_timestamp());
         assert!(stored.last_seen + 5 >= current_timestamp());
+    }
+
+    #[test]
+    fn stale_update_does_not_poison_a_known_address() {
+        let mut db = AddressDatabase::new(10);
+        let addr = create_test_address("9.9.9.9", 8333);
+        db.add_address(addr.clone(), 1);
+        let socket = db.network_addr_to_socket(&addr);
+        let original_time = db.addresses.get(&socket).unwrap().addr.time;
+        let mut stale = addr.clone();
+        stale.time = 0;
+        db.add_address(stale, 1);
+        let stored = db.addresses.get(&socket).unwrap();
+        assert_eq!(stored.addr.time, original_time);
+        assert!(stored.is_fresh(60 * 60));
     }
 }
