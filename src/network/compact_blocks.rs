@@ -173,6 +173,11 @@ pub fn reconstruct_block(
         .map(|(index, _, _)| *index)
         .collect();
     let mut next_block_index = 0usize;
+    let mut by_short: HashMap<ShortTxId, Vec<&Transaction>> = HashMap::new();
+    for (tx_hash, tx) in mempool_txs {
+        let short_id = calculate_short_tx_id(&compact_block.header, tx_hash, compact_block.nonce);
+        by_short.entry(short_id).or_default().push(tx);
+    }
 
     // Short ids are only the transactions that were not prefilled, in block order.
     for &short_id in &compact_block.short_ids {
@@ -184,16 +189,10 @@ pub fn reconstruct_block(
 
         // More than one pool transaction with this short id is ambiguous.
         // The block transaction has to be requested rather than guessed.
-        let mut matches = Vec::new();
-        for (tx_hash, tx) in mempool_txs {
-            let calculated_short_id =
-                calculate_short_tx_id(&compact_block.header, tx_hash, compact_block.nonce);
-            if calculated_short_id == short_id {
-                matches.push(tx);
-            }
-        }
+        let matches = by_short.get(&short_id).map(Vec::as_slice).unwrap_or(&[]);
 
-        if let [tx] = matches.as_slice() {
+        if let [tx] = matches {
+            let tx = *tx;
             let conflicts_match = reconstructed_txs
                 .iter()
                 .any(|(_, existing_tx)| has_conflict_with_tx(tx, existing_tx));
@@ -349,6 +348,14 @@ pub fn begin_compact_assembly(
         .iter()
         .map(|(index, _, _)| *index)
         .collect();
+    // First pool row for a short id wins, matching the previous scan. Ambiguous
+    // ids are already in `missing` from `reconstruct_block` and are not filled.
+    let mut by_short: HashMap<ShortTxId, &(Transaction, Option<Vec<Witness>>)> = HashMap::new();
+    for (tx_hash, pair) in mempool_txs {
+        let short_id = calculate_short_tx_id(&compact_block.header, tx_hash, compact_block.nonce);
+        by_short.entry(short_id).or_insert(pair);
+    }
+    let missing_set: HashSet<usize> = missing.iter().copied().collect();
     let mut next_block_index = 0usize;
     for &short_id in &compact_block.short_ids {
         while prefilled.contains(&next_block_index) {
@@ -356,18 +363,10 @@ pub fn begin_compact_assembly(
         }
         let block_index = next_block_index;
         next_block_index = next_block_index.saturating_add(1);
-        if missing.contains(&block_index) {
+        if missing_set.contains(&block_index) {
             continue;
         }
-        let mut found = None;
-        for (tx_hash, (tx, witness)) in mempool_txs {
-            let calculated =
-                calculate_short_tx_id(&compact_block.header, tx_hash, compact_block.nonce);
-            if calculated == short_id {
-                found = Some((tx.clone(), witness.clone()));
-                break;
-            }
-        }
+        let found = by_short.get(&short_id).map(|pair| (*pair).clone());
         if let Some(filled) = found {
             if block_index < slots.len() {
                 slots[block_index] = Some(filled);
