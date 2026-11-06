@@ -17,13 +17,7 @@
       "auto_prune": true,
       "auto_prune_interval": 144,
       "min_blocks_to_keep": 144,
-      "prune_on_startup": false,
-      "utxo_commitments": {
-        "keep_commitments": true,
-        "keep_filtered_blocks": false,
-        "generate_before_prune": true,
-        "max_commitment_age_days": 0
-      }
+      "prune_on_startup": false
     },
     "cache": {
       "block_cache_mb": 50,

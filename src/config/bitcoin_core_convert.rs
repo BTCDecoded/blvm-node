@@ -21,6 +21,7 @@ pub struct BitcoinCoreConfig {
     pub rpc_auth: Vec<String>,
     pub max_connections: Option<usize>,
     pub listen: bool,
+    pub listen_key_present: bool,
     pub bind: Option<String>,
     pub externalip: Option<String>,
     pub onlynet: Option<String>,
@@ -115,6 +116,7 @@ pub fn parse_bitcoin_conf(path: &Path) -> std::io::Result<BitcoinCoreConfig> {
                     }
                 }
                 "listen" => {
+                    config.listen_key_present = true;
                     config.listen = value == "1" || value.eq_ignore_ascii_case("true");
                 }
                 "bind" => config.bind = Some(value.to_string()),
@@ -364,6 +366,9 @@ pub fn generate_toml_config(config: &BitcoinCoreConfig, input_path: &Path) -> St
         toml.push_str(&format!("listen_addr = \"0.0.0.0:{port}\"\n"));
     }
 
+    if config.listen_key_present && !config.listen {
+        toml.push_str("listen = false\n");
+    }
 
     if let Some(max) = config.max_connections {
         toml.push_str(&format!("max_peers = {max}\n"));
@@ -576,7 +581,7 @@ mod tests {
         writeln!(f, "testnet=1").unwrap();
         writeln!(f, "listen=1").unwrap();
         writeln!(f, "maxconnections=40").unwrap();
-        writeln!(f, "addnode=1.2.3.4").unwrap();
+        writeln!(f, "addnode=peer.example").unwrap();
         writeln!(f, "rpcport=18332").unwrap();
         writeln!(f, "rpcuser=u").unwrap();
         writeln!(f, "rpcpassword=p").unwrap();
@@ -597,7 +602,7 @@ mod tests {
         assert_eq!(loaded.max_outbound_peers, Some(40));
         assert_eq!(
             loaded.persistent_peers,
-            vec!["1.2.3.4:18333".parse::<std::net::SocketAddr>().unwrap()]
+            vec!["peer.example:18333".to_string()]
         );
         assert_eq!(
             loaded.rpc_addr,
@@ -633,6 +638,42 @@ mod tests {
             loaded.rpc_addr,
             Some("127.0.0.1:18332".parse::<std::net::SocketAddr>().unwrap())
         );
+    }
+
+    #[tokio::test]
+    async fn listen_defaults_true_and_core_listen_zero_is_explicit() {
+        let omitted: crate::config::NodeConfig =
+            toml::from_str("protocol_version = \"regtest\"\n").unwrap();
+        assert!(omitted.listen);
+
+        let off: crate::config::NodeConfig = toml::from_str("listen = false\n").unwrap();
+        assert!(!off.listen);
+
+        let listen: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let manager = crate::network::NetworkManager::with_config(
+            listen,
+            8,
+            crate::network::TransportPreference::TCP_ONLY,
+            Some(&off),
+        );
+        assert!(!manager.listens());
+
+        let dir = TempDir::new().unwrap();
+        let omitted_conf = dir.path().join("omit.conf");
+        let mut f = std::fs::File::create(&omitted_conf).unwrap();
+        writeln!(f, "testnet=1").unwrap();
+        drop(f);
+        let parsed = parse_bitcoin_conf(&omitted_conf).unwrap();
+        let body = generate_toml_config(&parsed, &omitted_conf);
+        assert!(!body.contains("listen = false"));
+
+        let zero = dir.path().join("zero.conf");
+        let mut f = std::fs::File::create(&zero).unwrap();
+        writeln!(f, "listen=0").unwrap();
+        drop(f);
+        let parsed = parse_bitcoin_conf(&zero).unwrap();
+        let body = generate_toml_config(&parsed, &zero);
+        assert!(body.contains("listen = false"));
     }
 
     #[test]

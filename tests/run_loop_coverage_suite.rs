@@ -116,9 +116,6 @@ async fn test_node_with_pruning_storage_config() {
         incremental_prune_during_ibd: false,
         prune_window_size: 50,
         min_blocks_for_incremental_prune: 288,
-        #[cfg(feature = "utxo-commitments")]
-        utxo_commitments: None,
-        bip158_filters: None,
     });
 
     let mut node = Node::with_storage_config(

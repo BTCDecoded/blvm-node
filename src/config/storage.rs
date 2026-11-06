@@ -88,11 +88,6 @@ pub struct PruningConfig {
 
     #[serde(default = "default_min_blocks_for_incremental_prune")]
     pub min_blocks_for_incremental_prune: u64,
-
-    #[cfg(feature = "utxo-commitments")]
-    pub utxo_commitments: Option<UtxoCommitmentsPruningConfig>,
-
-    pub bip158_filters: Option<Bip158PruningConfig>,
 }
 
 fn default_pruning_mode() -> PruningMode {
@@ -136,9 +131,6 @@ impl Default for PruningConfig {
             incremental_prune_during_ibd: true,
             prune_window_size: 144,
             min_blocks_for_incremental_prune: 288,
-            #[cfg(feature = "utxo-commitments")]
-            utxo_commitments: None,
-            bip158_filters: None,
         }
     }
 }
@@ -195,60 +187,6 @@ impl PruningConfig {
         }
 
         Ok(())
-    }
-}
-
-#[cfg(feature = "utxo-commitments")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UtxoCommitmentsPruningConfig {
-    #[serde(default = "default_true")]
-    pub keep_commitments: bool,
-    #[serde(default = "default_false")]
-    pub keep_filtered_blocks: bool,
-    #[serde(default = "default_true")]
-    pub generate_before_prune: bool,
-    #[serde(default = "default_commitment_max_age")]
-    pub max_commitment_age_days: u32,
-}
-
-#[cfg(feature = "utxo-commitments")]
-fn default_commitment_max_age() -> u32 {
-    0
-}
-
-#[cfg(feature = "utxo-commitments")]
-impl Default for UtxoCommitmentsPruningConfig {
-    fn default() -> Self {
-        Self {
-            keep_commitments: true,
-            keep_filtered_blocks: false,
-            generate_before_prune: true,
-            max_commitment_age_days: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Bip158PruningConfig {
-    #[serde(default = "default_true")]
-    pub keep_filters: bool,
-    #[serde(default = "default_true")]
-    pub keep_filter_headers: bool,
-    #[serde(default = "default_filter_max_age")]
-    pub max_filter_age_days: u32,
-}
-
-fn default_filter_max_age() -> u32 {
-    0
-}
-
-impl Default for Bip158PruningConfig {
-    fn default() -> Self {
-        Self {
-            keep_filters: true,
-            keep_filter_headers: true,
-            max_filter_age_days: 0,
-        }
     }
 }
 

@@ -390,7 +390,11 @@ impl Default for ModuleConfig {
 pub struct NetworkTimingConfig {
     /// Target number of outbound peers to connect to (desired connections; reference: 8-125).
     /// Distinct from max_outbound_peers which is the PeerManager cap.
-    #[serde(default = "default_target_peer_count", rename = "target_peer_count")]
+    #[serde(
+        default = "default_target_peer_count",
+        rename = "target_peer_count",
+        alias = "target_outbound_peers"
+    )]
     pub target_outbound_peers: usize,
 
     /// Wait time before connecting to peers from database (after persistent peers)
@@ -502,18 +506,6 @@ pub struct RequestTimeoutConfig {
     /// TCP connect timeout
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout_secs: u64,
-
-    /// Checkpoint request timeout (LAN security)
-    #[serde(default = "default_checkpoint_request_timeout")]
-    pub checkpoint_request_timeout_secs: u64,
-
-    /// Protocol verification timeout (LAN discovery handshake)
-    #[serde(default = "default_protocol_verify_timeout")]
-    pub protocol_verify_timeout_secs: u64,
-
-    /// Headers verification timeout (LAN security)
-    #[serde(default = "default_headers_verify_timeout")]
-    pub headers_verify_timeout_secs: u64,
 }
 
 fn default_async_request_timeout() -> u64 {
@@ -548,18 +540,6 @@ fn default_connect_timeout() -> u64 {
     10
 }
 
-fn default_checkpoint_request_timeout() -> u64 {
-    5
-}
-
-fn default_protocol_verify_timeout() -> u64 {
-    5
-}
-
-fn default_headers_verify_timeout() -> u64 {
-    10
-}
-
 impl Default for RequestTimeoutConfig {
     fn default() -> Self {
         Self {
@@ -571,9 +551,6 @@ impl Default for RequestTimeoutConfig {
             rpc_timeout_seconds: 60,
             handshake_timeout_secs: 10,
             connect_timeout_secs: 10,
-            checkpoint_request_timeout_secs: 5,
-            protocol_verify_timeout_secs: 5,
-            headers_verify_timeout_secs: 10,
         }
     }
 }
@@ -871,6 +848,10 @@ pub struct NodeConfig {
     /// Network listening address
     pub listen_addr: Option<SocketAddr>,
 
+    /// Bind the P2P listeners. An omitted key stays true so existing files keep binding.
+    #[serde(default = "default_true")]
+    pub listen: bool,
+
     /// RPC bind address. Absent means the network default chosen by the binary.
     #[serde(default)]
     pub rpc_addr: Option<SocketAddr>,
@@ -921,9 +902,10 @@ pub struct NodeConfig {
     /// Storage and pruning configuration
     pub storage: Option<StorageConfig>,
 
-    /// Persistent peers (peers to connect to on startup)
+    /// Persistent peers (`host:port` or `ip:port`). A hostname is kept as written.
+    /// Dials use [`persistent_peer_sockets`], which keeps entries that are socket addresses.
     #[serde(default)]
-    pub persistent_peers: Vec<SocketAddr>,
+    pub persistent_peers: Vec<String>,
 
     /// Enable self-advertisement (send own address to peers)
     #[serde(default = "default_true")]
@@ -1039,6 +1021,7 @@ impl Default for NodeConfig {
     fn default() -> Self {
         Self {
             listen_addr: None,
+            listen: true,
             rpc_addr: None,
             block_validation: None,
             assumeutxo_blockhash: None,
@@ -1148,6 +1131,10 @@ fn canonicalize_for_confine(path: &std::path::Path) -> Option<std::path::PathBuf
 
 /// Entries in `persistent_peers` that are already socket addresses.
 /// A hostname is left in the config and is not dialed from here.
+pub fn persistent_peer_sockets(peers: &[String]) -> Vec<SocketAddr> {
+    peers.iter().filter_map(|peer| peer.parse().ok()).collect()
+}
+
 impl NodeConfig {
     /// Expand `~` to home directory in all path fields. Idempotent.
     pub fn expand_paths(&mut self) {
@@ -1685,6 +1672,16 @@ mod peer_count_tests {
         assert_eq!(roster_target_from_raw(None), Some(96));
         assert_eq!(roster_target_from_raw(Some("0")), None);
         assert_eq!(roster_target_from_raw(Some("150")), Some(100));
+    }
+
+    #[test]
+    fn target_peer_count_and_alias_both_yield_four() {
+        let from_rename: super::NetworkTimingConfig =
+            toml::from_str("target_peer_count = 4").unwrap();
+        assert_eq!(from_rename.effective_target_outbound_peers(), 4);
+        let from_alias: super::NetworkTimingConfig =
+            toml::from_str("target_outbound_peers = 4").unwrap();
+        assert_eq!(from_alias.effective_target_outbound_peers(), 4);
     }
 }
 

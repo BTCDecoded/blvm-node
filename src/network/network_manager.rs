@@ -343,6 +343,8 @@ pub struct NetworkManager {
     last_addr_sent: Arc<Mutex<HashMap<SocketAddr, u64>>>,
     /// Enable self-advertisement (send own address to peers)
     enable_self_advertisement: bool,
+    /// Bind TCP, Quinn, and Iroh listeners. False still constructs the manager with a socket address.
+    listen: bool,
     /// Request timeout configuration
     request_timeout_config: Arc<crate::config::RequestTimeoutConfig>,
     /// Protocol limits (message size, addr, inv, headers)
@@ -677,6 +679,7 @@ impl NetworkManager {
             address_database,
             last_addr_sent: Arc::new(Mutex::new(HashMap::new())),
             enable_self_advertisement: config.map(|c| c.enable_self_advertisement).unwrap_or(true),
+            listen: config.map(|c| c.listen).unwrap_or(true),
             request_timeout_config,
             protocol_limits,
             background_task_config,
@@ -1092,6 +1095,11 @@ impl NetworkManager {
         self.peer_tx.clone()
     }
 
+    /// Whether `start` binds the P2P listeners.
+    pub fn listens(&self) -> bool {
+        self.listen
+    }
+
     /// Start the network manager
     pub async fn start(&self, listen_addr: SocketAddr) -> Result<()> {
         info!(
@@ -1105,13 +1113,15 @@ impl NetworkManager {
         #[cfg(feature = "iroh")]
         super::startup::init_iroh_transport(self).await?;
 
-        super::startup::start_tcp_listener(self, listen_addr).await?;
+        if self.listen {
+            super::startup::start_tcp_listener(self, listen_addr).await?;
 
-        #[cfg(feature = "quinn")]
-        super::startup::start_quinn_listener(self, listen_addr).await?;
+            #[cfg(feature = "quinn")]
+            super::startup::start_quinn_listener(self, listen_addr).await?;
 
-        #[cfg(feature = "iroh")]
-        super::startup::start_iroh_listener(self, listen_addr).await?;
+            #[cfg(feature = "iroh")]
+            super::startup::start_iroh_listener(self, listen_addr).await?;
+        }
 
         // Start periodic ban cleanup task
         self.start_ban_cleanup_task();

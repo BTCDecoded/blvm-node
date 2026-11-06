@@ -18,12 +18,7 @@
         "keep_tx_index": false
       },
       "auto_prune": false,
-      "min_blocks_to_keep": 144,
-      "bip158_filters": {
-        "keep_filters": true,
-        "keep_filter_headers": true,
-        "max_filter_age_days": 0
-      }
+      "min_blocks_to_keep": 144
     },
     "cache": {
       "block_cache_mb": 10,

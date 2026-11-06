@@ -57,9 +57,6 @@ fn test_check_storage_bounds_with_pruning_enabled() {
         incremental_prune_during_ibd: false,
         prune_window_size: 50,
         min_blocks_for_incremental_prune: 288,
-        #[cfg(feature = "utxo-commitments")]
-        utxo_commitments: None,
-        bip158_filters: None,
     };
     let storage = Storage::with_backend_pruning_and_indexing(
         temp_dir.path(),

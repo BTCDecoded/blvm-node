@@ -781,10 +781,7 @@ fn test_node_config_with_custom_modules() {
 #[test]
 fn test_node_config_with_persistent_peers() {
     let mut config = NodeConfig::default();
-    config.persistent_peers = vec![
-        "127.0.0.1:8333".parse().unwrap(),
-        "192.168.1.1:8333".parse().unwrap(),
-    ];
+    config.persistent_peers = vec!["127.0.0.1:8333".to_string(), "192.168.1.1:8333".to_string()];
 
     assert_eq!(config.persistent_peers.len(), 2);
 }

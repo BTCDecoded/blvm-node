@@ -541,9 +541,6 @@ pub struct BackgroundTaskConfig {
     #[serde(default = "default_bg_dos_cleanup_interval")]
     pub dos_cleanup_interval_secs: u64,
 
-    #[serde(default = "default_bg_ban_cleanup_interval")]
-    pub ban_cleanup_interval_secs: u64,
-
     #[serde(default = "default_bg_ban_cleanup_outer_interval")]
     pub ban_cleanup_outer_interval_secs: u64,
 
@@ -577,9 +574,6 @@ pub struct BackgroundTaskConfig {
 fn default_bg_dos_cleanup_interval() -> u64 {
     300
 }
-fn default_bg_ban_cleanup_interval() -> u64 {
-    60
-}
 fn default_bg_ban_cleanup_outer_interval() -> u64 {
     300
 }
@@ -612,7 +606,6 @@ impl Default for BackgroundTaskConfig {
     fn default() -> Self {
         Self {
             dos_cleanup_interval_secs: 300,
-            ban_cleanup_interval_secs: 60,
             ban_cleanup_outer_interval_secs: 300,
             chain_sync_check_interval_secs: 60,
             chain_sync_timeout_secs: 1200,
@@ -900,5 +893,12 @@ mod ibd_engine_config_tests {
         let (h, ignored) = resolve_engine_export_height(Some(0), Some(640_000));
         assert_eq!(h, Some(640_000));
         assert_eq!(ignored, None);
+    }
+
+    #[test]
+    fn old_ban_cleanup_interval_is_ignored_and_outer_stays_300() {
+        let key = format!("ban_cleanup_{}", "interval_secs");
+        let cfg: BackgroundTaskConfig = toml::from_str(&format!("{key} = 1\n")).unwrap();
+        assert_eq!(cfg.ban_cleanup_outer_interval_secs, 300);
     }
 }

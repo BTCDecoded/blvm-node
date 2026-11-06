@@ -628,7 +628,7 @@ impl InternetCheckpointValidator {
     /// Returns Ok(()) if validation passed or was skipped,
     /// Err with details if validation failed.
     ///
-    /// `checkpoint_timeout`: Override from config (request_timeouts.checkpoint_request_timeout_secs).
+    /// `checkpoint_timeout`: Override when provided.
     /// When None, uses CHECKPOINT_REQUEST_TIMEOUT (5s).
     pub async fn validate_lan_block(
         &self,

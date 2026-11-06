@@ -1634,10 +1634,11 @@ impl Node {
                 // Still connect to persistent peers if configured
                 if let Some(ref config) = self.config {
                     if !config.persistent_peers.is_empty() {
-                        let persistent_peers = &config.persistent_peers;
+                        let persistent_peers =
+                            crate::config::persistent_peer_sockets(&config.persistent_peers);
                         if let Err(e) = self
                             .network
-                            .connect_persistent_peers(persistent_peers)
+                            .connect_persistent_peers(&persistent_peers)
                             .await
                         {
                             warn!("Failed to connect to some persistent peers: {}", e);

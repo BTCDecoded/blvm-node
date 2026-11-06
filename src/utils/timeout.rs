@@ -104,47 +104,6 @@ pub fn handshake_timeout_from_config(
         .unwrap_or(Duration::from_secs(10))
 }
 
-/// Checkpoint request timeout from config (default 5s). For lan_security.
-#[inline]
-pub fn checkpoint_timeout_from_config(
-    config: Option<&crate::config::RequestTimeoutConfig>,
-) -> Duration {
-    config
-        .map(|c| Duration::from_secs(c.checkpoint_request_timeout_secs))
-        .unwrap_or(Duration::from_secs(5))
-}
-
-/// Protocol verify timeout from config (default 5s). For lan_security DiscoveryVerifier.
-#[inline]
-pub fn protocol_verify_timeout_from_config(
-    config: Option<&crate::config::RequestTimeoutConfig>,
-) -> Duration {
-    config
-        .map(|c| Duration::from_secs(c.protocol_verify_timeout_secs))
-        .unwrap_or(Duration::from_secs(5))
-}
-
-/// Headers verify timeout from config (default 10s). For lan_security.
-#[inline]
-pub fn headers_verify_timeout_from_config(
-    config: Option<&crate::config::RequestTimeoutConfig>,
-) -> Duration {
-    config
-        .map(|c| Duration::from_secs(c.headers_verify_timeout_secs))
-        .unwrap_or(Duration::from_secs(10))
-}
-
-/// LAN security timeouts from config: (protocol_verify, headers_verify) for DiscoveryVerifier.
-/// Use with `verify_lan_peer(..., timeouts: Some(result))`.
-#[inline]
-pub fn lan_security_timeouts_from_config(
-    config: Option<&crate::config::RequestTimeoutConfig>,
-) -> (Duration, Duration) {
-    let proto = protocol_verify_timeout_from_config(config);
-    let headers = headers_verify_timeout_from_config(config);
-    (proto, headers)
-}
-
 #[cfg(test)]
 mod network_timeout_field_tests {
     use std::path::Path;
@@ -172,7 +131,10 @@ mod network_timeout_field_tests {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut hits = Vec::new();
         walk(&src, &mut hits);
-        assert!(hits.is_empty(), "src still names the removed field: {hits:?}");
+        assert!(
+            hits.is_empty(),
+            "src still names the removed field: {hits:?}"
+        );
 
         let config = std::fs::read_to_string(src.join("config/mod.rs")).unwrap();
         assert!(config.contains("connect_timeout_secs"));

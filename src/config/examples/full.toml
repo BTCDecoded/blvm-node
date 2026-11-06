@@ -42,8 +42,6 @@ protocol_version = "BitcoinV1"
 # storage_timeout_seconds = 10
 # rpc_timeout_seconds = 60
 # handshake_timeout_secs = 10
-# checkpoint_request_timeout_secs = 5
-# headers_verify_timeout_secs = 10
 
 # [protocol_limits]
 # max_protocol_message_length = 4000024

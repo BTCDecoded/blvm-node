@@ -702,10 +702,8 @@ impl NetworkManager {
         }
 
         if !config.persistent_peers.is_empty() {
-            if let Err(e) = self
-                .connect_persistent_peers(&config.persistent_peers)
-                .await
-            {
+            let persistent_peers = crate::config::persistent_peer_sockets(&config.persistent_peers);
+            if let Err(e) = self.connect_persistent_peers(&persistent_peers).await {
                 warn!("Failed to connect to some persistent peers: {}", e);
             }
         }

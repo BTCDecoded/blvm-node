@@ -22,9 +22,6 @@ fn normal_pruning_config() -> PruningConfig {
         incremental_prune_during_ibd: false,
         prune_window_size: 50,
         min_blocks_for_incremental_prune: 288,
-        #[cfg(feature = "utxo-commitments")]
-        utxo_commitments: None,
-        bip158_filters: None,
     }
 }
 
@@ -121,9 +118,6 @@ fn test_pruning_custom_mode_keeps_metadata() {
         incremental_prune_during_ibd: false,
         prune_window_size: 50,
         min_blocks_for_incremental_prune: 288,
-        #[cfg(feature = "utxo-commitments")]
-        utxo_commitments: None,
-        bip158_filters: None,
     };
     let pm = PruningManager::new(config, storage.blocks());
     let stats = pm.prune_to_height(15, 79, false).unwrap();

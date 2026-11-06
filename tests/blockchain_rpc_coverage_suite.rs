@@ -489,9 +489,6 @@ fn rpc_with_pruning_chain() -> (TempDir, Arc<Storage>, BlockchainRpc) {
         incremental_prune_during_ibd: false,
         prune_window_size: 50,
         min_blocks_for_incremental_prune: 288,
-        #[cfg(feature = "utxo-commitments")]
-        utxo_commitments: None,
-        bip158_filters: None,
     });
     let storage = Arc::new(
         Storage::with_backend_pruning_and_indexing(
