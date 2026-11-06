@@ -424,6 +424,9 @@ async fn handle_peer_disconnected(nm: &NetworkManager, addr: TransportAddr) {
     }
 
     let mut pm = nm.peer_manager_mutex().lock().await;
+    if let Some(peer) = pm.get_peer_mut(&addr) {
+        peer.shutdown_connection();
+    }
     pm.remove_peer(&addr);
     drop(pm);
 
