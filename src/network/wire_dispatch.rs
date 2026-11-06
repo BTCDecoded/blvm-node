@@ -452,10 +452,20 @@ impl NetworkManager {
                 StagedCompact::Fetch(expired)
             }
             CompactDecision::KeepCurrent => StagedCompact::Fetch(expired),
-            CompactDecision::Hold(assembly) if assembly.missing.is_empty() => {
+            CompactDecision::Hold(mut assembly) if assembly.missing.is_empty() => {
+                if same_hash {
+                    if let Some(previous) = pending.get(&block_hash) {
+                        assembly.started = previous.started;
+                    }
+                }
                 StagedCompact::Complete { assembly, expired }
             }
-            CompactDecision::Hold(assembly) => {
+            CompactDecision::Hold(mut assembly) => {
+                if same_hash {
+                    if let Some(previous) = pending.get(&block_hash) {
+                        assembly.started = previous.started;
+                    }
+                }
                 let indices = assembly
                     .missing
                     .iter()
