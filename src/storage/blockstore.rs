@@ -946,37 +946,6 @@ impl BlockStore {
         Ok(true)
     }
 
-    /// TidesDB: one transaction spanning all blockstore CFs + recent headers.
-    #[cfg(feature = "tidesdb")]
-    pub(crate) fn try_ibd_flush_tidesdb_unified(
-        &self,
-        flush_order: &[usize],
-        heights: &[u64],
-        block_hashes: &[Hash],
-        block_data: &[Vec<u8>],
-        header_data: &[Arc<Vec<u8>>],
-        witness_blobs: &[Option<Vec<u8>>],
-        metadata_blobs: &[Vec<u8>],
-        recent_entries: &[(u64, Vec<u8>)],
-    ) -> Result<bool> {
-        use crate::storage::database::tidesdb_impl::TidesDBDatabase;
-
-        let Some(tdb) = self.db.as_ref().as_any().downcast_ref::<TidesDBDatabase>() else {
-            return Ok(false);
-        };
-        tdb.write_ibd_blockstore_flush_no_wal(
-            flush_order,
-            heights,
-            block_hashes,
-            block_data,
-            header_data,
-            witness_blobs,
-            metadata_blobs,
-            recent_entries,
-        )?;
-        Ok(true)
-    }
-
     /// heed3 / LMDB: one write transaction for all blockstore sub-DBs + recent headers.
     #[cfg(feature = "heed3")]
     pub(crate) fn try_ibd_flush_heed3_unified(

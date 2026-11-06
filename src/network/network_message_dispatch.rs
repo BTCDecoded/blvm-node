@@ -418,6 +418,10 @@ async fn handle_peer_disconnected(nm: &NetworkManager, addr: TransportAddr) {
 
     nm.clear_companion_udp_peer_on_disconnect(&addr).await;
 
+    if let Some(sock) = sock_opt {
+        nm.revoke_high_bandwidth_peer(sock).await;
+    }
+
     let mut pm = nm.peer_manager_mutex().lock().await;
     pm.remove_peer(&addr);
     drop(pm);
@@ -445,7 +449,12 @@ async fn handle_peer_disconnected(nm: &NetworkManager, addr: TransportAddr) {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove_peer(&sock.to_string());
+        nm.tx_requests()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .forget_peer(sock);
         nm.peer_states().write().await.remove(&sock);
+        nm.fill_high_bandwidth_slots().await;
 
         // Decrement eclipse-prevention diversity counter for this peer's IP.
         nm.remove_peer_diversity(sock.ip());

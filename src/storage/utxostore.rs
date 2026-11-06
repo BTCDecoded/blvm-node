@@ -284,6 +284,11 @@ impl UtxoStore {
         Ok(())
     }
 
+    /// The chain-table tree this store already has open.
+    pub(crate) fn utxo_tree(&self) -> Arc<dyn Tree> {
+        Arc::clone(&self.utxos)
+    }
+
     /// Get all UTXOs in the set
     pub fn get_all_utxos(&self) -> Result<UtxoSet> {
         #[cfg(test)]

@@ -78,7 +78,8 @@ async fn test_ckpool_basic_auth_not_admin_without_admin_tokens() {
     let manager = RpcAuthManager::new(true);
     manager
         .set_basic_auth(Some("ckpool".to_string()), "pool-secret".to_string())
-        .await;
+        .await
+        .unwrap();
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -99,7 +100,8 @@ async fn test_ckpool_basic_auth_admin_when_password_in_admin_tokens() {
     let manager = RpcAuthManager::new(true);
     manager
         .set_basic_auth(Some("ckpool".to_string()), "pool-secret".to_string())
-        .await;
+        .await
+        .unwrap();
     manager
         .add_admin_token("pool-secret".to_string())
         .await

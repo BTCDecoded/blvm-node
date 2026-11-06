@@ -2245,7 +2245,8 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();
         let auth = Arc::new(RpcAuthManager::new(true));
         auth.set_basic_auth(Some("ckpool".to_string()), "s3cret".to_string())
-            .await;
+            .await
+            .unwrap();
 
         let server = Arc::new(RpcServer::with_auth("127.0.0.1:0".parse().unwrap(), auth));
         let mut headers = HeaderMap::new();
@@ -2282,7 +2283,8 @@ mod tests {
             password: Some("s3cret".to_string()),
             ..Default::default()
         })
-        .await;
+        .await
+        .unwrap();
 
         let addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();
         let server = Arc::new(RpcServer::with_auth("127.0.0.1:0".parse().unwrap(), auth));
@@ -2315,7 +2317,8 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();
         let auth = Arc::new(RpcAuthManager::new(true));
         auth.set_basic_auth(Some("ckpool".to_string()), "s3cret".to_string())
-            .await;
+            .await
+            .unwrap();
         auth.add_admin_token("s3cret".to_string()).await.unwrap();
 
         let server = Arc::new(RpcServer::with_auth("127.0.0.1:0".parse().unwrap(), auth));

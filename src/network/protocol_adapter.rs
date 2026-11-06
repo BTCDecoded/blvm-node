@@ -306,7 +306,7 @@ impl ProtocolAdapter {
         match msg {
             ConsensusNetworkMessage::Version(v) => {
                 Ok(ProtocolMessage::Version(ProtoVersionMessage {
-                    version: v.version as i32,
+                    version: v.version,
                     services: v.services,
                     timestamp: v.timestamp,
                     addr_recv: ProtoNetworkAddress {

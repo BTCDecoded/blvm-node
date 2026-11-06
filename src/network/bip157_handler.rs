@@ -36,7 +36,7 @@ pub fn handle_getcfilters(
         let mut found_stop = false;
 
         // Iterate through blocks from start_height
-        for height in start_height..=current_height.min(start_height + 2000) {
+        for height in start_height..=current_height.min(start_height + 1000) {
             // Get block hash by height, then get block
             if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(height as u64) {
                 // The height index stores the wire block id used to save the block.

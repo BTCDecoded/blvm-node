@@ -80,6 +80,8 @@ pub struct AddressDatabase {
     iroh_addresses: HashMap<PublicKey, AddressEntry>,
     /// Maximum number of addresses to store (total across both maps)
     max_addresses: usize,
+    /// New and tried buckets used when choosing an outbound peer.
+    table: super::address_table::AddressTable,
     /// Address expiration time in seconds (default: 24 hours)
     expiration_seconds: u64,
 }
@@ -94,6 +96,7 @@ impl AddressDatabase {
             #[cfg(feature = "iroh")]
             iroh_addresses: HashMap::with_capacity(capacity / 2), // Estimate 50% Iroh peers
             max_addresses,
+            table: super::address_table::AddressTable::new(),
             expiration_seconds: 24 * 60 * 60, // 24 hours default
         }
     }
@@ -107,6 +110,7 @@ impl AddressDatabase {
             #[cfg(feature = "iroh")]
             iroh_addresses: HashMap::with_capacity(capacity / 2), // Estimate 50% Iroh peers
             max_addresses,
+            table: super::address_table::AddressTable::new(),
             expiration_seconds,
         }
     }
@@ -151,6 +155,7 @@ impl AddressDatabase {
                 self.addresses.insert(socket_addr, entry);
             }
         }
+        self.place_socket_new(socket_addr);
     }
 
     /// Add an address from a DNS seed, resetting any persisted `NODE_NETWORK_LIMITED` flag
@@ -174,6 +179,7 @@ impl AddressDatabase {
                     .insert(socket_addr, AddressEntry::new(addr, 0));
             }
         }
+        self.place_socket_new(socket_addr);
     }
 
     /// Add multiple addresses
@@ -256,6 +262,98 @@ impl AddressDatabase {
             .collect()
     }
 
+    /// Outbound pick. Both tables nonempty follows `pick_tried`. A terrible record is skipped.
+    pub fn select_outbound(&self, count: usize, pick_tried: bool) -> Vec<NetworkAddress> {
+        use super::address_table::{TableSide, choose_side};
+        use blvm_protocol::service_flags::standard::NODE_NETWORK;
+        let now = current_timestamp();
+        let usable = |addr: SocketAddr| !self.socket_is_terrible(addr, now);
+        let new_has = self.table.addrs(TableSide::New).into_iter().any(usable);
+        let tried_has = self.table.addrs(TableSide::Tried).into_iter().any(usable);
+        let Some(side) = choose_side(new_has, tried_has, pick_tried) else {
+            return Vec::new();
+        };
+        let mut full = Vec::new();
+        let mut unknown = Vec::new();
+        let mut limited = Vec::new();
+        for socket in self.table.addrs(side) {
+            if self.socket_is_terrible(socket, now) {
+                continue;
+            }
+            let Some(entry) = self.addresses.get(&socket) else {
+                continue;
+            };
+            let row = (entry.last_seen, entry.addr.clone());
+            if entry.services == 0 {
+                unknown.push(row);
+            } else if (entry.services & NODE_NETWORK) != 0 {
+                full.push(row);
+            } else {
+                limited.push(row);
+            }
+        }
+        full.sort_by(|a, b| b.0.cmp(&a.0));
+        unknown.sort_by(|a, b| b.0.cmp(&a.0));
+        limited.sort_by(|a, b| b.0.cmp(&a.0));
+        full.into_iter()
+            .chain(unknown)
+            .chain(limited)
+            .take(count)
+            .map(|(_, addr)| addr)
+            .collect()
+    }
+
+    pub fn promote_tried(&mut self, addr: SocketAddr) {
+        let now = current_timestamp();
+        self.table.note_attempt(addr, true);
+        let terrible = self.terrible_sockets(now);
+        self.table
+            .promote_tried(addr, |stored| terrible.contains(&stored));
+        self.table.remember_anchor(addr, now);
+    }
+
+    pub fn note_dial_failure(&mut self, addr: SocketAddr) {
+        self.table.note_attempt(addr, false);
+    }
+
+    pub fn anchors(&mut self) -> Vec<NetworkAddress> {
+        let now = current_timestamp();
+        self.table
+            .anchors(now)
+            .into_iter()
+            .filter_map(|socket| self.addresses.get(&socket).map(|entry| entry.addr.clone()))
+            .collect()
+    }
+
+    fn place_socket_new(&mut self, socket: SocketAddr) {
+        let now = current_timestamp();
+        let terrible = self.terrible_sockets(now);
+        self.table
+            .place_new(socket, |stored| terrible.contains(&stored));
+    }
+
+    fn terrible_sockets(&self, now: u64) -> std::collections::HashSet<SocketAddr> {
+        self.addresses
+            .keys()
+            .copied()
+            .filter(|addr| self.socket_is_terrible(*addr, now))
+            .collect()
+    }
+
+    fn socket_is_terrible(&self, addr: SocketAddr, now: u64) -> bool {
+        let Some(entry) = self.addresses.get(&addr) else {
+            return true;
+        };
+        let (failures, successes) = self.table.attempt_counts(addr);
+        super::address_table::is_terrible_record(
+            entry.last_seen,
+            entry.addr.time,
+            now,
+            failures,
+            successes,
+        )
+    }
+
     /// Count how many fresh addresses are suitable for full-history IBD.
     /// "Full-history" = explicitly advertises NODE_NETWORK (0x1) OR services unknown.
     /// Modern Bitcoin Core 25+ sets both NODE_NETWORK and NODE_NETWORK_LIMITED; checking
@@ -283,6 +381,7 @@ impl AddressDatabase {
     pub fn remove_address(&mut self, addr: &NetworkAddress) {
         let socket_addr = self.network_addr_to_socket(addr);
         self.addresses.remove(&socket_addr);
+        self.table.remove(socket_addr);
     }
 
     /// Overwrite (force-set) service flags on an existing entry identified by its `SocketAddr`.
@@ -469,6 +568,7 @@ impl AddressDatabase {
                     // Both maps have entries - evict the oldest
                     if socket_time <= iroh_time {
                         self.addresses.remove(&socket_addr);
+                        self.table.remove(socket_addr);
                     } else {
                         self.iroh_addresses.remove(&iroh_id);
                     }
@@ -476,6 +576,7 @@ impl AddressDatabase {
                 (Some((socket_addr, _)), None) => {
                     // Only SocketAddr map has entries
                     self.addresses.remove(&socket_addr);
+                    self.table.remove(socket_addr);
                 }
                 (None, Some((iroh_id, _))) => {
                     // Only Iroh map has entries
@@ -492,6 +593,7 @@ impl AddressDatabase {
             // Only SocketAddr map exists
             if let Some((socket_addr, _)) = oldest_socket {
                 self.addresses.remove(&socket_addr);
+                self.table.remove(socket_addr);
             }
         }
     }
@@ -561,6 +663,26 @@ mod tests {
             port,
             time: current_timestamp() as u32,
         }
+    }
+
+    #[test]
+    fn outbound_selection_uses_the_table_and_drops_three_failures() {
+        let mut db = AddressDatabase::new(100);
+        let live = create_test_address("8.8.8.8", 8333);
+        let failed = create_test_address("1.2.3.4", 8333);
+        db.add_address(live.clone(), 1);
+        db.add_address(failed.clone(), 1);
+        let socket = db.network_addr_to_socket(&failed);
+        db.note_dial_failure(socket);
+        db.note_dial_failure(socket);
+        db.note_dial_failure(socket);
+        let picked = db.select_outbound(10, false);
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].port, live.port);
+        db.promote_tried(db.network_addr_to_socket(&live));
+        let from_tried = db.select_outbound(10, true);
+        assert_eq!(from_tried.len(), 1);
+        assert!(db.anchors().len() <= 2);
     }
 
     #[test]

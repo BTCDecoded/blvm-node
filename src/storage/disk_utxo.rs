@@ -32,11 +32,10 @@
 use crate::storage::database::Tree;
 use anyhow::Result;
 
-/// Historical name (TidesDB had `TDB_MAX_TXN_OPS=100000`). On RocksDB this is a safety cap
-/// that splits a `flush_batch_to_disk` into multiple `WriteBatch::commit()`s when the retire
+/// Safety cap that splits a `flush_batch_to_disk` into multiple `WriteBatch::commit()`s when the retire
 /// hot path emits a very large pending package. Each `commit()` has a fixed cost (atomic
 /// sequence + memtable lock + WAL fsync if enabled) so larger chunks = fewer RocksDB write
-/// barriers. Aligned with `TIDESDB_MAX_TXN_OPS` (200k) so a 200k-op flush is one batch.
+/// barriers. Aligned with `MAX_FLUSH_OPS` (200k) so a 200k-op flush is one batch.
 pub(crate) const MAX_BATCH_OPS: usize = 200_000;
 
 use blvm_protocol::transaction::is_coinbase;
@@ -161,7 +160,7 @@ pub fn block_input_keys_into(block: &Block, keys_out: &mut Vec<OutPointKey>) {
 }
 
 /// Collect and deduplicate outpoint keys from multiple blocks (for batched lookahead prefetch).
-/// Reduces TidesDB round-trips by loading UTXOs for several blocks in one disk read batch.
+/// Loads UTXOs for several blocks in one disk read batch.
 pub(crate) fn block_input_keys_batch(blocks: &[&Block]) -> Vec<OutPointKey> {
     let est: usize = blocks
         .iter()
@@ -350,8 +349,7 @@ pub struct SyncBatch {
     pub total_delta: isize,
 }
 
-/// Flush a batch of UTXO operations to disk. Splits into chunks of MAX_BATCH_OPS to stay
-/// under TidesDB's TDB_MAX_TXN_OPS (100k). Used by IbdUtxoStore.
+/// Flush a batch of UTXO operations to disk. Splits into chunks of MAX_BATCH_OPS. Used by IbdUtxoStore.
 pub fn flush_batch_to_disk(
     batch: &[(OutPointKey, PendingValue)],
     disk: &dyn Tree,

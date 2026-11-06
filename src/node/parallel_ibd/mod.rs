@@ -20,6 +20,7 @@ pub(crate) mod body_dup;
 mod feeder;
 mod feeder_miss;
 pub(crate) mod headers;
+mod headers_presync;
 pub(crate) use headers::ibd_header_locator_heights;
 #[cfg(feature = "production")]
 mod ibd_staging;
@@ -8493,6 +8494,11 @@ impl ParallelIBD {
                 target_height
             ));
         }
+        if !header_result.may_assign {
+            return Err(anyhow::anyhow!(
+                "header pre-sync is below minimum chain work; block assigner not started"
+            ));
+        }
 
         if let Some(ref ep) = event_publisher {
             let duration_secs = headers_start.elapsed().as_secs();
@@ -10281,6 +10287,9 @@ impl ParallelIBD {
         } else {
             std::mem::take(utxo_set)
         };
+        let pin_height = blvm_consensus::block::get_assume_valid_height();
+        let hash_at_pin = blockstore.get_hash_by_height(pin_height).ok().flatten();
+        let assume_valid_pin_connected = crate::config::assume_valid_pin_connected(hash_at_pin);
         let (result, new_utxo_set, tx_ids, utxo_delta, undo_log) =
             blvm_consensus::block::connect_block_ibd_with_undo(
                 block,
@@ -10294,6 +10303,7 @@ impl ParallelIBD {
                 witnesses_arc,
                 best_header_chainwork,
                 ibd_utxo_lookup,
+                assume_valid_pin_connected,
             )?;
 
         *utxo_set = new_utxo_set;
@@ -10796,7 +10806,7 @@ impl ParallelIBD {
             // RECENT_HEADERS_TABLE is a sliding window of the last ~11 blocks. Only the
             // final chunk's entries matter for the end state; passing empty for earlier
             // chunks produces the same result without touching the table N-1 extra times.
-            #[cfg(any(feature = "rocksdb", feature = "redb", feature = "tidesdb"))]
+            #[cfg(any(feature = "rocksdb", feature = "redb"))]
             let recent_entries: Vec<(u64, Vec<u8>)> = if is_last_chunk {
                 flush_order
                     .iter()
@@ -10851,23 +10861,6 @@ impl ParallelIBD {
                     storage_unified = true;
                 }
             }
-            #[cfg(feature = "tidesdb")]
-            {
-                if !storage_unified
-                    && blockstore.try_ibd_flush_tidesdb_unified(
-                        &flush_order,
-                        &chunk_heights,
-                        &block_hashes,
-                        &block_data,
-                        &header_data,
-                        &witness_blobs,
-                        &metadata_blobs,
-                        &recent_entries,
-                    )?
-                {
-                    storage_unified = true;
-                }
-            }
             #[cfg(feature = "heed3")]
             {
                 if !storage_unified
@@ -10887,7 +10880,7 @@ impl ParallelIBD {
             }
 
             if !storage_unified {
-                // Per-tree batches (Redb, Sled, TidesDB, or non-Rocks `Arc<dyn Database>`).
+                // Per-tree batches (Redb, Sled, or non-Rocks `Arc<dyn Database>`).
                 {
                     let blocks_tree = blockstore.blocks_tree()?;
                     let mut batch = blocks_tree.batch()?;

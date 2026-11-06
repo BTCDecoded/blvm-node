@@ -59,7 +59,7 @@ fn default_min_recent_blocks() -> u64 {
 }
 
 fn default_min_blocks() -> u64 {
-    144
+    288
 }
 
 /// Pruning configuration
@@ -100,7 +100,7 @@ fn default_pruning_mode() -> PruningMode {
         keep_from_height: 0,
         keep_commitments: true,
         keep_filtered_blocks: false,
-        min_blocks: 144,
+        min_blocks: default_min_blocks(),
     }
 }
 
@@ -109,7 +109,7 @@ fn default_auto_prune_interval() -> u64 {
 }
 
 fn default_min_blocks_to_keep() -> u64 {
-    144
+    288
 }
 
 fn default_prune_window_size() -> u64 {
@@ -127,11 +127,11 @@ impl Default for PruningConfig {
                 keep_from_height: 0,
                 keep_commitments: true,
                 keep_filtered_blocks: false,
-                min_blocks: 144,
+                min_blocks: default_min_blocks(),
             },
             auto_prune: true,
-            auto_prune_interval: 144,
-            min_blocks_to_keep: 144,
+            auto_prune_interval: default_auto_prune_interval(),
+            min_blocks_to_keep: default_min_blocks_to_keep(),
             prune_on_startup: false,
             incremental_prune_during_ibd: true,
             prune_window_size: 144,
@@ -259,7 +259,6 @@ pub enum DatabaseBackendConfig {
     Sled,
     Redb,
     Rocksdb,
-    Tidesdb,
     Heed3,
     Auto,
 }
@@ -350,8 +349,6 @@ pub struct StorageConfig {
     #[serde(default)]
     pub rocksdb: Option<RocksDBConfig>,
 
-    pub tidesdb: Option<TidesDBConfig>,
-
     /// heed3 / LMDB options when `database_backend = "heed3"`.
     #[serde(default)]
     pub heed3: Option<Heed3Config>,
@@ -385,42 +382,6 @@ fn default_auto_migrate_core() -> bool {
 
 fn default_reuse_core_block_files() -> bool {
     true
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TidesDBConfig {
-    #[serde(default = "default_tidesdb_utxo_klog_threshold")]
-    pub utxo_klog_threshold: usize,
-
-    /// Flush threads. ENV BLVM_TIDESDB_FLUSH_THREADS overrides config.
-    #[serde(default = "default_tidesdb_flush_threads")]
-    pub flush_threads: i32,
-
-    /// Compaction threads. ENV BLVM_TIDESDB_COMPACT_THREADS overrides config.
-    #[serde(default = "default_tidesdb_compact_threads")]
-    pub compact_threads: i32,
-}
-
-fn default_tidesdb_utxo_klog_threshold() -> usize {
-    64 * 1024
-}
-
-fn default_tidesdb_flush_threads() -> i32 {
-    4
-}
-
-fn default_tidesdb_compact_threads() -> i32 {
-    4
-}
-
-impl Default for TidesDBConfig {
-    fn default() -> Self {
-        Self {
-            utxo_klog_threshold: default_tidesdb_utxo_klog_threshold(),
-            flush_threads: default_tidesdb_flush_threads(),
-            compact_threads: default_tidesdb_compact_threads(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -462,7 +423,6 @@ impl Default for StorageConfig {
             data_dir: "data".to_string(),
             dbcache_mb: 450,
             rocksdb: None,
-            tidesdb: None,
             heed3: None,
             pruning: None,
             cache: None,
@@ -601,5 +561,45 @@ impl Default for IndexingConfig {
             enable_compression: false,
             background_indexing: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod prune_keep_floor {
+    use super::{PruningConfig, PruningMode};
+
+    #[test]
+    fn keep_floors_are_288_and_prune_windows_stay_144() {
+        let config = PruningConfig::default();
+        let PruningMode::Aggressive { min_blocks, .. } = config.mode else {
+            panic!("default pruning mode is aggressive");
+        };
+        assert_eq!(min_blocks, 288);
+        assert_eq!(config.min_blocks_to_keep, 288);
+        assert_eq!(config.auto_prune_interval, 144);
+        assert_eq!(config.prune_window_size, 144);
+        assert_eq!(config.min_blocks_for_incremental_prune, 288);
+
+        let omitted: PruningConfig = toml::from_str("auto_prune = false").unwrap();
+        let PruningMode::Aggressive {
+            min_blocks: omitted_blocks,
+            ..
+        } = omitted.mode
+        else {
+            panic!("omitted pruning mode is aggressive");
+        };
+        assert_eq!(omitted_blocks, 288);
+        assert_eq!(omitted.min_blocks_to_keep, 288);
+        assert_eq!(omitted.auto_prune_interval, 144);
+        assert_eq!(omitted.prune_window_size, 144);
+
+        let normal: PruningMode = toml::from_str("type = \"normal\"").unwrap();
+        let PruningMode::Normal {
+            min_recent_blocks, ..
+        } = normal
+        else {
+            panic!("normal mode");
+        };
+        assert_eq!(min_recent_blocks, 288);
     }
 }

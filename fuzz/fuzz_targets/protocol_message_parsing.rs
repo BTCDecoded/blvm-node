@@ -63,7 +63,7 @@ fuzz_target!(|data: &[u8]| {
     if data.len() >= 24 {
         let mut corrupted = data.to_vec();
         // Set payload length to maximum + 1
-        let max_payload = (32 * 1024 * 1024 - 24 + 1) as u32;
+        let max_payload = (blvm_node::network::protocol::MAX_PROTOCOL_PAYLOAD as u32) + 1;
         if corrupted.len() >= 20 {
             corrupted[16..20].copy_from_slice(&max_payload.to_le_bytes());
             let _corrupted = ProtocolParser::parse_message(&corrupted);
@@ -102,8 +102,10 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Very large messages (should be rejected)
-    if data.len() > 32 * 1024 * 1024 {
-        let _large = ProtocolParser::parse_message(&data[..32 * 1024 * 1024]);
+    if data.len() > blvm_node::network::protocol::MAX_PROTOCOL_MESSAGE_LENGTH {
+        let _large = ProtocolParser::parse_message(
+            &data[..blvm_node::network::protocol::MAX_PROTOCOL_MESSAGE_LENGTH],
+        );
     }
 
     // 9. Test with zero bytes

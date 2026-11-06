@@ -261,12 +261,14 @@ impl RpcManager {
                 self.rpc_cookie_path = Some(path);
             }
         }
-        self.auth_manager = Some(Self::build_auth_manager(auth_config).await);
+        self.auth_manager = Some(Self::build_auth_manager(auth_config).await?);
         Ok(())
     }
 
     /// Build an [`RpcAuthManager`] from TOML / env [`RpcAuthConfig`] (shared by startup and tests).
-    pub async fn build_auth_manager(auth_config: RpcAuthConfig) -> Arc<auth::RpcAuthManager> {
+    pub async fn build_auth_manager(
+        auth_config: RpcAuthConfig,
+    ) -> Result<Arc<auth::RpcAuthManager>> {
         let auth_manager = Arc::new(auth::RpcAuthManager::with_rate_limits(
             auth_config.required,
             auth_config.rate_limit_burst,
@@ -327,7 +329,7 @@ impl RpcManager {
         if let Some(ref password) = auth_config.password {
             auth_manager
                 .set_basic_auth(auth_config.username.clone(), password.clone())
-                .await;
+                .await?;
             // ckpool / Bitcoin Core Basic clients need admin methods (getblocktemplate, submitblock).
             if let Err(e) = auth_manager.add_admin_token(password.clone()).await {
                 let redacted_error =
@@ -340,7 +342,7 @@ impl RpcManager {
             info!("HTTP Basic RPC auth configured (Bitcoin Core / ckpool compatible)");
         }
 
-        auth_manager
+        Ok(auth_manager)
     }
 
     /// Allow the RPC server to start on a non-loopback address without an auth manager.

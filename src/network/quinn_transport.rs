@@ -100,7 +100,9 @@ impl QuinnTransport {
         info!("Quinn transport initialized (client mode)");
         Ok(Self {
             endpoint,
-            max_message_length,
+            max_message_length: crate::network::protocol::clamp_protocol_message_length(
+                max_message_length,
+            ),
         })
     }
 

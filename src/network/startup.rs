@@ -136,6 +136,47 @@ pub(crate) async fn start_tcp_listener(nm: &NetworkManager, listen_addr: SocketA
                     let peer_manager_for_peer = Arc::clone(&peer_manager_clone);
                     let transport_addr_for_peer = transport_addr_tcp;
                     tokio::spawn(async move {
+                        #[cfg(feature = "bip324")]
+                        let mut stream = stream;
+                        #[cfg(feature = "bip324")]
+                        match super::v2_negotiation::handshake_if_offered(
+                            &mut stream,
+                            false,
+                            super::protocol::ACTIVE_MAGIC
+                                .load(std::sync::atomic::Ordering::Relaxed)
+                                .to_le_bytes(),
+                            &[],
+                            &[],
+                        )
+                        .await
+                        {
+                            Ok(Some(session)) => {
+                                let mut peer = peer::Peer::from_tcp_stream_v2(
+                                    stream,
+                                    socket_addr,
+                                    peer_tx_clone.clone(),
+                                    max_message_length,
+                                    session,
+                                );
+                                peer.set_ping_timeout_seconds(ping_timeout_secs);
+                                let mut pm = peer_manager_for_peer.lock().await;
+                                if let Err(e) = pm.add_peer(transport_addr_for_peer.clone(), peer) {
+                                    warn!("Failed to add peer {}: {}", socket_addr, e);
+                                    let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(
+                                        transport_addr_for_peer.clone(),
+                                    ));
+                                }
+                                return;
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                warn!("v2 handshake failed for {}: {}", socket_addr, e);
+                                let _ = peer_tx_clone.send(NetworkMessage::PeerDisconnected(
+                                    transport_addr_for_peer.clone(),
+                                ));
+                                return;
+                            }
+                        }
                         let mut peer = peer::Peer::from_tcp_stream_split(
                             stream,
                             socket_addr,

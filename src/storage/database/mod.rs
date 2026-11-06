@@ -1,6 +1,6 @@
 //! Database abstraction layer
 //!
-//! Provides a unified interface for different database backends (tidesdb, redb, sled, rocksdb, heed3).
+//! Provides a unified interface for different database backends (redb, sled, rocksdb, heed3).
 //! Allows switching between storage engines via feature flags.
 //!
 //! All backends must support the same set of tree names.
@@ -240,17 +240,16 @@ pub enum DatabaseBackend {
     Sled,
     Redb,
     RocksDB,
-    TidesDB,
     Heed3,
 }
 
 /// String passed to module subprocesses as `MODULE_CONFIG_DATABASE_BACKEND` / `database_backend` merge key.
 ///
 /// Generic module `ModuleDb` / [`open_module_db`](blvm_sdk::module::database::open_module_db) needs
-/// dynamic `open_tree()` — **Sled**, **TidesDB**, and **heed3 module env** qualify. The node's
+/// dynamic `open_tree()` — **Sled** and **heed3 module env** qualify. The node's
 /// **RocksDB / Redb / heed3 chain** backend must **not** be forwarded as-is for RocksDB/Redb
 /// (older `blvm-sdk` builds could mis-handle it). Defaults: **sled** when the chain uses RocksDB
-/// or Redb, **tidesdb** when the chain uses TidesDB, **heed3** when the chain uses heed3 (requires
+/// or Redb, **heed3** when the chain uses heed3 (requires
 /// `heed3` feature), **sled** when the chain uses Sled. Override with
 /// [`ModuleConfig::module_database_backend`](crate::config::ModuleConfig::module_database_backend).
 pub fn module_subprocess_database_backend_preference(
@@ -272,7 +271,6 @@ pub fn module_subprocess_database_backend_preference(
 /// Default backend for module-process KV (`open_module_db`): dynamic `open_tree` only.
 fn module_subprocess_kv_backend_default(chain_backend: DatabaseBackend) -> String {
     match chain_backend {
-        DatabaseBackend::TidesDB => "tidesdb".to_string(),
         DatabaseBackend::Sled => "sled".to_string(),
         #[cfg(feature = "heed3")]
         DatabaseBackend::Heed3 => "heed3".to_string(),
@@ -313,14 +311,6 @@ pub fn backend_from_config(
                 "RocksDB backend not available (build with --features rocksdb)"
             ));
         }
-        DatabaseBackendConfig::Tidesdb => {
-            #[cfg(feature = "tidesdb")]
-            return Ok(DatabaseBackend::TidesDB);
-            #[cfg(not(feature = "tidesdb"))]
-            return Err(anyhow::anyhow!(
-                "TidesDB backend not available (build with --features tidesdb)"
-            ));
-        }
         DatabaseBackendConfig::Heed3 => {
             #[cfg(feature = "heed3")]
             return Ok(DatabaseBackend::Heed3);
@@ -334,7 +324,6 @@ pub fn backend_from_config(
 }
 
 /// Create a database instance based on backend type.
-/// When `storage_config` is provided and backend is TidesDB, uses tidesdb.* config options.
 pub fn create_database<P: AsRef<Path>>(
     data_dir: P,
     backend: DatabaseBackend,
@@ -364,15 +353,6 @@ pub fn create_database<P: AsRef<Path>>(
         #[cfg(not(feature = "rocksdb"))]
         DatabaseBackend::RocksDB => Err(anyhow::anyhow!(
             "RocksDB backend not available (feature not enabled)"
-        )),
-        #[cfg(feature = "tidesdb")]
-        DatabaseBackend::TidesDB => Ok(Box::new(tidesdb_impl::TidesDBDatabase::new(
-            data_dir,
-            storage_config.and_then(|s| s.tidesdb.as_ref()),
-        )?)),
-        #[cfg(not(feature = "tidesdb"))]
-        DatabaseBackend::TidesDB => Err(anyhow::anyhow!(
-            "TidesDB backend not available (build with --features tidesdb)"
         )),
         #[cfg(feature = "heed3")]
         DatabaseBackend::Heed3 => Ok(Box::new(heed3_impl::Heed3Database::new(
@@ -468,7 +448,7 @@ pub fn create_ibd_utxo_standalone_db<P: AsRef<Path>>(utxo_dir: P) -> Result<Box<
 /// Try to open a **module-process** KV store (dynamic `open_tree()` names).
 ///
 /// Attempts backends in order among those **compiled into** this `blvm-node` build:
-/// **Sled** (if `feature = "sled"`), then **TidesDB** (if `feature = "tidesdb"`), then
+/// **Sled** (if `feature = "sled"`), then
 /// **heed3** (if `feature = "heed3"`, module LMDB env with on-demand named DBs).
 pub fn try_create_module_kv_database<P: AsRef<Path>>(db_path: P) -> Result<Box<dyn Database>> {
     try_create_module_kv_database_with_preference(db_path, None)
@@ -481,29 +461,21 @@ pub fn try_create_module_kv_database_with_preference<P: AsRef<Path>>(
 ) -> Result<Box<dyn Database>> {
     let db_path = db_path.as_ref();
 
-    #[cfg(all(
-        not(feature = "sled"),
-        not(feature = "tidesdb"),
-        not(feature = "heed3")
-    ))]
+    #[cfg(all(not(feature = "sled"), not(feature = "heed3")))]
     #[allow(clippy::needless_return)]
     {
         return Err(anyhow::anyhow!(
-            "No dynamic module KV backend compiled into blvm-node (enable `sled`, `tidesdb`, and/or `heed3`)"
+            "No dynamic module KV backend compiled into blvm-node (enable `sled` and/or `heed3`)"
         ));
     }
 
-    #[cfg(any(feature = "sled", feature = "tidesdb", feature = "heed3"))]
+    #[cfg(any(feature = "sled", feature = "heed3"))]
     {
         let mut attempts: Vec<DatabaseBackend> = Vec::new();
         if let Some(pref) = preferred {
             attempts.push(pref);
         }
-        for backend in [
-            DatabaseBackend::Sled,
-            DatabaseBackend::TidesDB,
-            DatabaseBackend::Heed3,
-        ] {
+        for backend in [DatabaseBackend::Sled, DatabaseBackend::Heed3] {
             if !attempts.contains(&backend) {
                 attempts.push(backend);
             }
@@ -520,16 +492,6 @@ pub fn try_create_module_kv_database_with_preference<P: AsRef<Path>>(
                     #[cfg(not(feature = "sled"))]
                     {
                         Err(anyhow::anyhow!("sled feature not enabled"))
-                    }
-                }
-                DatabaseBackend::TidesDB => {
-                    #[cfg(feature = "tidesdb")]
-                    {
-                        create_database(db_path, DatabaseBackend::TidesDB, None)
-                    }
-                    #[cfg(not(feature = "tidesdb"))]
-                    {
-                        Err(anyhow::anyhow!("tidesdb feature not enabled"))
                     }
                 }
                 DatabaseBackend::Heed3 => {
@@ -574,16 +536,6 @@ pub fn detect_backend_from_db(db: &dyn Database) -> DatabaseBackend {
             return DatabaseBackend::Heed3;
         }
     }
-    #[cfg(feature = "tidesdb")]
-    {
-        if db
-            .as_any()
-            .downcast_ref::<tidesdb_impl::TidesDBDatabase>()
-            .is_some()
-        {
-            return DatabaseBackend::TidesDB;
-        }
-    }
     #[cfg(feature = "redb")]
     {
         if db
@@ -610,25 +562,17 @@ pub fn detect_backend_from_db(db: &dyn Database) -> DatabaseBackend {
 /// Get default database backend
 ///
 /// When `heed3` is enabled, returns heed3 (LMDB + rkyv zero-copy UTXO reads). Otherwise RocksDB
-/// when compiled in, then TidesDB, Redb, Sled.
+/// when compiled in, then Redb, Sled.
 pub fn default_backend() -> DatabaseBackend {
     #[cfg(feature = "heed3")]
     return DatabaseBackend::Heed3;
     #[cfg(all(not(feature = "heed3"), feature = "rocksdb"))]
     return DatabaseBackend::RocksDB;
-    #[cfg(all(not(feature = "heed3"), not(feature = "rocksdb"), feature = "tidesdb"))]
-    return DatabaseBackend::TidesDB;
-    #[cfg(all(
-        not(feature = "heed3"),
-        not(feature = "rocksdb"),
-        not(feature = "tidesdb"),
-        feature = "redb"
-    ))]
+    #[cfg(all(not(feature = "heed3"), not(feature = "rocksdb"), feature = "redb"))]
     return DatabaseBackend::Redb;
     #[cfg(all(
         not(feature = "heed3"),
         not(feature = "rocksdb"),
-        not(feature = "tidesdb"),
         not(feature = "redb"),
         feature = "sled"
     ))]
@@ -636,13 +580,10 @@ pub fn default_backend() -> DatabaseBackend {
     #[cfg(all(
         not(feature = "heed3"),
         not(feature = "rocksdb"),
-        not(feature = "tidesdb"),
         not(feature = "redb"),
         not(feature = "sled")
     ))]
-    compile_error!(
-        "At least one storage backend must be enabled (rocksdb, redb, sled, tidesdb, or heed3)"
-    );
+    compile_error!("At least one storage backend must be enabled (rocksdb, redb, sled, or heed3)");
     #[allow(unreachable_code)]
     DatabaseBackend::Redb // Only for cfg exhaustiveness; one of the above returns always runs
 }
@@ -653,42 +594,16 @@ pub fn default_backend() -> DatabaseBackend {
 /// Returns None if no fallback is available.
 pub fn fallback_backend(primary: DatabaseBackend) -> Option<DatabaseBackend> {
     match primary {
-        DatabaseBackend::TidesDB => {
-            #[cfg(feature = "redb")]
-            {
-                Some(DatabaseBackend::Redb)
-            }
-            #[cfg(all(not(feature = "redb"), feature = "rocksdb"))]
-            {
-                Some(DatabaseBackend::RocksDB)
-            }
-            #[cfg(all(not(feature = "redb"), not(feature = "rocksdb"), feature = "sled"))]
-            {
-                Some(DatabaseBackend::Sled)
-            }
-            #[cfg(all(not(feature = "redb"), not(feature = "rocksdb"), not(feature = "sled")))]
-            {
-                None
-            }
-        }
         DatabaseBackend::Redb => {
-            #[cfg(feature = "tidesdb")]
-            {
-                Some(DatabaseBackend::TidesDB)
-            }
-            #[cfg(all(not(feature = "tidesdb"), feature = "sled"))]
+            #[cfg(feature = "sled")]
             {
                 Some(DatabaseBackend::Sled)
             }
-            #[cfg(all(not(feature = "tidesdb"), not(feature = "sled"), feature = "rocksdb"))]
+            #[cfg(all(not(feature = "sled"), feature = "rocksdb"))]
             {
                 Some(DatabaseBackend::RocksDB)
             }
-            #[cfg(all(
-                not(feature = "tidesdb"),
-                not(feature = "sled"),
-                not(feature = "rocksdb")
-            ))]
+            #[cfg(all(not(feature = "sled"), not(feature = "rocksdb")))]
             {
                 None
             }
@@ -708,33 +623,19 @@ pub fn fallback_backend(primary: DatabaseBackend) -> Option<DatabaseBackend> {
             }
         }
         DatabaseBackend::RocksDB => {
-            #[cfg(feature = "tidesdb")]
-            {
-                Some(DatabaseBackend::TidesDB)
-            }
-            #[cfg(all(not(feature = "tidesdb"), feature = "redb"))]
+            #[cfg(feature = "redb")]
             {
                 Some(DatabaseBackend::Redb)
             }
-            #[cfg(all(not(feature = "tidesdb"), not(feature = "redb"), feature = "heed3"))]
+            #[cfg(all(not(feature = "redb"), feature = "heed3"))]
             {
                 Some(DatabaseBackend::Heed3)
             }
-            #[cfg(all(
-                not(feature = "tidesdb"),
-                not(feature = "redb"),
-                not(feature = "heed3"),
-                feature = "sled"
-            ))]
+            #[cfg(all(not(feature = "redb"), not(feature = "heed3"), feature = "sled"))]
             {
                 Some(DatabaseBackend::Sled)
             }
-            #[cfg(all(
-                not(feature = "tidesdb"),
-                not(feature = "redb"),
-                not(feature = "heed3"),
-                not(feature = "sled")
-            ))]
+            #[cfg(all(not(feature = "redb"), not(feature = "heed3"), not(feature = "sled")))]
             {
                 None
             }
@@ -765,7 +666,7 @@ pub fn fallback_backend(primary: DatabaseBackend) -> Option<DatabaseBackend> {
 mod sled_impl {
     use super::{BatchWriter, Database, Tree};
     use anyhow::Result;
-    use sled::Db;
+    use blvm_storage_fence::sled::{self, Db};
     use std::path::Path;
     use std::sync::Arc;
 
@@ -886,7 +787,7 @@ mod sled_impl {
 pub(crate) mod redb_impl {
     use super::{BatchWriter, Database, Tree};
     use anyhow::Result;
-    use redb::{Database as RedbDb, ReadableTable, TableDefinition};
+    use blvm_storage_fence::redb::{Database as RedbDb, ReadableTable, TableDefinition};
     use std::path::Path;
     use std::sync::Arc;
 
@@ -1545,8 +1446,8 @@ pub mod rocksdb_impl {
         rocksdb_env_over_file,
     };
     use anyhow::Result;
-    use rocksdb::{
-        BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, DB,
+    use blvm_storage_fence::rocksdb::{
+        self, BlockBasedOptions, Cache, ColumnFamily, ColumnFamilyDescriptor, DB,
         IngestExternalFileOptions, Options, ReadOptions, SstFileWriter, WriteOptions,
     };
     use std::path::Path;
@@ -2613,433 +2514,6 @@ pub mod rocksdb_impl {
 
         fn len(&self) -> usize {
             self.op_count
-        }
-    }
-}
-
-// TidesDB implementation
-#[cfg(feature = "tidesdb")]
-pub(crate) mod tidesdb_impl {
-    use super::{BatchWriter, Database, Tree};
-    use anyhow::Result;
-    use std::path::Path;
-    use std::sync::Arc;
-    use tidesdb::{ColumnFamilyConfig, CompressionAlgorithm, Config, LogLevel, SyncMode, TidesDB};
-
-    pub struct TidesDBDatabase {
-        db: Arc<TidesDB>,
-        tidesdb_config: Option<crate::config::TidesDBConfig>,
-    }
-
-    impl TidesDBDatabase {
-        pub fn new<P: AsRef<Path>>(
-            data_dir: P,
-            tidesdb_config: Option<&crate::config::TidesDBConfig>,
-        ) -> Result<Self> {
-            let db_path = data_dir.as_ref().join("tidesdb");
-            std::fs::create_dir_all(&db_path)?;
-
-            let dbcache_mb: usize = std::env::var("BLVM_DBCACHE_MB")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(450);
-            let dbcache_bytes = dbcache_mb.saturating_mul(1024).saturating_mul(1024);
-
-            // ENV > config > defaults
-            let flush_threads: i32 = std::env::var("BLVM_TIDESDB_FLUSH_THREADS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .or_else(|| tidesdb_config.map(|c| c.flush_threads))
-                .unwrap_or(4);
-            let compact_threads: i32 = std::env::var("BLVM_TIDESDB_COMPACT_THREADS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .or_else(|| tidesdb_config.map(|c| c.compact_threads))
-                .unwrap_or(4);
-            let config = Config::new(&db_path)
-                .block_cache_size(dbcache_bytes)
-                .num_flush_threads(flush_threads)
-                .num_compaction_threads(compact_threads)
-                .log_level(LogLevel::Warn);
-
-            let db =
-                TidesDB::open(config).map_err(|e| anyhow::anyhow!("TidesDB open failed: {}", e))?;
-
-            Ok(Self {
-                db: Arc::new(db),
-                tidesdb_config: tidesdb_config.cloned(),
-            })
-        }
-
-        /// Tuned config per tree for IBD/block sync performance.
-        fn cf_config_for_tree(&self, name: &str) -> ColumnFamilyConfig {
-            let base =
-                ColumnFamilyConfig::default().compression_algorithm(CompressionAlgorithm::None);
-            let utxo_threshold = self
-                .tidesdb_config
-                .as_ref()
-                .map(|c| c.utxo_klog_threshold)
-                .unwrap_or(0);
-
-            match name {
-                "ibd_utxos" => base
-                    .klog_value_threshold(utxo_threshold)
-                    .write_buffer_size(256 * 1024 * 1024) // 256MB memtable, fewer flushes
-                    .enable_bloom_filter(true)
-                    .bloom_fpr(0.01)
-                    .sync_mode(SyncMode::Interval)
-                    .sync_interval_us(1_000_000), // 1s sync interval during IBD
-                "blocks" => base
-                    .klog_value_threshold(4 * 1024 * 1024) // blocks up to 4MB to vlog
-                    .write_buffer_size(256 * 1024 * 1024)
-                    .enable_bloom_filter(true)
-                    .sync_mode(SyncMode::Interval)
-                    .sync_interval_us(1_000_000),
-                "utxos" => base
-                    .klog_value_threshold(utxo_threshold)
-                    .write_buffer_size(128 * 1024 * 1024)
-                    .enable_bloom_filter(true),
-                _ => base,
-            }
-        }
-
-        fn get_or_create_cf(&self, name: &str) -> Result<tidesdb::ColumnFamily> {
-            if let Ok(cf) = self.db.get_column_family(name) {
-                return Ok(cf);
-            }
-            let cf_config = self.cf_config_for_tree(name);
-            self.db
-                .create_column_family(name, cf_config)
-                .map_err(|e| anyhow::anyhow!("TidesDB create_column_family failed: {}", e))?;
-            self.db
-                .get_column_family(name)
-                .map_err(|e| anyhow::anyhow!("TidesDB get_column_family failed: {}", e))
-        }
-
-        /// One transaction for all blockstore column families plus recent headers (IBD, no extra sync).
-        /// Matches the per-CF batch sequence in `parallel_ibd::do_flush_to_storage`.
-        pub(crate) fn write_ibd_blockstore_flush_no_wal(
-            &self,
-            flush_order: &[usize],
-            heights: &[u64],
-            block_hashes: &[blvm_protocol::Hash],
-            block_data: &[Vec<u8>],
-            header_data: &[std::sync::Arc<Vec<u8>>],
-            witness_blobs: &[Option<Vec<u8>>],
-            metadata_blobs: &[Vec<u8>],
-            recent_entries: &[(u64, Vec<u8>)],
-        ) -> Result<()> {
-            use crate::storage::blockstore::block_height_row_key;
-
-            let cf_blocks = self.get_or_create_cf("blocks")?;
-            let cf_headers = self.get_or_create_cf("headers")?;
-            let cf_witnesses = self.get_or_create_cf("witnesses")?;
-            let cf_height = self.get_or_create_cf("height_index")?;
-            let cf_h2h = self.get_or_create_cf("hash_to_height")?;
-            let cf_meta = self.get_or_create_cf("block_metadata")?;
-            let cf_recent = self.get_or_create_cf("recent_headers")?;
-
-            let mut txn = self.db.begin_transaction()?;
-            for &i in flush_order {
-                let height = heights[i];
-                let key = block_height_row_key(height, &block_hashes[i]);
-                txn.put(&cf_blocks, key.as_slice(), &block_data[i], -1)?;
-                txn.put(&cf_headers, key.as_slice(), header_data[i].as_slice(), -1)?;
-                if let Some(w) = witness_blobs[i].as_ref() {
-                    txn.put(&cf_witnesses, key.as_slice(), w.as_slice(), -1)?;
-                }
-                let height_key = height.to_be_bytes();
-                txn.put(&cf_height, &height_key, block_hashes[i].as_slice(), -1)?;
-                txn.put(&cf_h2h, block_hashes[i].as_slice(), &height_key, -1)?;
-                txn.put(&cf_meta, key.as_slice(), &metadata_blobs[i], -1)?;
-            }
-            for &(height, ref header_bytes) in recent_entries {
-                let height_bytes = height.to_be_bytes();
-                txn.put(
-                    &cf_recent,
-                    height_bytes.as_slice(),
-                    header_bytes.as_slice(),
-                    -1,
-                )?;
-                if height > 11 {
-                    let rm = (height - 12).to_be_bytes();
-                    txn.delete(&cf_recent, rm.as_slice())?;
-                }
-            }
-            txn.commit()
-                .map_err(|e| anyhow::anyhow!("TidesDB IBD blockstore flush commit failed: {}", e))
-        }
-    }
-
-    impl Database for TidesDBDatabase {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
-        fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
-            if name.starts_with("module_") || name == "modules" {
-                return Err(anyhow::anyhow!(
-                    "Module storage has been removed. Use blvm_sdk::module::open_module_db."
-                ));
-            }
-
-            let cf = self.get_or_create_cf(name)?;
-            Ok(Box::new(TidesDBTree {
-                db: Arc::clone(&self.db),
-                cf: Arc::new(cf),
-                name: name.to_string(),
-            }))
-        }
-
-        fn flush(&self) -> Result<()> {
-            // TidesDB has no global flush(); no-op per implementation plan.
-            Ok(())
-        }
-    }
-
-    struct TidesDBTree {
-        db: Arc<TidesDB>,
-        cf: Arc<tidesdb::ColumnFamily>,
-        name: String,
-    }
-
-    fn tidesdb_get_to_option(
-        txn: &tidesdb::Transaction,
-        cf: &tidesdb::ColumnFamily,
-        key: &[u8],
-    ) -> Result<Option<Vec<u8>>> {
-        match txn.get(cf, key) {
-            Ok(v) => Ok(Some(v)),
-            Err(e) if e.is_not_found() => Ok(None),
-            Err(e) => Err(anyhow::anyhow!("TidesDB get failed: {}", e)),
-        }
-    }
-
-    impl Tree for TidesDBTree {
-        fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
-            let mut txn = self.db.begin_transaction()?;
-            txn.put(&self.cf, key, value, -1)?;
-            txn.commit()
-                .map_err(|e| anyhow::anyhow!("TidesDB commit failed: {}", e))
-        }
-
-        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-            let txn = self.db.begin_transaction()?;
-            tidesdb_get_to_option(&txn, &self.cf, key)
-        }
-
-        fn remove(&self, key: &[u8]) -> Result<()> {
-            let mut txn = self.db.begin_transaction()?;
-            txn.delete(&self.cf, key)?;
-            txn.commit()
-                .map_err(|e| anyhow::anyhow!("TidesDB commit failed: {}", e))
-        }
-
-        fn contains_key(&self, key: &[u8]) -> Result<bool> {
-            Ok(self.get(key)?.is_some())
-        }
-
-        fn clear(&self) -> Result<()> {
-            let txn = self.db.begin_transaction()?;
-            let mut iter = txn.new_iterator(&self.cf)?;
-            iter.seek_to_first()?;
-            let mut keys = Vec::new();
-            while iter.is_valid() {
-                keys.push(iter.key()?);
-                iter.next()?;
-            }
-            drop(iter);
-            drop(txn);
-
-            if keys.is_empty() {
-                return Ok(());
-            }
-            let mut txn = self.db.begin_transaction()?;
-            for k in keys {
-                txn.delete(&self.cf, &k)?;
-            }
-            txn.commit()
-                .map_err(|e| anyhow::anyhow!("TidesDB commit failed: {}", e))
-        }
-
-        fn len(&self) -> Result<usize> {
-            let stats = self.cf.get_stats()?;
-            Ok(stats.total_keys as usize)
-        }
-
-        fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
-            let txn = match self.db.begin_transaction() {
-                Ok(t) => t,
-                Err(e) => {
-                    return Box::new(std::iter::once(Err(anyhow::anyhow!(
-                        "TidesDB begin_transaction failed: {}",
-                        e
-                    ))));
-                }
-            };
-            let mut iter = match txn.new_iterator(&self.cf) {
-                Ok(i) => i,
-                Err(e) => {
-                    return Box::new(std::iter::once(Err(anyhow::anyhow!(
-                        "TidesDB new_iterator failed: {}",
-                        e
-                    ))));
-                }
-            };
-            let _ = iter.seek_to_first();
-            let mut items = Vec::new();
-            while iter.is_valid() {
-                match (iter.key(), iter.value()) {
-                    (Ok(k), Ok(v)) => items.push(Ok((k, v))),
-                    (Err(e), _) | (_, Err(e)) => {
-                        items.push(Err(anyhow::anyhow!("TidesDB iter: {}", e)));
-                        break;
-                    }
-                }
-                if let Err(e) = iter.next() {
-                    items.push(Err(anyhow::anyhow!("TidesDB iter next: {}", e)));
-                    break;
-                }
-            }
-            Box::new(items.into_iter())
-        }
-
-        fn batch(&self) -> Result<Box<dyn BatchWriter + '_>> {
-            Ok(Box::new(TidesDBBatchWriter {
-                db: Arc::clone(&self.db),
-                cf: Arc::clone(&self.cf),
-                pending: Vec::new(),
-            }))
-        }
-    }
-
-    struct TidesDBModuleTree {
-        inner: Arc<TidesDBTree>,
-        module_id: String,
-        tree_name: String,
-    }
-
-    impl TidesDBModuleTree {
-        fn key_prefix(&self) -> Vec<u8> {
-            format!("module_{}_{}_", self.module_id, self.tree_name).into_bytes()
-        }
-        fn namespace_key(&self, key: &[u8]) -> Vec<u8> {
-            let mut n = self.key_prefix();
-            n.extend_from_slice(key);
-            n
-        }
-    }
-
-    impl Tree for TidesDBModuleTree {
-        fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
-            self.inner.insert(&self.namespace_key(key), value)
-        }
-        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-            self.inner.get(&self.namespace_key(key))
-        }
-        fn remove(&self, key: &[u8]) -> Result<()> {
-            self.inner.remove(&self.namespace_key(key))
-        }
-        fn contains_key(&self, key: &[u8]) -> Result<bool> {
-            self.inner.contains_key(&self.namespace_key(key))
-        }
-        fn clear(&self) -> Result<()> {
-            let prefix = self.key_prefix();
-            let keys: Vec<Vec<u8>> = self
-                .inner
-                .iter()
-                .filter_map(|r| match r {
-                    Ok((k, _)) if k.starts_with(&prefix) => Some(Ok(k)),
-                    Ok(_) => None,
-                    Err(e) => Some(Err(e)),
-                })
-                .collect::<Result<_>>()?;
-            for k in keys {
-                self.inner.remove(&k)?;
-            }
-            Ok(())
-        }
-        fn len(&self) -> Result<usize> {
-            let prefix = self.key_prefix();
-            let mut count = 0;
-            for item in self.inner.iter() {
-                match item {
-                    Ok((k, _)) if k.starts_with(&prefix) => count += 1,
-                    Ok(_) => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            Ok(count)
-        }
-        fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
-            let prefix = self.key_prefix();
-            Box::new(self.inner.iter().filter_map(move |item| match item {
-                Ok((k, v)) if k.starts_with(&prefix) => Some(Ok((k[prefix.len()..].to_vec(), v))),
-                Ok(_) => None,
-                Err(e) => Some(Err(e)),
-            }))
-        }
-        fn batch(&self) -> Result<Box<dyn BatchWriter + '_>> {
-            Ok(Box::new(TidesDBModuleBatchWriter {
-                inner: self.inner.batch()?,
-                key_prefix: self.key_prefix(),
-            }))
-        }
-    }
-
-    struct TidesDBModuleBatchWriter<'a> {
-        inner: Box<dyn BatchWriter + 'a>,
-        key_prefix: Vec<u8>,
-    }
-
-    impl<'a> BatchWriter for TidesDBModuleBatchWriter<'a> {
-        fn put(&mut self, key: &[u8], value: &[u8]) {
-            let mut k = self.key_prefix.clone();
-            k.extend_from_slice(key);
-            self.inner.put(&k, value);
-        }
-        fn delete(&mut self, key: &[u8]) {
-            let mut k = self.key_prefix.clone();
-            k.extend_from_slice(key);
-            self.inner.delete(&k);
-        }
-        fn commit(self: Box<Self>) -> Result<()> {
-            self.inner.commit()
-        }
-        fn len(&self) -> usize {
-            self.inner.len()
-        }
-    }
-
-    struct TidesDBBatchWriter {
-        db: Arc<TidesDB>,
-        cf: Arc<tidesdb::ColumnFamily>,
-        pending: Vec<(Vec<u8>, Option<Vec<u8>>)>,
-    }
-
-    impl BatchWriter for TidesDBBatchWriter {
-        fn put(&mut self, key: &[u8], value: &[u8]) {
-            self.pending.push((key.to_vec(), Some(value.to_vec())));
-        }
-        fn delete(&mut self, key: &[u8]) {
-            self.pending.push((key.to_vec(), None));
-        }
-        fn commit(self: Box<Self>) -> Result<()> {
-            if self.pending.is_empty() {
-                return Ok(());
-            }
-            let mut txn = self.db.begin_transaction()?;
-            for (key, value) in self.pending {
-                match value {
-                    Some(v) => txn.put(&self.cf, &key, &v, -1)?,
-                    None => txn.delete(&self.cf, &key)?,
-                }
-            }
-            txn.commit()
-                .map_err(|e| anyhow::anyhow!("TidesDB batch commit failed: {}", e))
-        }
-        fn len(&self) -> usize {
-            self.pending.len()
         }
     }
 }

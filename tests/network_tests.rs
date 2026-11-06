@@ -1005,7 +1005,7 @@ async fn test_protocol_constants() {
     assert_eq!(BITCOIN_MAGIC_REGTEST, [0xfa, 0xbf, 0xb5, 0xda]);
 
     // Test max message length
-    assert_eq!(MAX_PROTOCOL_MESSAGE_LENGTH, 32 * 1024 * 1024);
+    assert_eq!(MAX_PROTOCOL_MESSAGE_LENGTH, 4_000_000 + 24);
 
     // Test allowed commands
     assert!(ALLOWED_COMMANDS.contains(&"version"));

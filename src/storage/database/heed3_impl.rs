@@ -6,8 +6,8 @@
 
 use super::{BatchWriter, Database, KNOWN_TREE_NAMES, Tree};
 use anyhow::{Context, Result};
-use heed3::types::Bytes;
-use heed3::{
+use blvm_storage_fence::heed3::types::Bytes;
+use blvm_storage_fence::heed3::{
     Database as HeedDatabase, Env, EnvFlags, EnvOpenOptions, FlagSetMode, PutFlags, WithoutTls,
 };
 use parking_lot::Mutex;
@@ -806,7 +806,7 @@ impl Heed3Tree {
     pub fn get_many_heed3<'txn>(
         &self,
         keys: &[&[u8]],
-        rtxn: &'txn heed3::RoTxn<'_, heed3::WithoutTls>,
+        rtxn: &'txn blvm_storage_fence::heed3::RoTxn<'_, blvm_storage_fence::heed3::WithoutTls>,
     ) -> Result<Vec<Option<&'txn [u8]>>> {
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {

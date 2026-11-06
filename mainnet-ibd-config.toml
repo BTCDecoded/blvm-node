@@ -11,11 +11,6 @@ persistent_peers = []
 [storage]
 data_dir = "~/.local/share/blvm-mainnet"
 database_backend = "rocksdb"
-# TidesDB tuning (when database_backend = "tidesdb"):
-# [storage.tidesdb]
-# utxo_klog_threshold = 65536   # Values <= this stay inline (fast). 0 = all to vlog. Default 64KB.
-# flush_threads = 4             # ENV BLVM_TIDESDB_FLUSH_THREADS overrides
-# compact_threads = 4           # ENV BLVM_TIDESDB_COMPACT_THREADS overrides
 
 [storage.pruning]
 # Pruning mode: normal (utxo-commitments disabled during spec migration)

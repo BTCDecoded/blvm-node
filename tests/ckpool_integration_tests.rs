@@ -168,7 +168,8 @@ async fn ckpool_http_basic_auth() {
     let manager = RpcAuthManager::new(true);
     manager
         .set_basic_auth(Some("ckpool".to_string()), "s3cret".to_string())
-        .await;
+        .await
+        .unwrap();
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -201,7 +202,8 @@ async fn ckpool_basic_auth_rejects_wrong_username() {
     let manager = RpcAuthManager::new(true);
     manager
         .set_basic_auth(Some("ckpool".to_string()), "s3cret".to_string())
-        .await;
+        .await
+        .unwrap();
 
     let mut headers = HeaderMap::new();
     headers.insert(

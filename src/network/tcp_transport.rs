@@ -29,7 +29,11 @@ impl TcpTransport {
 
     /// Create with configurable max message length (for constrained networks).
     pub fn with_max_message_length(max_message_length: usize) -> Self {
-        Self { max_message_length }
+        Self {
+            max_message_length: crate::network::protocol::clamp_protocol_message_length(
+                max_message_length,
+            ),
+        }
     }
 }
 
@@ -181,6 +185,8 @@ pub struct TcpConnection {
 impl TcpConnection {
     /// Create a new TCP connection from a stream
     pub fn new(stream: TcpStream, peer_addr: TransportAddr, max_message_length: usize) -> Self {
+        let max_message_length =
+            crate::network::protocol::clamp_protocol_message_length(max_message_length);
         let (reader, writer) = tokio::io::split(stream);
         Self {
             reader: std::sync::Arc::new(tokio::sync::Mutex::new(reader)),

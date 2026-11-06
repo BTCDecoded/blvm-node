@@ -84,11 +84,15 @@ fn default_rate_limit_rate() -> u32 {
     10
 }
 
+fn default_auth_required() -> bool {
+    true
+}
+
 /// RPC authentication configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcAuthConfig {
-    /// Require authentication for RPC requests
-    #[serde(default)]
+    /// Require authentication for RPC requests. Omitted TOML is true.
+    #[serde(default = "default_auth_required")]
     pub required: bool,
 
     /// Valid authentication tokens (env RPC_AUTH_TOKENS, token_file, or this field).
@@ -261,5 +265,16 @@ mod stratum_v2_config_tests {
         let section = config.stratum_v2.as_ref().expect("section present");
         assert!(!section.p2p_stratum_demux);
         assert!(!p2p_stratum_demux_enabled(Some(section)));
+    }
+}
+
+#[cfg(test)]
+mod auth_required_default {
+    use super::RpcAuthConfig;
+
+    #[test]
+    fn omitted_required_is_true() {
+        let config: RpcAuthConfig = serde_json::from_str("{}").unwrap();
+        assert!(config.required);
     }
 }

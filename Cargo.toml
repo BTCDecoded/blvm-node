@@ -39,10 +39,8 @@ blvm-spec-lock = { version = ">=0.1, <1", optional = true, default-features = fa
 # Node requires current MuHash APIs (running-state serde, insert_mut/remove_mut hot path).
 blvm-muhash = { version = ">=0.1, <1" }
 
-# Storage layer - EXACT VERSIONS for security
-sled = { version = "=0.34.7", optional = true }
-redb = { version = "=1.4", optional = true }
-rocksdb = { version = "=0.24.0", optional = true }
+# Storage engines (heed3, redb, sled, rocksdb) are dependencies of blvm-storage-fence.
+blvm-storage-fence = { path = "crates/blvm-storage-fence", default-features = false }
 # Pure-Rust LevelDB reader: used when Bitcoin Core chainstate has .ldb (true LevelDB) files
 # that RocksDB cannot open. Gated behind the rocksdb feature (migration requires rocksdb dest).
 rusty-leveldb = { version = "4", optional = true }
@@ -50,14 +48,10 @@ rusty-leveldb = { version = "4", optional = true }
 # the API we need. All are pinned to an exact rev or tag to guarantee reproducibility.
 # Policy: upgrade to crates.io as soon as a compatible release ships; never leave
 # a git dep on a floating branch. Packagers who disallow git deps should disable the
-# relevant feature (e.g. `--no-default-features` for tidesdb).
+# relevant feature.
 #
-# heed3: LMDB mdb.master3 wrapper (MVCC, concurrent readers). Requires liblmdb at link time.
-heed3 = { version = "=0.22.1", optional = true, default-features = false }
 # rkyv: zero-copy archived values paired with heed3 mmap reads.
 rkyv = { version = "=0.8.18", optional = true, features = ["bytecheck"] }
-# Pinned rev; build.rs builds libtidesdb from source and links lz4/zstd/snappy (CI installs -dev packages).
-tidesdb = { git = "https://github.com/tidesdb/tidesdb-rs.git", rev = "2c128540b02400a538475d992a122d940eb93da3", version = "0.6.7", optional = true }
 
 # Networking layer - EXACT VERSIONS for security
 # Explicit features avoid `full` (smaller graphs, clearer deps). Mirrors actual `tokio::` usage
@@ -208,7 +202,7 @@ windows-sys = { version = "=0.59", features = ["Win32_System_JobObjects", "Win32
 
 [features]
 # Storage: `database_backend = "auto"` picks heed3 when the `heed3` feature is enabled
-# (see `storage/database/mod.rs::default_backend`), else RocksDB, TidesDB, Redb, Sled.
+# (see `storage/database/mod.rs::default_backend`), else RocksDB, Redb, Sled.
 # Shared default stack (blvm adds sled/compression on the binary crate).
 default = [
     "sysinfo",
@@ -235,12 +229,11 @@ sigop = []
 # System information for memory stats (sysinfo is always included)
 sysinfo = ["dep:sysinfo"]
 # Storage backends
-sled = ["dep:sled"]
-redb = ["dep:redb"]
+sled = ["blvm-storage-fence/sled"]
+redb = ["blvm-storage-fence/redb"]
 # Note: rocksdb and erlay are mutually exclusive due to clang-sys version conflicts
-rocksdb = ["dep:rocksdb", "dep:rusty-leveldb"]
-tidesdb = ["dep:tidesdb"]
-heed3 = ["dep:heed3", "dep:rkyv"]
+rocksdb = ["blvm-storage-fence/rocksdb", "dep:rusty-leveldb"]
+heed3 = ["blvm-storage-fence/heed3", "dep:rkyv"]
 # Process sandboxing (Unix)
 nix = ["dep:nix", "dep:libc"]
 libc = ["dep:libc"]
@@ -264,6 +257,8 @@ dandelion = ["dep:blvm-spec-lock", "blvm-protocol/dandelion"]
 protocol-verification = ["dep:blvm-spec-lock", "blvm-protocol/protocol-verification"]
 # CTV (BIP119 CheckTemplateVerify) - passed through from blvm-protocol
 ctv = ["blvm-protocol/ctv", "dep:blvm-consensus"]
+# v2 encrypted transport. Off unless this feature is enabled. The offer flag stays false.
+bip324 = ["blvm-protocol/bip324"]
 # Governance (auto-detect Commons server, HTTP client)
 governance = ["dep:reqwest"]
 # Memory allocator optimization (mimalloc) - faster than default allocator

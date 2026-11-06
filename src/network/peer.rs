@@ -12,6 +12,14 @@ use super::NetworkMessage;
 use super::transport::{TransportAddr, TransportConnection};
 use crate::utils::current_timestamp;
 
+/// Slot filled by an outbound dial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutboundRole {
+    FullRelay,
+    BlockRelayOnly,
+    Feeler,
+}
+
 /// Peer connection state
 ///
 /// Supports multiple transport types (TCP, Quinn, Iroh) via TransportConnection trait
@@ -51,6 +59,8 @@ pub struct Peer {
     version_time: Option<i64>,
     /// Whether this is an outbound connection (we initiated it)
     is_outbound: bool,
+    /// Outbound slot, when this dial filled one. Inbound peers have none.
+    outbound_role: Option<OutboundRole>,
     /// Best block hash (from version message or headers)
     best_block_hash: Option<blvm_protocol::Hash>,
     /// Best block height (from version message) - duplicate of start_height but as u64
@@ -94,6 +104,55 @@ async fn reserve_raw_frame(len: usize) -> bool {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     false
+}
+
+#[cfg(feature = "bip324")]
+async fn read_v2_frame<R>(
+    reader: &mut R,
+    recv: &mut blvm_protocol::v2_transport::V2Recv,
+    max_message_length: usize,
+) -> std::io::Result<Option<Vec<u8>>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut enc_len = [0u8; 3];
+    reader.read_exact(&mut enc_len).await?;
+    let contents_len = recv
+        .decrypt_length(&enc_len)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?;
+    if contents_len > max_message_length {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "v2 contents exceed the message cap",
+        ));
+    }
+    let mut body = vec![0u8; 1 + contents_len + 16];
+    reader.read_exact(&mut body).await?;
+    let (contents, ignore) = recv
+        .decrypt_body(&body, &[])
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?;
+    if ignore {
+        return Ok(None);
+    }
+    if contents.len() < 24 || contents.len() != contents_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "v2 frame is not a v1 message",
+        ));
+    }
+    let payload_len =
+        u32::from_le_bytes([contents[16], contents[17], contents[18], contents[19]]) as usize;
+    if contents.len() != 24 + payload_len
+        || !crate::network::protocol::wire_header_magic_ok(&contents[..24])
+        || !crate::network::protocol::wire_checksum_ok(&contents[..24], &contents[24..])
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "v2 frame failed the v1 header checks",
+        ));
+    }
+    Ok(Some(contents))
 }
 
 fn enqueue_raw(
@@ -149,6 +208,7 @@ impl Peer {
             start_height: 0,
             version_time: None,
             is_outbound: false,
+            outbound_role: None,
             best_block_hash: None,
             best_block_height: None,
             chainwork: None,
@@ -313,6 +373,7 @@ impl Peer {
             start_height: 0, // Best block height from version message (set when version received)
             version_time: None,
             is_outbound: false, // Default to false, should be set by caller
+            outbound_role: None,
             pending_ping_nonce: None,
             ping_sent_time: None,
             ping_sent_at: None,
@@ -353,10 +414,52 @@ impl Peer {
         message_tx: mpsc::UnboundedSender<NetworkMessage>,
         max_message_length: usize,
     ) -> Self {
+        Self::split_peer(
+            stream,
+            addr,
+            message_tx,
+            max_message_length,
+            #[cfg(feature = "bip324")]
+            None,
+            #[cfg(feature = "bip324")]
+            None,
+        )
+    }
+
+    /// Same split as [`Self::from_tcp_stream_split`], after a finished v2 handshake.
+    /// Writes are encrypted and reads are decrypted before the v1 header checks.
+    #[cfg(feature = "bip324")]
+    pub fn from_tcp_stream_v2(
+        stream: tokio::net::TcpStream,
+        addr: SocketAddr,
+        message_tx: mpsc::UnboundedSender<NetworkMessage>,
+        max_message_length: usize,
+        session: blvm_protocol::v2_transport::V2Session,
+    ) -> Self {
+        let (send, recv) = session.split();
+        Self::split_peer(
+            stream,
+            addr,
+            message_tx,
+            max_message_length,
+            Some(send),
+            Some(recv),
+        )
+    }
+
+    fn split_peer(
+        stream: tokio::net::TcpStream,
+        addr: SocketAddr,
+        message_tx: mpsc::UnboundedSender<NetworkMessage>,
+        max_message_length: usize,
+        #[cfg(feature = "bip324")] v2_send: Option<blvm_protocol::v2_transport::V2Send>,
+        #[cfg(feature = "bip324")] v2_recv: Option<blvm_protocol::v2_transport::V2Recv>,
+    ) -> Self {
         use super::transport::TransportAddr;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tracing::{debug, info, warn};
 
+        let max_message_length = super::protocol::clamp_protocol_message_length(max_message_length);
         let peer_addr = stream.peer_addr().unwrap_or(addr);
         let transport_addr = TransportAddr::Tcp(peer_addr);
 
@@ -372,9 +475,54 @@ impl Peer {
         let message_tx_write = message_tx.clone();
 
         // Spawn read task - owns the reader half exclusively
+        #[cfg(feature = "bip324")]
+        let v2_recv = v2_recv;
         let read_task = tokio::spawn(async move {
             let mut reader = reader;
+            #[cfg(feature = "bip324")]
+            let mut v2_recv = v2_recv;
             loop {
+                #[cfg(feature = "bip324")]
+                if let Some(recv) = v2_recv.as_mut() {
+                    match read_v2_frame(&mut reader, recv, max_message_length).await {
+                        Ok(Some(data)) => {
+                            let peer_socket = match &transport_addr_clone {
+                                TransportAddr::Tcp(sock) => *sock,
+                                #[cfg(feature = "quinn")]
+                                TransportAddr::Quinn(sock) => *sock,
+                                #[cfg(feature = "iroh")]
+                                TransportAddr::Iroh(_) => {
+                                    std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+                                }
+                            };
+                            if !reserve_raw_frame(data.len()).await {
+                                warn!(
+                                    "Peer {:?} filled the receive queue ({} bytes), disconnecting",
+                                    transport_addr_clone,
+                                    data.len()
+                                );
+                                let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
+                                    transport_addr_clone.clone(),
+                                ));
+                                break;
+                            }
+                            enqueue_raw(&message_tx_clone, data, peer_socket);
+                            continue;
+                        }
+                        Ok(None) => continue,
+                        Err(e) => {
+                            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                                info!("Peer {:?} connection closed", transport_addr_clone);
+                            } else {
+                                warn!("Peer read error for {:?}: {}", transport_addr_clone, e);
+                            }
+                            let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
+                                transport_addr_clone.clone(),
+                            ));
+                            break;
+                        }
+                    }
+                }
                 // Read Bitcoin wire format header (24 bytes)
                 let mut header = [0u8; 24];
                 match reader.read_exact(&mut header).await {
@@ -480,6 +628,8 @@ impl Peer {
             send_rx,
             message_tx_write,
             transport_addr_write,
+            #[cfg(feature = "bip324")]
+            v2_send,
         ));
 
         let now = current_timestamp();
@@ -503,6 +653,7 @@ impl Peer {
             start_height: 0,
             version_time: None,
             is_outbound: false, // Default to false, should be set by caller
+            outbound_role: None,
             best_block_hash: None,
             best_block_height: None,
             chainwork: None,
@@ -705,6 +856,14 @@ impl Peer {
         self.is_outbound = is_outbound;
     }
 
+    pub(crate) fn outbound_role(&self) -> Option<OutboundRole> {
+        self.outbound_role
+    }
+
+    pub(crate) fn set_outbound_role(&mut self, role: Option<OutboundRole>) {
+        self.outbound_role = role;
+    }
+
     /// Record that a ping was sent.
     ///
     /// The nonce tracks the latest ping so a pong can match it. The timeout
@@ -844,11 +1003,25 @@ async fn run_peer_writer<W>(
     mut send_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     message_tx: mpsc::UnboundedSender<NetworkMessage>,
     addr: TransportAddr,
+    #[cfg(feature = "bip324")] mut v2_send: Option<blvm_protocol::v2_transport::V2Send>,
 ) where
     W: tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::AsyncWriteExt;
     while let Some(data) = send_rx.recv().await {
+        #[cfg(feature = "bip324")]
+        let data = if let Some(send) = v2_send.as_mut() {
+            match send.encrypt(&data) {
+                Ok(packet) => packet,
+                Err(e) => {
+                    warn!("Peer v2 encrypt error for {:?}: {}", addr, e);
+                    let _ = message_tx.send(NetworkMessage::PeerDisconnected(addr));
+                    break;
+                }
+            }
+        } else {
+            data
+        };
         match writer.write_all(&data).await {
             Ok(()) => {
                 if let Err(e) = writer.flush().await {
@@ -910,6 +1083,8 @@ mod write_error_tests {
             send_rx,
             message_tx,
             addr.clone(),
+            #[cfg(feature = "bip324")]
+            None,
         ));
         send_tx.send(vec![1, 2, 3]).unwrap();
         let message = message_rx.recv().await;

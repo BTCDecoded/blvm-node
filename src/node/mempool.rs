@@ -57,6 +57,8 @@ pub(crate) fn replacement_clears_fee_rate(
 /// Wrapped in Mutex for add_transaction from Arc context (re-broadcast, sendrawtransaction)
 struct MempoolPool {
     transactions: HashMap<Hash, Transaction>,
+    /// Witness transaction id recorded at admission, keyed by txid.
+    wtxids: HashMap<Hash, Hash>,
     /// SegWit witness stacks per txid (one stack per input), when known at accept time.
     tx_witnesses: HashMap<Hash, Vec<Witness>>,
     /// Sigop-adjusted virtual size recorded at accept time.
@@ -895,6 +897,7 @@ impl MempoolManager {
         let manager = Self {
             pool: Mutex::new(MempoolPool {
                 transactions: HashMap::new(),
+                wtxids: HashMap::new(),
                 tx_witnesses: HashMap::new(),
                 adjusted_vsize: HashMap::new(),
                 spent_outputs: HashSet::new(),
@@ -939,6 +942,7 @@ impl MempoolManager {
         Self {
             pool: Mutex::new(MempoolPool {
                 transactions: HashMap::new(),
+                wtxids: HashMap::new(),
                 tx_witnesses: HashMap::new(),
                 adjusted_vsize: HashMap::new(),
                 spent_outputs: HashSet::new(),
@@ -3510,8 +3514,10 @@ impl MempoolManager {
 
         // Add transaction to mempool (store full transaction + optional witnesses)
         {
+            let wtxid = crate::network::txhash::calculate_wtxid(&tx, witnesses.as_deref());
             let mut pool = self.pool_lock();
             pool.transactions.insert(tx_hash, tx.clone());
+            pool.wtxids.insert(tx_hash, wtxid);
             pool.adjusted_vsize.insert(tx_hash, candidate_vsize);
             if let Some(wits) = witnesses {
                 pool.tx_witnesses.insert(tx_hash, wits);
@@ -3684,6 +3690,36 @@ impl MempoolManager {
             .get(hash)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Transactions whose witness id shortens to one of `short_ids`.
+    ///
+    /// Holds the pool lock only for the scan. Clones the matching bodies and
+    /// leaves every other transaction in the pool.
+    pub fn transactions_for_short_ids(
+        &self,
+        header: &blvm_protocol::BlockHeader,
+        nonce: u64,
+        short_ids: &[crate::network::compact_blocks::ShortTxId],
+    ) -> HashMap<Hash, (Transaction, Option<Vec<Witness>>)> {
+        use crate::network::compact_blocks::calculate_short_tx_id;
+        let wanted: HashSet<crate::network::compact_blocks::ShortTxId> =
+            short_ids.iter().copied().collect();
+        let pool = self.pool_lock();
+        let mut matched = HashMap::new();
+        for (txid, tx) in &pool.transactions {
+            let wtxid = pool.wtxids.get(txid).copied().unwrap_or_else(|| {
+                crate::network::txhash::calculate_wtxid(
+                    tx,
+                    pool.tx_witnesses.get(txid).map(Vec::as_slice),
+                )
+            });
+            let short_id = calculate_short_tx_id(header, &wtxid, nonce);
+            if wanted.contains(&short_id) {
+                matched.insert(wtxid, (tx.clone(), pool.tx_witnesses.get(txid).cloned()));
+            }
+        }
+        matched
     }
 
     /// Get transaction by hash
@@ -4245,6 +4281,7 @@ impl MempoolManager {
             let Some(tx) = pool.transactions.remove(hash) else {
                 return false;
             };
+            pool.wtxids.remove(hash);
             pool.tx_witnesses.remove(hash);
             pool.adjusted_vsize.remove(hash);
             for input in &tx.inputs {
@@ -4565,7 +4602,9 @@ fn decode_persisted_tx(bytes: &[u8]) -> Result<(Transaction, Option<Vec<Witness>
 
 #[cfg(test)]
 mod tests {
-    use super::{MempoolManager, decode_persisted_tx, encode_persisted_tx, replacement_clears_fee_rate};
+    use super::{
+        MempoolManager, decode_persisted_tx, encode_persisted_tx, replacement_clears_fee_rate,
+    };
     use crate::config::MempoolPolicyConfig;
     use blvm_protocol::serialization::transaction::serialize_transaction;
 

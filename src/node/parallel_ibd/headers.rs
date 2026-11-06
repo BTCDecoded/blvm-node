@@ -78,11 +78,16 @@ use crate::storage::hashing::double_sha256;
 /// Result of a header download pass (sequential or parallel merge).
 pub(crate) struct HeaderSyncResult {
     pub tip_height: u64,
+    /// False while pre-sync still holds the headers. The block assigner stays idle.
+    pub may_assign: bool,
 }
 
 impl HeaderSyncResult {
     fn at_height(tip_height: u64) -> Self {
-        Self { tip_height }
+        Self {
+            tip_height,
+            may_assign: true,
+        }
     }
 }
 
@@ -532,6 +537,9 @@ pub(crate) async fn download_headers(
     );
     let genesis = blvm_consensus::block::genesis_block(consensus_network);
     let genesis_hash = blvm_consensus::block::block_header_hash(&genesis.header);
+    let mut header_presync = super::headers_presync::HeadersPresync::new(
+        super::headers_presync::network_key(consensus_network),
+    );
 
     // `sync_parallel` passes the next block height to fetch. When resuming (start_height > 0),
     // we must anchor GetHeaders to the stored parent hash — not genesis — or peers return
@@ -602,6 +610,9 @@ pub(crate) async fn download_headers(
                         break;
                     }
                     last_hash = stored_hash;
+                    if let Some(stored_header) = blockstore.get_header(&stored_hash)? {
+                        header_presync.note(&stored_header);
+                    }
                     skip_count += 1;
                     current_height += 1;
                 }
@@ -819,6 +830,7 @@ pub(crate) async fn download_headers(
                     let header_hash = double_sha256(&header_data);
 
                     batch_entries.push((header_hash, header.clone(), current_height));
+                    header_presync.note(header);
 
                     last_hash = header_hash;
                     current_height += 1;
@@ -921,6 +933,7 @@ pub(crate) async fn download_headers(
                     );
                     return Ok(HeaderSyncResult {
                         tip_height: current_height.saturating_sub(1),
+                        may_assign: header_presync.releases_assigner(),
                     });
                 }
             }
@@ -999,6 +1012,7 @@ pub(crate) async fn download_headers(
 
     Ok(HeaderSyncResult {
         tip_height: current_height.saturating_sub(1),
+        may_assign: header_presync.releases_assigner(),
     })
 }
 

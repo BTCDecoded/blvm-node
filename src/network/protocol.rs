@@ -35,8 +35,14 @@ pub const BITCOIN_MAGIC_SIGNET: [u8; 4] = [0x0a, 0x03, 0xcf, 0x40];
 pub(crate) static ACTIVE_MAGIC: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(u32::from_le_bytes(BITCOIN_MAGIC_MAINNET));
 
-/// Maximum protocol message size (32MB)
-pub const MAX_PROTOCOL_MESSAGE_LENGTH: usize = 32 * 1024 * 1024;
+pub use blvm_protocol::p2p_framing::{MAX_PROTOCOL_MESSAGE_LENGTH, MAX_PROTOCOL_PAYLOAD};
+
+/// A configured message ceiling cannot rise above [`MAX_PROTOCOL_MESSAGE_LENGTH`].
+/// Smaller values are kept. The 24-byte header is included in this ceiling.
+#[inline]
+pub fn clamp_protocol_message_length(max_message_length: usize) -> usize {
+    max_message_length.min(MAX_PROTOCOL_MESSAGE_LENGTH)
+}
 
 /// Maximum addresses in an addr message (MAX_ADDR_TO_SEND)
 pub const MAX_ADDR_TO_SEND: usize = 1000;
@@ -144,6 +150,8 @@ pub mod cmd {
     pub const VERACK: &str = "verack";
     pub const VERSION: &str = "version";
     pub const SENDHEADERS: &str = "sendheaders";
+    pub use blvm_protocol::p2p_commands::cmd::WTXIDRELAY;
+    pub use blvm_protocol::p2p_commands::cmd::{ANCPKGINFO, GETPKGTXNS, PKGTXNS, SENDPACKAGES};
     pub const REJECT: &str = "reject";
     pub const MEMPOOL: &str = "mempool";
     pub const ADDRV2: &str = "addrv2";
@@ -167,6 +175,11 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     cmd::ADDR,
     cmd::ADDRV2,
     cmd::SENDHEADERS,
+    cmd::WTXIDRELAY,
+    cmd::SENDPACKAGES,
+    cmd::ANCPKGINFO,
+    cmd::GETPKGTXNS,
+    cmd::PKGTXNS,
     cmd::MEMPOOL,
     cmd::REJECT,
     cmd::FEEFILTER,
@@ -268,6 +281,10 @@ pub enum ProtocolMessage {
     SendPkgTxn(SendPkgTxnMessage),
     PkgTxn(PkgTxnMessage),
     PkgTxnReject(PkgTxnRejectMessage),
+    SendPackages(u64),
+    AncPkgInfo(Vec<Hash>),
+    GetPkgTxns(Vec<Hash>),
+    PkgTxns(Vec<Vec<u8>>),
     // Ban List Sharing
     GetBanList(GetBanListMessage),
     BanList(BanListMessage),
@@ -278,6 +295,7 @@ pub enum ProtocolMessage {
     Addr(AddrMessage),
     AddrV2(AddrV2Message),
     SendHeaders,
+    WtxidRelay,
     Reject(RejectMessage),
     MemPool,
     // Module Registry
@@ -1063,7 +1081,7 @@ impl ProtocolParser {
         let checksum = &data[20..24];
 
         // Validate payload length
-        if payload_length as usize > MAX_PROTOCOL_MESSAGE_LENGTH - 24 {
+        if payload_length as usize > MAX_PROTOCOL_PAYLOAD {
             return Err(anyhow::anyhow!("Payload too large"));
         }
 
@@ -1261,6 +1279,18 @@ impl ProtocolParser {
             cmd::PKGTXNREJECT => Ok(ProtocolMessage::PkgTxnReject(bincode::deserialize(
                 payload,
             )?)),
+            cmd::SENDPACKAGES => Ok(ProtocolMessage::SendPackages(
+                crate::network::package_messages::decode_sendpackages(payload)?,
+            )),
+            cmd::ANCPKGINFO => Ok(ProtocolMessage::AncPkgInfo(
+                crate::network::package_messages::decode_ancpkginfo(payload)?,
+            )),
+            cmd::GETPKGTXNS => Ok(ProtocolMessage::GetPkgTxns(
+                crate::network::package_messages::decode_wtxid_list(payload)?,
+            )),
+            cmd::PKGTXNS => Ok(ProtocolMessage::PkgTxns(
+                crate::network::package_messages::decode_pkgtxns(payload)?,
+            )),
             // Ban List Sharing
             cmd::GETBANLIST => Ok(ProtocolMessage::GetBanList(bincode::deserialize(payload)?)),
             cmd::BANLIST => Ok(ProtocolMessage::BanList(bincode::deserialize(payload)?)),
@@ -1287,6 +1317,7 @@ impl ProtocolParser {
                 Ok(ProtocolMessage::AddrV2(msg))
             }
             cmd::SENDHEADERS => Ok(ProtocolMessage::SendHeaders),
+            cmd::WTXIDRELAY if payload.is_empty() => Ok(ProtocolMessage::WtxidRelay),
             cmd::MEMPOOL => Ok(ProtocolMessage::MemPool),
             cmd::REJECT => {
                 let msg = blvm_protocol::wire::deserialize_reject(payload)
@@ -1393,6 +1424,7 @@ impl ProtocolParser {
             }
             ProtocolMessage::Verack => (cmd::VERACK, vec![]),
             ProtocolMessage::SendHeaders => (cmd::SENDHEADERS, vec![]),
+            ProtocolMessage::WtxidRelay => (cmd::WTXIDRELAY, vec![]),
             ProtocolMessage::MemPool => (cmd::MEMPOOL, vec![]),
             ProtocolMessage::Reject(msg) => (
                 cmd::REJECT,
@@ -1545,6 +1577,22 @@ impl ProtocolParser {
             ProtocolMessage::SendPkgTxn(msg) => (cmd::SENDPKGTXN, bincode::serialize(msg)?),
             ProtocolMessage::PkgTxn(msg) => (cmd::PKGTXN, bincode::serialize(msg)?),
             ProtocolMessage::PkgTxnReject(msg) => (cmd::PKGTXNREJECT, bincode::serialize(msg)?),
+            ProtocolMessage::SendPackages(version) => (
+                cmd::SENDPACKAGES,
+                crate::network::package_messages::encode_sendpackages(*version).to_vec(),
+            ),
+            ProtocolMessage::AncPkgInfo(wtxids) => (
+                cmd::ANCPKGINFO,
+                crate::network::package_messages::encode_ancpkginfo(wtxids)?,
+            ),
+            ProtocolMessage::GetPkgTxns(wtxids) => (
+                cmd::GETPKGTXNS,
+                crate::network::package_messages::encode_wtxid_list(wtxids)?,
+            ),
+            ProtocolMessage::PkgTxns(transactions) => (
+                cmd::PKGTXNS,
+                crate::network::package_messages::encode_pkgtxns(transactions)?,
+            ),
             // Ban List Sharing
             ProtocolMessage::GetBanList(msg) => (cmd::GETBANLIST, bincode::serialize(msg)?),
             ProtocolMessage::BanList(msg) => (cmd::BANLIST, bincode::serialize(msg)?),

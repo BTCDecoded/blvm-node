@@ -428,12 +428,12 @@ pub(crate) fn last_reported_pressure_level(mg: &MemoryGuard) -> PressureLevel {
     PressureLevel::from_u8(mg.last_reported_pressure.load(Ordering::Relaxed))
 }
 
-/// Historical name (TidesDB had `TDB_MAX_TXN_OPS=100000`); on RocksDB this is just an
+/// Batch operation cap for a RocksDB write.
 /// upper bound on `flush_threshold` so a single retire→flush batch doesn't grow without
 /// bound. Bigger batches → fewer SST flushes → less compaction → higher IBD BPS, at the
 /// cost of larger pending memory + longer flush stalls when triggered. 200k × ~250 B per
 /// op ≈ 50 MB peak — comfortable on 16 GB hosts.
-pub(crate) const TIDESDB_MAX_TXN_OPS: usize = 200_000;
+pub(crate) const MAX_FLUSH_OPS: usize = 200_000;
 
 /// Shared counter: total estimated bytes of blocks held in the reorder_buffer + channels.
 /// Updated by the coordinator, read by the validation loop for logging.
@@ -1358,7 +1358,6 @@ impl MemoryGuard {
         match backend {
             DatabaseBackend::RocksDB => ROCKSDB_PIPELINE_RESERVE_MB,
             DatabaseBackend::Heed3 => 512,
-            DatabaseBackend::TidesDB => 1024,
             DatabaseBackend::Redb | DatabaseBackend::Sled => 768,
         }
     }
@@ -1386,7 +1385,7 @@ impl MemoryGuard {
                 // Override via BLVM_IBD_STORAGE_FLUSH_INTERVAL.
                 if total_gb >= 16 { 200 } else { 100 }
             }
-            DatabaseBackend::RocksDB | DatabaseBackend::TidesDB => {
+            DatabaseBackend::RocksDB => {
                 if total_gb >= 32 {
                     2000
                 } else {
@@ -2042,7 +2041,7 @@ impl MemoryGuard {
                 // without any join latency.
                 DatabaseBackend::Heed3 | DatabaseBackend::Redb | DatabaseBackend::Sled => 1,
                 // Multi-writer / WAL-based engines: extra parallelism helps.
-                DatabaseBackend::RocksDB | DatabaseBackend::TidesDB => {
+                DatabaseBackend::RocksDB => {
                     if total_gb <= 24 {
                         max_utxo_flushes
                     } else if total_gb <= 32 {

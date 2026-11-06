@@ -4,6 +4,7 @@
 //! message handling for communication with other Bitcoin nodes.
 
 pub mod address_db;
+pub mod address_table;
 pub mod ban_list_merging;
 pub mod ban_list_signing;
 pub mod bandwidth_protection;
@@ -52,9 +53,11 @@ mod getdata_serve;
 mod handlers;
 pub(crate) mod header_work;
 mod network_message_dispatch;
+mod package_messages;
 pub(crate) mod parse_offload;
 mod peer_connections;
 mod startup;
+mod tx_inflight;
 mod wire_dispatch;
 // Payment Protocol (BIP70) - P2P handlers
 // Privacy and Performance Enhancements
@@ -65,6 +68,8 @@ pub mod package_relay_handler; // BIP 331 handlers
 // Stratum V2: P2P TLV demux → `StratumV2MessageReceived`; dedicated miner TCP is owned by
 // `blvm-stratum-v2`. `NodeAPI::send_peer_transport_payload` sends opaque bytes on P2P.
 pub mod txhash; // Non-consensus hashing helpers for relay
+#[cfg(feature = "bip324")]
+pub mod v2_negotiation;
 
 use std::net::SocketAddr;
 use tokio::sync::mpsc;

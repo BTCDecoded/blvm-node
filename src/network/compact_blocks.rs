@@ -21,12 +21,25 @@
 
 use crate::network::transport::TransportType;
 use anyhow::Result;
+use blvm_protocol::segwit::Witness;
 use blvm_protocol::{Block, BlockHeader, Hash, Transaction};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
+use std::time::{Duration, Instant};
 
 pub use blvm_protocol::bip152::{CompactBlock, ShortTxId};
+
+/// A compact block with more transactions than this is fetched whole.
+pub const MAX_COMPACT_BLOCK_TXS: usize = 100_000;
+/// More holes than this, and the block is fetched whole.
+pub const MAX_COMPACT_MISSING: usize = 128;
+/// Assemblies retained while `getblocktxn` is in flight.
+pub const MAX_PENDING_COMPACT: usize = 4;
+/// Bytes retained across those assemblies.
+pub const MAX_PENDING_COMPACT_BYTES: usize = 8 * 1024 * 1024;
+/// An assembly older than this is dropped and the block is fetched whole.
+pub const COMPACT_ASSEMBLY_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Calculate Bitcoin transaction hash (double SHA256 of serialized transaction)
 ///
@@ -207,8 +220,108 @@ pub struct CompactAssembly {
     pub header: BlockHeader,
     pub nonce: u64,
     /// `None` until a short-id match or a `blocktxn` fills the position.
-    pub slots: Vec<Option<(Transaction, Option<Vec<blvm_protocol::segwit::Witness>>)>>,
+    pub slots: Vec<Option<(Transaction, Option<Vec<Witness>>)>>,
     pub missing: Vec<usize>,
+    /// When this assembly was created. Older than [`COMPACT_ASSEMBLY_DEADLINE`] is dropped.
+    pub started: Instant,
+    /// `6 * short_ids.len()`, counted in [`assembly_retained_bytes`].
+    pub short_id_bytes: usize,
+}
+
+impl CompactAssembly {
+    pub fn expired_at(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.started) >= COMPACT_ASSEMBLY_DEADLINE
+    }
+}
+
+/// Serialized transaction bytes in `slots`, plus one slot's size times capacity,
+/// plus the short-id bytes recorded on the assembly.
+pub fn assembly_retained_bytes(assembly: &CompactAssembly) -> usize {
+    let tx_bytes = assembly
+        .slots
+        .iter()
+        .flatten()
+        .map(|(tx, witness)| serialized_slot_bytes(tx, witness.as_deref()))
+        .sum::<usize>();
+    let slot_bytes = assembly
+        .slots
+        .capacity()
+        .saturating_mul(std::mem::size_of::<
+            Option<(Transaction, Option<Vec<Witness>>)>,
+        >());
+    tx_bytes
+        .saturating_add(slot_bytes)
+        .saturating_add(assembly.short_id_bytes)
+}
+
+fn serialized_slot_bytes(tx: &Transaction, witness: Option<&[Witness]>) -> usize {
+    let body = blvm_protocol::serialization::transaction::serialize_transaction(tx).len();
+    let witness_bytes = witness
+        .map(|stacks| {
+            stacks
+                .iter()
+                .map(|stack| stack.iter().map(|item| item.len()).sum::<usize>())
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+    body.saturating_add(witness_bytes)
+}
+
+/// What the pending table should do with one compact block.
+pub struct CompactBudget {
+    /// Assemblies already held, not counting this block's hash.
+    pub assemblies: usize,
+    /// Retained bytes of those assemblies.
+    pub retained_bytes: usize,
+    /// This block hash is already in the table.
+    pub same_hash: bool,
+}
+
+pub enum CompactDecision {
+    Hold(CompactAssembly),
+    /// Fetch this block whole. Do not insert an assembly.
+    FullBlock,
+    /// A reconstruction of this hash is already held and the replacement
+    /// does not fit. Leave that assembly in place.
+    KeepCurrent,
+}
+
+/// Caps from the compact-block budget. A `FullBlock` result must be fetched with `getdata`.
+pub fn decide_compact_block(
+    compact: &CompactBlock,
+    matches: &HashMap<Hash, (Transaction, Option<Vec<Witness>>)>,
+    budget: CompactBudget,
+) -> Result<CompactDecision> {
+    let total = compact
+        .short_ids
+        .len()
+        .saturating_add(compact.prefilled_txs.len());
+    if total > MAX_COMPACT_BLOCK_TXS {
+        return Ok(CompactDecision::FullBlock);
+    }
+    let assembly = begin_compact_assembly(compact, matches)?;
+    if assembly.missing.len() > MAX_COMPACT_MISSING
+        || assembly
+            .missing
+            .iter()
+            .any(|index| u16::try_from(*index).is_err())
+    {
+        return Ok(CompactDecision::FullBlock);
+    }
+    let adding = if budget.same_hash { 0 } else { 1 };
+    if budget.assemblies.saturating_add(adding) > MAX_PENDING_COMPACT {
+        return Ok(CompactDecision::FullBlock);
+    }
+    let next_bytes = budget
+        .retained_bytes
+        .saturating_add(assembly_retained_bytes(&assembly));
+    if next_bytes > MAX_PENDING_COMPACT_BYTES {
+        if budget.same_hash {
+            return Ok(CompactDecision::KeepCurrent);
+        }
+        return Ok(CompactDecision::FullBlock);
+    }
+    Ok(CompactDecision::Hold(assembly))
 }
 
 /// Place prefilled transactions and unique, non-conflicting pool matches.
@@ -266,6 +379,8 @@ pub fn begin_compact_assembly(
         nonce: compact_block.nonce,
         slots,
         missing,
+        started: Instant::now(),
+        short_id_bytes: 6usize.saturating_mul(compact_block.short_ids.len()),
     })
 }
 
@@ -871,5 +986,195 @@ mod tests {
             reconstructed.transactions[1].outputs[0].script_pubkey,
             vec![OP_1]
         );
+    }
+
+    fn bare_compact(short_ids: Vec<ShortTxId>) -> CompactBlock {
+        CompactBlock {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0; 32],
+                merkle_root: [0; 32],
+                timestamp: 0,
+                bits: 0,
+                nonce: 0,
+            },
+            nonce: 1,
+            short_ids,
+            prefilled_txs: vec![],
+        }
+    }
+
+    fn open_budget() -> CompactBudget {
+        CompactBudget {
+            assemblies: 0,
+            retained_bytes: 0,
+            same_hash: false,
+        }
+    }
+
+    #[test]
+    fn a_fifth_assembly_is_fetched_whole() {
+        let compact = bare_compact(vec![[1u8; 6]]);
+        let held = decide_compact_block(
+            &compact,
+            &HashMap::new(),
+            CompactBudget {
+                assemblies: MAX_PENDING_COMPACT,
+                retained_bytes: 0,
+                same_hash: false,
+            },
+        )
+        .unwrap();
+        assert!(matches!(held, CompactDecision::FullBlock));
+        let replaced = decide_compact_block(
+            &compact,
+            &HashMap::new(),
+            CompactBudget {
+                assemblies: MAX_PENDING_COMPACT - 1,
+                retained_bytes: 0,
+                same_hash: true,
+            },
+        )
+        .unwrap();
+        assert!(matches!(replaced, CompactDecision::Hold(_)));
+    }
+
+    #[test]
+    fn retained_bytes_past_eight_mib_are_fetched_whole() {
+        let compact = bare_compact(vec![[1u8; 6]]);
+        let held = decide_compact_block(
+            &compact,
+            &HashMap::new(),
+            CompactBudget {
+                assemblies: 0,
+                retained_bytes: MAX_PENDING_COMPACT_BYTES,
+                same_hash: false,
+            },
+        )
+        .unwrap();
+        assert!(matches!(held, CompactDecision::FullBlock));
+    }
+
+    #[test]
+    fn a_replacement_past_the_byte_cap_keeps_the_current_assembly() {
+        let compact = bare_compact(vec![[1u8; 6]]);
+        let kept = decide_compact_block(
+            &compact,
+            &HashMap::new(),
+            CompactBudget {
+                assemblies: 0,
+                retained_bytes: MAX_PENDING_COMPACT_BYTES,
+                same_hash: true,
+            },
+        )
+        .unwrap();
+        assert!(matches!(kept, CompactDecision::KeepCurrent));
+    }
+
+    #[test]
+    fn more_than_128_holes_are_fetched_whole() {
+        let compact = bare_compact(vec![[2u8; 6]; MAX_COMPACT_MISSING + 1]);
+        let held = decide_compact_block(&compact, &HashMap::new(), open_budget()).unwrap();
+        assert!(matches!(held, CompactDecision::FullBlock));
+        let within = bare_compact(vec![[2u8; 6]; MAX_COMPACT_MISSING]);
+        let held = decide_compact_block(&within, &HashMap::new(), open_budget()).unwrap();
+        assert!(matches!(held, CompactDecision::Hold(_)));
+    }
+
+    #[test]
+    fn more_than_100_000_transactions_are_fetched_whole() {
+        let compact = bare_compact(vec![[3u8; 6]; MAX_COMPACT_BLOCK_TXS + 1]);
+        let held = decide_compact_block(&compact, &HashMap::new(), open_budget()).unwrap();
+        assert!(matches!(held, CompactDecision::FullBlock));
+    }
+
+    #[test]
+    fn an_index_past_u16_is_fetched_whole() {
+        let compact = bare_compact(vec![[4u8; 6]; (u16::MAX as usize) + 2]);
+        let held = decide_compact_block(&compact, &HashMap::new(), open_budget()).unwrap();
+        assert!(matches!(held, CompactDecision::FullBlock));
+    }
+
+    #[test]
+    fn an_assembly_older_than_sixty_seconds_is_expired() {
+        let compact = bare_compact(vec![[5u8; 6]]);
+        let CompactDecision::Hold(mut assembly) =
+            decide_compact_block(&compact, &HashMap::new(), open_budget()).unwrap()
+        else {
+            panic!("one hole fits the budget");
+        };
+        let now = Instant::now();
+        assert!(!assembly.expired_at(now));
+        assembly.started = now - COMPACT_ASSEMBLY_DEADLINE;
+        assert!(assembly.expired_at(now));
+    }
+
+    #[test]
+    fn short_id_lookup_clones_only_the_match() {
+        use crate::node::mempool::MempoolManager;
+        use blvm_protocol::constants::SEQUENCE_FINAL;
+        use blvm_protocol::{OutPoint, TransactionInput, TransactionOutput};
+        use std::sync::Arc;
+
+        let tx = |prev: u8| Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [prev; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 10_000,
+                script_pubkey: vec![0x6a],
+            }]
+            .into(),
+            lock_time: 0,
+        };
+        let mempool = MempoolManager::new();
+        let mut policy = crate::config::MempoolPolicyConfig::default();
+        policy.require_standard = false;
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        mempool.set_policy_config(Some(policy));
+        for prev in [1u8, 2u8] {
+            let tx = tx(prev);
+            let mut utxo = blvm_protocol::UtxoSet::default();
+            utxo.insert(
+                tx.inputs[0].prevout,
+                Arc::new(blvm_protocol::UTXO {
+                    value: 20_000,
+                    script_pubkey: vec![0x51].into(),
+                    height: 1,
+                    is_coinbase: false,
+                }),
+            );
+            mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(utxo)));
+            assert!(
+                mempool.add_transaction(tx).unwrap(),
+                "prev {prev} was not admitted"
+            );
+        }
+        assert_eq!(mempool.get_transactions().len(), 2);
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0; 32],
+            merkle_root: [0; 32],
+            timestamp: 0,
+            bits: 0,
+            nonce: 0,
+        };
+        let nonce = 11u64;
+        let wanted = {
+            let txs = mempool.get_transactions();
+            let wtxid = crate::network::txhash::calculate_wtxid(&txs[0], None);
+            calculate_short_tx_id(&header, &wtxid, nonce)
+        };
+        let matched = mempool.transactions_for_short_ids(&header, nonce, &[wanted]);
+        assert_eq!(matched.len(), 1);
+        let _ = wanted;
     }
 }

@@ -23,6 +23,26 @@ async fn test_message_size_validation() {
     assert!(result.is_err(), "Oversized message should be rejected");
 }
 
+#[test]
+fn payload_above_four_million_is_rejected_before_a_body_exists() {
+    use blvm_node::network::protocol::{BITCOIN_MAGIC_MAINNET, ProtocolParser};
+
+    let mut header = [0u8; 24];
+    header[0..4].copy_from_slice(&BITCOIN_MAGIC_MAINNET);
+    header[4..8].copy_from_slice(b"ping");
+    header[16..20].copy_from_slice(&4_000_001u32.to_le_bytes());
+    let err = ProtocolParser::parse_message(&header)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Payload too large"), "{err}");
+
+    header[16..20].copy_from_slice(&4_000_000u32.to_le_bytes());
+    let err = ProtocolParser::parse_message(&header)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Incomplete message"), "{err}");
+}
+
 #[tokio::test]
 async fn test_rate_limiting() {
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

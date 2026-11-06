@@ -8,6 +8,7 @@ pub mod background_validation;
 pub mod block_processor;
 #[cfg(feature = "production")]
 pub mod chain_selector;
+pub mod data_dir_lock;
 pub mod event_publisher;
 pub mod health;
 pub mod mempool;
@@ -19,6 +20,7 @@ pub mod performance;
 #[cfg(feature = "production")]
 pub mod reorg_executor;
 pub mod run_loop;
+pub mod startup_verify;
 pub mod subsystems;
 pub mod sync;
 #[cfg(feature = "production")]
@@ -214,6 +216,15 @@ impl Node {
                 crate::config::overlay_assume_valid(env_height, config.block_validation.as_ref());
             consensus_config.block_validation.assume_valid_height = height;
             consensus_config.block_validation.assume_valid_hash = hash;
+            let chain_work_network = match self.protocol_version {
+                ProtocolVersion::BitcoinV1 => "mainnet",
+                ProtocolVersion::Testnet3 => "testnet3",
+                ProtocolVersion::Testnet4 => "testnet4",
+                ProtocolVersion::Signet => "signet",
+                ProtocolVersion::Regtest => "regtest",
+            };
+            consensus_config.block_validation.n_minimum_chain_work =
+                crate::config::minimum_chain_work_for_network(chain_work_network);
             crate::config::overlay_mempool_onto_consensus(
                 &mut consensus_config.mempool,
                 config.mempool.as_ref(),
@@ -799,6 +810,11 @@ impl Node {
                 height_for_blockhash, is_background_validated, read_base_blockhash_marker,
             };
             let data_dir = std::path::Path::new(&self.data_dir);
+            if crate::storage::assumeutxo::active_chainstate_refused(data_dir) {
+                return Err(anyhow::anyhow!(
+                    "assumeutxo active chainstate refused: commitment status is Failed"
+                ));
+            }
             if let Ok(Some(base_blockhash)) = read_base_blockhash_marker(data_dir) {
                 if !is_background_validated(data_dir, &base_blockhash) {
                     let network = self

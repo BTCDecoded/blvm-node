@@ -157,7 +157,8 @@ fn test_handle_getcfilters_reads_wire_output_scripts() {
         .unwrap();
     storage.blocks().store_height(0, &block_hash).unwrap();
     let expected =
-        blvm_protocol::bip158::build_block_filter(block.transactions.as_ref(), &[]).unwrap();
+        blvm_protocol::bip158::build_block_filter(&block_hash, block.transactions.as_ref(), &[])
+            .unwrap();
 
     let request = GetCfiltersMessage {
         filter_type: 0,

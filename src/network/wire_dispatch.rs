@@ -86,6 +86,18 @@ pub(crate) fn split_ibd_refused_inventory(
     (refused, serve)
 }
 
+enum StagedCompact {
+    Fetch(Vec<[u8; 32]>),
+    Complete {
+        assembly: crate::network::compact_blocks::CompactAssembly,
+        expired: Vec<[u8; 32]>,
+    },
+    Holes {
+        indices: Vec<u16>,
+        expired: Vec<[u8; 32]>,
+    },
+}
+
 impl NetworkManager {
     /// Handle an incoming `block` wire message (IBD GetData response or relay).
     ///
@@ -240,6 +252,12 @@ impl NetworkManager {
         let mut pm = self.peer_manager_mutex().lock().await;
         let transport_addr = pm.find_transport_addr_by_socket(peer_addr);
         let transport_addr_for_verack = transport_addr.clone();
+        let block_relay_only = transport_addr
+            .as_ref()
+            .and_then(|addr| pm.get_peer(addr))
+            .is_some_and(|peer| {
+                peer.outbound_role() == Some(crate::network::peer::OutboundRole::BlockRelayOnly)
+            });
 
         if let Some(transport_addr) = transport_addr {
             if let Some(peer) = pm.get_peer_mut(&transport_addr) {
@@ -270,10 +288,17 @@ impl NetworkManager {
                 .entry(peer_addr)
                 .or_insert_with(blvm_protocol::network::PeerState::new);
             state.version = version_msg.version;
-            state.relay_tx = version_msg.relay;
+            state.relay_tx = version_msg.relay && !block_relay_only;
         }
 
         if let Some(ref transport_addr) = transport_addr_for_verack {
+            if let Ok(packages) = ProtocolParser::serialize_message(&ProtocolMessage::SendPackages(
+                crate::network::package_messages::PACKAGE_VERSION_LOCAL,
+            )) {
+                let _ = self
+                    .send_to_peer_by_transport(transport_addr.clone(), packages)
+                    .await;
+            }
             match ProtocolParser::serialize_message(&ProtocolMessage::Verack) {
                 Ok(verack_msg) => {
                     if let Err(e) = self
@@ -308,46 +333,145 @@ impl NetworkManager {
     }
 
     /// Match a compact block against the pool and ask for the holes.
+    /// Over the pending cap, the block is requested whole.
     pub(crate) async fn handle_cmpctblock(
         &self,
         peer_addr: SocketAddr,
         compact: &blvm_protocol::bip152::CompactBlock,
     ) -> Result<()> {
-        use crate::network::compact_blocks::begin_compact_assembly;
-        use crate::network::txhash::calculate_wtxid;
-        use blvm_protocol::block::calculate_tx_id;
-        use std::collections::HashMap;
+        use crate::network::compact_blocks::MAX_COMPACT_BLOCK_TXS;
 
-        let mut pool = HashMap::new();
-        if let Some(mm) = self.mempool_manager() {
-            for tx in mm.get_transactions() {
-                let txid = calculate_tx_id(&tx);
-                let witness = mm.get_transaction_witnesses(&txid);
-                let wtxid = calculate_wtxid(&tx, witness.as_deref());
-                pool.insert(wtxid, (tx, witness));
+        let block_hash = block_hash_from_header(&compact.header);
+        let total = compact
+            .short_ids
+            .len()
+            .saturating_add(compact.prefilled_txs.len());
+        if total > MAX_COMPACT_BLOCK_TXS {
+            self.send_witness_block_getdata(peer_addr, block_hash).await;
+            return Ok(());
+        }
+
+        let matches = self
+            .mempool_manager()
+            .map(|mm| {
+                mm.transactions_for_short_ids(&compact.header, compact.nonce, &compact.short_ids)
+            })
+            .unwrap_or_default();
+
+        let staged = self.stage_compact_block(block_hash, compact, &matches)?;
+        match staged {
+            StagedCompact::Fetch(hashes) => {
+                for hash in hashes {
+                    self.send_witness_block_getdata(peer_addr, hash).await;
+                }
+            }
+            StagedCompact::Complete { assembly, expired } => {
+                for hash in expired {
+                    self.send_witness_block_getdata(peer_addr, hash).await;
+                }
+                self.queue_completed_compact(&assembly)?;
+            }
+            StagedCompact::Holes { indices, expired } => {
+                for hash in expired {
+                    self.send_witness_block_getdata(peer_addr, hash).await;
+                }
+                let msg =
+                    ProtocolMessage::GetBlockTxn(crate::network::protocol::GetBlockTxnMessage {
+                        block_hash,
+                        indices,
+                    });
+                if let Ok(wire) = ProtocolParser::serialize_message(&msg) {
+                    let _ = self.send_to_peer(peer_addr, wire).await;
+                }
             }
         }
-        let assembly = begin_compact_assembly(compact, &pool)?;
-        let block_hash = block_hash_from_header(&compact.header);
-        if assembly.missing.is_empty() {
-            return self.queue_completed_compact(&assembly);
-        }
-        let indices: Vec<u16> = assembly
-            .missing
+        Ok(())
+    }
+
+    /// Lock the pending table, expire old assemblies, and record this one.
+    /// The lock is released before the caller writes to the peer.
+    fn stage_compact_block(
+        &self,
+        block_hash: [u8; 32],
+        compact: &blvm_protocol::bip152::CompactBlock,
+        matches: &std::collections::HashMap<
+            blvm_protocol::Hash,
+            (
+                blvm_protocol::Transaction,
+                Option<Vec<blvm_protocol::segwit::Witness>>,
+            ),
+        >,
+    ) -> Result<StagedCompact> {
+        use crate::network::compact_blocks::{
+            CompactBudget, CompactDecision, assembly_retained_bytes, decide_compact_block,
+        };
+        use std::time::Instant;
+
+        let mut pending = match self.pending_compact.lock() {
+            Ok(pending) => pending,
+            Err(_) => return Ok(StagedCompact::Fetch(vec![block_hash])),
+        };
+        let now = Instant::now();
+        let mut expired = Vec::new();
+        pending.retain(|hash, assembly| {
+            if assembly.expired_at(now) {
+                expired.push(*hash);
+                false
+            } else {
+                true
+            }
+        });
+        let same_hash = pending.contains_key(&block_hash);
+        let assemblies = pending.len() - usize::from(same_hash);
+        let retained_bytes = pending
             .iter()
-            .filter_map(|index| u16::try_from(*index).ok())
-            .collect();
-        if let Ok(mut pending) = self.pending_compact.lock() {
-            pending.insert(block_hash, assembly);
-        }
-        let msg = ProtocolMessage::GetBlockTxn(crate::network::protocol::GetBlockTxnMessage {
-            block_hash,
-            indices,
+            .filter(|(hash, _)| **hash != block_hash)
+            .map(|(_, assembly)| assembly_retained_bytes(assembly))
+            .sum();
+        let staged = match decide_compact_block(
+            compact,
+            matches,
+            CompactBudget {
+                assemblies,
+                retained_bytes,
+                same_hash,
+            },
+        )? {
+            CompactDecision::FullBlock => {
+                expired.push(block_hash);
+                StagedCompact::Fetch(expired)
+            }
+            CompactDecision::KeepCurrent => StagedCompact::Fetch(expired),
+            CompactDecision::Hold(assembly) if assembly.missing.is_empty() => {
+                StagedCompact::Complete { assembly, expired }
+            }
+            CompactDecision::Hold(assembly) => {
+                let indices = assembly
+                    .missing
+                    .iter()
+                    .map(|index| {
+                        u16::try_from(*index).expect("decide_compact_block rejects a non-u16 index")
+                    })
+                    .collect::<Vec<_>>();
+                pending.insert(block_hash, assembly);
+                StagedCompact::Holes { indices, expired }
+            }
+        };
+        Ok(staged)
+    }
+
+    async fn send_witness_block_getdata(&self, peer_addr: SocketAddr, block_hash: [u8; 32]) {
+        use crate::network::inventory::MSG_WITNESS_BLOCK;
+        use crate::network::protocol::{GetDataMessage, InventoryVector};
+        let msg = ProtocolMessage::GetData(GetDataMessage {
+            inventory: vec![InventoryVector {
+                inv_type: MSG_WITNESS_BLOCK,
+                hash: block_hash,
+            }],
         });
         if let Ok(wire) = ProtocolParser::serialize_message(&msg) {
             let _ = self.send_to_peer(peer_addr, wire).await;
         }
-        Ok(())
     }
 
     /// Fill a pending compact block from `blocktxn`, including witness stacks.
@@ -412,6 +536,56 @@ impl NetworkManager {
             let _ = self.send_to_peer(peer_addr, wire).await;
         }
         Ok(())
+    }
+
+    fn admit_announced_txs(
+        &self,
+        peer_addr: SocketAddr,
+        hashes: &[blvm_protocol::Hash],
+    ) -> Vec<blvm_protocol::Hash> {
+        let mut tracker = self
+            .tx_requests()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        tracker.admit(peer_addr, hashes, std::time::Instant::now())
+    }
+
+    fn finish_tx_request(
+        &self,
+        peer_addr: SocketAddr,
+        hash: blvm_protocol::Hash,
+    ) -> Vec<blvm_protocol::Hash> {
+        let mut tracker = self
+            .tx_requests()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        tracker.complete(peer_addr, hash, std::time::Instant::now())
+    }
+
+    async fn request_witness_txs(&self, peer_addr: SocketAddr, hashes: &[blvm_protocol::Hash]) {
+        if hashes.is_empty() {
+            return;
+        }
+        let inv_type = {
+            let states = self.peer_states().read().await;
+            crate::network::inventory::tx_announce_inv_type(
+                states
+                    .get(&peer_addr)
+                    .is_some_and(|state| state.wtxid_relay),
+            )
+        };
+        let inventory = hashes
+            .iter()
+            .map(|hash| crate::network::protocol::InventoryVector {
+                inv_type,
+                hash: *hash,
+            })
+            .collect();
+        let getdata =
+            ProtocolMessage::GetData(crate::network::protocol::GetDataMessage { inventory });
+        if let Ok(wire) = ProtocolParser::serialize_message(&getdata) {
+            let _ = self.send_to_peer(peer_addr, wire).await;
+        }
     }
 
     /// Dispatch protocol message to handlers or route to message queue.
@@ -537,7 +711,10 @@ impl NetworkManager {
                     }
                 }
             }
-            ProtocolMessage::Tx(_) => {
+            ProtocolMessage::Tx(tx_msg) => {
+                let txid = blvm_protocol::block::calculate_tx_id(&tx_msg.transaction);
+                let follow = self.finish_tx_request(peer_addr, txid);
+                self.request_witness_txs(peer_addr, &follow).await;
                 let _ = self
                     .peer_tx()
                     .send(NetworkMessage::TransactionReceived(data));
@@ -588,10 +765,19 @@ impl NetworkManager {
                                 headers.len(),
                                 getheaders.block_locator_hashes.len()
                             );
-                            let msg = ProtocolMessage::Headers(HeadersMessage { headers });
+                            let msg = ProtocolMessage::Headers(HeadersMessage {
+                                headers: headers.clone(),
+                            });
                             if let Ok(wire) = ProtocolParser::serialize_message(&msg) {
                                 if let Err(e) = self.send_to_peer(peer_addr, wire).await {
                                     warn!("Failed to send Headers to {}: {}", peer_addr, e);
+                                } else if let Some(last) = headers.last() {
+                                    let last_hash = blvm_consensus::block::block_header_hash(last);
+                                    if let Ok(Some(height)) =
+                                        storage.blocks().get_height_by_hash(&last_hash)
+                                    {
+                                        self.note_known_header_height(peer_addr, height).await;
+                                    }
                                 }
                             } else {
                                 warn!("Failed to serialize Headers for {}", peer_addr);
@@ -739,11 +925,18 @@ impl NetworkManager {
                         )
                         .await;
                 }
-                let mut wanted = Vec::new();
+                let wtxid_relay = self
+                    .peer_states()
+                    .read()
+                    .await
+                    .get(&peer_addr)
+                    .is_some_and(|state| state.wtxid_relay);
+                let mut announced = Vec::new();
                 for inv in &inv_msg.inventory {
-                    if inv.inv_type != crate::network::inventory::MSG_TX
-                        && inv.inv_type != crate::network::inventory::MSG_WITNESS_TX
-                    {
+                    let transaction = inv.inv_type == crate::network::inventory::MSG_TX
+                        || inv.inv_type == crate::network::inventory::MSG_WITNESS_TX
+                        || (wtxid_relay && inv.inv_type == crate::network::inventory::MSG_WTX);
+                    if !transaction {
                         continue;
                     }
                     let in_pool = self
@@ -756,21 +949,11 @@ impl NetworkManager {
                         .and_then(|storage| storage.transactions().has_transaction(&inv.hash).ok())
                         .unwrap_or(false);
                     if !in_pool && !in_chain {
-                        wanted.push(crate::network::protocol::InventoryVector {
-                            inv_type: crate::network::inventory::MSG_WITNESS_TX,
-                            hash: inv.hash,
-                        });
+                        announced.push(inv.hash);
                     }
                 }
-                if !wanted.is_empty() {
-                    let getdata =
-                        ProtocolMessage::GetData(crate::network::protocol::GetDataMessage {
-                            inventory: wanted,
-                        });
-                    if let Ok(wire) = ProtocolParser::serialize_message(&getdata) {
-                        let _ = self.send_to_peer(peer_addr, wire).await;
-                    }
-                }
+                let wanted = self.admit_announced_txs(peer_addr, &announced);
+                self.request_witness_txs(peer_addr, &wanted).await;
                 let _ = self
                     .peer_tx()
                     .send(NetworkMessage::InventoryReceived(data, peer_addr));
@@ -907,6 +1090,7 @@ impl NetworkManager {
                             if let Err(e) = storage.blocks().store_headers_batch(&batch) {
                                 warn!("unsolicited headers from {}: {}", peer_addr, e);
                             } else {
+                                self.note_known_header_height(peer_addr, height).await;
                                 self.note_block_announcement(peer_addr).await;
                             }
                         }
@@ -1058,11 +1242,21 @@ impl NetworkManager {
             }
             ProtocolMessage::MemPool => {
                 // BIP35: respond with an Inv listing all txids currently in our mempool.
+                if self.outbound_role_is_block_only(peer_addr).await {
+                    return Ok(());
+                }
                 if let Some(mm) = self.mempool_manager() {
-                    use crate::network::inventory::MSG_WITNESS_TX;
                     let min_sat_per_kvb = {
                         let states = self.peer_states().read().await;
                         states.get(&peer_addr).and_then(|state| state.min_fee_rate)
+                    };
+                    let inv_type = {
+                        let states = self.peer_states().read().await;
+                        crate::network::inventory::tx_announce_inv_type(
+                            states
+                                .get(&peer_addr)
+                                .is_some_and(|state| state.wtxid_relay),
+                        )
                     };
                     let inventory: Vec<crate::network::protocol::InventoryVector> = mm
                         .pooled_fee_basis()
@@ -1071,10 +1265,7 @@ impl NetworkManager {
                             if !mempool_inv_includes(basis, min_sat_per_kvb) {
                                 return None;
                             }
-                            Some(crate::network::protocol::InventoryVector {
-                                inv_type: MSG_WITNESS_TX,
-                                hash,
-                            })
+                            Some(crate::network::protocol::InventoryVector { inv_type, hash })
                         })
                         .collect();
                     let max_inv = self.protocol_limits().max_inv_sz.max(1);
@@ -1096,6 +1287,8 @@ impl NetworkManager {
                     state.handshake_complete = true;
                 }
                 drop(peer_states);
+
+                self.fill_high_bandwidth_slots().await;
 
                 let fee_rate = self
                     .mempool_manager()
@@ -1150,20 +1343,54 @@ impl NetworkManager {
             ProtocolMessage::NotFound(msg) => {
                 // A peer that does not have the block used to be ignored here, so the
                 // download oneshot stayed open until the 90–135s chunk deadline.
-                use crate::network::inventory::{MSG_BLOCK, MSG_WITNESS_BLOCK};
+                use crate::network::inventory::{
+                    MSG_BLOCK, MSG_TX, MSG_WITNESS_BLOCK, MSG_WITNESS_TX, MSG_WTX,
+                };
                 let mut dropped = 0u32;
+                let mut follow = Vec::new();
                 for inv in &msg.inventory {
-                    if inv.inv_type != MSG_BLOCK && inv.inv_type != MSG_WITNESS_BLOCK {
-                        continue;
+                    if inv.inv_type == MSG_BLOCK || inv.inv_type == MSG_WITNESS_BLOCK {
+                        self.cancel_block_request_force(peer_addr, inv.hash);
+                        dropped = dropped.saturating_add(1);
+                    } else if inv.inv_type == MSG_TX
+                        || inv.inv_type == MSG_WITNESS_TX
+                        || inv.inv_type == MSG_WTX
+                    {
+                        follow.extend(self.finish_tx_request(peer_addr, inv.hash));
                     }
-                    self.cancel_block_request_force(peer_addr, inv.hash);
-                    dropped = dropped.saturating_add(1);
                 }
+                self.request_witness_txs(peer_addr, &follow).await;
                 if dropped > 0 {
                     warn!(
                         "[IBD_NOTFOUND] peer={} dropped {} block request(s)",
                         peer_addr, dropped
                     );
+                }
+                return Ok(());
+            }
+            ProtocolMessage::SendPackages(version) => {
+                let mut states = self.peer_states().write().await;
+                if let Some(state) = states.get_mut(&peer_addr) {
+                    if state.version > 0
+                        && !state.handshake_complete
+                        && state.package_remote.is_none()
+                    {
+                        state.package_remote = Some(*version);
+                    }
+                }
+                return Ok(());
+            }
+            ProtocolMessage::AncPkgInfo(_)
+            | ProtocolMessage::GetPkgTxns(_)
+            | ProtocolMessage::PkgTxns(_) => {
+                return Ok(());
+            }
+            ProtocolMessage::WtxidRelay => {
+                let mut states = self.peer_states().write().await;
+                if let Some(state) = states.get_mut(&peer_addr) {
+                    if state.version > 0 && !state.handshake_complete && !state.wtxid_relay {
+                        state.wtxid_relay = true;
+                    }
                 }
                 return Ok(());
             }
@@ -1460,6 +1687,222 @@ mod plan_wire_locks {
         assert_eq!(inventory[0].hash, hash);
     }
 
+    fn numbered_hash(n: u16) -> [u8; 32] {
+        let mut hash = [0u8; 32];
+        hash[0] = (n >> 8) as u8;
+        hash[1] = n as u8;
+        hash
+    }
+
+    #[tokio::test]
+    async fn a_peer_holds_one_hundred_requests_and_notfound_releases_the_next() {
+        use crate::network::inventory::MSG_WITNESS_TX;
+        use crate::network::protocol::NotFoundMessage;
+        use crate::network::tx_inflight::MAX_PEER_IN_FLIGHT;
+
+        let mut node = wired().await;
+        let inventory: Vec<_> = (0..=MAX_PEER_IN_FLIGHT as u16)
+            .map(|n| InventoryVector {
+                inv_type: MSG_TX,
+                hash: numbered_hash(n),
+            })
+            .collect();
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::Inv(InvMessage { inventory }),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let bytes = node.incoming.recv().await.unwrap();
+        let ProtocolMessage::GetData(GetDataMessage { inventory }) =
+            ProtocolParser::parse_message(&bytes).unwrap()
+        else {
+            panic!("inv reply was not getdata");
+        };
+        assert_eq!(inventory.len(), MAX_PEER_IN_FLIGHT);
+        assert!(inventory.iter().all(|item| item.inv_type == MSG_WITNESS_TX));
+        assert!(
+            inventory
+                .iter()
+                .all(|item| item.hash != numbered_hash(MAX_PEER_IN_FLIGHT as u16))
+        );
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::NotFound(NotFoundMessage {
+                    inventory: vec![InventoryVector {
+                        inv_type: MSG_WITNESS_TX,
+                        hash: numbered_hash(0),
+                    }],
+                }),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let bytes = node.incoming.recv().await.unwrap();
+        let ProtocolMessage::GetData(GetDataMessage { inventory }) =
+            ProtocolParser::parse_message(&bytes).unwrap()
+        else {
+            panic!("notfound follow-up was not getdata");
+        };
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].hash, numbered_hash(MAX_PEER_IN_FLIGHT as u16));
+        assert_eq!(inventory[0].inv_type, MSG_WITNESS_TX);
+    }
+
+    #[tokio::test]
+    async fn a_hash_already_requested_is_not_requested_again() {
+        let mut node = wired().await;
+        let first = [7u8; 32];
+        let second = [8u8; 32];
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::Inv(InvMessage {
+                    inventory: vec![InventoryVector {
+                        inv_type: MSG_TX,
+                        hash: first,
+                    }],
+                }),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let _ = node.incoming.recv().await.unwrap();
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::Inv(InvMessage {
+                    inventory: vec![
+                        InventoryVector {
+                            inv_type: MSG_TX,
+                            hash: first,
+                        },
+                        InventoryVector {
+                            inv_type: MSG_WITNESS_TX,
+                            hash: second,
+                        },
+                    ],
+                }),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let bytes = node.incoming.recv().await.unwrap();
+        let ProtocolMessage::GetData(GetDataMessage { inventory }) =
+            ProtocolParser::parse_message(&bytes).unwrap()
+        else {
+            panic!("second inv reply was not getdata");
+        };
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].hash, second);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_transaction_and_a_block_notfound_do_not_share_the_set() {
+        use crate::network::inventory::MSG_BLOCK;
+        use crate::network::protocol::{NotFoundMessage, TxMessage};
+
+        let mut node = wired().await;
+        let tx = spend(
+            OutPoint {
+                hash: [3u8; 32],
+                index: 0,
+            },
+            1_000,
+        );
+        let txid = blvm_protocol::block::calculate_tx_id(&tx);
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::Inv(InvMessage {
+                    inventory: vec![InventoryVector {
+                        inv_type: MSG_TX,
+                        hash: txid,
+                    }],
+                }),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let _ = node.incoming.recv().await.unwrap();
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::NotFound(NotFoundMessage {
+                    inventory: vec![InventoryVector {
+                        inv_type: MSG_BLOCK,
+                        hash: txid,
+                    }],
+                }),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let other = [6u8; 32];
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::Inv(InvMessage {
+                    inventory: vec![
+                        InventoryVector {
+                            inv_type: MSG_TX,
+                            hash: txid,
+                        },
+                        InventoryVector {
+                            inv_type: MSG_TX,
+                            hash: other,
+                        },
+                    ],
+                }),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let bytes = node.incoming.recv().await.unwrap();
+        let ProtocolMessage::GetData(GetDataMessage { inventory }) =
+            ProtocolParser::parse_message(&bytes).unwrap()
+        else {
+            panic!("inv after block notfound was not getdata");
+        };
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].hash, other);
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::Tx(TxMessage {
+                    transaction: tx,
+                    witnesses: Vec::new(),
+                }),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::Inv(InvMessage {
+                    inventory: vec![InventoryVector {
+                        inv_type: MSG_TX,
+                        hash: txid,
+                    }],
+                }),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let bytes = node.incoming.recv().await.unwrap();
+        let ProtocolMessage::GetData(GetDataMessage { inventory }) =
+            ProtocolParser::parse_message(&bytes).unwrap()
+        else {
+            panic!("inv after tx was not getdata");
+        };
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].hash, txid);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unsolicited_header_on_the_tip_extends_the_header_chain() {
         let node = wired().await;
@@ -1736,7 +2179,8 @@ mod plan_wire_locks {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn announce_lock_block_and_tx_leave_as_inv() {
-        use crate::network::inventory::{MSG_WITNESS_BLOCK, MSG_WITNESS_TX};
+        use crate::network::inventory::MSG_WITNESS_TX;
+        use crate::network::protocol::HeadersMessage;
         let mut node = wired().await;
         let header = BlockHeader {
             version: 1,
@@ -1747,23 +2191,33 @@ mod plan_wire_locks {
             nonce: 7,
         };
         let block_hash = [0x44; 32];
+        node.storage.blocks().store_height(1, &block_hash).unwrap();
         node.manager
-            .announce_connected_block(block_hash, header)
+            .peer_states()
+            .write()
+            .await
+            .get_mut(&node.peer)
+            .unwrap()
+            .known_header_height = Some(0);
+        node.manager
+            .announce_connected_block(block_hash, header.clone())
             .await;
-        let bytes = node.incoming.recv().await.unwrap();
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(5), node.incoming.recv())
+            .await
+            .expect("headers announcement")
+            .unwrap();
         match ProtocolParser::parse_message(&bytes).unwrap() {
-            ProtocolMessage::Inv(InvMessage { inventory }) => {
-                assert!(
-                    inventory.iter().any(|item| {
-                        item.inv_type == MSG_WITNESS_BLOCK && item.hash == block_hash
-                    })
-                );
+            ProtocolMessage::Headers(HeadersMessage { headers }) => {
+                assert_eq!(headers, vec![header]);
             }
-            other => panic!("expected block inv, got {other:?}"),
+            other => panic!("expected headers, got {other:?}"),
         }
         let txid = [0x55; 32];
         node.manager.announce_accepted_transaction(txid, None).await;
-        let bytes = node.incoming.recv().await.unwrap();
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(5), node.incoming.recv())
+            .await
+            .expect("tx inv")
+            .unwrap();
         match ProtocolParser::parse_message(&bytes).unwrap() {
             ProtocolMessage::Inv(InvMessage { inventory }) => {
                 assert!(
@@ -2548,6 +3002,240 @@ mod plan_wire_locks {
             .await
             .unwrap();
         assert!(announce_reaches(&mut omitted).await);
+    }
+
+    #[tokio::test]
+    async fn a_block_relay_only_peer_is_not_sent_transaction_inv() {
+        use crate::network::peer::OutboundRole;
+        let mut node = wired().await;
+        {
+            let mut pm = node.manager.peer_manager_mutex().lock().await;
+            pm.get_peer_mut(&TransportAddr::Tcp(node.peer))
+                .unwrap()
+                .set_outbound_role(Some(OutboundRole::BlockRelayOnly));
+        }
+        {
+            let mut states = node.manager.peer_states().write().await;
+            states.get_mut(&node.peer).unwrap().version = 0;
+        }
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::Version(version_message(true)),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let relay_tx = node
+            .manager
+            .peer_states()
+            .read()
+            .await
+            .get(&node.peer)
+            .unwrap()
+            .relay_tx;
+        assert!(!relay_tx);
+        while node.incoming.try_recv().is_ok() {}
+        node.manager
+            .dispatch_protocol_message(node.peer, &ProtocolMessage::MemPool, Vec::new())
+            .await
+            .unwrap();
+        assert!(node.incoming.try_recv().is_err());
+        assert!(!announce_reaches(&mut node).await);
+    }
+
+    #[tokio::test]
+    async fn wtxidrelay_selects_type_5_and_a_peer_without_it_stays_on_witness_tx() {
+        use crate::network::inventory::{MSG_WITNESS_TX, MSG_WTX, tx_announce_inv_type};
+        use crate::network::protocol::cmd;
+
+        assert_eq!(MSG_WTX, 5);
+        assert_eq!(tx_announce_inv_type(false), MSG_WITNESS_TX);
+        assert_eq!(tx_announce_inv_type(true), MSG_WTX);
+        let empty = ProtocolParser::serialize_message(&ProtocolMessage::WtxidRelay).unwrap();
+        assert!(matches!(
+            ProtocolParser::parse_message(&empty).unwrap(),
+            ProtocolMessage::WtxidRelay
+        ));
+        let nonempty = ProtocolParser::serialize_command_payload(cmd::WTXIDRELAY, &[1]).unwrap();
+        let err = ProtocolParser::parse_message(&nonempty).unwrap_err();
+        assert!(err.to_string().contains("Unknown command"));
+
+        let mut node = wired().await;
+        {
+            let mut states = node.manager.peer_states().write().await;
+            let state = states.get_mut(&node.peer).unwrap();
+            state.version = 0;
+            state.handshake_complete = false;
+            state.wtxid_relay = false;
+        }
+        node.manager
+            .dispatch_protocol_message(node.peer, &ProtocolMessage::WtxidRelay, Vec::new())
+            .await
+            .unwrap();
+        assert!(!wtxid_flag(&node).await);
+
+        {
+            let mut states = node.manager.peer_states().write().await;
+            let state = states.get_mut(&node.peer).unwrap();
+            state.version = 70016;
+            state.handshake_complete = true;
+        }
+        node.manager
+            .dispatch_protocol_message(node.peer, &ProtocolMessage::WtxidRelay, Vec::new())
+            .await
+            .unwrap();
+        assert!(!wtxid_flag(&node).await);
+
+        {
+            let mut states = node.manager.peer_states().write().await;
+            states.get_mut(&node.peer).unwrap().handshake_complete = false;
+        }
+        node.manager
+            .dispatch_protocol_message(node.peer, &ProtocolMessage::WtxidRelay, Vec::new())
+            .await
+            .unwrap();
+        assert!(wtxid_flag(&node).await);
+        node.manager
+            .dispatch_protocol_message(node.peer, &ProtocolMessage::WtxidRelay, Vec::new())
+            .await
+            .unwrap();
+        assert!(wtxid_flag(&node).await);
+
+        let missing = [9u8; 32];
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::Inv(InvMessage {
+                    inventory: vec![InventoryVector {
+                        inv_type: MSG_TX,
+                        hash: missing,
+                    }],
+                }),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(next_inv_type(&mut node.incoming).await, MSG_WTX);
+        while node.incoming.try_recv().is_ok() {}
+        node.manager
+            .announce_accepted_transaction([4u8; 32], None)
+            .await;
+        assert_eq!(next_inv_type(&mut node.incoming).await, MSG_WTX);
+
+        let mut plain = wired().await;
+        plain
+            .manager
+            .dispatch_protocol_message(
+                plain.peer,
+                &ProtocolMessage::Inv(InvMessage {
+                    inventory: vec![InventoryVector {
+                        inv_type: MSG_WITNESS_TX,
+                        hash: [8u8; 32],
+                    }],
+                }),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(next_inv_type(&mut plain.incoming).await, MSG_WITNESS_TX);
+        while plain.incoming.try_recv().is_ok() {}
+        plain
+            .manager
+            .announce_accepted_transaction([5u8; 32], None)
+            .await;
+        assert_eq!(next_inv_type(&mut plain.incoming).await, MSG_WITNESS_TX);
+    }
+
+    async fn wtxid_flag(node: &Wired) -> bool {
+        node.manager
+            .peer_states()
+            .read()
+            .await
+            .get(&node.peer)
+            .unwrap()
+            .wtxid_relay
+    }
+
+    async fn next_inv_type(incoming: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> u32 {
+        let bytes = incoming.recv().await.expect("inventory");
+        match ProtocolParser::parse_message(&bytes).unwrap() {
+            ProtocolMessage::GetData(GetDataMessage { inventory })
+            | ProtocolMessage::Inv(InvMessage { inventory }) => inventory[0].inv_type,
+            _ => panic!("reply was not inventory"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sendpackages_is_accepted_only_before_verack() {
+        use crate::network::package_messages::{
+            PACKAGE_TX, PACKAGE_VERSION_LOCAL, package_enabled,
+        };
+        let mut node = wired().await;
+        {
+            let mut states = node.manager.peer_states().write().await;
+            let state = states.get_mut(&node.peer).unwrap();
+            state.version = 0;
+            state.handshake_complete = false;
+            state.package_remote = None;
+        }
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::SendPackages(PACKAGE_VERSION_LOCAL),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert!(package_remote(&node).await.is_none());
+        {
+            let mut states = node.manager.peer_states().write().await;
+            let state = states.get_mut(&node.peer).unwrap();
+            state.version = 70016;
+            state.handshake_complete = true;
+        }
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::SendPackages(PACKAGE_TX),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert!(package_remote(&node).await.is_none());
+        {
+            let mut states = node.manager.peer_states().write().await;
+            states.get_mut(&node.peer).unwrap().handshake_complete = false;
+        }
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::SendPackages(PACKAGE_TX),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(package_remote(&node).await, Some(PACKAGE_TX));
+        assert_eq!(package_enabled(PACKAGE_TX), PACKAGE_TX);
+        node.manager
+            .dispatch_protocol_message(
+                node.peer,
+                &ProtocolMessage::SendPackages(PACKAGE_VERSION_LOCAL),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(package_remote(&node).await, Some(PACKAGE_TX));
+    }
+
+    async fn package_remote(node: &Wired) -> Option<u64> {
+        node.manager
+            .peer_states()
+            .read()
+            .await
+            .get(&node.peer)
+            .unwrap()
+            .package_remote
     }
 }
 

@@ -69,6 +69,10 @@ pub const TESTNET_ASSUMEUTXO_SNAPSHOTS: &[(u64, &str)] = &[(
 
 const CHAINSTATE_SNAPSHOT_DIR: &str = "chainstate_snapshot";
 const BASE_BLOCKHASH_FILE: &str = "base_blockhash";
+const COMMITMENT_STATUS_FILE: &str = "commitment";
+
+/// Persisted when the historical chainstate's UTXO hash does not match the snapshot commitment.
+pub const COMMITMENT_FAILED: &str = "Failed";
 
 /// Path to chainstate_snapshot directory (for restart detection when using assumeutxo).
 pub fn chainstate_snapshot_dir(data_dir: &Path) -> std::path::PathBuf {
@@ -133,6 +137,30 @@ pub fn write_background_validated_marker(data_dir: &Path, base_blockhash: &[u8; 
         .context("Failed to write background_validated")?;
     info!("Wrote assumeutxo background_validated marker");
     Ok(())
+}
+
+/// Record a commitment mismatch. The next start reads this and refuses the active chainstate.
+pub fn persist_commitment_failed(data_dir: &Path) -> Result<()> {
+    let dir = chainstate_snapshot_dir(data_dir);
+    std::fs::create_dir_all(&dir).context("Failed to create chainstate_snapshot dir")?;
+    std::fs::write(dir.join(COMMITMENT_STATUS_FILE), COMMITMENT_FAILED)
+        .context("Failed to persist assumeutxo commitment status")?;
+    Ok(())
+}
+
+/// True when a commitment mismatch has been persisted. The active chainstate must not start.
+pub fn active_chainstate_refused(data_dir: &Path) -> bool {
+    let path = chainstate_snapshot_dir(data_dir).join(COMMITMENT_STATUS_FILE);
+    std::fs::read_to_string(path)
+        .map(|status| status.trim() == COMMITMENT_FAILED)
+        .unwrap_or(false)
+}
+
+/// True when this network's snapshot table includes `height`.
+pub fn has_snapshot_height(network: &str, height: u64) -> bool {
+    assumeutxo_data_for_network(network)
+        .iter()
+        .any(|data| data.height == height)
 }
 
 /// Remove assumeutxo marker (call when background validation completes).
@@ -712,6 +740,35 @@ mod tests {
             AssumeUtxoManager::calculate_utxo_hash(&forward).unwrap(),
             AssumeUtxoManager::calculate_utxo_hash(&reverse).unwrap()
         );
+    }
+
+    #[test]
+    fn commitment_mismatch_persists_failed_and_the_next_start_refuses() {
+        let dir = tempdir().unwrap();
+        assert!(!active_chainstate_refused(dir.path()));
+        persist_commitment_failed(dir.path()).unwrap();
+        let status =
+            std::fs::read_to_string(chainstate_snapshot_dir(dir.path()).join("commitment"))
+                .unwrap();
+        assert_eq!(status, COMMITMENT_FAILED);
+        assert!(active_chainstate_refused(dir.path()));
+    }
+
+    #[test]
+    fn snapshot_seeds_do_not_include_height_965000() {
+        for network in [
+            "mainnet",
+            "bitcoinv1",
+            "testnet",
+            "testnet3",
+            "signet",
+            "regtest",
+        ] {
+            assert!(
+                !has_snapshot_height(network, 965_000),
+                "{network} lists height 965000"
+            );
+        }
     }
 
     #[test]

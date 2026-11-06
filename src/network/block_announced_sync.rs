@@ -8,17 +8,101 @@
 use crate::network::inventory::{MSG_BLOCK, MSG_WITNESS_BLOCK};
 use crate::network::network_manager::NetworkManager;
 use crate::network::protocol::{
-    GetDataMessage, GetHeadersMessage, InventoryVector, ProtocolMessage, ProtocolParser,
+    GetDataMessage, GetHeadersMessage, HeadersMessage, InventoryVector, ProtocolMessage,
+    ProtocolParser, SendCmpctMessage,
 };
-use crate::network::transport::TransportAddr;
+use crate::network::transport::{TransportAddr, TransportType};
 use anyhow::Result;
 use blvm_protocol::Hash;
 use std::net::SocketAddr;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
-/// Maximum block `getdata` items per `inv`. A larger block inventory is a historical range.
+/// How many block hashes one `inv` may turn into `getdata`.
 pub(crate) const MAX_BLOCK_REQUESTS_PER_INV: usize = 16;
+
+/// At most this many peers are asked for high-bandwidth compact announcements.
+pub(crate) const MAX_HIGH_BANDWIDTH_PEERS: usize = 3;
+
+/// A headers announcement is sent only when the peer's known header is this close to the tip.
+pub(crate) const MAX_HEADER_ANNOUNCE_DISTANCE: u64 = 8;
+
+/// Length of the headers batch for a peer, or none when the gap is outside 1..=8.
+pub(crate) fn header_announce_len(tip_height: u64, known_height: Option<u64>) -> Option<u64> {
+    let known = known_height?;
+    let distance = tip_height.checked_sub(known)?;
+    if (1..=MAX_HEADER_ANNOUNCE_DISTANCE).contains(&distance) {
+        Some(distance)
+    } else {
+        None
+    }
+}
+
+/// Handshake-complete peers that are not already in the high-bandwidth set, up to the open slots.
+pub(crate) fn high_bandwidth_candidates(
+    states: &std::collections::HashMap<SocketAddr, blvm_protocol::network::PeerState>,
+) -> Vec<SocketAddr> {
+    let selected = states.values().filter(|state| state.high_bandwidth).count();
+    let room = MAX_HIGH_BANDWIDTH_PEERS.saturating_sub(selected);
+    if room == 0 {
+        return Vec::new();
+    }
+    let mut open: Vec<SocketAddr> = states
+        .iter()
+        .filter(|(_, state)| state.handshake_complete && !state.high_bandwidth)
+        .map(|(addr, _)| *addr)
+        .collect();
+    open.sort();
+    open.truncate(room);
+    open
+}
+
+/// Record a header height the peer has. A lower height does not rewind the mark.
+pub(crate) fn advance_known_header_height(
+    state: &mut blvm_protocol::network::PeerState,
+    height: u64,
+) {
+    let next = state
+        .known_header_height
+        .map_or(height, |known| known.max(height));
+    state.known_header_height = Some(next);
+}
+
+/// Clear a peer's high-bandwidth slot. Returns whether that peer had the slot.
+pub(crate) fn revoke_high_bandwidth(state: &mut blvm_protocol::network::PeerState) -> bool {
+    if !state.high_bandwidth {
+        return false;
+    }
+    state.high_bandwidth = false;
+    true
+}
+
+fn headers_for_announce(
+    storage: &crate::storage::Storage,
+    tip_height: u64,
+    distance: u64,
+    tip_hash: &Hash,
+    tip_header: &blvm_protocol::BlockHeader,
+) -> Option<Vec<blvm_protocol::BlockHeader>> {
+    if distance == 1 {
+        return Some(vec![tip_header.clone()]);
+    }
+    let start = tip_height.saturating_sub(distance - 1);
+    let mut headers = Vec::with_capacity(distance as usize);
+    for height in start..=tip_height {
+        let hash = storage.blocks().get_hash_by_height(height).ok().flatten()?;
+        let header = storage.blocks().get_header(&hash).ok().flatten()?;
+        headers.push(header);
+    }
+    if headers.len() as u64 != distance {
+        return None;
+    }
+    let last = blvm_consensus::block::block_header_hash(headers.last()?);
+    if last != *tip_hash {
+        return None;
+    }
+    Some(headers)
+}
 
 const HEADER_PROBE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(120);
 
@@ -597,6 +681,9 @@ impl NetworkManager {
     }
 
     /// Tell connected peers about a block that just became the tip.
+    ///
+    /// A peer whose known header is 1 to 8 blocks behind receives that many headers.
+    /// A wider gap, or a peer with no known header height, receives nothing.
     pub(crate) async fn announce_connected_block(
         &self,
         hash: Hash,
@@ -605,30 +692,116 @@ impl NetworkManager {
         if !self.relay_policies().enable_block_relay {
             return;
         }
+        let Some(storage) = self.storage().as_ref() else {
+            return;
+        };
+        let Some(tip_height) = storage
+            .blocks()
+            .get_height_by_hash(&hash)
+            .ok()
+            .flatten()
+            .or_else(|| {
+                let tip = storage.chain().get_tip_hash().ok().flatten()?;
+                if tip != hash {
+                    return None;
+                }
+                storage.chain().get_height().ok().flatten()
+            })
+        else {
+            return;
+        };
         let peers = self.get_connected_peer_addresses().await;
         for peer_addr in peers {
-            let prefer_headers = self
+            let known = self
                 .peer_states()
                 .read()
                 .await
                 .get(&peer_addr)
-                .map(|state| state.prefer_headers)
-                .unwrap_or(false);
-            let message = if prefer_headers {
-                ProtocolMessage::Headers(crate::network::protocol::HeadersMessage {
-                    headers: vec![header.clone()],
-                })
-            } else {
-                ProtocolMessage::Inv(crate::network::protocol::InvMessage {
-                    inventory: vec![InventoryVector {
-                        inv_type: MSG_WITNESS_BLOCK,
-                        hash,
-                    }],
-                })
+                .and_then(|state| state.known_header_height);
+            let Some(distance) = header_announce_len(tip_height, known) else {
+                continue;
             };
+            let Some(headers) = headers_for_announce(storage, tip_height, distance, &hash, &header)
+            else {
+                continue;
+            };
+            let message = ProtocolMessage::Headers(HeadersMessage { headers });
             if let Ok(wire) = ProtocolParser::serialize_message(&message) {
-                let _ = self.send_to_peer(peer_addr, wire).await;
+                if self.send_to_peer(peer_addr, wire).await.is_ok() {
+                    self.note_known_header_height(peer_addr, tip_height).await;
+                }
             }
+        }
+    }
+
+    /// Offer announce-true `sendcmpct` while fewer than three peers hold a slot.
+    /// A peer that does not get a slot is sent nothing.
+    pub(crate) async fn fill_high_bandwidth_slots(&self) {
+        let candidates = {
+            let states = self.peer_states().read().await;
+            high_bandwidth_candidates(&states)
+        };
+        for peer_addr in candidates {
+            let took = {
+                let mut states = self.peer_states().write().await;
+                if states.values().filter(|state| state.high_bandwidth).count()
+                    >= MAX_HIGH_BANDWIDTH_PEERS
+                {
+                    false
+                } else if let Some(state) = states.get_mut(&peer_addr) {
+                    if state.handshake_complete && !state.high_bandwidth {
+                        state.high_bandwidth = true;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
+            if !took {
+                continue;
+            }
+            if self
+                .send_high_bandwidth_cmpct(peer_addr, true)
+                .await
+                .is_err()
+            {
+                let mut states = self.peer_states().write().await;
+                if let Some(state) = states.get_mut(&peer_addr) {
+                    state.high_bandwidth = false;
+                }
+            }
+        }
+    }
+
+    /// A peer leaving the set is told announce false. A peer that never had the slot is not.
+    pub(crate) async fn revoke_high_bandwidth_peer(&self, peer_addr: SocketAddr) -> bool {
+        let leave = {
+            let mut states = self.peer_states().write().await;
+            states
+                .get_mut(&peer_addr)
+                .is_some_and(revoke_high_bandwidth)
+        };
+        if leave {
+            let _ = self.send_high_bandwidth_cmpct(peer_addr, false).await;
+        }
+        leave
+    }
+
+    async fn send_high_bandwidth_cmpct(&self, peer_addr: SocketAddr, announce: bool) -> Result<()> {
+        let message = ProtocolMessage::SendCmpct(SendCmpctMessage::for_transport(
+            TransportType::Tcp,
+            announce,
+        ));
+        let wire = ProtocolParser::serialize_message(&message)?;
+        self.send_to_peer(peer_addr, wire).await
+    }
+
+    pub(crate) async fn note_known_header_height(&self, peer_addr: SocketAddr, height: u64) {
+        let mut states = self.peer_states().write().await;
+        if let Some(state) = states.get_mut(&peer_addr) {
+            advance_known_header_height(state, height);
         }
     }
 
@@ -646,19 +819,25 @@ impl NetworkManager {
         let mut eligible = Vec::new();
         for peer_addr in peers {
             let allowed = {
-                let states = self.peer_states().read().await;
-                match states.get(&peer_addr) {
-                    Some(state) if !state.relay_tx => false,
-                    Some(state) => match state.min_fee_rate {
-                        Some(min) => match fee_basis {
-                            Some((fee_sats, vsize)) => {
-                                super::wire_dispatch::fee_rate_meets_filter(fee_sats, vsize, min)
-                            }
-                            None => false,
+                if self.outbound_role_is_block_only(peer_addr).await {
+                    false
+                } else {
+                    let states = self.peer_states().read().await;
+                    match states.get(&peer_addr) {
+                        Some(state) if !state.relay_tx => false,
+                        Some(state) => match state.min_fee_rate {
+                            Some(min) => match fee_basis {
+                                Some((fee_sats, vsize)) => {
+                                    super::wire_dispatch::fee_rate_meets_filter(
+                                        fee_sats, vsize, min,
+                                    )
+                                }
+                                None => false,
+                            },
+                            None => true,
                         },
                         None => true,
-                    },
-                    None => true,
+                    }
                 }
             };
             if allowed {
@@ -686,9 +865,17 @@ impl NetworkManager {
             None => eligible,
         };
         for peer_addr in targets {
+            let inv_type = {
+                let states = self.peer_states().read().await;
+                crate::network::inventory::tx_announce_inv_type(
+                    states
+                        .get(&peer_addr)
+                        .is_some_and(|state| state.wtxid_relay),
+                )
+            };
             let message = ProtocolMessage::Inv(crate::network::protocol::InvMessage {
                 inventory: vec![InventoryVector {
-                    inv_type: crate::network::inventory::MSG_WITNESS_TX,
+                    inv_type,
                     hash: txid,
                 }],
             });
@@ -724,6 +911,42 @@ mod tests {
     use std::sync::Arc;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
+
+    #[test]
+    fn a_header_gap_past_eight_is_not_announced() {
+        assert_eq!(header_announce_len(100, None), None);
+        assert_eq!(header_announce_len(100, Some(100)), None);
+        assert_eq!(header_announce_len(100, Some(99)), Some(1));
+        assert_eq!(header_announce_len(100, Some(92)), Some(8));
+        assert_eq!(header_announce_len(100, Some(91)), None);
+    }
+
+    #[test]
+    fn high_bandwidth_keeps_three_and_does_not_clear_a_peer_that_was_never_selected() {
+        use blvm_protocol::network::PeerState;
+        use std::collections::HashMap;
+        let mut states = HashMap::new();
+        for host in 1u8..=5 {
+            let mut state = PeerState::new();
+            state.handshake_complete = true;
+            states.insert(SocketAddr::from(([10, 0, 0, host], 8333)), state);
+        }
+        let picked = high_bandwidth_candidates(&states);
+        assert_eq!(picked.len(), MAX_HIGH_BANDWIDTH_PEERS);
+        for addr in &picked {
+            states.get_mut(addr).unwrap().high_bandwidth = true;
+        }
+        assert!(high_bandwidth_candidates(&states).is_empty());
+        let never = states
+            .keys()
+            .copied()
+            .find(|addr| !picked.contains(addr))
+            .unwrap();
+        assert!(!revoke_high_bandwidth(states.get_mut(&never).unwrap()));
+        assert!(revoke_high_bandwidth(states.get_mut(&picked[0]).unwrap()));
+        assert!(!states.get(&picked[0]).unwrap().high_bandwidth);
+        assert_eq!(high_bandwidth_candidates(&states).len(), 1);
+    }
 
     async fn read_frame(sock: &mut tokio::net::TcpStream) -> Vec<u8> {
         let mut header = [0u8; 24];
@@ -1578,5 +1801,102 @@ mod header_probe_order_tests {
     fn wrong_port_probe_is_short() {
         assert_eq!(header_probe_timeout_secs(8333, 48333, 30), 3);
         assert_eq!(header_probe_timeout_secs(48333, 48333, 30), 30);
+    }
+}
+
+#[cfg(test)]
+mod high_bandwidth_tests {
+    use super::{
+        MAX_HEADER_ANNOUNCE_DISTANCE, MAX_HIGH_BANDWIDTH_PEERS, advance_known_header_height,
+        header_announce_len, high_bandwidth_candidates, revoke_high_bandwidth,
+    };
+    use crate::network::protocol::SendCmpctMessage;
+    use crate::network::transport::TransportType;
+    use blvm_protocol::network::PeerState;
+    use std::collections::HashMap;
+    use std::net::SocketAddr;
+
+    fn peer(addr: &str, handshake: bool) -> (SocketAddr, PeerState) {
+        let addr = addr.parse().unwrap();
+        let mut state = PeerState::new();
+        state.handshake_complete = handshake;
+        state.start_height = 50_000;
+        (addr, state)
+    }
+
+    #[test]
+    fn one_header_through_eight_is_inside_the_gap() {
+        assert_eq!(header_announce_len(100, Some(99)), Some(1));
+        assert_eq!(header_announce_len(100, Some(92)), Some(8));
+        assert_eq!(MAX_HEADER_ANNOUNCE_DISTANCE, 8);
+        assert_eq!(header_announce_len(100, Some(91)), None);
+        assert_eq!(header_announce_len(100, Some(100)), None);
+        assert_eq!(header_announce_len(100, None), None);
+        assert_eq!(header_announce_len(100, Some(101)), None);
+    }
+
+    #[test]
+    fn at_most_three_peers_are_offered_and_a_fourth_is_not() {
+        let mut states = HashMap::new();
+        for addr in [
+            "4.4.4.4:8333",
+            "1.1.1.1:8333",
+            "3.3.3.3:8333",
+            "2.2.2.2:8333",
+        ] {
+            let (addr, state) = peer(addr, true);
+            states.insert(addr, state);
+        }
+        let (quiet, quiet_state) = peer("9.9.9.9:8333", false);
+        states.insert(quiet, quiet_state);
+        let picked = high_bandwidth_candidates(&states);
+        assert_eq!(picked.len(), MAX_HIGH_BANDWIDTH_PEERS);
+        let first: SocketAddr = "1.1.1.1:8333".parse().unwrap();
+        let second: SocketAddr = "2.2.2.2:8333".parse().unwrap();
+        let third: SocketAddr = "3.3.3.3:8333".parse().unwrap();
+        assert_eq!(picked, vec![first, second, third]);
+        for addr in &picked {
+            states.get_mut(addr).unwrap().high_bandwidth = true;
+        }
+        assert!(high_bandwidth_candidates(&states).is_empty());
+        assert!(revoke_high_bandwidth(states.get_mut(&picked[0]).unwrap()));
+        let again = high_bandwidth_candidates(&states);
+        assert_eq!(again.len(), 1);
+        assert_ne!(again[0], picked[1]);
+        assert_ne!(again[0], picked[2]);
+        assert!(!states[&again[0]].high_bandwidth);
+    }
+
+    #[test]
+    fn a_peer_that_was_never_selected_gets_no_revoke() {
+        let mut state = PeerState::new();
+        state.start_height = 100;
+        assert!(!revoke_high_bandwidth(&mut state));
+        assert!(!state.high_bandwidth);
+        assert!(state.known_header_height.is_none());
+        assert_eq!(state.start_height, 100);
+    }
+
+    #[test]
+    fn known_header_height_advances_and_does_not_rewind() {
+        let mut state = PeerState::new();
+        state.start_height = 40;
+        advance_known_header_height(&mut state, 10);
+        advance_known_header_height(&mut state, 7);
+        advance_known_header_height(&mut state, 12);
+        assert_eq!(state.known_header_height, Some(12));
+        assert_eq!(state.start_height, 40);
+        assert_eq!(header_announce_len(13, state.known_header_height), Some(1));
+        assert_eq!(header_announce_len(21, state.known_header_height), None);
+    }
+
+    #[test]
+    fn announce_true_and_false_are_the_two_sendcmpct_flags() {
+        let on = SendCmpctMessage::for_transport(TransportType::Tcp, true);
+        let off = SendCmpctMessage::for_transport(TransportType::Tcp, false);
+        assert_eq!(on.version, 1);
+        assert_eq!(off.version, 1);
+        assert_eq!(on.prefer_cmpct, 1);
+        assert_eq!(off.prefer_cmpct, 0);
     }
 }

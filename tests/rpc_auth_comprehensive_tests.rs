@@ -133,9 +133,11 @@ async fn test_auth_manager_auth_required() {
 #[tokio::test]
 async fn test_auth_manager_http_basic_password_only() {
     let manager = RpcAuthManager::new(true);
-    manager
+    let error = manager
         .set_basic_auth(None, "pool-secret".to_string())
-        .await;
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("username"));
 
     let mut headers = hyper::HeaderMap::new();
     // anyuser:pool-secret
@@ -145,8 +147,7 @@ async fn test_auth_manager_http_basic_password_only() {
     );
     let addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();
     let result = manager.authenticate_request(&headers, addr).await;
-    assert!(result.user_id.is_some());
-    assert!(result.error.is_none());
+    assert!(result.user_id.is_none());
 }
 
 #[tokio::test]

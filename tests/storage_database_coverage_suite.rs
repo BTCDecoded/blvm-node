@@ -18,7 +18,6 @@ fn database_default_and_fallback_backends() {
         DatabaseBackend::Sled
             | DatabaseBackend::RocksDB
             | DatabaseBackend::Redb
-            | DatabaseBackend::TidesDB
             | DatabaseBackend::Heed3
     ));
 }
@@ -32,16 +31,22 @@ fn database_backend_from_config_auto() {
 #[test]
 fn database_module_subprocess_preference_respects_override() {
     assert_eq!(
-        module_subprocess_database_backend_preference(DatabaseBackend::RocksDB, Some("tidesdb")),
-        "tidesdb"
+        module_subprocess_database_backend_preference(DatabaseBackend::RocksDB, Some("sled")),
+        "sled"
     );
     assert_eq!(
         module_subprocess_database_backend_preference(DatabaseBackend::RocksDB, Some("auto")),
         "sled"
     );
+    #[cfg(feature = "heed3")]
     assert_eq!(
-        module_subprocess_database_backend_preference(DatabaseBackend::TidesDB, None),
-        "tidesdb"
+        module_subprocess_database_backend_preference(DatabaseBackend::Heed3, None),
+        "heed3"
+    );
+    #[cfg(not(feature = "heed3"))]
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::Heed3, None),
+        "sled"
     );
 }
 

@@ -2251,7 +2251,7 @@ impl BlockchainRpc {
             let scripts =
                 crate::storage::blockstore::output_and_spent_slices(&outputs.scripts, &spent);
             let prev_block_hash = outputs.prev_hash;
-            match blvm_protocol::bip158::build_block_filter_output_scripts(scripts, &[]) {
+            match blvm_protocol::bip158::build_block_filter_output_scripts(&hash, scripts, &[]) {
                 Ok(filter) => {
                     let prev_header = previous_filter_header(storage, &prev_block_hash)?;
                     let header = chain_filter_header(filter.filter_data.as_slice(), &prev_header);
@@ -3217,8 +3217,9 @@ mod block_stats_tests {
             .get_block_filter(&json!([crate::storage::hashing::hash_to_rpc_hex(&hash)]))
             .await
             .unwrap();
-        let built = build_block_filter(block.transactions.as_ref(), &[script.clone()]).unwrap();
-        assert!(match_filter(&built, &script));
+        let built =
+            build_block_filter(&hash, block.transactions.as_ref(), &[script.clone()]).unwrap();
+        assert!(match_filter(&hash, &built, &script));
         assert_eq!(
             result["filter"].as_str().unwrap(),
             hex::encode(built.filter_data.as_slice())

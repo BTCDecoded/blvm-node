@@ -70,13 +70,13 @@ fn test_module_config_module_database_backend_from_toml() {
 transport_preference = "tcponly"
 
 [modules]
-module_database_backend = "tidesdb"
+module_database_backend = "sled"
 "#,
     )
     .unwrap();
     let config = NodeConfig::from_toml_file(&path).unwrap();
     let modules = config.modules.as_ref().expect("modules");
-    assert_eq!(modules.module_database_backend.as_deref(), Some("tidesdb"));
+    assert_eq!(modules.module_database_backend.as_deref(), Some("sled"));
 }
 
 #[test]
@@ -97,8 +97,8 @@ fn test_module_subprocess_database_backend_preference() {
         "sled"
     );
     assert_eq!(
-        module_subprocess_database_backend_preference(DatabaseBackend::TidesDB, None),
-        "tidesdb"
+        module_subprocess_database_backend_preference(DatabaseBackend::Heed3, None),
+        "heed3"
     );
     #[cfg(feature = "heed3")]
     assert_eq!(
@@ -111,16 +111,16 @@ fn test_module_subprocess_database_backend_preference() {
         "sled"
     );
     assert_eq!(
-        module_subprocess_database_backend_preference(DatabaseBackend::RocksDB, Some("tidesdb")),
-        "tidesdb"
+        module_subprocess_database_backend_preference(DatabaseBackend::RocksDB, Some("sled")),
+        "sled"
     );
     assert_eq!(
         module_subprocess_database_backend_preference(DatabaseBackend::RocksDB, Some("auto")),
         "sled"
     );
     assert_eq!(
-        module_subprocess_database_backend_preference(DatabaseBackend::TidesDB, Some("auto")),
-        "tidesdb"
+        module_subprocess_database_backend_preference(DatabaseBackend::Heed3, Some("auto")),
+        "heed3"
     );
 }
 
@@ -531,6 +531,18 @@ fn test_zero_header_cap_is_rejected_and_is_not_a_protocol_violation() {
     assert!(!headers_batch_is_full(1, 0));
     assert!(headers_batch_is_full(2000, 2000));
     assert!(headers_message_exceeds_limit(2001, 2000));
+}
+
+#[test]
+fn test_message_ceiling_clamps_to_protocol_maximum() {
+    let mut limits = ProtocolLimitsConfig::default();
+    assert_eq!(limits.max_protocol_message_length, 4_000_024);
+    limits.max_protocol_message_length = 32 * 1024 * 1024;
+    limits.clamp_message_ceiling();
+    assert_eq!(limits.max_protocol_message_length, 4_000_024);
+    limits.max_protocol_message_length = 1_000;
+    limits.clamp_message_ceiling();
+    assert_eq!(limits.max_protocol_message_length, 1_000);
 }
 
 #[test]

@@ -307,11 +307,11 @@ pub struct ModuleConfig {
 
     /// Default storage engine hint for **module subprocess** KV (`{module_data}/db/`), passed as
     /// `database_backend` / `MODULE_CONFIG_DATABASE_BACKEND`. Must be a backend that supports
-    /// dynamic `open_tree()` (**sled**, **tidesdb**); **rocksdb** / **redb** from the chain store are
+    /// dynamic `open_tree()` (**sled**); **rocksdb** / **redb** from the chain store are
     /// not forwarded unchanged (see `module_subprocess_database_backend_preference`).
     ///
-    /// When unset, the node picks **sled** for RocksDB/Redb chains and **tidesdb** when the chain
-    /// uses TidesDB. Set **`auto`** for the same mapping.
+    /// When unset, the node picks **sled** for RocksDB/Redb chains and **heed3** when the chain
+    /// uses heed3. Set **`auto`** for the same mapping.
     #[serde(default)]
     pub module_database_backend: Option<String>,
 
@@ -662,7 +662,9 @@ impl Default for ModuleResourceLimitsConfig {
 /// Protocol message limits (for constrained networks)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtocolLimitsConfig {
-    /// Maximum protocol message size (bytes). Default 32MB.
+    /// Message ceiling in bytes, including the 24-byte header. Default 4,000,024.
+    /// A larger value is lowered to that ceiling. A smaller value is kept, and the
+    /// reader still subtracts 24 before accepting a payload.
     #[serde(default = "default_max_protocol_message_length")]
     pub max_protocol_message_length: usize,
 
@@ -680,7 +682,16 @@ pub struct ProtocolLimitsConfig {
 }
 
 fn default_max_protocol_message_length() -> usize {
-    32 * 1024 * 1024
+    blvm_protocol::p2p_framing::MAX_PROTOCOL_MESSAGE_LENGTH
+}
+
+impl ProtocolLimitsConfig {
+    /// Lower `max_protocol_message_length` to the protocol ceiling. Smaller values stay.
+    pub fn clamp_message_ceiling(&mut self) {
+        self.max_protocol_message_length = crate::network::protocol::clamp_protocol_message_length(
+            self.max_protocol_message_length,
+        );
+    }
 }
 
 fn default_max_addr_to_send() -> usize {
@@ -727,6 +738,19 @@ pub fn parse_signet_challenge_hex(hex_str: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Chain-work floor for script skipping. A zero field is the unset default, so this
+/// always returns the network constant. The value fits in `u128`; the high 16 bytes are zero.
+pub fn minimum_chain_work_for_network(network: &str) -> u128 {
+    match network.to_lowercase().as_str() {
+        "mainnet" | "bitcoinv1" => 0x1128750f82f4c366153a3a030,
+        "testnet" | "testnet3" => 0x17dde1c649f3708d14b6,
+        "testnet4" => 0x9a0fe15d0177d086304,
+        "signet" => 0xb463ea0a4b8,
+        "regtest" => 0,
+        _ => 0,
+    }
+}
+
 /// Seeded assume-valid height. Not Bitcoin Core's current `defaultAssumeValid` height.
 pub fn default_assume_valid_height_for_network(network: &str) -> u64 {
     match network.to_lowercase().as_str() {
@@ -735,6 +759,15 @@ pub fn default_assume_valid_height_for_network(network: &str) -> u64 {
         "testnet4" => 0,
         "signet" => 267_665,
         _ => 0,
+    }
+}
+
+/// True only when the hash stored at the assume-valid height is the configured pin.
+/// A missing row is not connected. The helper that skips scripts does not store this.
+pub fn assume_valid_pin_connected(hash_at_pin: Option<[u8; 32]>) -> bool {
+    match (blvm_consensus::config::get_assume_valid_hash(), hash_at_pin) {
+        (Some(expected), Some(found)) => expected == found,
+        _ => false,
     }
 }
 
@@ -910,8 +943,8 @@ pub struct NodeConfig {
     pub relay: Option<RelayConfig>,
 
     /// Advertise `NODE_COMPACT_FILTERS` and answer filter requests.
-    /// `--disable-bip158` sets this false. Default true.
-    #[serde(default = "default_true")]
+    /// Default false. `--enable-bip158` sets this true.
+    #[serde(default = "default_false")]
     pub serve_compact_filters: bool,
 
     /// Address database configuration
@@ -1026,7 +1059,7 @@ impl Default for NodeConfig {
             ibd_protection: None,
             ibd: None,
             relay: None,
-            serve_compact_filters: true,
+            serve_compact_filters: false,
             address_database: None,
             #[cfg(feature = "dandelion")]
             dandelion: None,
@@ -1557,6 +1590,32 @@ pub struct LoggingConfig {
     /// Enable JSON logging format (for log aggregation systems)
     #[serde(default)]
     pub json_format: bool,
+}
+
+#[cfg(test)]
+mod minimum_chain_work_tests {
+    use super::minimum_chain_work_for_network;
+    use blvm_consensus::pow::U256;
+
+    fn floor_equals_its_lift(network: &str, work: u128) {
+        let value = minimum_chain_work_for_network(network);
+        assert_eq!(value, work);
+        let lifted = U256::from_u128(value);
+        assert_eq!(lifted.low_u128(), value);
+        assert_eq!(lifted, U256::from_u128(value));
+        assert!(lifted.to_le_bytes()[16..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn each_network_floor_equals_its_u128_lift() {
+        floor_equals_its_lift("mainnet", 0x1128750f82f4c366153a3a030);
+        floor_equals_its_lift("bitcoinv1", 0x1128750f82f4c366153a3a030);
+        floor_equals_its_lift("testnet", 0x17dde1c649f3708d14b6);
+        floor_equals_its_lift("testnet3", 0x17dde1c649f3708d14b6);
+        floor_equals_its_lift("testnet4", 0x9a0fe15d0177d086304);
+        floor_equals_its_lift("signet", 0xb463ea0a4b8);
+        floor_equals_its_lift("regtest", 0);
+    }
 }
 
 #[cfg(test)]

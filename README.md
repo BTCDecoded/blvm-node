@@ -41,7 +41,7 @@ Tier 4 of the BLVM stack. Bitcoin Commons is the specification and the governanc
 - **Payment Processing**: CTV (CheckTemplateVerify) support for advanced payment flows
 - **Advanced Indexing**: Address and value range indexing for efficient queries
 - **RPC Interface**: JSON-RPC server with methods aligned to common Bitcoin node documentation
-- **Storage**: UTXO set management and chain state with multiple backends (tidesdb, redb, sled, rocksdb)
+- **Storage**: UTXO set management and chain state with multiple backends (redb, sled, rocksdb, heed3)
 - **Module System**: Process-isolated modules for optional features
 - **P2P Governance**: Governance message relay via P2P protocol
 
@@ -55,7 +55,6 @@ Supports multiple database backends via feature flags:
 - **rocksdb**: High-performance database; reads common LevelDB/`blk*.dat` layouts; Core datadir migration
 - **redb**: Embedded database with ACID transactions
 - **sled**: Embedded key-value store (fallback)
-- **tidesdb** (optional): LSM-tree key-value store; requires TidesDB C library
 
 **heed3 (LMDB)** is the first choice when `database_backend = "auto"` in standard builds (default features include `heed3` and `rocksdb`). Use **`database_backend = "rocksdb"`** for an existing RocksDB datadir or Core LevelDB import.
 

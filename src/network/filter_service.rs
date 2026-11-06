@@ -104,6 +104,7 @@ impl BlockFilterService {
         height: u32,
     ) -> Result<CompactBlockFilter> {
         let filter = blvm_protocol::bip158::build_block_filter_output_scripts(
+            &block_hash,
             output_scripts,
             previous_outpoint_scripts,
         )
@@ -200,8 +201,9 @@ impl BlockFilterService {
             return Err(anyhow!("Start height > stop height"));
         }
 
+        let end = stop_height.min(start_height.saturating_add(1_999));
         let mut header_hashes = Vec::new();
-        for height in start_height..=stop_height {
+        for height in start_height..=end {
             if let Some(header) = headers.get(height as usize) {
                 header_hashes.push(header.header_hash());
             }

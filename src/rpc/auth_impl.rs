@@ -184,8 +184,9 @@ pub struct RpcAuthManager {
     /// Defaults to `false`. Prefer explicit admin token registration instead.
     all_tokens_are_admin: bool,
     /// Optional HTTP Basic credentials (Bitcoin Core / ckpool `rpcuser` + `rpcpassword`).
+    /// The password field is the SHA-256 of the secret, not the secret itself.
     basic_auth_user: Arc<Mutex<Option<String>>>,
-    basic_auth_password: Arc<Mutex<Option<String>>>,
+    basic_auth_password: Arc<Mutex<Option<[u8; 32]>>>,
 }
 
 impl RpcAuthManager {
@@ -227,10 +228,19 @@ impl RpcAuthManager {
         }
     }
 
-    /// Configure Bitcoin Core-style HTTP Basic credentials (ckpool, legacy tools).
-    pub async fn set_basic_auth(&self, username: Option<String>, password: String) {
-        *self.basic_auth_user.lock().await = username;
-        *self.basic_auth_password.lock().await = Some(password);
+    /// Configure HTTP Basic credentials.
+    ///
+    /// `password` is the secret. A cookie file stores `__cookie__:` plus that secret;
+    /// this hashes the secret, not the file line. A missing username is a configuration
+    /// error and nothing is stored.
+    pub async fn set_basic_auth(&self, username: Option<String>, password: String) -> Result<()> {
+        let Some(username) = username.filter(|user| !user.is_empty()) else {
+            anyhow::bail!("RPC basic auth requires a username");
+        };
+        let hash = password_hash(password.as_bytes());
+        *self.basic_auth_user.lock().await = Some(username);
+        *self.basic_auth_password.lock().await = Some(hash);
+        Ok(())
     }
 
     /// Grant every authenticated token admin privileges, regardless of `admin_tokens`.
@@ -420,14 +430,20 @@ impl RpcAuthManager {
                 } else if let Some(b64) = auth_str.strip_prefix("Basic ") {
                     if let Some((user, pass)) = decode_http_basic_credentials(b64.trim()) {
                         let expected_user = self.basic_auth_user.lock().await.clone();
-                        let expected_pass = self.basic_auth_password.lock().await.clone();
-                        if let Some(ref expected_password) = expected_pass {
-                            let user_ok = expected_user
-                                .as_ref()
-                                .map(|u| constant_time_eq(u.as_bytes(), user.as_bytes()))
-                                .unwrap_or(true);
-                            if user_ok
-                                && constant_time_eq(expected_password.as_bytes(), pass.as_bytes())
+                        let expected_pass = *self.basic_auth_password.lock().await;
+                        if let Some(expected_password) = expected_pass.as_ref() {
+                            let Some(expected_user) =
+                                expected_user.as_deref().filter(|user| !user.is_empty())
+                            else {
+                                return AuthResult {
+                                    user_id: None,
+                                    requires_auth: self.auth_required,
+                                    error: Some("RPC basic auth requires a username".to_string()),
+                                };
+                            };
+                            let presented = password_hash(pass.as_bytes());
+                            if constant_time_eq(expected_user.as_bytes(), user.as_bytes())
+                                && constant_time_eq(expected_password, &presented)
                             {
                                 let token = AuthToken::new(pass.clone());
                                 let user_id = UserId::Token(token);
@@ -752,6 +768,11 @@ impl SecurityEvent {
     }
 }
 
+fn password_hash(password: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(password).into()
+}
+
 /// Decode `Authorization: Basic <base64>` into `(username, password)`.
 fn decode_http_basic_credentials(b64: &str) -> Option<(String, String)> {
     let decoded = decode_base64_standard(b64.as_bytes()).ok()?;
@@ -1051,5 +1072,90 @@ mod rate_limiter_tests {
         assert!(l.check_and_consume_n(2));
         advance(Duration::from_millis(900)).await;
         assert!(!l.check_and_consume());
+    }
+}
+
+#[cfg(test)]
+mod basic_password_hash {
+    use super::RpcAuthManager;
+    use hyper::HeaderMap;
+    use std::net::SocketAddr;
+
+    fn basic(user: &str, password: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        let token = standard_b64(format!("{user}:{password}").as_bytes());
+        headers.insert("authorization", format!("Basic {token}").parse().unwrap());
+        headers
+    }
+
+    fn standard_b64(bytes: &[u8]) -> String {
+        const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        let mut i = 0;
+        while i + 3 <= bytes.len() {
+            let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | bytes[i + 2] as u32;
+            out.push(TABLE[((n >> 18) & 63) as usize] as char);
+            out.push(TABLE[((n >> 12) & 63) as usize] as char);
+            out.push(TABLE[((n >> 6) & 63) as usize] as char);
+            out.push(TABLE[(n & 63) as usize] as char);
+            i += 3;
+        }
+        let rest = bytes.len() - i;
+        if rest == 1 {
+            let n = (bytes[i] as u32) << 16;
+            out.push(TABLE[((n >> 18) & 63) as usize] as char);
+            out.push(TABLE[((n >> 12) & 63) as usize] as char);
+            out.push('=');
+            out.push('=');
+        } else if rest == 2 {
+            let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8);
+            out.push(TABLE[((n >> 18) & 63) as usize] as char);
+            out.push(TABLE[((n >> 12) & 63) as usize] as char);
+            out.push(TABLE[((n >> 6) & 63) as usize] as char);
+            out.push('=');
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn a_missing_username_is_rejected_before_the_password_is_stored() {
+        let manager = RpcAuthManager::new(true);
+        let error = manager
+            .set_basic_auth(None, "pool-secret".to_string())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("username"));
+
+        let addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();
+        let result = manager
+            .authenticate_request(&basic("anyuser", "pool-secret"), addr)
+            .await;
+        assert!(result.user_id.is_none());
+        assert!(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|message| message != "RPC basic auth requires a username")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_presented_password_is_hashed_and_the_cookie_line_is_not() {
+        let manager = RpcAuthManager::new(true);
+        let secret = "abc123";
+        manager
+            .set_basic_auth(Some("__cookie__".to_string()), secret.to_string())
+            .await
+            .unwrap();
+        let addr: SocketAddr = "127.0.0.1:8332".parse().unwrap();
+        let ok = manager
+            .authenticate_request(&basic("__cookie__", secret), addr)
+            .await;
+        assert!(ok.error.is_none(), "{ok:?}");
+        let line = format!("__cookie__:{secret}");
+        let whole_line = manager
+            .authenticate_request(&basic("__cookie__", &line), addr)
+            .await;
+        assert!(whole_line.user_id.is_none(), "{whole_line:?}");
     }
 }

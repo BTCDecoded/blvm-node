@@ -59,7 +59,7 @@ cargo test --test storage_tests
 
 ### CI parity (default features)
 
-This repo’s **CI** runs **`cargo test`** with **default** `[features].default` from `Cargo.toml` — not `--all-features`. For the same compile/link surface locally: **`cargo check -p blvm-node`**, then **`cargo test -p blvm-node --no-run`** (or **`cargo test`** to execute). If you touch optional features (`iroh`, `tidesdb`, etc.), add **`--features ...`** or **`--test <name>`** for those paths. **`cargo test --all-features`** is a separate, heavier matrix and is not what the main CI job runs.
+This repo’s **CI** runs **`cargo test`** with **default** `[features].default` from `Cargo.toml` — not `--all-features`. For the same compile/link surface locally: **`cargo check -p blvm-node`**, then **`cargo test -p blvm-node --no-run`** (or **`cargo test`** to execute). If you touch optional features (`iroh`, `rocksdb`, etc.), add **`--features ...`** or **`--test <name>`** for those paths. **`cargo test --all-features`** is a separate, heavier matrix and is not what the main CI job runs.
 
 ### Review Criteria
 

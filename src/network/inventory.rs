@@ -18,8 +18,15 @@ pub const MSG_CMPCT_BLOCK: u32 = 4;
 pub const MSG_WITNESS_FLAG: u32 = 1 << 30;
 /// Transaction inventory that includes witness stacks.
 pub const MSG_WITNESS_TX: u32 = MSG_TX | MSG_WITNESS_FLAG;
+/// Inventory type 5. The hash is a witness transaction id.
+pub const MSG_WTX: u32 = 5;
 /// Block inventory that includes witness stacks.
 pub const MSG_WITNESS_BLOCK: u32 = MSG_BLOCK | MSG_WITNESS_FLAG;
+
+/// Inventory type used when announcing a transaction to a peer.
+pub fn tx_announce_inv_type(wtxid_relay: bool) -> u32 {
+    if wtxid_relay { MSG_WTX } else { MSG_WITNESS_TX }
+}
 
 /// Maximum entries in the global `known_inventory` set.
 /// Matches Bitcoin Core's `INVENTORY_BROADCAST_MAX` order-of-magnitude (5x headroom).

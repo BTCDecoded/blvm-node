@@ -21,11 +21,6 @@ protocol_version = "BitcoinV1"
 # max_background_compactions = 4
 # max_background_flushes = 4
 
-# [storage.tidesdb]
-# utxo_klog_threshold = 65536
-# flush_threads = 4
-# compact_threads = 4
-
 # [storage.pruning]
 # incremental_prune_during_ibd = false
 # prune_window_size = 144
@@ -52,7 +47,7 @@ protocol_version = "BitcoinV1"
 # headers_verify_timeout_secs = 10
 
 # [protocol_limits]
-# max_protocol_message_length = 33554432
+# max_protocol_message_length = 4000024
 # max_addr_to_send = 1000
 # max_inv_sz = 50000
 # max_headers_results = 2000

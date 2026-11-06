@@ -34,7 +34,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{info, warn};
 
 fn inventory_requests_tx(inv_type: u32) -> bool {
-    inv_type == MSG_TX || inv_type == MSG_WITNESS_TX
+    inv_type == MSG_TX
+        || inv_type == MSG_WITNESS_TX
+        || inv_type == crate::network::inventory::MSG_WTX
 }
 
 impl NetworkManager {

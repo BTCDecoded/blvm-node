@@ -51,7 +51,7 @@ pub struct ModuleManager {
     /// Node config overrides per module ([modules.<name>] from config.toml). Merged over module config.
     module_config_overrides: std::sync::RwLock<HashMap<String, HashMap<String, String>>>,
     /// Default database backend for modules (inherited from node when not set per-module).
-    /// Values: "redb", "rocksdb", "sled", "tidesdb".
+    /// Values: "redb", "rocksdb", "sled", "heed3".
     default_database_backend: std::sync::RwLock<Option<String>>,
     /// Event manager for module event subscriptions
     event_manager: Arc<EventManager>,

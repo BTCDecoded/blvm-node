@@ -23,6 +23,13 @@ use std::time::SystemTime;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::{debug, error, info, warn};
 
+fn outbound_pick_tried() -> bool {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.subsec_nanos() & 1 == 1)
+        .unwrap_or(false)
+}
+
 use super::NetworkMessage;
 use super::lan_discovery;
 use super::peer;
@@ -35,6 +42,7 @@ fn protocol_message_type(msg: &ProtocolMessage) -> &'static str {
         ProtocolMessage::Version(_) => cmd::VERSION,
         ProtocolMessage::Verack => cmd::VERACK,
         ProtocolMessage::SendHeaders => cmd::SENDHEADERS,
+        ProtocolMessage::WtxidRelay => cmd::WTXIDRELAY,
         ProtocolMessage::Ping(_) => cmd::PING,
         ProtocolMessage::Pong(_) => cmd::PONG,
         ProtocolMessage::GetHeaders(_) => cmd::GETHEADERS,
@@ -74,6 +82,10 @@ fn protocol_message_type(msg: &ProtocolMessage) -> &'static str {
         ProtocolMessage::SendPkgTxn(_) => cmd::SENDPKGTXN,
         ProtocolMessage::PkgTxn(_) => cmd::PKGTXN,
         ProtocolMessage::PkgTxnReject(_) => cmd::PKGTXNREJECT,
+        ProtocolMessage::SendPackages(_) => cmd::SENDPACKAGES,
+        ProtocolMessage::AncPkgInfo(_) => cmd::ANCPKGINFO,
+        ProtocolMessage::GetPkgTxns(_) => cmd::GETPKGTXNS,
+        ProtocolMessage::PkgTxns(_) => cmd::PKGTXNS,
         ProtocolMessage::GetBanList(_) => cmd::GETBANLIST,
         ProtocolMessage::BanList(_) => cmd::BANLIST,
         ProtocolMessage::GetAddr => cmd::GETADDR,
@@ -179,6 +191,8 @@ pub struct NetworkManager {
     /// Compact blocks waiting on `blocktxn` for the positions `getblocktxn` asked for.
     pub(crate) pending_compact:
         Arc<std::sync::Mutex<HashMap<[u8; 32], crate::network::compact_blocks::CompactAssembly>>>,
+    /// Per-peer transaction getdata, capped separately from the mempool.
+    tx_requests: Arc<std::sync::Mutex<crate::network::tx_inflight::TxRequestTracker>>,
     /// Network statistics
     /// Optimization: Use AtomicU64 for lock-free updates
     bytes_sent: Arc<AtomicU64>,
@@ -441,12 +455,13 @@ impl NetworkManager {
 
         // Use config for protocol limits
         let limits_config_default = crate::config::ProtocolLimitsConfig::default();
-        let limits_config = config
-            .and_then(|c| c.protocol_limits.as_ref())
-            .unwrap_or(&limits_config_default);
-        let protocol_limits = Arc::new(limits_config.clone());
+        let mut limits_config = config
+            .and_then(|c| c.protocol_limits.clone())
+            .unwrap_or(limits_config_default);
+        limits_config.clamp_message_ceiling();
         let tcp_transport =
             TcpTransport::with_max_message_length(limits_config.max_protocol_message_length);
+        let protocol_limits = Arc::new(limits_config);
 
         // Use config for background task intervals
         let bg_config_default = crate::config::BackgroundTaskConfig::default();
@@ -491,7 +506,7 @@ impl NetworkManager {
                 .as_ref()
                 .map(|limits| (limits.default_burst, limits.default_rate))
         });
-        let serve_compact_filters = config.map(|c| c.serve_compact_filters).unwrap_or(true);
+        let serve_compact_filters = config.map(|c| c.serve_compact_filters).unwrap_or(false);
         let headers_probe_timeout_secs = config
             .and_then(|c| c.ibd.as_ref())
             .map(|ibd| ibd.headers_timeout_secs)
@@ -545,6 +560,9 @@ impl NetworkManager {
             peer_spam_violations: Arc::new(Mutex::new(HashMap::new())),
             pending_blocks: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             pending_compact: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            tx_requests: Arc::new(std::sync::Mutex::new(
+                crate::network::tx_inflight::TxRequestTracker::default(),
+            )),
             bytes_sent: Arc::new(AtomicU64::new(0)),
             bytes_received: Arc::new(AtomicU64::new(0)),
             socket_to_transport: Arc::new(Mutex::new(HashMap::new())),
@@ -1669,7 +1687,7 @@ impl NetworkManager {
                 let candidates: Vec<std::net::SocketAddr> = {
                     let db = self.address_database().read().await;
                     // Use IBD-biased ordering (full-history first, then unknown, then limited).
-                    let fresh = db.get_fresh_ibd_addresses(128);
+                    let fresh = db.select_outbound(128, outbound_pick_tried());
                     let filtered = db.filter_addresses(fresh, &ban_list, &current);
                     filtered
                         .iter()
@@ -1792,7 +1810,7 @@ impl NetworkManager {
                 let candidates: Vec<SocketAddr> = {
                     let db = self.address_database().read().await;
                     // IBD-ordered: full-history first, unknown second, limited last.
-                    let fresh = db.get_fresh_ibd_addresses(128);
+                    let fresh = db.select_outbound(128, outbound_pick_tried());
                     let filtered = db.filter_addresses(fresh, &ban_list, &current);
                     // Split into non-limited (preferred) and limited (fallback).
                     let mut preferred = Vec::new();
@@ -1834,7 +1852,7 @@ impl NetworkManager {
                     };
                     let ban_list2 = self.ban_list().read().await.clone();
                     let db = self.address_database().read().await;
-                    let fresh2 = db.get_fresh_ibd_addresses(128);
+                    let fresh2 = db.select_outbound(128, outbound_pick_tried());
                     let filtered2 = db.filter_addresses(fresh2, &ban_list2, &current_after);
                     let evicted2 = self.ibd_evicted_ips.read().unwrap();
                     let mut preferred2 = Vec::new();
@@ -2625,9 +2643,9 @@ impl NetworkManager {
                 match ProtocolParser::parse_message(&data) {
                     Ok(parsed) => parsed,
                     Err(err) => {
-                        // Bitcoin ignores an unrecognized command. Disconnecting here
-                        // drops a peer that just sent version and verack, then sendaddrv2
-                        // or wtxidrelay.
+                        // An unrecognized command is ignored. Disconnecting here
+                        // drops a peer that sent version and verack, then a command
+                        // this node does not parse.
                         if !Self::disconnect_on_unrecognized_command(&err) {
                             info!("ignoring unrecognized message from {peer_addr}: {err:#}");
                             return Ok(());
@@ -3346,6 +3364,13 @@ impl NetworkManager {
         &self.socket_to_transport
     }
 
+    /// Transaction requests outstanding to one peer.
+    pub(crate) fn tx_requests(
+        &self,
+    ) -> &std::sync::Mutex<crate::network::tx_inflight::TxRequestTracker> {
+        &self.tx_requests
+    }
+
     /// Peer states (for utxo_commitments_client)
     pub(crate) fn peer_states(
         &self,
@@ -3520,16 +3545,11 @@ impl NetworkManager {
         use blvm_protocol::bip157::NODE_COMPACT_FILTERS;
         use blvm_protocol::service_flags::standard;
 
-        // NODE_WITNESS stays set. A pruned node advertises NODE_NETWORK_LIMITED and
-        // leaves NODE_NETWORK clear. An archive node does the opposite.
-        let pruned = self
-            .storage
-            .as_ref()
-            .and_then(|storage| storage.pruning())
-            .map(|pruning_manager| pruning_manager.is_enabled())
-            .unwrap_or(false);
+        // NODE_WITNESS stays set. The genesis body decides history bits.
+        // Present: NODE_NETWORK. Absent: NODE_NETWORK_LIMITED.
+        // No storage keeps the old branch and advertises NODE_NETWORK.
         let mut services_with_filters = standard::NODE_WITNESS;
-        if pruned {
+        if self.genesis_body_absent() {
             services_with_filters |= standard::NODE_NETWORK_LIMITED;
         } else {
             services_with_filters |= standard::NODE_NETWORK;
@@ -3548,6 +3568,8 @@ impl NetworkManager {
             services_with_filters |= crate::network::protocol::NODE_BAN_LIST_SHARING;
         }
 
+        services_with_filters |= crate::network::protocol::NODE_PACKAGE_RELAY;
+
         #[cfg(feature = "governance")]
         if self.governance_config.is_some() {
             services_with_filters |= crate::network::protocol::NODE_GOVERNANCE;
@@ -3558,21 +3580,25 @@ impl NetworkManager {
             services_with_filters |= crate::network::protocol::NODE_DANDELION;
         }
 
-        services_with_filters |= crate::network::protocol::NODE_PACKAGE_RELAY;
-        services_with_filters |= crate::network::protocol::NODE_FIBRE;
         self.apply_history_service_bits(services_with_filters)
     }
 
-    /// An archive node keeps `NODE_NETWORK`. A pruned node keeps `NODE_NETWORK_LIMITED` and clears the other.
+    /// Storage with no genesis body cannot serve the full chain.
+    /// Missing storage is not that case: the caller still advertises `NODE_NETWORK`.
+    fn genesis_body_absent(&self) -> bool {
+        let Some(storage) = self.storage.as_ref() else {
+            return false;
+        };
+        let Ok(Some(hash)) = storage.blocks().get_hash_by_height(0) else {
+            return true;
+        };
+        !storage.blocks().has_block_body(&hash).unwrap_or(false)
+    }
+
+    /// A stored genesis body keeps `NODE_NETWORK`. A missing one keeps `NODE_NETWORK_LIMITED`.
     fn apply_history_service_bits(&self, services: u64) -> u64 {
         use blvm_protocol::service_flags::standard;
-        let pruned = self
-            .storage
-            .as_ref()
-            .and_then(|storage| storage.pruning())
-            .map(|pruning_manager| pruning_manager.is_enabled())
-            .unwrap_or(false);
-        if pruned {
+        if self.genesis_body_absent() {
             (services & !standard::NODE_NETWORK) | standard::NODE_NETWORK_LIMITED
         } else {
             (services & !standard::NODE_NETWORK_LIMITED) | standard::NODE_NETWORK
@@ -3595,12 +3621,13 @@ impl NetworkManager {
     /// - Standard Bitcoin flags:
     ///   - NODE_NETWORK (bit 0) - Always set for full nodes
     ///   - NODE_WITNESS (bit 3) - SegWit support (always enabled)
-    /// - BIP157: NODE_COMPACT_FILTERS (always enabled if filter service exists)
+    /// - BIP157: NODE_COMPACT_FILTERS when `serve_compact_filters` is set
     /// - UTXO Commitments: NODE_UTXO_COMMITMENTS (if feature enabled)
     /// - Ban List Sharing: NODE_BAN_LIST_SHARING (if config enabled)
     /// - Dandelion: NODE_DANDELION (if feature enabled)
-    /// - Package Relay: NODE_PACKAGE_RELAY (always enabled)
-    /// - FIBRE: NODE_FIBRE (always enabled)
+    /// - Package relay: `NODE_PACKAGE_RELAY` (`1 << 25`) because `sendpackages`,
+    ///   `ancpkginfo`, `getpkgtxns`, and `pkgtxns` round-trip
+    /// - FIBRE: `NODE_FIBRE` (`1 << 26`) stays clear
     pub fn create_version_message(
         &self,
         version: i32,
@@ -3668,26 +3695,74 @@ mod pruning_version_services {
     }
 
     #[tokio::test]
-    async fn pruned_version_clears_node_network() {
-        let archive = tempfile::TempDir::new().unwrap();
-        let archive_storage = Arc::new(Storage::new(archive.path()).unwrap());
-        let archive_bits = version_services(archive_storage);
-        assert_ne!(archive_bits & NODE_NETWORK, 0);
-        assert_eq!(archive_bits & NODE_NETWORK_LIMITED, 0);
+    async fn genesis_body_sets_the_history_bit() {
+        use crate::network::protocol::{NODE_FIBRE, NODE_PACKAGE_RELAY};
 
-        let pruned = tempfile::TempDir::new().unwrap();
+        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let bare = NetworkManager::new(listen).advertised_services();
+        assert_ne!(bare & NODE_NETWORK, 0);
+        assert_eq!(bare & NODE_NETWORK_LIMITED, 0);
+        assert_ne!(bare & NODE_PACKAGE_RELAY, 0);
+        assert_eq!(bare & NODE_FIBRE, 0);
+
+        let empty = tempfile::TempDir::new().unwrap();
         let mut config = PruningConfig::default();
         config.mode = PruningMode::Normal {
             keep_from_height: 0,
             min_recent_blocks: 288,
         };
-        let pruned_storage = Arc::new(
-            Storage::with_backend_and_pruning(pruned.path(), default_backend(), Some(config))
+        let empty_storage = Arc::new(
+            Storage::with_backend_and_pruning(empty.path(), default_backend(), Some(config))
                 .unwrap(),
         );
-        let pruned_bits = version_services(pruned_storage);
-        assert_ne!(pruned_bits & NODE_NETWORK_LIMITED, 0);
-        assert_eq!(pruned_bits & NODE_NETWORK, 0);
+        let empty_bits = version_services(Arc::clone(&empty_storage));
+        assert_eq!(empty_bits & NODE_NETWORK, 0);
+        assert_ne!(empty_bits & NODE_NETWORK_LIMITED, 0);
+        assert_ne!(empty_bits & NODE_PACKAGE_RELAY, 0);
+        assert_eq!(empty_bits & NODE_FIBRE, 0);
+
+        let genesis = blvm_consensus::block::genesis_block(blvm_protocol::types::Network::Regtest);
+        let genesis_hash = empty_storage.blocks().get_block_hash(&genesis);
+        empty_storage.blocks().store_block(&genesis).unwrap();
+        empty_storage
+            .blocks()
+            .store_height(0, &genesis_hash)
+            .unwrap();
+        let with_genesis = version_services(empty_storage);
+        assert_ne!(with_genesis & NODE_NETWORK, 0);
+        assert_eq!(with_genesis & NODE_NETWORK_LIMITED, 0);
+        assert_ne!(with_genesis & (1 << 25), 0);
+        assert_eq!(with_genesis & (1 << 26), 0);
+    }
+
+    #[tokio::test]
+    async fn compact_filter_bit_is_clear_unless_the_flag_is_set() {
+        use blvm_protocol::bip157::NODE_COMPACT_FILTERS;
+        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let off = NetworkManager::new(listen);
+        assert_eq!(off.advertised_services() & NODE_COMPACT_FILTERS, 0);
+
+        let mut config = crate::config::NodeConfig::default();
+        assert!(!config.serve_compact_filters);
+        let from_default = NetworkManager::with_config(
+            listen,
+            8,
+            crate::network::transport::TransportPreference::TCP_ONLY,
+            Some(&config),
+        );
+        assert_eq!(from_default.advertised_services() & NODE_COMPACT_FILTERS, 0);
+
+        config.serve_compact_filters = true;
+        let on = NetworkManager::with_config(
+            listen,
+            8,
+            crate::network::transport::TransportPreference::TCP_ONLY,
+            Some(&config),
+        );
+        assert_ne!(on.advertised_services() & NODE_COMPACT_FILTERS, 0);
+
+        let omitted: crate::config::NodeConfig = toml::from_str("").unwrap();
+        assert!(!omitted.serve_compact_filters);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -12,6 +12,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+fn outbound_coin_picks_tried() -> bool {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.subsec_nanos() & 1 == 1)
+        .unwrap_or(false)
+}
+
 /// Check once at runtime whether global (routable) IPv6 is available.
 ///
 /// Many servers have link-local (fe80::) IPv6 only. Attempting to connect to
@@ -40,6 +47,77 @@ fn has_global_ipv6() -> bool {
             }
         }
     })
+}
+
+/// Full-relay outbound dials. This is not the process peer ceiling.
+pub(crate) const FULL_RELAY_OUTBOUND: usize = 8;
+
+/// Block-relay-only outbound dials. They are not full-relay slots.
+pub(crate) const BLOCK_RELAY_ONLY_OUTBOUND: usize = 2;
+
+/// Mean feeler interval, in microseconds.
+pub(crate) const FEELER_DELAY_MEAN_MICROS: u64 = 120_000_000;
+
+/// Exponential delay whose mean is [`FEELER_DELAY_MEAN_MICROS`].
+pub(crate) fn feeler_delay(unit_interval: f64) -> std::time::Duration {
+    let unit = unit_interval.clamp(f64::EPSILON, 1.0 - f64::EPSILON);
+    let micros = (-unit.ln() * FEELER_DELAY_MEAN_MICROS as f64)
+        .round()
+        .max(0.0) as u64;
+    std::time::Duration::from_micros(micros)
+}
+
+/// Time of the next feeler attempt.
+#[derive(Debug, Default)]
+pub(crate) struct FeelerSchedule {
+    next_at: Option<std::time::Instant>,
+}
+
+impl FeelerSchedule {
+    pub(crate) fn due(&self, now: std::time::Instant) -> bool {
+        self.next_at.map(|at| now >= at).unwrap_or(true)
+    }
+
+    pub(crate) fn arm(&mut self, now: std::time::Instant, delay: std::time::Duration) {
+        self.next_at = Some(now + delay);
+    }
+}
+
+/// Next outbound dial. Feelers are not counted as full-relay or block-relay-only.
+pub(crate) fn next_outbound_role(
+    roles: &[peer::OutboundRole],
+    feeler_allowed: bool,
+) -> Option<peer::OutboundRole> {
+    let mut full = 0usize;
+    let mut block = 0usize;
+    let mut feelers = 0usize;
+    for role in roles {
+        match role {
+            peer::OutboundRole::FullRelay => full += 1,
+            peer::OutboundRole::BlockRelayOnly => block += 1,
+            peer::OutboundRole::Feeler => feelers += 1,
+        }
+    }
+    if full < FULL_RELAY_OUTBOUND {
+        Some(peer::OutboundRole::FullRelay)
+    } else if block < BLOCK_RELAY_ONLY_OUTBOUND {
+        Some(peer::OutboundRole::BlockRelayOnly)
+    } else if feeler_allowed && feelers == 0 {
+        Some(peer::OutboundRole::Feeler)
+    } else {
+        None
+    }
+}
+
+fn claim_feeler_attempt(now: std::time::Instant) -> bool {
+    static GATE: std::sync::LazyLock<std::sync::Mutex<FeelerSchedule>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(FeelerSchedule::default()));
+    let mut gate = GATE.lock().unwrap_or_else(|err| err.into_inner());
+    if !gate.due(now) {
+        return false;
+    }
+    gate.arm(now, feeler_delay(rand::random()));
+    true
 }
 
 impl NetworkManager {
@@ -279,18 +357,26 @@ impl NetworkManager {
             let pm = self.peer_manager_mutex().lock().await;
             pm.peer_socket_addresses()
         };
-        let on_port = connected_peers
-            .iter()
-            .filter(|addr| addr.port() == network_port)
-            .count();
-        if on_port >= target_count {
-            return Ok(0);
+        let open_roles = {
+            let pm = self.peer_manager_mutex().lock().await;
+            let mut filled: Vec<peer::OutboundRole> = pm
+                .peers()
+                .values()
+                .filter_map(|peer| peer.outbound_role())
+                .collect();
+            let mut open = Vec::new();
+            while let Some(role) = next_outbound_role(&filled, false) {
+                filled.push(role);
+                open.push(role);
+            }
+            open
+        };
+        let needed = open_roles.len();
+        if needed == 0 {
+            return self.dial_one_feeler().await;
         }
-
-        let needed = target_count - on_port;
         info!(
-            "Need {} more peers on port {network_port} (current on-port: {on_port}, connected: {}, target: {target_count})",
-            needed,
+            "Need {needed} more outbound peers on port {network_port} (connected: {}, full-relay {FULL_RELAY_OUTBOUND}, block-relay-only {BLOCK_RELAY_ONLY_OUTBOUND})",
             connected_peers.len()
         );
 
@@ -342,7 +428,8 @@ impl NetworkManager {
         let addresses: Vec<_> = {
             let db = self.address_database().read().await;
             // IBD-biased ordering: full-history peers first, unknown second, pruned last.
-            let fresh = db.get_fresh_ibd_addresses(needed * (fanout + 1));
+            let pick_tried = outbound_coin_picks_tried();
+            let fresh = db.select_outbound(needed * (fanout + 1), pick_tried);
             db.filter_addresses(fresh, &ban_list, &connected_peers)
         };
 
@@ -372,7 +459,8 @@ impl NetworkManager {
         }
         let sockets: Vec<SocketAddr> = {
             let db = self.address_database().read().await;
-            let fresh = db.get_fresh_ibd_addresses(needed * (fanout + 1));
+            let pick_tried = outbound_coin_picks_tried();
+            let fresh = db.select_outbound(needed * (fanout + 1), pick_tried);
             let filtered = db.filter_addresses(fresh, &ban_list, &connected_peers);
             let mapped: Vec<SocketAddr> = filtered
                 .iter()
@@ -395,20 +483,40 @@ impl NetworkManager {
         // they arrive and stop early once `needed` connections succeed.
         use futures::StreamExt as _;
         let mut stream = futures::stream::FuturesUnordered::new();
+        let role_queue = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+            open_roles,
+        )));
         for socket in sockets {
-            stream.push(async move { (socket, self.connect_to_peer(socket).await) });
+            let roles = Arc::clone(&role_queue);
+            stream.push(async move { (socket, self.connect_to_peer(socket).await, roles) });
         }
 
         let mut connected = 0;
-        while let Some((socket, result)) = stream.next().await {
+        while let Some((socket, result, roles)) = stream.next().await {
             match result {
                 Ok(()) => {
-                    connected += 1;
-                    if connected >= needed {
+                    self.address_database().write().await.promote_tried(socket);
+                    let role = roles
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .pop_front();
+                    if let Some(role) = role {
+                        self.stamp_outbound_role(socket, role).await;
+                        connected += 1;
+                    }
+                    if roles
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .is_empty()
+                    {
                         break;
                     }
                 }
                 Err(e) => {
+                    self.address_database()
+                        .write()
+                        .await
+                        .note_dial_failure(socket);
                     debug!("Failed to connect to {}: {}", socket, e);
                 }
             }
@@ -425,7 +533,88 @@ impl NetworkManager {
             connected += iroh_connected;
         }
 
+        if role_queue
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .is_empty()
+        {
+            connected += self.dial_one_feeler().await?;
+        }
+
         Ok(connected)
+    }
+
+    async fn stamp_outbound_role(&self, addr: SocketAddr, role: peer::OutboundRole) {
+        let mut pm = self.peer_manager_mutex().lock().await;
+        let transport = pm
+            .find_transport_addr_by_socket(addr)
+            .unwrap_or(TransportAddr::Tcp(addr));
+        if let Some(peer) = pm.get_peer_mut(&transport) {
+            peer.set_outbound_role(Some(role));
+        }
+    }
+
+    pub(crate) async fn outbound_role_is_block_only(&self, addr: SocketAddr) -> bool {
+        let pm = self.peer_manager_mutex().lock().await;
+        let transport = pm
+            .find_transport_addr_by_socket(addr)
+            .unwrap_or(TransportAddr::Tcp(addr));
+        pm.get_peer(&transport)
+            .is_some_and(|peer| peer.outbound_role() == Some(peer::OutboundRole::BlockRelayOnly))
+    }
+
+    /// One feeler, and only when both outbound slots are full.
+    async fn dial_one_feeler(&self) -> Result<usize> {
+        if crate::network::ibd_peers_pinned() || !self.get_persistent_peers().await.is_empty() {
+            return Ok(0);
+        }
+        let roles: Vec<peer::OutboundRole> = {
+            let pm = self.peer_manager_mutex().lock().await;
+            pm.peers()
+                .values()
+                .filter_map(|peer| peer.outbound_role())
+                .collect()
+        };
+        if next_outbound_role(&roles, true) != Some(peer::OutboundRole::Feeler) {
+            return Ok(0);
+        }
+        let now = std::time::Instant::now();
+        if !claim_feeler_attempt(now) {
+            return Ok(0);
+        }
+        let connected = {
+            let pm = self.peer_manager_mutex().lock().await;
+            pm.peer_socket_addresses()
+        };
+        let ban_list = self.ban_list().read().await.clone();
+        let (_network_name, network_port) =
+            crate::network::protocol::ProtocolParser::dns_seed_network();
+        let addr = {
+            let db = self.address_database().read().await;
+            let fresh = db.select_outbound(8, outbound_coin_picks_tried());
+            let filtered = db.filter_addresses(fresh, &ban_list, &connected);
+            let mapped: Vec<SocketAddr> = filtered
+                .iter()
+                .map(|addr| db.network_addr_to_socket(addr))
+                .collect();
+            prefer_network_port(mapped, network_port)
+                .into_iter()
+                .find(|addr| !dial_is_cooled(*addr))
+        };
+        let Some(addr) = addr else {
+            return Ok(0);
+        };
+        match self.connect_to_peer(addr).await {
+            Ok(()) => {
+                self.stamp_outbound_role(addr, peer::OutboundRole::Feeler)
+                    .await;
+                Ok(1)
+            }
+            Err(e) => {
+                debug!("feeler dial {} failed: {e}", addr);
+                Ok(0)
+            }
+        }
     }
 
     /// Initialize peer connections after startup
@@ -737,7 +926,32 @@ impl NetworkManager {
                     .tcp_transport()
                     .connect_stream_with_timeout(addr, connect_secs)
                     .await?;
+                #[cfg(feature = "bip324")]
+                let mut stream = stream;
                 let transport_addr = TransportAddr::Tcp(addr);
+                #[cfg(feature = "bip324")]
+                if let Some(session) = super::v2_negotiation::handshake_if_offered(
+                    &mut stream,
+                    true,
+                    super::protocol::ACTIVE_MAGIC
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        .to_le_bytes(),
+                    &[],
+                    &[],
+                )
+                .await?
+                {
+                    let mut peer = peer::Peer::from_tcp_stream_v2(
+                        stream,
+                        addr,
+                        self.peer_tx().clone(),
+                        self.protocol_limits().max_protocol_message_length,
+                        session,
+                    );
+                    peer.set_is_outbound(true);
+                    peer.set_ping_timeout_seconds(self.background_task_config().ping_timeout_secs);
+                    return Ok((peer, transport_addr));
+                }
                 let mut peer = peer::Peer::from_tcp_stream_split(
                     stream,
                     addr,
@@ -824,6 +1038,43 @@ mod tests {
         assert_eq!(chosen, vec![testnet4]);
         let only_mainnet = prefer_network_port(vec![mainnet], 48333);
         assert_eq!(only_mainnet, vec![mainnet]);
+    }
+
+    #[test]
+    fn eight_full_relay_then_two_block_relay_and_a_feeler_is_not_counted() {
+        use crate::network::peer::OutboundRole::{BlockRelayOnly, Feeler, FullRelay};
+        let mut roles = vec![FullRelay; FULL_RELAY_OUTBOUND];
+        assert_eq!(next_outbound_role(&roles, true), Some(BlockRelayOnly));
+        roles.push(Feeler);
+        assert_eq!(next_outbound_role(&roles, true), Some(BlockRelayOnly));
+        roles.push(BlockRelayOnly);
+        roles.push(BlockRelayOnly);
+        assert_eq!(next_outbound_role(&roles, true), None);
+        assert_eq!(next_outbound_role(&roles, false), None);
+        let mut with_room = vec![FullRelay; FULL_RELAY_OUTBOUND - 1];
+        with_room.push(Feeler);
+        assert_eq!(next_outbound_role(&with_room, true), Some(FullRelay));
+        let full = vec![FullRelay; FULL_RELAY_OUTBOUND];
+        let mut both = full.clone();
+        both.extend([BlockRelayOnly, BlockRelayOnly]);
+        assert_eq!(next_outbound_role(&both, false), None);
+        assert_eq!(next_outbound_role(&both, true), Some(Feeler));
+    }
+
+    #[test]
+    fn feeler_delay_means_one_hundred_twenty_seconds() {
+        use std::time::{Duration, Instant};
+        assert_eq!(FEELER_DELAY_MEAN_MICROS, 120_000_000);
+        let half = feeler_delay(0.5);
+        let expected = (-0.5f64.ln() * 120_000_000.0).round() as u64;
+        assert_eq!(half, Duration::from_micros(expected));
+        assert!(half > Duration::from_secs(80) && half < Duration::from_secs(90));
+        let now = Instant::now();
+        let mut schedule = FeelerSchedule::default();
+        assert!(schedule.due(now));
+        schedule.arm(now, Duration::from_secs(120));
+        assert!(!schedule.due(now));
+        assert!(schedule.due(now + Duration::from_secs(120)));
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -1,7 +1,7 @@
 //! Storage layer for blvm-node
 //!
 //! This module provides persistent storage for blocks, UTXO set, and chain state.
-//! Supports multiple database backends via feature flags (tidesdb, redb, sled, rocksdb, heed3).
+//! Supports multiple database backends via feature flags (redb, sled, rocksdb, heed3).
 
 pub mod assumeutxo;
 pub mod bitcoin_core_blocks;
@@ -23,6 +23,7 @@ pub mod commitment_store;
 mod core_reuse_tests;
 pub mod database;
 pub mod disk_utxo;
+mod engine_fence;
 pub mod hashing;
 pub mod ibd_autorepair;
 /// Age-tiered IBD UTXO engine for high-throughput Initial Block Download validation.
@@ -129,7 +130,7 @@ impl Storage {
 
     /// Create a new storage instance with default backend.
     ///
-    /// Attempts to use the default backend (TidesDB if available, else Redb), and gracefully
+    /// Attempts to use the default backend, and gracefully
     /// falls back to alternatives if the primary fails.
     ///
     /// If existing node data is detected, will use RocksDB to read it.
