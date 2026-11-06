@@ -630,9 +630,16 @@ pub fn try_activate_heavier_fork(
     } else {
         None
     };
+    // Disk undo does not return the blocks it removed. Keep them so the
+    // publisher and the mempool still see one entry per disconnected block.
+    let mut disk_disconnected: Vec<Block> = Vec::new();
     let (current_chain, mut new_chain, consensus_height) = if let Some(tree) = &live_tree {
         let (active, candidate) =
             fork_hash_chains(storage, blockstore, &active_tip, candidate_tip)?;
+        disk_disconnected = active[1..]
+            .iter()
+            .map(|hash| load_reorg_block(blockstore, hash))
+            .collect::<Result<Vec<_>>>()?;
         let ancestor = active
             .first()
             .copied()
@@ -845,9 +852,14 @@ pub fn try_activate_heavier_fork(
         storage.utxos().store_utxo_set(utxo_set)?;
     }
 
+    let disconnected = if result.disconnected_blocks.is_empty() {
+        disk_disconnected.as_slice()
+    } else {
+        result.disconnected_blocks.as_slice()
+    };
     if let Some(pool) = mempool {
         let disconnected_witnesses =
-            match witnesses_for_chain(blockstore, storage, &result.disconnected_blocks, protocol) {
+            match witnesses_for_chain(blockstore, storage, disconnected, protocol) {
                 Ok(witnesses) => witnesses,
                 Err(e) => {
                     warn!("reorg mempool readd could not load witnesses: {e}");
@@ -855,7 +867,7 @@ pub fn try_activate_heavier_fork(
                 }
             };
         pool.apply_reorg(
-            &result.disconnected_blocks,
+            disconnected,
             &disconnected_witnesses,
             &result.connected_blocks,
             utxo_set,
@@ -868,7 +880,7 @@ pub fn try_activate_heavier_fork(
         blockstore,
         &active_tip,
         &new_tip_hash,
-        &result.disconnected_blocks,
+        disconnected,
     );
 
     info!(
