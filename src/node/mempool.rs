@@ -29,6 +29,30 @@ fn next_replacement_count(counts: impl IntoIterator<Item = u32>) -> u32 {
     counts.into_iter().max().unwrap_or(0).saturating_add(1)
 }
 
+/// True when `new_fee_scaled / existing_fee_scaled` is strictly above `multiplier`.
+///
+/// The multiplier is applied in integer millionths. A non-finite multiplier,
+/// including Disabled, accepts nothing.
+pub(crate) fn replacement_clears_fee_rate(
+    new_fee_scaled: u128,
+    existing_fee_scaled: u128,
+    multiplier: f64,
+) -> Result<bool> {
+    if !multiplier.is_finite() {
+        return Ok(false);
+    }
+    let millis = multiplier * 1_000_000.0;
+    if !millis.is_finite() || millis < 0.0 {
+        return Ok(false);
+    }
+    let millis = millis.round() as u128;
+    let required = existing_fee_scaled
+        .checked_mul(millis)
+        .ok_or_else(|| anyhow::anyhow!("Fee rate calculation overflow"))?
+        / 1_000_000;
+    Ok(new_fee_scaled > required)
+}
+
 /// Core mempool state (transactions + spent outputs)
 /// Wrapped in Mutex for add_transaction from Arc context (re-broadcast, sendrawtransaction)
 struct MempoolPool {
@@ -1889,15 +1913,25 @@ impl MempoolManager {
             .contains_key(&existing_tx_hash);
         let (existing_fee, existing_tx_size) = if stored {
             let package = self.replacement_package(&existing_tx_hash);
-            let totals = self.package_fee_and_vsize(&package, utxo_set);
-            if package.len() > 1 {
-                debug!(
-                    "RBF replacement: comparing against {} txs ({} sat total fee)",
-                    package.len(),
-                    totals.0
-                );
+            if !rbf_config.allow_package_replacements && package.len() > 1 {
+                return Ok(false);
             }
-            totals
+            if !rbf_config.allow_package_replacements {
+                (
+                    self.calculate_transaction_fee(existing_tx, utxo_set) as i64,
+                    self.pooled_vsize(&existing_tx_hash, existing_tx, utxo_set),
+                )
+            } else {
+                let totals = self.package_fee_and_vsize(&package, utxo_set);
+                if package.len() > 1 {
+                    debug!(
+                        "RBF replacement: comparing against {} txs ({} sat total fee)",
+                        package.len(),
+                        totals.0
+                    );
+                }
+                totals
+            }
         } else {
             (
                 self.calculate_transaction_fee(existing_tx, utxo_set) as i64,
@@ -1920,10 +1954,11 @@ impl MempoolManager {
             .checked_mul(new_tx_size as u128)
             .ok_or_else(|| anyhow::anyhow!("Fee rate calculation overflow"))?;
 
-        // Apply mode-specific multiplier
-        let required_fee_scaled =
-            (existing_fee_scaled as f64 * rbf_config.min_fee_rate_multiplier) as u128;
-        if new_fee_scaled <= required_fee_scaled {
+        if !replacement_clears_fee_rate(
+            new_fee_scaled,
+            existing_fee_scaled,
+            rbf_config.min_fee_rate_multiplier,
+        )? {
             warn!(
                 "RBF replacement rejected: fee rate increase insufficient (required: {:.2}x, got: {:.2}x) for tx {}",
                 rbf_config.min_fee_rate_multiplier,
@@ -2598,7 +2633,17 @@ impl MempoolManager {
             let mut package_utxo = {
                 let slot = self.utxo_set_arc.read().unwrap_or_else(|e| e.into_inner());
                 match slot.as_ref().and_then(|arc| arc.try_lock().ok()) {
-                    Some(guard) => guard.clone(),
+                    Some(guard) => {
+                        let mut snapshot = UtxoSet::default();
+                        for (tx, _) in &txs {
+                            for input in &tx.inputs {
+                                if let Some(utxo) = guard.get(&input.prevout) {
+                                    snapshot.insert(input.prevout, utxo.clone());
+                                }
+                            }
+                        }
+                        snapshot
+                    }
                     None => UtxoSet::default(),
                 }
             };
@@ -3045,7 +3090,15 @@ impl MempoolManager {
             let utxo_slot = self.utxo_set_arc.read().unwrap_or_else(|e| e.into_inner());
             if let Some(arc) = utxo_slot.as_ref() {
                 match arc.try_lock() {
-                    Ok(guard) => (guard.clone(), true),
+                    Ok(guard) => {
+                        let mut snapshot = UtxoSet::default();
+                        for input in &tx.inputs {
+                            if let Some(utxo) = guard.get(&input.prevout) {
+                                snapshot.insert(input.prevout, utxo.clone());
+                            }
+                        }
+                        (snapshot, true)
+                    }
                     Err(_) => {
                         warn!(
                             "Transaction {} rejected: UTXO set is locked",
@@ -3300,12 +3353,27 @@ impl MempoolManager {
             }
         }
 
-        // BIP125: displacement set includes descendants of each directly conflicting tx.
+        // Descendants join the displacement set only when package replacements are on.
         let direct_conflicts = conflicting_tx_hashes.clone();
         if !conflicting_tx_hashes.is_empty() {
+            let allow_packages = self
+                .rbf_config
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|cfg| cfg.allow_package_replacements)
+                .unwrap_or(true);
             let mut displacement_set = HashSet::new();
             for hash in &direct_conflicts {
-                displacement_set.extend(self.replacement_package(hash));
+                let package = self.replacement_package(hash);
+                if !allow_packages && package.len() > 1 {
+                    return Ok(false);
+                }
+                if allow_packages {
+                    displacement_set.extend(package);
+                } else {
+                    displacement_set.insert(*hash);
+                }
             }
             conflicting_tx_hashes = displacement_set.into_iter().collect();
         }
@@ -4339,7 +4407,7 @@ impl MempoolManager {
 
     /// Save mempool to disk for persistence
     pub fn save_to_disk<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
-        use blvm_protocol::serialization::transaction::serialize_transaction;
+        use blvm_protocol::block::calculate_tx_id;
         use std::fs::File;
         use std::io::Write;
 
@@ -4349,9 +4417,11 @@ impl MempoolManager {
         // Write transaction count
         file.write_all(&(transactions.len() as u32).to_le_bytes())?;
 
-        // Write each transaction
+        // Write each transaction, including its witness stacks when present.
         for tx in transactions {
-            let serialized = serialize_transaction(&tx);
+            let hash = calculate_tx_id(&tx);
+            let witnesses = self.get_transaction_witnesses(&hash);
+            let serialized = encode_persisted_tx(&tx, witnesses.as_deref())?;
             file.write_all(&(serialized.len() as u32).to_le_bytes())?;
             file.write_all(&serialized)?;
         }
@@ -4443,7 +4513,6 @@ impl crate::node::miner::MempoolProvider for MempoolManager {
 impl MempoolManager {
     /// Load mempool from disk
     pub fn load_from_disk<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
-        use blvm_protocol::serialization::transaction::deserialize_transaction;
         use std::fs::File;
         use std::io::Read;
 
@@ -4460,19 +4529,68 @@ impl MempoolManager {
             let mut tx_bytes = vec![0u8; len];
             file.read_exact(&mut tx_bytes)?;
 
-            let tx = deserialize_transaction(&tx_bytes)?;
-            drop(self.add_transaction(tx));
+            let (tx, witnesses) = decode_persisted_tx(&tx_bytes)?;
+            drop(self.add_transaction_with_witness(tx, witnesses));
         }
 
         Ok(())
     }
 }
 
+fn encode_persisted_tx(tx: &Transaction, witnesses: Option<&[Witness]>) -> Result<Vec<u8>> {
+    use blvm_protocol::serialization::transaction::{
+        serialize_transaction, serialize_transaction_with_witness,
+    };
+    match witnesses {
+        Some(wits) => serialize_transaction_with_witness(tx, wits)
+            .map_err(|e| anyhow::anyhow!("mempool persist encode: {e}")),
+        None => Ok(serialize_transaction(tx)),
+    }
+}
+
+fn decode_persisted_tx(bytes: &[u8]) -> Result<(Transaction, Option<Vec<Witness>>)> {
+    use blvm_protocol::serialization::transaction::deserialize_transaction_with_witness;
+    let (tx, witnesses, _) = deserialize_transaction_with_witness(bytes)
+        .map_err(|e| anyhow::anyhow!("mempool persist decode: {e}"))?;
+    let witnesses = if witnesses.iter().any(|stack| !stack.is_empty()) {
+        Some(witnesses)
+    } else {
+        None
+    };
+    Ok((tx, witnesses))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::MempoolManager;
+    use super::{MempoolManager, decode_persisted_tx, encode_persisted_tx, replacement_clears_fee_rate};
     use crate::config::MempoolPolicyConfig;
     use blvm_protocol::serialization::transaction::serialize_transaction;
+
+    #[test]
+    fn replacement_fee_rate_does_not_use_binary64() {
+        let n = (1u128 << 53) + 1;
+        assert!(!replacement_clears_fee_rate(n, n, 1.0).unwrap());
+        assert!(replacement_clears_fee_rate(n + 1, n, 1.0).unwrap());
+        let aggressive = 562949953421319u128;
+        let floor = 591097451092384u128;
+        assert!(!replacement_clears_fee_rate(floor, aggressive, 1.05).unwrap());
+        assert!(replacement_clears_fee_rate(floor + 1, aggressive, 1.05).unwrap());
+        assert!(!replacement_clears_fee_rate(1, 1, f64::INFINITY).unwrap());
+    }
+
+    #[test]
+    fn persisted_tx_keeps_a_witness_stack() {
+        let tx = legacy_empty_script();
+        let bare = encode_persisted_tx(&tx, None).unwrap();
+        let (_, bare_wits) = decode_persisted_tx(&bare).unwrap();
+        assert!(bare_wits.is_none());
+
+        let stacks: Vec<blvm_protocol::Witness> = vec![vec![vec![0x30, 0x01]]];
+        let with_witness = encode_persisted_tx(&tx, Some(&stacks)).unwrap();
+        assert_eq!(with_witness.len(), bare.len() + 6);
+        let (_, wits) = decode_persisted_tx(&with_witness).unwrap();
+        assert_eq!(wits.unwrap(), stacks);
+    }
 
     #[test]
     fn policy_cap_is_file_size_and_unset_policy_is_300_mib() {

@@ -110,7 +110,7 @@ Minimum absolute fee bump in satoshis
 Minimum confirmations before allowing replacement (conservative mode only)
 
 ### `allow_package_replacements`
-Allow package replacements (aggressive mode only). Package = parent + child transactions replaced together.
+When true, a replacement removes the conflicting transaction and its in-mempool descendants and must pay for that set. Standard and aggressive default to true. When false, a conflict that still has descendants is refused, so the child is not left spending a removed parent.
 
 ### `max_replacements_per_tx`
 Maximum number of replacements per transaction. Prevents replacement spam.

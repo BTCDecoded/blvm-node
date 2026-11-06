@@ -572,6 +572,9 @@ pub(crate) async fn download_headers(
             hex::encode(last_hash)
         );
     }
+    // Genesis stores the local header and asks the peer for height 1. An empty
+    // reply at that floor is no progress. A resume asks from `start_height`.
+    let request_floor = current_height;
     let mut consecutive_failures = 0;
     let mut current_peer_idx = 0;
     let mut last_progress_log = start_height;
@@ -680,10 +683,10 @@ pub(crate) async fn download_headers(
 
                 if headers.is_empty() {
                     let fetched_tip = current_height.saturating_sub(1);
-                    if !empty_headers_is_ibd_tip(fetched_tip, start_height, end_height) {
+                    if !empty_headers_is_ibd_tip(fetched_tip, request_floor, end_height) {
                         warn!(
                             "[IBD_HEADER_EMPTY] peer={} fetched_tip={} start={} end={} — not IBD tip; rotate",
-                            peer_addr, fetched_tip, start_height, end_height
+                            peer_addr, fetched_tip, request_floor, end_height
                         );
                         consecutive_failures += 1;
                         current_peer_idx += 1;
@@ -1112,6 +1115,8 @@ mod n13_tests {
         // dest-bg 2026-08-25T07:21Z: empty getheaders at height 1 → COMPLETE 0
         // against target 963969. Rotate, do not declare tip.
         assert!(!empty_headers_is_ibd_tip(0, 1, 963_969));
+        // Genesis asks from height 1. One accepted header, then empty, is this peer's tip.
+        assert!(empty_headers_is_ibd_tip(1, 1, 963_969));
         assert!(
             empty_headers_is_ibd_tip(961_638, 1, 963_969),
             "progress then empty is BIP130 this-peer tip (dest-bf 961k complete)"

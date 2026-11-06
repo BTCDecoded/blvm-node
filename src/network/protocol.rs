@@ -1089,7 +1089,7 @@ impl ProtocolParser {
 
                 // Convert to node's ProtocolMessage format
                 Ok(ProtocolMessage::Version(VersionMessage {
-                    version: version_msg.version as i32, // blvm-node uses i32, blvm-protocol uses u32
+                    version: version_msg.version,
                     services: version_msg.services,
                     timestamp: version_msg.timestamp,
                     addr_recv: NetworkAddress {
@@ -1350,7 +1350,7 @@ impl ProtocolParser {
                 use blvm_protocol::wire::serialize_version;
 
                 let version_msg = VersionMessage {
-                    version: msg.version as u32,
+                    version: msg.version,
                     services: msg.services,
                     timestamp: msg.timestamp,
                     addr_recv: NetworkAddress {

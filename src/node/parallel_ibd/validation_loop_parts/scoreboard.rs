@@ -422,15 +422,12 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     let mut spec_adds: std::collections::BTreeMap<u64, Arc<UtxoSet>> =
         std::collections::BTreeMap::new();
 
-    // Cache BLVM_IBD_SNAPSHOT_DIR once at loop init (was std::env::var per block)
-    let snapshot_dir_base: Option<String> = std::env::var("BLVM_IBD_SNAPSHOT_DIR").ok();
+    // File value, with the environment variable applied in ParallelIBDConfig::from_config.
+    let snapshot_dir_base = parallel_ibd.config.snapshot_dir.clone();
     // Same for optional BPS CSV (read on periodic IBD log intervals only, but avoid env lookup each time)
     let ibd_bps_csv_path: Option<String> = std::env::var("BLVM_IBD_BPS_CSV").ok();
-    // #48: Tunable yield interval (default 500 for 5–10K BPS; fewer yields = less validation interruption)
-    let yield_interval: u64 = std::env::var("BLVM_IBD_YIELD_INTERVAL")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1000);
+    // Same source as the snapshot directory: env overrides the file, then 1000.
+    let yield_interval = parallel_ibd.config.yield_interval;
 
     // BIP30 O(1) index: for non-disk path, maintain locally. For disk path, DiskBackedUtxoSet owns it.
     let mut bip30_index = Bip30Index::default();
@@ -3991,7 +3988,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             }
         }
 
-        // CRITICAL: Yield to the runtime (BLVM_IBD_YIELD_INTERVAL, default 100)
+        // Yield to the runtime (config yield_interval, default 1000)
         // Allows download workers to progress; fewer yields = less validation interruption
         if yield_interval > 0 && blocks_synced % yield_interval == 0 {
             #[cfg(feature = "profile")]
@@ -4352,7 +4349,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         utxo_flush_handles
             .lock()
             .push_back(std::thread::spawn(move || {
-                // Phase 1: ADDs only. DELs are written after watermark is persisted.
+                // Phase 1: ADDs only. Spends are written and synced before the watermark.
                 store_clone.flush_prepared_package_adds_only(&prepared)?;
                 store_clone.release_protected_heights(&heights);
                 store_clone.note_utxo_flush_completed(prepared.max_block_height);
@@ -4402,25 +4399,21 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         warn!("IBD shutdown: storage.flush after block drain failed: {e}");
     }
 
-    // Persist the final checkpoint using two-phase crash-safe commit (same as periodic
-    // checkpoints): ADDs flushed before watermark, DELs flushed after.
+    // Same order as a periodic checkpoint: spends are durable before the watermark.
+    // A crash after the spend flush and before the watermark replays those blocks.
     // Height is clamped to durable block tip inside persist_ibd_utxo_flush_checkpoint.
     if let Some(max_height) = shutdown_pkg_height {
         let muhash_running = ibd_muhash_accumulator.lock().serialize_running_state();
-        info!("IBD shutdown: flush_disk before UTXO watermark advance (height {max_height})");
-        // Phase 1 ADDs → disk already written by spawned thread; flush_disk makes them durable.
+        info!("IBD shutdown: flush_disk of ADDs before spends (height {max_height})");
         ibd_store_v2_for_validation.flush_disk()?;
-        info!("IBD shutdown: persisting UTXO checkpoint at height {max_height}");
-        // Phase 2: advance watermark (safe point — any crash after this leaves stale UTXOs,
-        // not missing UTXOs; stale UTXOs are harmless per Bitcoin double-spend prevention).
-        storage_clone
-            .chain()
-            .persist_ibd_utxo_flush_checkpoint(max_height, &muhash_running)?;
-        // Phase 3: DELs → disk, then flush.
         if let Some(ref dels_pkg) = shutdown_prepared_for_dels {
             ibd_store_v2_for_validation.flush_prepared_package_dels_only(dels_pkg)?;
             ibd_store_v2_for_validation.flush_disk()?;
         }
+        info!("IBD shutdown: persisting UTXO checkpoint at height {max_height}");
+        storage_clone
+            .chain()
+            .persist_ibd_utxo_flush_checkpoint(max_height, &muhash_running)?;
     }
     let last_validated = next_validation_height.saturating_sub(1);
     let shutdown_requested = crate::node::parallel_ibd::IBD_SHUTDOWN_REQUESTED

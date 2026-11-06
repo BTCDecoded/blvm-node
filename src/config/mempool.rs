@@ -22,7 +22,7 @@ pub enum RbfMode {
 }
 
 /// RBF (Replace-By-Fee) configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RbfConfig {
     #[serde(default = "default_rbf_mode")]
     pub mode: RbfMode,
@@ -63,7 +63,7 @@ fn default_rbf_min_confirmations() -> u32 {
 }
 
 fn default_rbf_allow_packages() -> bool {
-    false
+    true
 }
 
 fn default_rbf_max_replacements() -> u32 {
@@ -81,7 +81,7 @@ impl Default for RbfConfig {
             min_fee_rate_multiplier: 1.0,
             min_fee_bump_satoshis: 1000,
             min_confirmations: 0,
-            allow_package_replacements: false,
+            allow_package_replacements: true,
             max_replacements_per_tx: 10,
             cooldown_seconds: 0,
         }
@@ -121,6 +121,50 @@ impl RbfConfig {
                 cooldown_seconds: 60,
             },
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for RbfConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default = "default_rbf_mode")]
+            mode: RbfMode,
+            min_fee_rate_multiplier: Option<f64>,
+            min_fee_bump_satoshis: Option<u64>,
+            min_confirmations: Option<u32>,
+            allow_package_replacements: Option<bool>,
+            max_replacements_per_tx: Option<u32>,
+            cooldown_seconds: Option<u64>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let explicit = raw.min_fee_rate_multiplier.is_some()
+            || raw.min_fee_bump_satoshis.is_some()
+            || raw.min_confirmations.is_some()
+            || raw.allow_package_replacements.is_some()
+            || raw.max_replacements_per_tx.is_some()
+            || raw.cooldown_seconds.is_some();
+        if !explicit {
+            return Ok(Self::with_mode(raw.mode));
+        }
+        let base = Self::default();
+        Ok(Self {
+            mode: raw.mode,
+            min_fee_rate_multiplier: raw
+                .min_fee_rate_multiplier
+                .unwrap_or(base.min_fee_rate_multiplier),
+            min_fee_bump_satoshis: raw
+                .min_fee_bump_satoshis
+                .unwrap_or(base.min_fee_bump_satoshis),
+            min_confirmations: raw.min_confirmations.unwrap_or(base.min_confirmations),
+            allow_package_replacements: raw
+                .allow_package_replacements
+                .unwrap_or(base.allow_package_replacements),
+            max_replacements_per_tx: raw
+                .max_replacements_per_tx
+                .unwrap_or(base.max_replacements_per_tx),
+            cooldown_seconds: raw.cooldown_seconds.unwrap_or(base.cooldown_seconds),
+        })
     }
 }
 
@@ -369,6 +413,22 @@ mod overlay_tests {
         consensus.max_mempool_mb = 300;
         overlay_mempool_onto_consensus(&mut consensus, None, None);
         assert_eq!(consensus.max_mempool_mb, 300);
+    }
+
+    #[test]
+    fn mode_only_rbf_uses_the_preset() {
+        let cfg: RbfConfig = toml::from_str("mode = \"conservative\"").unwrap();
+        assert_eq!(cfg.min_fee_bump_satoshis, 5000);
+        assert_eq!(cfg.cooldown_seconds, 300);
+    }
+
+    #[test]
+    fn explicit_rbf_number_keeps_the_other_defaults() {
+        let cfg: RbfConfig =
+            toml::from_str("mode = \"conservative\"\nmin_fee_bump_satoshis = 1").unwrap();
+        assert_eq!(cfg.min_fee_bump_satoshis, 1);
+        assert_eq!(cfg.cooldown_seconds, 0);
+        assert!(cfg.allow_package_replacements);
     }
 
     #[test]

@@ -1003,13 +1003,13 @@ impl From<TransportPreferenceConfig> for TransportPreference {
 impl Default for NodeConfig {
     fn default() -> Self {
         Self {
-            listen_addr: Some("127.0.0.1:8333".parse().unwrap()),
+            listen_addr: None,
             rpc_addr: None,
             block_validation: None,
             assumeutxo_blockhash: None,
             transport_preference: TransportPreferenceConfig::TcpOnly,
             max_outbound_peers: Some(100),
-            protocol_version: Some("BitcoinV1".to_string()),
+            protocol_version: None,
             signet_challenge: None,
             modules: Some(ModuleConfig::default()),
             #[cfg(feature = "stratum-v2")]

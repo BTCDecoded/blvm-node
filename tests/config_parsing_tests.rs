@@ -413,12 +413,12 @@ fn test_module_resource_limits_config_default() {
 #[test]
 fn test_node_config_default() {
     let config = NodeConfig::default();
-    assert!(config.listen_addr.is_some());
+    assert!(config.listen_addr.is_none());
     // TransportPreferenceConfig doesn't implement PartialEq, check via conversion
     let pref = config.get_transport_preference();
     assert!(pref.allows_tcp());
     assert_eq!(config.max_outbound_peers, Some(100));
-    assert_eq!(config.protocol_version, Some("BitcoinV1".to_string()));
+    assert!(config.protocol_version.is_none());
     assert!(config.modules.is_some());
     assert!(config.persistent_peers.is_empty());
     assert!(config.enable_self_advertisement);

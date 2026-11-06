@@ -269,7 +269,7 @@ impl NetworkManager {
             let state = peer_states
                 .entry(peer_addr)
                 .or_insert_with(blvm_protocol::network::PeerState::new);
-            state.version = version_msg.version as u32;
+            state.version = version_msg.version;
             state.relay_tx = version_msg.relay;
         }
 
@@ -2570,5 +2570,12 @@ mod ibd_refusal_tests {
         let (refused, serve) = split_ibd_refused_inventory(&[block.clone(), tx.clone()]);
         assert_eq!(refused, vec![block]);
         assert_eq!(serve, vec![tx]);
+    }
+
+    #[test]
+    fn seventeen_block_getdata_is_historical() {
+        assert!(!super::block_getdata_is_historical_download(1));
+        assert!(!super::block_getdata_is_historical_download(16));
+        assert!(super::block_getdata_is_historical_download(17));
     }
 }

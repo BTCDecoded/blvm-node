@@ -171,7 +171,7 @@ impl ProtocolAdapter {
                 use blvm_protocol::wire::serialize_version;
 
                 let version_msg = VersionMessage {
-                    version: v.version as u32,
+                    version: v.version,
                     services: v.services,
                     timestamp: v.timestamp,
                     addr_recv: NetworkAddress {
@@ -354,7 +354,7 @@ impl ProtocolAdapter {
         match msg {
             ProtocolMessage::Version(v) => {
                 Ok(ConsensusNetworkMessage::Version(ConsensusVersionMessage {
-                    version: v.version as u32,
+                    version: v.version,
                     services: v.services,
                     timestamp: v.timestamp,
                     addr_recv: ConsensusNetworkAddress {
@@ -401,7 +401,7 @@ impl ProtocolAdapter {
             ConsensusNetworkMessage::GetHeaders(_) => "getheaders",
             ConsensusNetworkMessage::Headers(_) => "headers",
             ConsensusNetworkMessage::Block(..) => "block",
-            ConsensusNetworkMessage::Tx(_) => "tx",
+            ConsensusNetworkMessage::Tx(_, _) => "tx",
             ConsensusNetworkMessage::Ping(_) => "ping",
             ConsensusNetworkMessage::Pong(_) => "pong",
             ConsensusNetworkMessage::MemPool => "mempool",
