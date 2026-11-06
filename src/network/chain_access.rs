@@ -78,6 +78,23 @@ impl ChainStateAccess for NodeChainAccess {
         self.mempool.get_transactions()
     }
 
+    fn mempool_for_compact_block(
+        &self,
+    ) -> Vec<(Transaction, Vec<blvm_protocol::segwit::Witness>)> {
+        self.mempool
+            .get_transactions()
+            .into_iter()
+            .map(|tx| {
+                let txid = blvm_protocol::block::calculate_tx_id(&tx);
+                let witnesses = self
+                    .mempool
+                    .get_transaction_witnesses(&txid)
+                    .unwrap_or_default();
+                (tx, witnesses)
+            })
+            .collect()
+    }
+
     fn get_block_witnesses(&self, hash: &Hash) -> Option<Vec<Vec<blvm_protocol::segwit::Witness>>> {
         self.blockstore.get_witness(hash).ok().flatten()
     }
