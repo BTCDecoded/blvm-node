@@ -83,6 +83,7 @@ pub(crate) async fn start_tcp_listener(nm: &NetworkManager, listen_addr: SocketA
     let ban_list = Arc::clone(nm.ban_list());
     let max_message_length = nm.protocol_limits().max_protocol_message_length;
     let ping_timeout_secs = nm.background_task_config().ping_timeout_secs;
+    let inbound_slots = Arc::clone(nm.connections_per_ip());
 
     tokio::spawn(async move {
         loop {
@@ -125,6 +126,15 @@ pub(crate) async fn start_tcp_listener(nm: &NetworkManager, listen_addr: SocketA
                         warn!(
                             "Active connection limit exceeded, rejecting connection from {}",
                             socket_addr
+                        );
+                        drop(stream);
+                        continue;
+                    }
+
+                    if !reserve_inbound_ip(&inbound_slots, ip).await {
+                        warn!(
+                            "Per-IP inbound cap reached for {}, rejecting connection",
+                            ip
                         );
                         drop(stream);
                         continue;
@@ -494,4 +504,19 @@ pub(crate) async fn start_iroh_listener(
     });
 
     Ok(())
+}
+
+const INBOUND_CONNECTIONS_PER_IP: usize = 3;
+
+async fn reserve_inbound_ip(
+    slots: &Arc<tokio::sync::Mutex<std::collections::HashMap<std::net::IpAddr, usize>>>,
+    ip: std::net::IpAddr,
+) -> bool {
+    let mut per_ip = slots.lock().await;
+    let count = per_ip.get(&ip).copied().unwrap_or(0);
+    if count >= INBOUND_CONNECTIONS_PER_IP {
+        return false;
+    }
+    *per_ip.entry(ip).or_insert(0) += 1;
+    true
 }

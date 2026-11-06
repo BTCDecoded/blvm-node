@@ -284,11 +284,7 @@ async fn handle_peer_connected(nm: &NetworkManager, addr: TransportAddr) {
         TransportAddr::Iroh(_) => None,
     };
 
-    // Track per-IP connection count for Sybil monitoring (TCP/QUIC only).
-    if let Some(peer_socket) = socket_addr {
-        let mut per_ip = nm.connections_per_ip().lock().await;
-        *per_ip.entry(peer_socket.ip()).or_insert(0) += 1;
-    }
+    // The accept path already reserved this address in connections_per_ip.
 
     {
         // Send the Bitcoin P2P Version handshake to ALL transports (including Iroh).
