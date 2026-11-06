@@ -16,6 +16,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing::{debug, warn};
+use zeroize::Zeroize;
 
 /// Opaque bearer token registered server-side (not a self-describing JWT/HMAC credential).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -184,9 +185,9 @@ pub struct RpcAuthManager {
     /// Defaults to `false`. Prefer explicit admin token registration instead.
     all_tokens_are_admin: bool,
     /// Optional HTTP Basic credentials (Bitcoin Core / ckpool `rpcuser` + `rpcpassword`).
-    /// The password field is the SHA-256 of the secret, not the secret itself.
+    /// The password field is an Argon2id PHC string, not the secret itself.
     basic_auth_user: Arc<Mutex<Option<String>>>,
-    basic_auth_password: Arc<Mutex<Option<[u8; 32]>>>,
+    basic_auth_password: Arc<Mutex<Option<String>>>,
 }
 
 impl RpcAuthManager {
@@ -233,13 +234,18 @@ impl RpcAuthManager {
     /// `password` is the secret. A cookie file stores `__cookie__:` plus that secret;
     /// this hashes the secret, not the file line. A missing username is a configuration
     /// error and nothing is stored.
-    pub async fn set_basic_auth(&self, username: Option<String>, password: String) -> Result<()> {
+    pub async fn set_basic_auth(
+        &self,
+        username: Option<String>,
+        mut password: String,
+    ) -> Result<()> {
         let Some(username) = username.filter(|user| !user.is_empty()) else {
             anyhow::bail!("RPC basic auth requires a username");
         };
-        let hash = password_hash(password.as_bytes());
+        let phc = password_phc(password.as_bytes())?;
+        password.zeroize();
         *self.basic_auth_user.lock().await = Some(username);
-        *self.basic_auth_password.lock().await = Some(hash);
+        *self.basic_auth_password.lock().await = Some(phc);
         Ok(())
     }
 
@@ -430,8 +436,8 @@ impl RpcAuthManager {
                 } else if let Some(b64) = auth_str.strip_prefix("Basic ") {
                     if let Some((user, pass)) = decode_http_basic_credentials(b64.trim()) {
                         let expected_user = self.basic_auth_user.lock().await.clone();
-                        let expected_pass = *self.basic_auth_password.lock().await;
-                        if let Some(expected_password) = expected_pass.as_ref() {
+                        let expected_pass = self.basic_auth_password.lock().await.clone();
+                        if let Some(expected_password) = expected_pass.as_deref() {
                             let Some(expected_user) =
                                 expected_user.as_deref().filter(|user| !user.is_empty())
                             else {
@@ -441,9 +447,8 @@ impl RpcAuthManager {
                                     error: Some("RPC basic auth requires a username".to_string()),
                                 };
                             };
-                            let presented = password_hash(pass.as_bytes());
                             if constant_time_eq(expected_user.as_bytes(), user.as_bytes())
-                                && constant_time_eq(expected_password, &presented)
+                                && verify_password(pass.as_bytes(), expected_password)
                             {
                                 let token = AuthToken::new(pass.clone());
                                 let user_id = UserId::Token(token);
@@ -768,9 +773,26 @@ impl SecurityEvent {
     }
 }
 
-fn password_hash(password: &[u8]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(password).into()
+fn password_phc(password: &[u8]) -> Result<String> {
+    use argon2::Argon2;
+    use argon2::password_hash::rand_core::OsRng;
+    use argon2::password_hash::{PasswordHasher, SaltString};
+
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password, &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|e| anyhow::anyhow!("RPC password hash failed: {e}"))
+}
+
+fn verify_password(password: &[u8], phc: &str) -> bool {
+    use argon2::password_hash::PasswordHash;
+    use argon2::{Argon2, PasswordVerifier};
+
+    let Ok(parsed) = PasswordHash::new(phc) else {
+        return false;
+    };
+    Argon2::default().verify_password(password, &parsed).is_ok()
 }
 
 /// Decode `Authorization: Basic <base64>` into `(username, password)`.

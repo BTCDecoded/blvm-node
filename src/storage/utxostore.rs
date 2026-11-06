@@ -170,7 +170,7 @@ impl UtxoStore {
             // Decompress if data is compressed
             #[cfg(feature = "utxo-compression")]
             let utxo_data = if Self::is_compressed(&value) {
-                zstd::decode_all(&value[..])
+                crate::storage::zstd_limit::decode_bounded(&value[..])
                     .map_err(|e| anyhow::anyhow!("UTXO decompression failed: {}", e))?
             } else {
                 value
@@ -242,7 +242,7 @@ impl UtxoStore {
             // Decompress if data is compressed (auto-detect via zstd magic bytes)
             #[cfg(feature = "utxo-compression")]
             let utxo_data = if Self::is_compressed(&data) {
-                zstd::decode_all(&data[..])
+                crate::storage::zstd_limit::decode_bounded(&data[..])
                     .map_err(|e| anyhow::anyhow!("UTXO decompression failed: {}", e))?
             } else {
                 data
@@ -317,7 +317,7 @@ impl UtxoStore {
             // Decompress if data is compressed
             #[cfg(feature = "utxo-compression")]
             let utxo_data = if Self::is_compressed(&value) {
-                zstd::decode_all(&value[..])
+                crate::storage::zstd_limit::decode_bounded(&value[..])
                     .map_err(|e| anyhow::anyhow!("UTXO decompression failed: {}", e))?
             } else {
                 value

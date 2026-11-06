@@ -453,7 +453,7 @@ impl StorageConfig {
         &self,
         data_dir: &std::path::Path,
     ) -> std::path::PathBuf {
-        std::env::var("BLVM_CORE_MIGRATE_DESTINATION")
+        let dest = std::env::var("BLVM_CORE_MIGRATE_DESTINATION")
             .ok()
             .map(std::path::PathBuf::from)
             .or_else(|| {
@@ -461,7 +461,18 @@ impl StorageConfig {
                     .as_ref()
                     .map(std::path::PathBuf::from)
             })
-            .unwrap_or_else(|| data_dir.join("blvm"))
+            .unwrap_or_else(|| data_dir.join("blvm"));
+        if crate::config::path_is_strictly_within(data_dir, &dest) {
+            return dest;
+        }
+        let fallback = data_dir.join("blvm");
+        tracing::warn!(
+            "core migrate destination {} is outside data_dir {} or equal to it; using {}",
+            dest.display(),
+            data_dir.display(),
+            fallback.display()
+        );
+        fallback
     }
 
     /// Whether migrate should skip copying block bodies and read Core `blocks/` in place.

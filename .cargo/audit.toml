@@ -1,34 +1,21 @@
 # cargo audit — single source of advisory suppressions for blvm-node.
-# CI runs plain `cargo audit` from this repo root so all ignores come from here (no duplicate `--ignore` flags in workflows).
+# CI runs plain `cargo audit` from this repo root so all ignores come from here.
 #
-# Reconcile quarterly or when bumping iroh/quinn/hickory/time: run `cargo audit` after temporarily clearing `ignore`
-# and use `cargo tree -i <crate>` to confirm whether each ID still applies.
-#
-# Rationale summaries — details in docs/AUDIT_SUPPRESSIONS.md (table + review dates).
-# - Several IDs may still appear from transitive duplicates even where iroh 0.95 addressed the primary stack; verify before dropping.
-# - Hickory DNS advisories: transitive via iroh until upstream bumps hickory.
+# Reconcile when bumping iroh or hickory: run `cargo audit` and `cargo tree -i <crate>`.
+# Hickory 0.25 is only reached through iroh 0.95. There is no 0.25 patch for 0118
+# (fixed on the 0.26 line). 0119 is patched in hickory-proto >=0.26.1.
+# quinn-proto 0.11.15 still matches 0338 and 0340 (>=0.11.18) and 0339, 0341, 0342
+# (>=0.11.17). 0.11.19 does not resolve: rand 0.10 pulls chacha20 0.10, which
+# conflicts with iroh 0.95's chacha20 0.10.0-rc.2.
+# Exit for both stacks: an iroh bump, then drop these.
 
 [advisories]
 ignore = [
-    "RUSTSEC-2024-0421",
-    "RUSTSEC-2025-0009",
-    "RUSTSEC-2023-0071",
-    "RUSTSEC-2026-0007",
-    "RUSTSEC-2026-0037",
     "RUSTSEC-2026-0118",
     "RUSTSEC-2026-0119",
-    # fmt::Pointer on null Atomic/Shared only; rayon does not format null epoch pointers.
-    "RUSTSEC-2026-0204",
-    # quinn-proto <0.11.17/18 (QUIC transport DoS class). Fixed quinn-proto pulls rand 0.10 -> chacha20 0.10 stable,
-    # which cannot co-resolve with iroh 0.95's pre-release crypto_box/chacha20 rc stack. Exit: iroh bump, then drop these.
     "RUSTSEC-2026-0338",
     "RUSTSEC-2026-0339",
     "RUSTSEC-2026-0340",
     "RUSTSEC-2026-0341",
     "RUSTSEC-2026-0342",
-    # webpki-roots / webpki-root-certs 0.26.11 (distrusted emSign root). Both 0.26.11 crates are shims that
-    # re-export the 1.x crates, which resolve to patched 1.0.10; no 0.26.x release is marked patched.
-    # Paths: iroh 0.95.1 -> rustls-platform-verifier 0.5.3 -> webpki-root-certs 0.26.11 (0383).
-    # Exit: iroh bump past rustls-platform-verifier 0.5. Revisit by 2027-01-20.
-    "RUSTSEC-2026-0383",
 ]

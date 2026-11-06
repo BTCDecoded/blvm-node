@@ -1,9 +1,10 @@
 //! Process sandboxing and resource limits for modules
 //!
-//! Provides OS-level sandboxing, file system access control, and network isolation
-//! to ensure modules cannot access resources outside their allowed scope.
+//! On Linux, module spawn enacts a Landlock domain (`landlock`) before exec.
+//! Resource limits are applied with `prlimit` after the child starts.
 
 pub mod filesystem;
+pub mod landlock;
 pub mod network;
 pub mod process;
 

@@ -2,7 +2,9 @@
 //!
 //! Standalone binary. Also available as `blvm config convert-core`.
 
-use blvm_node::config::{generate_toml_config, parse_bitcoin_conf};
+use blvm_node::config::{
+    format_unmapped_comment, generate_toml_config, parse_bitcoin_conf, write_private_config,
+};
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,7 +30,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let toml_config = generate_toml_config(&bitcoin_config, &args.input);
 
-    std::fs::write(&args.output, toml_config)?;
+    write_private_config(&args.output, &toml_config)?;
+    for (key, value) in &bitcoin_config.unmapped {
+        println!("{}", format_unmapped_comment(key, value));
+    }
 
     println!("✓ Configuration converted successfully!");
     println!("  Input:  {}", args.input.display());

@@ -73,6 +73,8 @@ pub struct ModuleManager {
     /// HTTP URL for the first-party module registry JSON (e.g. blvm/registry/modules.json on GitHub).
     /// When set, `auto_load_modules` will bootstrap-download any `enabled_modules` not found locally.
     registry_url: Option<String>,
+    /// When false, a module with no signatures is not loaded.
+    allow_unsigned_modules: bool,
     /// Node IPC socket path (where node listens; modules connect here)
     node_socket_path: Option<PathBuf>,
     /// Node P2P listen address injected into module spawn env (`MODULE_CONFIG_NODE_P2P_LISTEN_*`).
@@ -204,6 +206,7 @@ impl ModuleManager {
             enabled_modules: HashMap::new(),
             disabled_modules: Vec::new(),
             registry_url: None,
+            allow_unsigned_modules: false,
             node_p2p_listen: std::sync::RwLock::new(None),
         }
     }
@@ -333,6 +336,15 @@ impl ModuleManager {
     /// An empty map (the default) means load every discovered module.
     pub fn set_enabled_modules(&mut self, enabled: HashMap<String, String>) {
         self.enabled_modules = enabled;
+    }
+
+    /// Allow loading a module that has no signatures. Default is refuse.
+    pub fn set_allow_unsigned_modules(&mut self, allow: bool) {
+        self.allow_unsigned_modules = allow;
+    }
+
+    pub fn allow_unsigned_modules(&self) -> bool {
+        self.allow_unsigned_modules
     }
 
     /// Set module names to exclude from auto-load and registry bootstrap (opt-out).
@@ -883,16 +895,10 @@ impl ModuleManager {
                 let mut process_guard = shared_process.lock().await;
                 process_guard.kill().await?;
             } else if let Some(pid) = managed.process_id {
-                // Kill by PID if we don't have process reference
-                use tokio::process::Command;
-                #[cfg(unix)]
-                {
-                    let _ = Command::new("kill")
-                        .arg("-9")
-                        .arg(pid.to_string())
-                        .output()
-                        .await;
-                }
+                warn!(
+                    "Module {} has pid {} but no process handle; not signaling an unreaped pid",
+                    module_name, pid
+                );
             }
 
             info!("Module {} unloaded", module_name);

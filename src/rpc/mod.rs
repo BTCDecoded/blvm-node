@@ -118,6 +118,7 @@ fn install_rpc_cookie(
     let mut secret = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
     let password = hex::encode(secret);
+    zeroize::Zeroize::zeroize(&mut secret);
     let path = datadir.join(".cookie");
     write_cookie_file(&path, &format!("{RPC_COOKIE_USER}:{password}"))?;
     auth.username = Some(RPC_COOKIE_USER.to_string());
@@ -134,9 +135,17 @@ fn write_cookie_file(path: &std::path::Path, contents: &str) -> Result<()> {
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
+        // A symlink at `.cookie` must fail the open instead of truncating the target.
+        #[cfg(feature = "libc")]
+        options.custom_flags(libc::O_NOFOLLOW);
     }
     let mut file = options.open(path)?;
     file.write_all(contents.as_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 

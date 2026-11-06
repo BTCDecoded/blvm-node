@@ -306,6 +306,14 @@ pub fn migrate_core_data(args: MigrateCoreArgs) -> Result<()> {
         }
     }
 
+    if !crate::config::path_is_strictly_within(&args.source, &args.destination) {
+        anyhow::bail!(
+            "migrate destination {:?} must be inside source {:?} and distinct from it",
+            args.destination,
+            args.source
+        );
+    }
+
     std::fs::create_dir_all(&args.destination).with_context(|| {
         format!(
             "Failed to create destination directory {:?}",

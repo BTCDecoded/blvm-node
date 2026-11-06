@@ -83,7 +83,7 @@ fn prev_hash_from_stored_body(data: &[u8]) -> Result<[u8; 32]> {
     }
     #[cfg(feature = "block-compression")]
     if BlockStore::is_compressed(data) {
-        let decoded = zstd::decode_all(data)
+        let decoded = crate::storage::zstd_limit::decode_bounded(data)
             .map_err(|e| anyhow::anyhow!("Block decompression failed: {}", e))?;
         return prev_hash_from_bincode_header(&decoded);
     }
@@ -177,7 +177,7 @@ fn output_spans(bytes: Vec<u8>) -> Result<OutputScriptSpans> {
     }
     #[cfg(feature = "block-compression")]
     if BlockStore::is_compressed(&bytes) {
-        let decoded = zstd::decode_all(bytes.as_slice())
+        let decoded = crate::storage::zstd_limit::decode_bounded(bytes.as_slice())
             .map_err(|e| anyhow::anyhow!("Block decompression failed: {}", e))?;
         return output_spans(decoded);
     }
@@ -801,7 +801,7 @@ impl BlockStore {
             if let Some(data) = self.witnesses.get(&k)? {
                 #[cfg(feature = "witness-compression")]
                 let witness_data = if Self::is_compressed(&data) {
-                    zstd::decode_all(&data[..])
+                    crate::storage::zstd_limit::decode_bounded(&data[..])
                         .map_err(|e| anyhow::anyhow!("Witness decompression failed: {}", e))?
                 } else {
                     data
@@ -827,7 +827,7 @@ impl BlockStore {
             // Decompress if data is compressed (auto-detect via zstd magic bytes)
             #[cfg(feature = "witness-compression")]
             let witness_data = if Self::is_compressed(&data) {
-                zstd::decode_all(&data[..])
+                crate::storage::zstd_limit::decode_bounded(&data[..])
                     .map_err(|e| anyhow::anyhow!("Witness decompression failed: {}", e))?
             } else {
                 data
@@ -1100,7 +1100,7 @@ impl BlockStore {
         }
         #[cfg(feature = "block-compression")]
         let block_data = if Self::is_compressed(data) {
-            zstd::decode_all(data)
+            crate::storage::zstd_limit::decode_bounded(data)
                 .map_err(|e| anyhow::anyhow!("Block decompression failed: {}", e))?
         } else {
             data.to_vec()
@@ -1955,9 +1955,7 @@ mod header_height_tests {
             .store_headers_batch(&[(g, genesis, 0), (h1, parent, 1), (h2, child, 2)])
             .unwrap();
 
-        let none = store
-            .build_headers_response(&[], &[0u8; 32], 10)
-            .unwrap();
+        let none = store.build_headers_response(&[], &[0u8; 32], 10).unwrap();
         assert!(none.is_empty(), "zero hash_stop returns no headers");
 
         let missing = [9u8; 32];

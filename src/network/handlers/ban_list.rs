@@ -129,8 +129,26 @@ impl NetworkManager {
 
         if msg.is_full && !verify_ban_list_hash(&msg.ban_entries, &msg.ban_list_hash) {
             warn!("Ban list hash verification failed from {}", peer_addr);
+            return self
+                .disconnect_for_protocol_violation(peer_addr, "ban list hash mismatch", false)
+                .await;
+        }
+
+        let sharing = self.ban_list_sharing_config.clone();
+        let trusted = sharing
+            .as_ref()
+            .is_some_and(|cfg| cfg.trusts_peer(&peer_addr));
+        if !trusted {
+            debug!(
+                "Ignoring ban list from untrusted peer {} (trusted_peers is empty or does not include this peer)",
+                peer_addr
+            );
             return Ok(());
         }
+        let max_duration = sharing
+            .as_ref()
+            .map(|cfg| cfg.max_accepted_ban_seconds)
+            .unwrap_or(7 * 24 * 3600);
 
         if !msg.is_full {
             debug!(
@@ -143,8 +161,18 @@ impl NetworkManager {
         let mut ban_list = self.ban_list().write().await;
         let mut merged_count = 0;
 
+        let now = crate::utils::current_timestamp();
         for entry in &msg.ban_entries {
             if !validate_ban_entry(entry) {
+                continue;
+            }
+            if entry.unban_timestamp == u64::MAX
+                || entry.unban_timestamp.saturating_sub(now) > max_duration
+            {
+                warn!(
+                    "Rejecting ban from {} with unban timestamp {} (permanent or past {}s)",
+                    peer_addr, entry.unban_timestamp, max_duration
+                );
                 continue;
             }
 
@@ -166,11 +194,7 @@ impl NetworkManager {
 
             match ban_list.get(&socket_addr) {
                 Some(&existing_timestamp) => {
-                    if entry.unban_timestamp == u64::MAX {
-                        ban_list.insert(socket_addr, u64::MAX);
-                        merged_count += 1;
-                    } else if existing_timestamp != u64::MAX
-                        && entry.unban_timestamp > existing_timestamp
+                    if existing_timestamp != u64::MAX && entry.unban_timestamp > existing_timestamp
                     {
                         ban_list.insert(socket_addr, entry.unban_timestamp);
                         merged_count += 1;
@@ -307,9 +331,28 @@ mod tests {
     async fn handle_ban_list_merges_valid_entry() {
         let listen: SocketAddr = "127.0.0.1:18423".parse().unwrap();
         let peer: SocketAddr = "127.0.0.1:18425".parse().unwrap();
-        let nm = NetworkManager::new(listen);
+        let mut nm = NetworkManager::new(listen);
         let entries = vec![legacy_ban_entry(8333)];
         let hash = calculate_ban_list_hash(&entries);
+        nm.handle_ban_list(
+            peer,
+            BanListMessage {
+                is_full: true,
+                ban_list_hash: hash,
+                ban_entries: entries.clone(),
+                timestamp: current_timestamp(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            nm.ban_list().read().await.is_empty(),
+            "an untrusted peer must not install a ban"
+        );
+        nm.ban_list_sharing_config = Some(crate::config::BanListSharingConfig {
+            trusted_peers: vec![peer.to_string()],
+            ..crate::config::BanListSharingConfig::default()
+        });
         nm.handle_ban_list(
             peer,
             BanListMessage {

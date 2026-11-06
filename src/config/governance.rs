@@ -55,6 +55,19 @@ pub struct BanListSharingConfig {
     /// Minimum ban duration to share (seconds, 0 = all)
     #[serde(default = "default_min_ban_duration")]
     pub min_ban_duration_to_share: u64,
+
+    /// Peers allowed to install bans on this node. Empty means this node
+    /// sends its own list and applies none. An entry is an IP or `ip:port`.
+    #[serde(default)]
+    pub trusted_peers: Vec<String>,
+
+    /// Longest peer-supplied ban this node will install, measured from now.
+    #[serde(default = "default_max_accepted_ban_seconds")]
+    pub max_accepted_ban_seconds: u64,
+}
+
+fn default_max_accepted_ban_seconds() -> u64 {
+    7 * 24 * 3600
 }
 
 /// Ban share mode
@@ -88,6 +101,8 @@ impl Default for BanListSharingConfig {
             share_mode: BanShareMode::Periodic,
             periodic_interval_seconds: 300,
             min_ban_duration_to_share: 3600,
+            trusted_peers: Vec::new(),
+            max_accepted_ban_seconds: default_max_accepted_ban_seconds(),
         }
     }
 }
@@ -96,5 +111,19 @@ impl BanListSharingConfig {
     /// Sharing is on when the section is enabled and the mode is not `disabled`.
     pub fn shares(&self) -> bool {
         self.enabled && !matches!(self.share_mode, BanShareMode::Disabled)
+    }
+
+    /// True when `peer` is listed by IP or by full socket address.
+    pub fn trusts_peer(&self, peer: &std::net::SocketAddr) -> bool {
+        self.trusted_peers.iter().any(|entry| {
+            let entry = entry.trim();
+            if let Ok(addr) = entry.parse::<std::net::SocketAddr>() {
+                addr == *peer || (addr.port() == 0 && addr.ip() == peer.ip())
+            } else if let Ok(ip) = entry.parse::<std::net::IpAddr>() {
+                ip == peer.ip()
+            } else {
+                false
+            }
+        })
     }
 }

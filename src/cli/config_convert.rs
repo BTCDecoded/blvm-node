@@ -25,16 +25,18 @@ pub fn run_config_convert_core(input: &Path, output: &Path, verbose: bool) -> Re
     }
 
     let toml_config = generate_toml_config(&bitcoin_config, input);
-    std::fs::write(output, toml_config)
+    crate::config::write_private_config(output, &toml_config)
         .with_context(|| format!("Failed to write {}", output.display()))?;
 
     println!("✓ Configuration converted successfully!");
+    for (key, value) in &bitcoin_config.unmapped {
+        println!("{}", crate::config::format_unmapped_comment(key, value));
+    }
     println!("  Input:  {}", input.display());
     println!("  Output: {}", output.display());
     println!();
     println!("Review the generated config:");
     println!("  - storage.data_dir is the network-specific Core tree (chainstate/ + blocks/)");
-    println!("  - Remove legacy [network] wrappers if your NodeConfig expects top-level keys");
     println!("  - Some Core options still need manual mapping");
 
     Ok(())

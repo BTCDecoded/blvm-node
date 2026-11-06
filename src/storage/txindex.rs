@@ -305,7 +305,7 @@ impl TxIndex {
         #[cfg(feature = "compression")]
         {
             if self.enable_compression && Self::is_zstd(data) {
-                return zstd::decode_all(data)
+                return crate::storage::zstd_limit::decode_bounded(data)
                     .context("Transaction index blob decompression failed");
             }
         }

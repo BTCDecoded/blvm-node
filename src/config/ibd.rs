@@ -428,13 +428,27 @@ pub fn ibd_engine_checkpoint_interval_for_repair() -> u64 {
 
 /// Stable on-disk path for the engine flat table (not `/tmp` when `data_dir` is known).
 pub fn ibd_engine_path(data_dir: Option<&std::path::Path>) -> std::path::PathBuf {
+    let default_path = if let Some(dd) = data_dir {
+        dd.join("ibd_engine").join("utxo_table.bin")
+    } else {
+        std::env::temp_dir().join(format!("blvm_ibd_engine_{}.bin", std::process::id()))
+    };
     if let Ok(p) = std::env::var("BLVM_IBD_ENGINE_PATH") {
-        return std::path::PathBuf::from(p);
+        let candidate = std::path::PathBuf::from(&p);
+        if let Some(root) = data_dir {
+            if super::path_is_within(root, &candidate) {
+                return candidate;
+            }
+            tracing::warn!(
+                "BLVM_IBD_ENGINE_PATH {p} is outside data_dir {}; using {}",
+                root.display(),
+                default_path.display()
+            );
+            return default_path;
+        }
+        return candidate;
     }
-    if let Some(dd) = data_dir {
-        return dd.join("ibd_engine").join("utxo_table.bin");
-    }
-    std::env::temp_dir().join(format!("blvm_ibd_engine_{}.bin", std::process::id()))
+    default_path
 }
 
 fn default_ibd_chunk_size() -> u64 {

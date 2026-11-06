@@ -105,7 +105,8 @@ impl ModuleLoader {
             )?;
         }
 
-        // Verify signatures if present
+        // Verify signatures if present. Unsigned modules load only when the
+        // operator set `modules.allow_unsigned_modules`.
         if discovered.manifest.has_signatures() {
             debug!(
                 "Module {} has signatures, verifying...",
@@ -116,9 +117,14 @@ impl ModuleLoader {
                 &discovered.binary_path,
             )?;
             info!("Module {} signatures verified", discovered.manifest.name);
+        } else if !manager.allow_unsigned_modules() {
+            return Err(ModuleError::OperationError(format!(
+                "Module {} has no signatures; set modules.allow_unsigned_modules to load it",
+                discovered.manifest.name
+            )));
         } else {
             warn!(
-                "Module {} has no signatures - loading unsigned module (not recommended)",
+                "Module {} has no signatures; loading because allow_unsigned_modules is set",
                 discovered.manifest.name
             );
         }

@@ -101,9 +101,10 @@ impl ModuleProcessSpawner {
         // Use node's IPC socket path from context (modules connect to node; node listens on one socket)
         let socket_path = PathBuf::from(&context.socket_path);
 
-        // Spawn the process
+        // Spawn the process. The child does not inherit the node environment.
         let mut command = Command::new(binary_path);
         command
+            .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -114,10 +115,11 @@ impl ModuleProcessSpawner {
 
         // Add module config as environment variables
         for (key, value) in &context.config {
-            command.env(
-                format!("MODULE_CONFIG_{}", key.to_uppercase().as_str()),
-                value,
-            );
+            let env_key = sanitize_module_env_key(key);
+            if env_key.is_empty() {
+                continue;
+            }
+            command.env(format!("MODULE_CONFIG_{env_key}"), value);
         }
 
         debug!(
@@ -125,19 +127,31 @@ impl ModuleProcessSpawner {
             binary_path, command
         );
 
-        let child = command.spawn().map_err(|e| {
+        let landlock = crate::module::sandbox::landlock::ModuleLandlock::prepare(
+            binary_path,
+            &module_data_dir,
+            &socket_path,
+            &self.modules_dir,
+        )
+        .map_err(|e| {
+            ModuleError::InitializationError(format!(
+                "refusing to spawn module {module_name} without a Landlock domain: {e}"
+            ))
+        })?;
+        landlock.arm_tokio(&mut command);
+
+        let mut child = command.spawn().map_err(|e| {
             ModuleError::InitializationError(format!("Failed to spawn module process: {e}"))
         })?;
 
-        // Apply resource limits if sandbox is configured
+        // Apply resource limits if sandbox is configured. A failure kills the child.
         if let Some(ref sandbox) = self.process_sandbox {
             let pid = child.id();
             if let Err(e) = sandbox.apply_limits(pid) {
-                warn!(
-                    "Failed to apply resource limits to module {}: {}",
-                    module_name, e
-                );
-                // Continue — module process is already running; limits may be partially unset.
+                let _ = child.kill().await;
+                return Err(ModuleError::InitializationError(format!(
+                    "refusing to run module {module_name} without resource limits: {e}"
+                )));
             }
         }
 
@@ -259,6 +273,21 @@ impl ModuleProcessSpawner {
             )
         })
     }
+}
+
+/// `MODULE_CONFIG_*` keys are ASCII letters, digits, and underscores.
+fn sanitize_module_env_key(key: &str) -> String {
+    key.chars()
+        .filter_map(|c| {
+            if c.is_ascii_alphanumeric() {
+                Some(c.to_ascii_uppercase())
+            } else if c == '_' || c == '-' {
+                Some('_')
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Used with retry_async_with_backoff when socket is not yet ready (Display required).

@@ -274,14 +274,12 @@ impl ProcessSandbox {
                             if prlimit64(pid as libc::pid_t, RLIMIT_AS, &rlim, std::ptr::null_mut())
                                 != 0
                             {
-                                warn!(
-                                    "Failed to set memory limit for PID {} using prlimit: {}",
-                                    pid,
-                                    std::io::Error::last_os_error()
-                                );
-                            } else {
-                                debug!("Set memory limit for PID {}: {} bytes", pid, max_memory);
+                                return Err(ModuleError::op_err(
+                                    "Failed to set memory limit",
+                                    std::io::Error::last_os_error(),
+                                ));
                             }
+                            debug!("Set memory limit for PID {}: {} bytes", pid, max_memory);
                         }
                     }
 
@@ -299,14 +297,12 @@ impl ProcessSandbox {
                                 std::ptr::null_mut(),
                             ) != 0
                             {
-                                warn!(
-                                    "Failed to set file descriptor limit for PID {} using prlimit: {}",
-                                    pid,
-                                    std::io::Error::last_os_error()
-                                );
-                            } else {
-                                debug!("Set file descriptor limit for PID {}: {}", pid, max_fds);
+                                return Err(ModuleError::op_err(
+                                    "Failed to set file descriptor limit",
+                                    std::io::Error::last_os_error(),
+                                ));
                             }
+                            debug!("Set file descriptor limit for PID {}: {}", pid, max_fds);
                         }
                     }
 
@@ -324,14 +320,12 @@ impl ProcessSandbox {
                                 std::ptr::null_mut(),
                             ) != 0
                             {
-                                warn!(
-                                    "Failed to set process limit for PID {} using prlimit: {}",
-                                    pid,
-                                    std::io::Error::last_os_error()
-                                );
-                            } else {
-                                debug!("Set process limit for PID {}: {}", pid, max_children);
+                                return Err(ModuleError::op_err(
+                                    "Failed to set process limit",
+                                    std::io::Error::last_os_error(),
+                                ));
                             }
+                            debug!("Set process limit for PID {}: {}", pid, max_children);
                         }
                     }
 
@@ -347,70 +341,14 @@ impl ProcessSandbox {
                     return Ok(());
                 }
 
-                // Fallback: Note that setrlimit applies to the current process, not another process
-                // For non-Linux systems or when libc feature is disabled, we can't set limits on another process
+                // setrlimit applies to this process. Do not use it to "limit" a child.
                 #[cfg(not(all(feature = "libc", target_os = "linux")))]
                 {
-                    warn!(
-                        "prlimit not available (requires Linux with libc feature). Limits should be set before spawning process with PID {}",
-                        pid
-                    );
-
-                    // Apply memory limit (RLIMIT_AS = address space limit) - fallback for non-libc systems
-                    #[cfg(feature = "nix")]
-                    if let Some(max_memory) = limits.max_memory_bytes {
-                        use nix::sys::resource::{Resource, setrlimit};
-                        let soft_limit = max_memory as u64;
-                        let hard_limit = max_memory as u64;
-                        setrlimit(Resource::RLIMIT_AS, soft_limit, hard_limit)
-                            .map_err(|e| ModuleError::op_err("Failed to set memory limit", e))?;
-                        debug!("Set memory limit: {} bytes", max_memory);
-                    }
-
-                    // Apply file descriptor limit - fallback for non-libc systems
-                    if let Some(max_fds) = limits.max_file_descriptors {
-                        let soft_limit = max_fds as u64;
-                        let hard_limit = max_fds as u64;
-                        #[cfg(feature = "nix")]
-                        {
-                            use nix::sys::resource::{Resource, setrlimit};
-                            setrlimit(Resource::RLIMIT_NOFILE, soft_limit, hard_limit).map_err(
-                                |e| ModuleError::op_err("Failed to set file descriptor limit", e),
-                            )?;
-                        }
-                        #[cfg(not(feature = "nix"))]
-                        {
-                            // No-op when nix feature is disabled
-                        }
-                        debug!("Set file descriptor limit: {}", max_fds);
-                    }
-
-                    // Apply process limit (RLIMIT_NPROC = number of processes) - fallback for non-libc systems
-                    if let Some(max_children) = limits.max_child_processes {
-                        // Get current process count and add max_children as limit
-                        #[cfg(feature = "nix")]
-                        {
-                            use nix::sys::resource::{Resource, setrlimit};
-                            let soft_limit = max_children as u64;
-                            let hard_limit = max_children as u64;
-                            setrlimit(Resource::RLIMIT_NPROC, soft_limit, hard_limit).map_err(
-                                |e| ModuleError::op_err("Failed to set process limit", e),
-                            )?;
-                        }
-                        #[cfg(not(feature = "nix"))]
-                        {
-                            // No-op when nix feature is disabled
-                        }
-                        debug!("Set process limit: {}", max_children);
-                    }
-
-                    // CPU limit is typically enforced via cgroups or process scheduling
-                    // setrlimit doesn't directly limit CPU percentage, but we can use RLIMIT_CPU
-                    // which limits CPU time in seconds (not percentage)
-                    // For percentage-based limits, cgroups would be needed
-                    if self.config.strict_mode {
-                        debug!("Strict sandboxing enabled - resource limits applied");
-                    }
+                    let _ = pid;
+                    return Err(ModuleError::OperationError(
+                        "module resource limits require Linux prlimit; refusing to setrlimit on the node"
+                            .to_string(),
+                    ));
                 }
             } else {
                 debug!("No PID provided, skipping resource limit application");

@@ -9,7 +9,7 @@ use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
 };
 use hkdf::Hkdf;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use std::path::{Path, PathBuf};
 
 /// Module encryption handler
@@ -37,11 +37,11 @@ impl ModuleEncryption {
         module_binary: &[u8],
         payment_id: &str,
         module_hash: &[u8; 32],
+        secret: &[u8],
     ) -> Result<(Vec<u8>, Vec<u8>), ModuleError> {
-        // Derive encryption key from payment_id + module_hash
-        let key = Self::derive_key(payment_id, module_hash);
+        let key = Self::derive_key(secret, payment_id, module_hash)?;
 
-        // Create cipher
+        // Create cipher. `into` moves the key into the cipher.
         let cipher = Aes256Gcm::new(&key.into());
 
         // Generate random nonce (12 bytes for GCM)
@@ -73,11 +73,11 @@ impl ModuleEncryption {
         nonce: &[u8],
         payment_id: &str,
         module_hash: &[u8; 32],
+        secret: &[u8],
     ) -> Result<Vec<u8>, ModuleError> {
-        // Derive decryption key from payment_id + module_hash
-        let key = Self::derive_key(payment_id, module_hash);
+        let key = Self::derive_key(secret, payment_id, module_hash)?;
 
-        // Create cipher
+        // Create cipher. `into` moves the key into the cipher.
         let cipher = Aes256Gcm::new(&key.into());
 
         // GCM nonces are 12 bytes. generic-array 0.14's from_slice is deprecated.
@@ -94,21 +94,75 @@ impl ModuleEncryption {
         Ok(decrypted)
     }
 
-    /// Derive encryption key from payment_id + module_hash using HKDF
-    fn derive_key(payment_id: &str, module_hash: &[u8; 32]) -> [u8; 32] {
-        // Create input: payment_id || module_hash
-        let mut input = Vec::with_capacity(payment_id.len() + 32);
-        input.extend_from_slice(payment_id.as_bytes());
-        input.extend_from_slice(module_hash);
-
-        // Use HKDF-SHA256 to derive 32-byte key
-        let hk = Hkdf::<Sha256>::new(None, &input);
+    /// HKDF-SHA256. `secret` is the node master key. `payment_id` and
+    /// `module_hash` are info, not the key. Both of those are stored beside
+    /// the ciphertext, so they cannot be the IKM.
+    fn derive_key(
+        secret: &[u8],
+        payment_id: &str,
+        module_hash: &[u8; 32],
+    ) -> Result<[u8; 32], ModuleError> {
+        if secret.is_empty() {
+            return Err(ModuleError::CryptoError(
+                "module encryption requires a node master key".to_string(),
+            ));
+        }
+        let mut info = Vec::with_capacity(24 + payment_id.len() + 32);
+        info.extend_from_slice(b"module_encryption_key");
+        info.extend_from_slice(payment_id.as_bytes());
+        info.extend_from_slice(module_hash);
+        let hk = Hkdf::<Sha256>::new(None, secret);
         let mut key = [0u8; 32];
-        hk.expand(b"module_encryption_key", &mut key)
-            .expect("HKDF expansion failed");
-
-        key
+        hk.expand(&info, &mut key)
+            .map_err(|_| ModuleError::CryptoError("HKDF expansion failed".to_string()))?;
+        Ok(key)
     }
+}
+
+/// Load or create the 32-byte module master key.
+///
+/// The file is `modules_dir/.master_key`, mode `0600`. It is not written into
+/// an encrypted module directory.
+pub fn load_or_create_master_key(modules_dir: &Path) -> Result<[u8; 32], ModuleError> {
+    use std::io::Write;
+
+    let path = modules_dir.join(".master_key");
+    if path.is_file() {
+        let bytes = std::fs::read(&path)
+            .map_err(|e| ModuleError::op_err("Failed to read module master key", e))?;
+        let key: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+            ModuleError::CryptoError(format!(
+                "module master key must be 32 bytes, got {}",
+                bytes.len()
+            ))
+        })?;
+        return Ok(key);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ModuleError::op_err("Failed to create module key directory", e))?;
+    }
+    let mut key = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut key);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|e| ModuleError::op_err("Failed to create module master key", e))?;
+    file.write_all(&key)
+        .map_err(|e| ModuleError::op_err("Failed to write module master key", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| ModuleError::op_err("Failed to set module master key mode", e))?;
+    }
+    Ok(key)
 }
 
 impl Default for ModuleEncryption {
@@ -249,7 +303,7 @@ pub async fn store_decrypted_module(
             .await
             .map_err(|e| ModuleError::op_err("Failed to get file metadata", e))?
             .permissions();
-        perms.set_mode(0o755);
+        perms.set_mode(0o700);
         tokio::fs::set_permissions(&binary_path, perms)
             .await
             .map_err(|e| ModuleError::op_err("Failed to set file permissions", e))?;

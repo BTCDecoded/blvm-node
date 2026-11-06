@@ -17,6 +17,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 
+const TEST_MASTER_KEY: &[u8] = b"module-master-key-test-secret!!";
+
 fn test_payment_tb1_addresses() -> (String, String) {
     let author = BitcoinAddress::new(Network::Testnet, 0, vec![0x01; 20]).unwrap();
     let marketplace = BitcoinAddress::new(Network::Testnet, 0, vec![0x02; 20]).unwrap();
@@ -191,7 +193,7 @@ async fn test_handle_get_module_payment_pending_serves_encrypted() {
     };
 
     let (encrypted_binary, nonce) = encryption
-        .encrypt_module(module_binary, payment_id, &module_hash)
+        .encrypt_module(module_binary, payment_id, &module_hash, TEST_MASTER_KEY)
         .unwrap();
 
     let metadata = EncryptedModuleMetadata {
@@ -263,7 +265,7 @@ async fn test_handle_get_module_payment_confirmed_serves_decrypted() {
     };
 
     let (encrypted_binary, nonce) = encryption
-        .encrypt_module(module_binary, payment_id, &module_hash)
+        .encrypt_module(module_binary, payment_id, &module_hash, TEST_MASTER_KEY)
         .unwrap();
 
     let metadata = EncryptedModuleMetadata {

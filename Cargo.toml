@@ -56,7 +56,7 @@ rkyv = { version = "=0.8.18", optional = true, features = ["bytecheck"] }
 # Networking layer - EXACT VERSIONS for security
 # Explicit features avoid `full` (smaller graphs, clearer deps). Mirrors actual `tokio::` usage
 # (`rt-multi-thread`, `sync`, `time`, `net`, `fs`, `process`, `io-util`, `signal`, test macros).
-tokio = { version = "=1.48.0", features = [
+tokio = { version = "=1.54.1", features = [
     "macros",
     "rt",
     "rt-multi-thread",
@@ -87,6 +87,7 @@ toml = "=0.8.2"
 # Pure-Rust secp256k1 (same implementation as blvm-consensus/blvm-protocol)
 blvm-secp256k1 = { version = ">=0.1, <1" }
 sha2 = "=0.10.9"
+argon2 = "=0.5.3"
 ripemd = "=0.1.3"
 hex = "=0.4.3"
 siphasher = "=0.3"
@@ -128,7 +129,7 @@ rayon = { version = "1", optional = true }
 # Legacy P2PKH/P2SH (Base58Check) decoded inline in rpc/rawtx.rs using sha2.
 
 # Error handling - EXACT VERSIONS for security
-anyhow = "=1.0.93"
+anyhow = "=1.0.104"
 thiserror = "=1.0.69"
 
 # Logging - EXACT VERSIONS for security
@@ -146,7 +147,7 @@ bitflags = "^2.6"
 
 # lru: always a direct dep so serialization_cache.rs can import it without the
 # production feature gate (blvm_protocol::lru is only exposed with production).
-lru = "=0.16.4"
+lru = "=0.18.5"
 
 # Concurrent HashMap for IBD v2 (zero lock contention); works on all platforms
 dashmap = "=6.0"
@@ -298,13 +299,11 @@ compression = ["block-compression", "utxo-compression", "witness-compression"]
 # erlay = ["dep:minisketch-rs"]
 
 
-# Security: patch transitive deps via git (crates-io ↔ crates-io patch not allowed).
-# Exit criteria (reconcile with `.cargo/audit.toml` + `docs/AUDIT_SUPPRESSIONS.md`):
-# - quinn-proto: drop git patch when all consumers resolve >=0.11.15 from crates.io (RUSTSEC-2026-0185).
-# After bump: run plain `cargo audit`, `cargo tree -i quinn-proto`, `cargo tree -i time`, then remove obsolete ignores.
-[patch.crates-io]
-quinn-proto = { git = "https://github.com/quinn-rs/quinn", tag = "quinn-proto-0.11.15" }
 # Local monorepo: sibling paths override the blvm-* version pins above.
+# quinn-proto stays on crates.io 0.11.15. 0.11.19 (the fix for RUSTSEC-2026-0338
+# through 0342) depends on rand 0.10, whose chacha20 0.10 does not resolve next
+# to iroh 0.95's chacha20 0.10.0-rc.2. Exit: an iroh bump, then quinn-proto >=0.11.19.
+[patch.crates-io]
 blvm-protocol = { path = "../blvm-protocol" }
 blvm-consensus = { path = "../blvm-consensus" }
 blvm-primitives = { path = "../blvm-primitives" }
@@ -326,7 +325,7 @@ proptest = "=1.5.0"
 dhat = "=0.3"  # Heap profiling
 serial_test = "=3.0"  # Sequential test execution for database isolation
 # Paused/advanced tokio clock for deterministic rate-limiter tests (same version as the main dep)
-tokio = { version = "=1.48.0", features = ["test-util"] }
+tokio = { version = "=1.54.1", features = ["test-util"] }
 
 # Release profile optimizations (mirrors blvm-consensus)
 [profile.release]

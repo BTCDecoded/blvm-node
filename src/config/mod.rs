@@ -170,6 +170,7 @@ where
             let mut watch_auto_unload = false;
             let mut module_database_backend: Option<String> = None;
             let mut marketplace_fetch_enabled = false;
+            let mut allow_unsigned_modules = false;
 
             while let Some(key) = map.next_key::<String>()? {
                 if MODULE_CONFIG_KNOWN_KEYS.contains(&key.as_str()) {
@@ -200,6 +201,9 @@ where
                         }
                         "marketplace_fetch_enabled" => {
                             marketplace_fetch_enabled = map.next_value().unwrap_or(false)
+                        }
+                        "allow_unsigned_modules" => {
+                            allow_unsigned_modules = map.next_value().unwrap_or(false)
                         }
                         _ => {
                             let _: toml::Value = map.next_value()?;
@@ -243,6 +247,7 @@ where
                 watch_auto_load,
                 watch_auto_unload,
                 marketplace_fetch_enabled,
+                allow_unsigned_modules,
             })
         }
     }
@@ -264,6 +269,7 @@ const MODULE_CONFIG_KNOWN_KEYS: &[&str] = &[
     "watch_auto_unload",
     "module_database_backend",
     "marketplace_fetch_enabled",
+    "allow_unsigned_modules",
 ];
 
 /// Module system configuration
@@ -335,6 +341,10 @@ pub struct ModuleConfig {
     /// When `loadmodule` cannot find a module locally, call **`blvm-marketplace`** via inter-module IPC to fetch it first (default: **false**).
     #[serde(default = "default_false")]
     pub marketplace_fetch_enabled: bool,
+
+    /// Load a module that has no signatures. Default is refuse.
+    #[serde(default = "default_false")]
+    pub allow_unsigned_modules: bool,
 }
 
 pub(crate) fn default_true() -> bool {
@@ -370,6 +380,7 @@ impl Default for ModuleConfig {
             watch_auto_load: false,
             watch_auto_unload: false,
             marketplace_fetch_enabled: false,
+            allow_unsigned_modules: false,
         }
     }
 }
@@ -1070,7 +1081,8 @@ impl Default for NodeConfig {
     }
 }
 
-/// Expand leading `~` to home directory. Leaves other paths unchanged.
+/// Expand leading `~` to home directory. A result that still contains `..` is
+/// left unexpanded so a later delete cannot walk out of the home directory.
 fn expand_tilde_path(s: &str) -> String {
     let s = s.trim();
     if s.is_empty() {
@@ -1085,11 +1097,57 @@ fn expand_tilde_path(s: &str) -> String {
         dirs::home_dir(),
         s.strip_prefix("~/").or_else(|| s.strip_prefix("~\\")),
     ) {
-        return home.join(rest).to_string_lossy().into_owned();
+        let joined = home.join(rest);
+        if joined
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            tracing::warn!("refusing tilde expansion that contains '..': {s}");
+            return s.to_string();
+        }
+        return joined.to_string_lossy().into_owned();
     }
     s.to_string()
 }
 
+/// True when `candidate` canonicalizes to `root` or to a file inside it.
+/// A missing final component is checked through its parent. A symlink that
+/// resolves outside `root` is outside.
+pub fn path_is_within(root: &std::path::Path, candidate: &std::path::Path) -> bool {
+    confined_pair(root, candidate).is_some()
+}
+
+/// True when `candidate` is inside `root` and is not `root` itself.
+pub fn path_is_strictly_within(root: &std::path::Path, candidate: &std::path::Path) -> bool {
+    confined_pair(root, candidate)
+        .is_some_and(|(root_abs, candidate_abs)| root_abs != candidate_abs)
+}
+
+fn confined_pair(
+    root: &std::path::Path,
+    candidate: &std::path::Path,
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let root_abs = root.canonicalize().ok()?;
+    let candidate_abs = canonicalize_for_confine(candidate)?;
+    candidate_abs
+        .starts_with(&root_abs)
+        .then_some((root_abs, candidate_abs))
+}
+
+fn canonicalize_for_confine(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    if let Ok(canonical) = path.canonicalize() {
+        return Some(canonical);
+    }
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty())?;
+    let name = path.file_name()?;
+    if name == ".." || name == "." {
+        return None;
+    }
+    Some(parent.canonicalize().ok()?.join(name))
+}
+
+/// Entries in `persistent_peers` that are already socket addresses.
+/// A hostname is left in the config and is not dialed from here.
 impl NodeConfig {
     /// Expand `~` to home directory in all path fields. Idempotent.
     pub fn expand_paths(&mut self) {

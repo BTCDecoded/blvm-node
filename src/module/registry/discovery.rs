@@ -82,10 +82,10 @@ impl ModuleDiscovery {
                         }
                         crate::module::validation::ValidationResult::Invalid(errors) => {
                             warn!(
-                                "Manifest validation failed for module {}: {:?}",
+                                "Skipping module {}: manifest validation failed: {:?}",
                                 manifest.name, errors
                             );
-                            // Discovery stays permissive: log and still surface the module.
+                            continue;
                         }
                     }
 
@@ -214,12 +214,9 @@ impl ModuleDiscovery {
                 debug!("Manifest validated: {}", module_name);
             }
             crate::module::validation::ValidationResult::Invalid(errors) => {
-                warn!(
-                    "Manifest validation failed for module {}: {:?}",
-                    module_name, errors
-                );
-                // Discovery stays permissive: log and still load the module.
-                // A stricter registry could reject invalid manifests before spawn.
+                return Err(ModuleError::OperationError(format!(
+                    "Manifest validation failed for module {module_name}: {errors:?}"
+                )));
             }
         }
 

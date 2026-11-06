@@ -488,8 +488,21 @@ impl RpcServer {
                         ));
                     }
                 } else if path.starts_with("/health") {
-                    // Health endpoints: optional auth, but rate limit if unauthenticated
+                    // `/health` and `/health/ready` stay status-only probes.
+                    // `/health/detailed` carries peer, ban, block, and disk counts.
                     let auth_result = auth_manager.authenticate_request(&headers, addr).await;
+                    if path == "/health/detailed" {
+                        if let Some(error) = &auth_result.error {
+                            warn!(
+                                "Detailed health authentication failed from {}: {}",
+                                addr, error
+                            );
+                            return Ok(Self::http_error_response(
+                                StatusCode::UNAUTHORIZED,
+                                "Authentication required for detailed health",
+                            ));
+                        }
+                    }
                     if auth_result.user_id.is_none() {
                         // Unauthenticated health check - apply stricter rate limiting
                         if !auth_manager

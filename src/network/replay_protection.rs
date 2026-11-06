@@ -23,7 +23,12 @@ pub enum ReplayError {
     TimestampTooFuture(i64, u64),
     #[error("Duplicate request ID: {0}")]
     DuplicateRequestId(u64),
+    #[error("request id table is full")]
+    RequestIdTableFull,
 }
+
+/// Bound on request ids remembered inside the expiration window.
+const MAX_TRACKED_REQUEST_IDS: usize = 100_000;
 
 /// Replay protection manager
 ///
@@ -84,8 +89,12 @@ impl ReplayProtection {
     /// out-of-window timestamps.
     pub async fn check_message_id(&self, message_id: &str, timestamp: i64) -> Result<()> {
         // Validate timestamp before touching the dedup map.
-        Self::validate_timestamp(timestamp, self.message_id_expiration.as_secs())
-            .context("message timestamp out of window")?;
+        Self::validate_timestamp_with_tolerance(
+            timestamp,
+            self.message_id_expiration.as_secs(),
+            self.future_tolerance,
+        )
+        .context("message timestamp out of window")?;
 
         let mut message_ids = self.message_ids.lock().await;
 
@@ -112,8 +121,14 @@ impl ReplayProtection {
             return Err(ReplayError::DuplicateRequestId(request_id).into());
         }
 
-        // Store the request ID with current timestamp
         let now = current_timestamp();
+        if request_ids.len() >= MAX_TRACKED_REQUEST_IDS {
+            let cutoff = now.saturating_sub(self.request_id_expiration.as_secs());
+            request_ids.retain(|_, timestamp| *timestamp > cutoff);
+        }
+        if request_ids.len() >= MAX_TRACKED_REQUEST_IDS {
+            return Err(ReplayError::RequestIdTableFull.into());
+        }
         request_ids.insert(request_id, now);
 
         Ok(())
@@ -306,5 +321,30 @@ mod tests {
         let (msg_count, req_count) = protection.stats().await;
         assert_eq!(msg_count, 0);
         assert_eq!(req_count, 0);
+    }
+
+    #[tokio::test]
+    async fn future_tolerance_is_the_configured_window() {
+        let now = current_timestamp() as i64;
+        let tight = ReplayProtection::with_config(
+            Duration::from_secs(300),
+            Duration::from_secs(3600),
+            Duration::from_secs(300),
+            1,
+        );
+        assert!(
+            tight
+                .check_message_id("tight-future", now + 10)
+                .await
+                .is_err()
+        );
+
+        let defaulted = ReplayProtection::new();
+        assert!(
+            defaulted
+                .check_message_id("default-future", now + 100)
+                .await
+                .is_ok()
+        );
     }
 }

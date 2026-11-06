@@ -120,27 +120,40 @@ pub async fn handle_get_module(
                                         anyhow::anyhow!("Invalid module hash length in metadata")
                                     })?;
 
-                                match enc.decrypt_module(
-                                    &encrypted_binary,
-                                    &metadata.nonce,
-                                    payment_id,
-                                    &module_hash,
+                                match crate::module::encryption::load_or_create_master_key(
+                                    modules_dir_path,
                                 ) {
-                                    Ok(decrypted) => {
-                                        tracing::info!(
-                                            "Module {} decrypted for payment {}",
-                                            message.name,
-                                            payment_id
-                                        );
-                                        module_binary = Some(decrypted);
-                                    }
+                                    Ok(master_key) => match enc.decrypt_module(
+                                        &encrypted_binary,
+                                        &metadata.nonce,
+                                        payment_id,
+                                        &module_hash,
+                                        &master_key,
+                                    ) {
+                                        Ok(decrypted) => {
+                                            tracing::info!(
+                                                "Module {} decrypted for payment {}",
+                                                message.name,
+                                                payment_id
+                                            );
+                                            module_binary = Some(decrypted);
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "Failed to decrypt module {}: {}",
+                                                message.name,
+                                                e
+                                            );
+                                            // Fall back to encrypted version
+                                        }
+                                    },
                                     Err(e) => {
                                         tracing::warn!(
-                                            "Failed to decrypt module {}: {}",
+                                            "Failed to load module master key for {}: {}",
                                             message.name,
                                             e
                                         );
-                                        // Fall back to encrypted version
+                                        module_binary = Some(encrypted_binary);
                                     }
                                 }
                             }

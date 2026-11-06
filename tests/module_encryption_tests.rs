@@ -11,6 +11,8 @@ use blvm_node::module::traits::ModuleError;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+const TEST_MASTER_KEY: &[u8] = b"module-master-key-test-secret!!";
+
 /// Helper to create a test module hash
 fn create_test_module_hash() -> [u8; 32] {
     let data = b"test_module_binary_data";
@@ -29,7 +31,7 @@ fn test_encrypt_decrypt_round_trip() {
 
     // Encrypt
     let (encrypted, nonce) = encryption
-        .encrypt_module(module_binary, payment_id, &module_hash)
+        .encrypt_module(module_binary, payment_id, &module_hash, TEST_MASTER_KEY)
         .expect("Encryption should succeed");
 
     // Verify encrypted data is different from original
@@ -39,7 +41,13 @@ fn test_encrypt_decrypt_round_trip() {
 
     // Decrypt
     let decrypted = encryption
-        .decrypt_module(&encrypted, &nonce, payment_id, &module_hash)
+        .decrypt_module(
+            &encrypted,
+            &nonce,
+            payment_id,
+            &module_hash,
+            TEST_MASTER_KEY,
+        )
         .expect("Decryption should succeed");
 
     // Verify decrypted matches original
@@ -54,12 +62,12 @@ fn test_encrypt_decrypt_different_payment_ids() {
 
     // Encrypt with payment_id_1
     let (encrypted1, nonce1) = encryption
-        .encrypt_module(module_binary, "payment_1", &module_hash)
+        .encrypt_module(module_binary, "payment_1", &module_hash, TEST_MASTER_KEY)
         .expect("Encryption should succeed");
 
     // Encrypt with payment_id_2
     let (encrypted2, nonce2) = encryption
-        .encrypt_module(module_binary, "payment_2", &module_hash)
+        .encrypt_module(module_binary, "payment_2", &module_hash, TEST_MASTER_KEY)
         .expect("Encryption should succeed");
 
     // Encrypted data should be different (different keys)
@@ -67,17 +75,35 @@ fn test_encrypt_decrypt_different_payment_ids() {
 
     // Each should decrypt with its own payment_id
     let decrypted1 = encryption
-        .decrypt_module(&encrypted1, &nonce1, "payment_1", &module_hash)
+        .decrypt_module(
+            &encrypted1,
+            &nonce1,
+            "payment_1",
+            &module_hash,
+            TEST_MASTER_KEY,
+        )
         .expect("Decryption should succeed");
     assert_eq!(decrypted1, module_binary);
 
     let decrypted2 = encryption
-        .decrypt_module(&encrypted2, &nonce2, "payment_2", &module_hash)
+        .decrypt_module(
+            &encrypted2,
+            &nonce2,
+            "payment_2",
+            &module_hash,
+            TEST_MASTER_KEY,
+        )
         .expect("Decryption should succeed");
     assert_eq!(decrypted2, module_binary);
 
     // Cross-decryption should fail (wrong payment_id)
-    let result = encryption.decrypt_module(&encrypted1, &nonce1, "payment_2", &module_hash);
+    let result = encryption.decrypt_module(
+        &encrypted1,
+        &nonce1,
+        "payment_2",
+        &module_hash,
+        TEST_MASTER_KEY,
+    );
     assert!(result.is_err());
 }
 
@@ -98,12 +124,12 @@ fn test_encrypt_decrypt_different_module_hashes() {
 
     // Encrypt with hash1
     let (encrypted1, nonce1) = encryption
-        .encrypt_module(module_binary, payment_id, &hash1)
+        .encrypt_module(module_binary, payment_id, &hash1, TEST_MASTER_KEY)
         .expect("Encryption should succeed");
 
     // Encrypt with hash2
     let (encrypted2, nonce2) = encryption
-        .encrypt_module(module_binary, payment_id, &hash2)
+        .encrypt_module(module_binary, payment_id, &hash2, TEST_MASTER_KEY)
         .expect("Encryption should succeed");
 
     // Encrypted data should be different (different keys)
@@ -111,17 +137,18 @@ fn test_encrypt_decrypt_different_module_hashes() {
 
     // Each should decrypt with its own hash
     let decrypted1 = encryption
-        .decrypt_module(&encrypted1, &nonce1, payment_id, &hash1)
+        .decrypt_module(&encrypted1, &nonce1, payment_id, &hash1, TEST_MASTER_KEY)
         .expect("Decryption should succeed");
     assert_eq!(decrypted1, module_binary);
 
     let decrypted2 = encryption
-        .decrypt_module(&encrypted2, &nonce2, payment_id, &hash2)
+        .decrypt_module(&encrypted2, &nonce2, payment_id, &hash2, TEST_MASTER_KEY)
         .expect("Decryption should succeed");
     assert_eq!(decrypted2, module_binary);
 
     // Cross-decryption should fail (wrong hash)
-    let result = encryption.decrypt_module(&encrypted1, &nonce1, payment_id, &hash2);
+    let result =
+        encryption.decrypt_module(&encrypted1, &nonce1, payment_id, &hash2, TEST_MASTER_KEY);
     assert!(result.is_err());
 }
 
@@ -134,12 +161,18 @@ fn test_decrypt_with_wrong_nonce() {
 
     // Encrypt
     let (encrypted, nonce) = encryption
-        .encrypt_module(module_binary, payment_id, &module_hash)
+        .encrypt_module(module_binary, payment_id, &module_hash, TEST_MASTER_KEY)
         .expect("Encryption should succeed");
 
     // Try to decrypt with wrong nonce
     let wrong_nonce = vec![0u8; 12];
-    let result = encryption.decrypt_module(&encrypted, &wrong_nonce, payment_id, &module_hash);
+    let result = encryption.decrypt_module(
+        &encrypted,
+        &wrong_nonce,
+        payment_id,
+        &module_hash,
+        TEST_MASTER_KEY,
+    );
 
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -159,7 +192,7 @@ fn test_decrypt_with_tampered_data() {
 
     // Encrypt
     let (mut encrypted, nonce) = encryption
-        .encrypt_module(module_binary, payment_id, &module_hash)
+        .encrypt_module(module_binary, payment_id, &module_hash, TEST_MASTER_KEY)
         .expect("Encryption should succeed");
 
     // Tamper with encrypted data
@@ -168,7 +201,13 @@ fn test_decrypt_with_tampered_data() {
     }
 
     // Decryption should fail (GCM authentication will fail)
-    let result = encryption.decrypt_module(&encrypted, &nonce, payment_id, &module_hash);
+    let result = encryption.decrypt_module(
+        &encrypted,
+        &nonce,
+        payment_id,
+        &module_hash,
+        TEST_MASTER_KEY,
+    );
     assert!(result.is_err());
 }
 
@@ -186,7 +225,7 @@ async fn test_store_and_load_encrypted_module() {
 
     // Encrypt
     let (encrypted_binary, nonce) = encryption
-        .encrypt_module(module_binary, payment_id, &module_hash)
+        .encrypt_module(module_binary, payment_id, &module_hash, TEST_MASTER_KEY)
         .expect("Encryption should succeed");
 
     // Create metadata
@@ -259,11 +298,11 @@ fn test_key_derivation_consistency() {
 
     // Encrypt twice with same parameters
     let (encrypted1, nonce1) = encryption
-        .encrypt_module(module_binary, payment_id, &module_hash)
+        .encrypt_module(module_binary, payment_id, &module_hash, TEST_MASTER_KEY)
         .expect("Encryption should succeed");
 
     let (encrypted2, nonce2) = encryption
-        .encrypt_module(module_binary, payment_id, &module_hash)
+        .encrypt_module(module_binary, payment_id, &module_hash, TEST_MASTER_KEY)
         .expect("Encryption should succeed");
 
     // Encrypted data will be different (random nonce), but both should decrypt correctly
@@ -272,11 +311,23 @@ fn test_key_derivation_consistency() {
 
     // Both should decrypt to the same plaintext
     let decrypted1 = encryption
-        .decrypt_module(&encrypted1, &nonce1, payment_id, &module_hash)
+        .decrypt_module(
+            &encrypted1,
+            &nonce1,
+            payment_id,
+            &module_hash,
+            TEST_MASTER_KEY,
+        )
         .expect("Decryption should succeed");
 
     let decrypted2 = encryption
-        .decrypt_module(&encrypted2, &nonce2, payment_id, &module_hash)
+        .decrypt_module(
+            &encrypted2,
+            &nonce2,
+            payment_id,
+            &module_hash,
+            TEST_MASTER_KEY,
+        )
         .expect("Decryption should succeed");
 
     assert_eq!(decrypted1, module_binary);
@@ -292,11 +343,17 @@ fn test_encrypt_empty_binary() {
 
     // Should handle empty binary
     let (encrypted, nonce) = encryption
-        .encrypt_module(module_binary, payment_id, &module_hash)
+        .encrypt_module(module_binary, payment_id, &module_hash, TEST_MASTER_KEY)
         .expect("Encryption should succeed");
 
     let decrypted = encryption
-        .decrypt_module(&encrypted, &nonce, payment_id, &module_hash)
+        .decrypt_module(
+            &encrypted,
+            &nonce,
+            payment_id,
+            &module_hash,
+            TEST_MASTER_KEY,
+        )
         .expect("Decryption should succeed");
 
     assert_eq!(decrypted, module_binary);
@@ -313,11 +370,17 @@ fn test_encrypt_large_binary() {
 
     // Should handle large binary
     let (encrypted, nonce) = encryption
-        .encrypt_module(&module_binary, payment_id, &module_hash)
+        .encrypt_module(&module_binary, payment_id, &module_hash, TEST_MASTER_KEY)
         .expect("Encryption should succeed");
 
     let decrypted = encryption
-        .decrypt_module(&encrypted, &nonce, payment_id, &module_hash)
+        .decrypt_module(
+            &encrypted,
+            &nonce,
+            payment_id,
+            &module_hash,
+            TEST_MASTER_KEY,
+        )
         .expect("Decryption should succeed");
 
     assert_eq!(decrypted, module_binary);

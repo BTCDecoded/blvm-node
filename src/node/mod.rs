@@ -799,9 +799,7 @@ impl Node {
                         );
                     }
                     Err(e) => {
-                        warn!(
-                            "AssumeUTXO: {e}. Falling back to full IBD."
-                        );
+                        warn!("AssumeUTXO: {e}. Falling back to full IBD.");
                     }
                 }
             }
@@ -1456,6 +1454,10 @@ impl Node {
                     .lock()
                     .await
                     .set_disabled_modules(module_config.disabled_modules.clone());
+                module_manager
+                    .lock()
+                    .await
+                    .set_allow_unsigned_modules(module_config.allow_unsigned_modules);
                 if !module_config.enabled_modules.is_empty() {
                     module_manager
                         .lock()
@@ -1865,26 +1867,32 @@ impl Node {
                     );
                     // Same wipe path as watermark > tip, plus engine files / ckpt trees.
                     if let Some(data_dir) = self.storage.data_dir() {
+                        let confined = |path: &std::path::Path| {
+                            crate::config::path_is_strictly_within(data_dir.as_path(), path)
+                        };
                         let utxo_store_dir =
                             data_dir.join(crate::storage::database::IBD_UTXO_STORE_SUBDIR);
-                        if utxo_store_dir.exists() {
+                        if utxo_store_dir.exists() && confined(&utxo_store_dir) {
                             let _ = std::fs::remove_dir_all(&utxo_store_dir);
                         }
                         // Default engine lives under `$data_dir/ibd_engine/` — wipe the tree.
                         let engine_dir = data_dir.join("ibd_engine");
-                        if engine_dir.exists() {
+                        if engine_dir.exists() && confined(&engine_dir) {
                             let _ = std::fs::remove_dir_all(&engine_dir);
                         }
                         let engine_path =
                             crate::config::ibd::ibd_engine_path(Some(data_dir.as_path()));
-                        if engine_path.exists() {
+                        if engine_path.exists() && confined(&engine_path) {
                             let _ = std::fs::remove_file(&engine_path);
                             crate::storage::ibd_engine::remove_contiguous_length_sidecar(
                                 &engine_path,
                             );
                             let mut segs = engine_path.as_os_str().to_owned();
                             segs.push(".segs");
-                            let _ = std::fs::remove_dir_all(std::path::PathBuf::from(segs));
+                            let segs = std::path::PathBuf::from(segs);
+                            if confined(&segs) {
+                                let _ = std::fs::remove_dir_all(&segs);
+                            }
                         }
                     }
                     self.storage.clear_ibd_snapshot_trees();
@@ -1933,7 +1941,12 @@ impl Node {
                     if let Some(data_dir) = self.storage.data_dir() {
                         let utxo_store_dir =
                             data_dir.join(crate::storage::database::IBD_UTXO_STORE_SUBDIR);
-                        if utxo_store_dir.exists() {
+                        if utxo_store_dir.exists()
+                            && crate::config::path_is_strictly_within(
+                                data_dir.as_path(),
+                                &utxo_store_dir,
+                            )
+                        {
                             if let Err(e) = std::fs::remove_dir_all(&utxo_store_dir) {
                                 warn!(
                                     "[IBD_RESUME] failed to remove {}: {} — continuing anyway",

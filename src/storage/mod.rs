@@ -39,6 +39,13 @@ pub mod serialization_cache;
 pub mod txindex;
 pub mod utxo_value_codec;
 pub mod utxostore;
+#[cfg(any(
+    feature = "block-compression",
+    feature = "utxo-compression",
+    feature = "witness-compression",
+    feature = "compression"
+))]
+pub mod zstd_limit;
 
 use crate::config::PruningConfig;
 use anyhow::{Context, Result};
