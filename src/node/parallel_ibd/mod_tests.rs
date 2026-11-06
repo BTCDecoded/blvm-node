@@ -3430,6 +3430,137 @@ fn first_block_of_a_height_one_loop_past_two_hours_is_rejected() {
 }
 
 #[test]
+fn bip54_period_boundary_reads_the_parent_timestamps() {
+    use blvm_protocol::constants::SEQUENCE_FINAL;
+    use blvm_protocol::{
+        BitcoinProtocolEngine, OutPoint, ProtocolVersion, Transaction, TransactionInput,
+        TransactionOutput, UtxoSet,
+    };
+    use std::sync::Arc;
+
+    let network_time = 1_700_000_000u64;
+    let dir = tempfile::TempDir::new().unwrap();
+    let storage = crate::storage::Storage::new(dir.path()).unwrap();
+    let parent = blvm_protocol::BlockHeader {
+        version: 1,
+        prev_block_hash: [0u8; 32],
+        merkle_root: [3u8; 32],
+        timestamp: network_time - 100,
+        bits: 0x207fffff,
+        nonce: 1,
+    };
+    let parent_hash = blvm_consensus::block::block_header_hash(&parent);
+    storage
+        .blocks()
+        .store_header(&parent_hash, &parent)
+        .unwrap();
+    storage.blocks().store_height(4031, &parent_hash).unwrap();
+    let older = blvm_protocol::BlockHeader {
+        merkle_root: [4u8; 32],
+        timestamp: network_time - 200,
+        nonce: 2,
+        ..parent
+    };
+    let older_hash = blvm_consensus::block::block_header_hash(&older);
+    storage
+        .blocks()
+        .store_header(&older_hash, &older)
+        .unwrap();
+    storage.blocks().store_height(2017, &older_hash).unwrap();
+
+    let signal = blvm_protocol::BlockHeader {
+        version: 1 << 15,
+        timestamp: network_time - 100,
+        ..parent
+    };
+    let recent: Vec<Arc<blvm_protocol::BlockHeader>> =
+        (0..2016).map(|_| Arc::new(signal.clone())).collect();
+
+    let protocol = BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap();
+    let ibd = ParallelIBD::new(ParallelIBDConfig {
+        network: blvm_protocol::types::Network::Regtest,
+        ..ParallelIBDConfig::default()
+    });
+    let mut utxo = UtxoSet::default();
+    let prime = blvm_protocol::Block {
+        header: blvm_protocol::BlockHeader {
+            prev_block_hash: parent_hash,
+            merkle_root: [1u8; 32],
+            timestamp: network_time - 50,
+            nonce: 0,
+            ..parent
+        },
+        transactions: vec![Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout: OutPoint {
+                    hash: [0u8; 32],
+                    index: 0xffff_ffff,
+                },
+                script_sig: vec![1],
+                sequence: SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: 50_000,
+                script_pubkey: vec![0x51],
+            }]
+            .into(),
+            lock_time: 0,
+        }]
+        .into(),
+    };
+    let _ = ibd.validate_block_only(
+        storage.blocks().as_ref(),
+        &protocol,
+        &mut utxo,
+        None,
+        &prime,
+        None,
+        &[],
+        None,
+        2016,
+        Some(recent.as_slice()),
+        network_time,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    let block = blvm_protocol::Block {
+        header: blvm_protocol::BlockHeader {
+            prev_block_hash: parent_hash,
+            ..prime.header.clone()
+        },
+        transactions: prime.transactions.clone(),
+    };
+    let err = ibd
+        .validate_block_only(
+            storage.blocks().as_ref(),
+            &protocol,
+            &mut utxo,
+            None,
+            &block,
+            None,
+            &[],
+            None,
+            4032,
+            Some(recent.as_slice()),
+            network_time,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("BIP90"),
+        "boundary timestamps were not read: {err}"
+    );
+}
+
+#[test]
 fn block_whose_prev_is_not_the_active_parent_is_rejected() {
     use blvm_protocol::constants::SEQUENCE_FINAL;
     use blvm_protocol::genesis::regtest_genesis;

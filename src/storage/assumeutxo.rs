@@ -185,6 +185,29 @@ pub fn height_for_blockhash(network: &str, block_hash: &[u8; 32]) -> Option<u64>
         .map(|d| d.height)
 }
 
+/// Open the startup trust-anchor snapshot for `block_hash`.
+///
+/// An unknown hash is `Ok(None)`. A compiled entry with no `hash_serialized`
+/// is an error, and the snapshot file is not applied. A compiled hash is
+/// checked by `load_snapshot`.
+pub fn open_trust_anchor_snapshot(
+    data_dir: &Path,
+    network: &str,
+    block_hash: &[u8; 32],
+) -> Result<Option<(UtxoSet, SnapshotMetadata)>> {
+    let Some(data) = assumeutxo_data_for_blockhash(network, block_hash) else {
+        return Ok(None);
+    };
+    if data.hash_serialized.is_none() {
+        anyhow::bail!(
+            "assumeutxo height {} has no compiled hash",
+            data.height
+        );
+    }
+    let mut manager = AssumeUtxoManager::new(data_dir);
+    Ok(Some(manager.load_snapshot(data.height)?))
+}
+
 /// Look up full AssumeutxoData for a block hash. Returns None if not a known snapshot.
 pub fn assumeutxo_data_for_blockhash(
     network: &str,
@@ -785,5 +808,44 @@ mod tests {
             .unwrap();
 
         assert!(manager.has_snapshot(800_000));
+    }
+
+    #[test]
+    fn assumeutxo_trust_anchor_without_a_hash_is_refused() {
+        let dir = tempdir().unwrap();
+        let block_hash = [0x01u8; 32];
+        let utxo_set = create_test_utxo_set();
+        let manager = AssumeUtxoManager::new(dir.path());
+        manager
+            .create_snapshot(&utxo_set, block_hash, 100)
+            .unwrap();
+        assert!(dir.path().join("utxo_snapshot_100.dat").exists());
+
+        let anchor = open_trust_anchor_snapshot(dir.path(), "regtest", &block_hash);
+        assert!(
+            anchor.is_err(),
+            "startup must not apply utxo_snapshot_100.dat, got {anchor:?}"
+        );
+
+        let mut round_trip = AssumeUtxoManager::new(dir.path());
+        assert!(round_trip.load_snapshot(100).is_ok());
+
+        let manager = AssumeUtxoManager::new(dir.path());
+        manager
+            .create_snapshot(&utxo_set, [2u8; 32], 840_000)
+            .unwrap();
+        let mut checked = AssumeUtxoManager::new(dir.path());
+        let mismatch = checked.load_snapshot(840_000);
+        assert!(
+            mismatch.is_err(),
+            "a compiled hash must still reject a different file, got {mismatch:?}"
+        );
+
+        let manager = AssumeUtxoManager::new(dir.path());
+        manager
+            .create_snapshot(&utxo_set, [3u8; 32], 800_000)
+            .unwrap();
+        let mut written = AssumeUtxoManager::new(dir.path());
+        assert!(written.load_snapshot(800_000).is_ok());
     }
 }

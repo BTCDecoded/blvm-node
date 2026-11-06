@@ -397,7 +397,6 @@ fn test_request_timeout_config_default() {
     assert!(config.request_cleanup_interval_seconds > 0);
     assert!(config.pending_request_max_age_seconds > 0);
     assert!(config.storage_timeout_seconds > 0);
-    assert!(config.network_timeout_seconds > 0);
     assert!(config.rpc_timeout_seconds > 0);
 }
 

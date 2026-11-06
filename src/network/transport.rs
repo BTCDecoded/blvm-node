@@ -21,6 +21,25 @@ pub enum TransportAddr {
     Iroh(Vec<u8>), // Public key bytes
 }
 
+/// Identity of one connection. A TCP peer keeps its socket. An Iroh peer keeps
+/// its endpoint bytes, so two connections do not share one map entry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PeerIdentity {
+    Socket(SocketAddr),
+    #[cfg(feature = "iroh")]
+    Iroh(Vec<u8>),
+}
+
+impl std::fmt::Display for PeerIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PeerIdentity::Socket(addr) => write!(f, "{addr}"),
+            #[cfg(feature = "iroh")]
+            PeerIdentity::Iroh(endpoint) => write!(f, "iroh:{}", hex::encode(endpoint)),
+        }
+    }
+}
+
 impl TransportAddr {
     /// Create TCP transport address
     pub fn tcp(addr: SocketAddr) -> Self {

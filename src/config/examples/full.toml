@@ -40,7 +40,6 @@ protocol_version = "BitcoinV1"
 # [request_timeouts]
 # async_request_timeout_seconds = 300
 # storage_timeout_seconds = 10
-# network_timeout_seconds = 30
 # rpc_timeout_seconds = 60
 # handshake_timeout_secs = 10
 # checkpoint_request_timeout_secs = 5

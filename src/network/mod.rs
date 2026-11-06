@@ -99,7 +99,7 @@ pub enum NetworkMessage {
     #[cfg(feature = "stratum-v2")]
     StratumV2MessageReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
     // Raw message received from peer (needs processing)
-    RawMessageReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
+    RawMessageReceived(Vec<u8>, crate::network::transport::PeerIdentity), // (data, peer)
     // Headers response (for IBD)
     HeadersReceived(Vec<u8>, SocketAddr), // (data, peer_addr)
     // BIP157 Block Filter messages

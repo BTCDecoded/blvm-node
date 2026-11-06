@@ -158,17 +158,32 @@ where
 fn enqueue_raw(
     message_tx: &mpsc::UnboundedSender<NetworkMessage>,
     data: Vec<u8>,
-    peer_socket: std::net::SocketAddr,
+    peer: super::transport::PeerIdentity,
 ) {
     let len = data.len();
     if message_tx
-        .send(NetworkMessage::RawMessageReceived(data, peer_socket))
+        .send(NetworkMessage::RawMessageReceived(data, peer))
         .is_ok()
     {
         crate::network::parse_offload::note_peer_rx_enqueue();
     } else {
         crate::network::parse_offload::release_peer_rx(len);
     }
+}
+
+pub(crate) fn raw_peer_identity(addr: &super::transport::TransportAddr) -> super::transport::PeerIdentity {
+    use super::transport::{PeerIdentity, TransportAddr};
+    match addr {
+        TransportAddr::Tcp(sock) => PeerIdentity::Socket(*sock),
+        #[cfg(feature = "quinn")]
+        TransportAddr::Quinn(sock) => PeerIdentity::Socket(*sock),
+        #[cfg(feature = "iroh")]
+        TransportAddr::Iroh(endpoint) => PeerIdentity::Iroh(endpoint.clone()),
+    }
+}
+
+pub(crate) fn checksum_disconnect(addr: &super::transport::TransportAddr) -> NetworkMessage {
+    NetworkMessage::PeerDisconnected(addr.clone())
 }
 
 impl Peer {
@@ -276,15 +291,7 @@ impl Peer {
                         break;
                     }
                     Ok(data) => {
-                        let peer_addr = match &transport_addr_clone {
-                            super::transport::TransportAddr::Tcp(sock) => *sock,
-                            #[cfg(feature = "quinn")]
-                            super::transport::TransportAddr::Quinn(sock) => *sock,
-                            #[cfg(feature = "iroh")]
-                            super::transport::TransportAddr::Iroh(_) => {
-                                std::net::SocketAddr::from(([0, 0, 0, 0], 0))
-                            }
-                        };
+                        let peer = raw_peer_identity(&transport_addr_clone);
                         if data.len() < 24
                             || !crate::network::protocol::wire_header_magic_ok(&data)
                             || !crate::network::protocol::wire_checksum_ok(&data, &data[24..])
@@ -293,9 +300,7 @@ impl Peer {
                                 "Peer {:?} sent a frame that failed magic or checksum, disconnecting",
                                 transport_addr_clone
                             );
-                            let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
-                                transport_addr_clone.clone(),
-                            ));
+                            let _ = message_tx_clone.send(checksum_disconnect(&transport_addr_clone));
                             break;
                         }
                         if !reserve_raw_frame(data.len()).await {
@@ -309,7 +314,7 @@ impl Peer {
                             ));
                             break;
                         }
-                        enqueue_raw(&message_tx_clone, data, peer_addr);
+                        enqueue_raw(&message_tx_clone, data, peer);
                     }
                     Err(e) => {
                         warn!("Peer read error for {:?}: {}", transport_addr_clone, e);
@@ -486,15 +491,7 @@ impl Peer {
                 if let Some(recv) = v2_recv.as_mut() {
                     match read_v2_frame(&mut reader, recv, max_message_length).await {
                         Ok(Some(data)) => {
-                            let peer_socket = match &transport_addr_clone {
-                                TransportAddr::Tcp(sock) => *sock,
-                                #[cfg(feature = "quinn")]
-                                TransportAddr::Quinn(sock) => *sock,
-                                #[cfg(feature = "iroh")]
-                                TransportAddr::Iroh(_) => {
-                                    std::net::SocketAddr::from(([0, 0, 0, 0], 0))
-                                }
-                            };
+                            let peer = raw_peer_identity(&transport_addr_clone);
                             if !reserve_raw_frame(data.len()).await {
                                 warn!(
                                     "Peer {:?} filled the receive queue ({} bytes), disconnecting",
@@ -506,7 +503,7 @@ impl Peer {
                                 ));
                                 break;
                             }
-                            enqueue_raw(&message_tx_clone, data, peer_socket);
+                            enqueue_raw(&message_tx_clone, data, peer);
                             continue;
                         }
                         Ok(None) => continue,
@@ -592,21 +589,13 @@ impl Peer {
                         "Peer {:?} sent a bad checksum, disconnecting",
                         transport_addr_clone
                     );
-                    let _ = message_tx_clone.send(NetworkMessage::PeerDisconnected(
-                        transport_addr_clone.clone(),
-                    ));
+                    let _ = message_tx_clone.send(checksum_disconnect(&transport_addr_clone));
                     break;
                 }
                 let mut data = header.to_vec();
                 data.extend_from_slice(&payload);
 
-                let peer_socket = match &transport_addr_clone {
-                    TransportAddr::Tcp(sock) => *sock,
-                    #[cfg(feature = "quinn")]
-                    TransportAddr::Quinn(sock) => *sock,
-                    #[cfg(feature = "iroh")]
-                    TransportAddr::Iroh(_) => std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
-                };
+                let peer = raw_peer_identity(&transport_addr_clone);
                 if !reserve_raw_frame(data.len()).await {
                     warn!(
                         "Peer {:?} filled the receive queue ({} bytes), disconnecting",
@@ -618,7 +607,7 @@ impl Peer {
                     ));
                     break;
                 }
-                enqueue_raw(&message_tx_clone, data, peer_socket);
+                enqueue_raw(&message_tx_clone, data, peer);
             }
         });
 
@@ -1117,5 +1106,63 @@ mod shutdown_tests {
             .unwrap()
             .unwrap();
         assert_eq!(read, 0);
+    }
+}
+
+#[cfg(test)]
+mod iroh_identity_tests {
+    use super::{checksum_disconnect, enqueue_raw, raw_peer_identity};
+    use crate::network::network_manager::NetworkManager;
+    use crate::network::transport::{PeerIdentity, TransportAddr};
+    use crate::network::NetworkMessage;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_iroh_endpoints_are_two_peers() {
+        let a = TransportAddr::Iroh(b"endpoint-a".to_vec());
+        let b = TransportAddr::Iroh(b"endpoint-b".to_vec());
+        let sock: std::net::SocketAddr = "203.0.113.5:8333".parse().unwrap();
+        let tcp = TransportAddr::Tcp(sock);
+
+        let id_a = raw_peer_identity(&a);
+        let id_b = raw_peer_identity(&b);
+        let id_tcp = raw_peer_identity(&tcp);
+        assert_ne!(id_a, id_b);
+        assert_eq!(id_tcp, PeerIdentity::Socket(sock));
+        assert!(matches!(id_a, PeerIdentity::Iroh(ref key) if key == b"endpoint-a"));
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        enqueue_raw(&tx, vec![9], id_a.clone());
+        enqueue_raw(&tx, vec![9], id_b.clone());
+        let NetworkMessage::RawMessageReceived(_, queued_a) = rx.try_recv().unwrap() else {
+            panic!("iroh frame was not queued");
+        };
+        let NetworkMessage::RawMessageReceived(_, queued_b) = rx.try_recv().unwrap() else {
+            panic!("iroh frame was not queued");
+        };
+        assert_ne!(queued_a, queued_b);
+
+        match checksum_disconnect(&a) {
+            NetworkMessage::PeerDisconnected(got) => assert_eq!(got, a),
+            other => panic!("checksum did not disconnect the sender: {other:?}"),
+        }
+        match checksum_disconnect(&b) {
+            NetworkMessage::PeerDisconnected(got) => assert_ne!(got, a),
+            other => panic!("checksum did not disconnect the sender: {other:?}"),
+        }
+
+        let manager = NetworkManager::new("127.0.0.1:0".parse().unwrap());
+        manager.ban_identity(&id_a).await;
+        assert!(manager.identity_is_banned(&id_a).await);
+        assert!(!manager.identity_is_banned(&id_b).await);
+
+        manager
+            .remember_handshake(&id_a)
+            .await;
+        assert!(manager.handshake_known(&id_a).await);
+        assert!(!manager.handshake_known(&id_b).await);
+
+        manager.note_message_rate(&id_a).await;
+        manager.note_message_rate(&id_b).await;
+        assert_eq!(manager.identity_rate_entries(&id_a, &id_b).await, 2);
     }
 }

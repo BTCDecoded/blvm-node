@@ -3975,6 +3975,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 }
                 let utxo_for_dump = ibd_store_v2_for_validation.build_utxo_map(&keys_v2_buf);
                 ParallelIBD::dump_failed_block(
+                    parallel_ibd.config.dump_dir.as_deref(),
                     next_height,
                     block_arc.as_ref(),
                     witnesses_to_use,

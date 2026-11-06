@@ -1378,8 +1378,10 @@ impl BlockStore {
     /// Build a `headers` message payload for an incoming `getheaders` (BIP130-style chain walk).
     ///
     /// Finds the first locator hash that sits on this node's contiguous height index (main chain),
-    /// then returns up to `max_headers` headers starting at the **next** height. Empty vec means
-    /// the peer is already at our tip (or we share no indexed ancestor).
+    /// then returns up to `max_headers` headers starting at the **next** height. An empty locator
+    /// returns the header at `hash_stop` when that hash is indexed, and nothing when it is missing
+    /// or zero. Empty vec for a matched locator means the peer is already at our tip (or we share
+    /// no indexed ancestor).
     pub fn build_headers_response(
         &self,
         locator: &[Hash],
@@ -1390,33 +1392,37 @@ impl BlockStore {
             return Ok(Vec::new());
         };
 
-        let fork_h: Option<u64> = if locator.is_empty() {
-            // Empty locator: peer wants the chain from genesis.
-            Some(0)
-        } else {
-            let mut found = None;
-            for hash in locator {
-                if let Some(h) = self.get_height_by_hash(hash)? {
-                    if self.get_hash_by_height(h)? == Some(*hash) {
-                        found = Some(h);
-                        break;
-                    }
+        // An empty locator is Core's null locator: the reply is the header at
+        // hash_stop when that hash is indexed, and empty when it is missing or zero.
+        if locator.is_empty() {
+            if hash_stop.iter().all(|&b| b == 0) {
+                return Ok(Vec::new());
+            }
+            let Some(height) = self.get_height_by_hash(hash_stop)? else {
+                return Ok(Vec::new());
+            };
+            if self.get_hash_by_height(height)? != Some(*hash_stop) {
+                return Ok(Vec::new());
+            }
+            return Ok(self.get_header(hash_stop)?.into_iter().collect());
+        }
+
+        let mut fork_h = None;
+        for hash in locator {
+            if let Some(h) = self.get_height_by_hash(hash)? {
+                if self.get_hash_by_height(h)? == Some(*hash) {
+                    fork_h = Some(h);
+                    break;
                 }
             }
-            found
-        };
+        }
 
         let Some(fork) = fork_h else {
             return Ok(Vec::new());
         };
 
-        // An empty locator asks for the chain from genesis. A matched locator
-        // starts at the next header.
-        let start = if locator.is_empty() {
-            0
-        } else {
-            fork.saturating_add(1)
-        };
+        // A matched locator starts at the next header.
+        let start = fork.saturating_add(1);
         if start > tip_h {
             return Ok(Vec::new());
         }
@@ -1925,6 +1931,46 @@ mod header_height_tests {
         assert_eq!(got[0].prev_block_hash, h1);
         let none = store.build_headers_response(&[h2], &[0u8; 32], 10).unwrap();
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn empty_locator_returns_only_the_hash_stop_header() {
+        let dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        let g = [4u8; 32];
+        let h1 = [1u8; 32];
+        let h2 = [2u8; 32];
+        let mut genesis = BlockHeader::default();
+        genesis.prev_block_hash = [0u8; 32];
+        genesis.timestamp = 10;
+        let mut parent = BlockHeader::default();
+        parent.prev_block_hash = g;
+        parent.timestamp = 20;
+        let mut child = BlockHeader::default();
+        child.prev_block_hash = h1;
+        child.timestamp = 30;
+        store
+            .store_headers_batch(&[(g, genesis, 0), (h1, parent, 1), (h2, child, 2)])
+            .unwrap();
+
+        let none = store
+            .build_headers_response(&[], &[0u8; 32], 10)
+            .unwrap();
+        assert!(none.is_empty(), "zero hash_stop returns no headers");
+
+        let missing = [9u8; 32];
+        let absent = store.build_headers_response(&[], &missing, 10).unwrap();
+        assert!(absent.is_empty(), "a missing hash_stop returns no headers");
+
+        let one = store.build_headers_response(&[], &h2, 10).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].timestamp, 30);
+
+        let next = store.build_headers_response(&[h1], &[0u8; 32], 10).unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].timestamp, 30);
     }
 
     #[cfg(feature = "heed3")]

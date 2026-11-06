@@ -85,13 +85,12 @@ async fn test_timeout_config_helpers() {
     use blvm_node::utils::timeout::{
         checkpoint_timeout_from_config, handshake_timeout_from_config,
         headers_verify_timeout_from_config, lan_security_timeouts_from_config,
-        network_timeout_from_config, protocol_verify_timeout_from_config, rpc_timeout_from_config,
+        protocol_verify_timeout_from_config, rpc_timeout_from_config,
         storage_timeout_from_config,
     };
 
     let cfg = RequestTimeoutConfig {
         storage_timeout_seconds: 11,
-        network_timeout_seconds: 31,
         rpc_timeout_seconds: 61,
         handshake_timeout_secs: 12,
         checkpoint_request_timeout_secs: 6,
@@ -103,10 +102,6 @@ async fn test_timeout_config_helpers() {
     assert_eq!(
         storage_timeout_from_config(Some(&cfg)),
         Duration::from_secs(11)
-    );
-    assert_eq!(
-        network_timeout_from_config(Some(&cfg)),
-        Duration::from_secs(31)
     );
     assert_eq!(rpc_timeout_from_config(Some(&cfg)), Duration::from_secs(61));
     assert_eq!(

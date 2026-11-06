@@ -4445,29 +4445,46 @@ impl MempoolManager {
         }
     }
 
-    /// Save mempool to disk for persistence
+    /// Save mempool to disk for persistence.
+    ///
+    /// The new body is written to a temporary file in the same directory and
+    /// renamed over `path`. A failed write leaves the previous file unchanged.
     pub fn save_to_disk<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
         use blvm_protocol::block::calculate_tx_id;
         use std::fs::File;
         use std::io::Write;
 
+        let path = path.as_ref();
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let mut tmp_name = path
+            .file_name()
+            .map(|name| name.to_os_string())
+            .unwrap_or_else(|| std::ffi::OsString::from("mempool.dat"));
+        tmp_name.push(".tmp");
+        let tmp_path = parent.join(tmp_name);
+
         let transactions = self.get_transactions();
-        let mut file = File::create(path)?;
-
-        // Write transaction count
-        file.write_all(&(transactions.len() as u32).to_le_bytes())?;
-
-        // Write each transaction, including its witness stacks when present.
-        for tx in transactions {
-            let hash = calculate_tx_id(&tx);
-            let witnesses = self.get_transaction_witnesses(&hash);
-            let serialized = encode_persisted_tx(&tx, witnesses.as_deref())?;
-            file.write_all(&(serialized.len() as u32).to_le_bytes())?;
-            file.write_all(&serialized)?;
+        let write_result = (|| -> Result<()> {
+            let mut file = File::create(&tmp_path)?;
+            file.write_all(&(transactions.len() as u32).to_le_bytes())?;
+            for tx in &transactions {
+                let hash = calculate_tx_id(tx);
+                let witnesses = self.get_transaction_witnesses(&hash);
+                let serialized = encode_persisted_tx(tx, witnesses.as_deref())?;
+                file.write_all(&(serialized.len() as u32).to_le_bytes())?;
+                file.write_all(&serialized)?;
+            }
+            file.sync_all()?;
+            std::fs::rename(&tmp_path, path)?;
+            Ok(())
+        })();
+        if write_result.is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
         }
-
-        file.sync_all()?;
-        Ok(())
+        write_result
     }
 
     /// Mempool byte cap from `max_mempool_mb`. An unset policy uses the default of 300 MiB.
@@ -4551,8 +4568,13 @@ impl crate::node::miner::MempoolProvider for MempoolManager {
 }
 
 impl MempoolManager {
-    /// Load mempool from disk
+    /// Load mempool from disk.
+    ///
+    /// Every transaction is decoded before any of them is inserted. A short
+    /// read leaves the pool unchanged. An admission refusal rolls back the
+    /// transactions this load added and returns the error.
     pub fn load_from_disk<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
+        use blvm_protocol::block::calculate_tx_id;
         use std::fs::File;
         use std::io::Read;
 
@@ -4561,6 +4583,7 @@ impl MempoolManager {
         file.read_exact(&mut count_bytes)?;
         let count = u32::from_le_bytes(count_bytes) as usize;
 
+        let mut decoded = Vec::with_capacity(count);
         for _ in 0..count {
             let mut len_bytes = [0u8; 4];
             file.read_exact(&mut len_bytes)?;
@@ -4568,9 +4591,27 @@ impl MempoolManager {
 
             let mut tx_bytes = vec![0u8; len];
             file.read_exact(&mut tx_bytes)?;
+            decoded.push(decode_persisted_tx(&tx_bytes)?);
+        }
 
-            let (tx, witnesses) = decode_persisted_tx(&tx_bytes)?;
-            drop(self.add_transaction_with_witness(tx, witnesses));
+        let mut added = Vec::with_capacity(decoded.len());
+        for (tx, witnesses) in decoded {
+            let hash = calculate_tx_id(&tx);
+            match self.add_transaction_with_witness(tx, witnesses) {
+                Ok(true) => added.push(hash),
+                Ok(false) => {
+                    for hash in added.iter().rev() {
+                        self.remove_transaction(hash);
+                    }
+                    anyhow::bail!("mempool load refused a transaction");
+                }
+                Err(error) => {
+                    for hash in added.iter().rev() {
+                        self.remove_transaction(hash);
+                    }
+                    return Err(error);
+                }
+            }
         }
 
         Ok(())
@@ -4715,6 +4756,70 @@ mod tests {
 
     fn funded(script_pubkey: Vec<u8>, value: i64) -> blvm_protocol::UtxoSet {
         funded_at(script_pubkey, value, 0)
+    }
+
+    #[test]
+    fn mempool_file_is_replaced_or_loaded_as_a_whole() {
+        let mut first = legacy_empty_script();
+        first.inputs[0].prevout.hash = [1u8; 32];
+        let mut second = legacy_empty_script();
+        second.inputs[0].prevout.hash = [2u8; 32];
+
+        let source = MempoolManager::new();
+        assert!(source.add_transaction(first).unwrap());
+        assert!(source.add_transaction(second).unwrap());
+        assert_eq!(source.size(), 2);
+
+        let dir = std::env::temp_dir().join(format!("blvm-f50-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mempool.dat");
+        source.save_to_disk(&path).unwrap();
+        let intact = std::fs::read(&path).unwrap();
+        assert!(intact.len() > 1);
+
+        let mut torn = intact.clone();
+        torn.pop();
+        std::fs::write(&path, &torn).unwrap();
+        let torn_pool = MempoolManager::new();
+        let torn_load = torn_pool.load_from_disk(&path);
+        assert!(
+            torn_load.is_err(),
+            "a short mempool file must return an error, got {torn_load:?}"
+        );
+        assert_eq!(
+            torn_pool.size(),
+            0,
+            "a short mempool file must not keep a prefix"
+        );
+
+        std::fs::write(&path, &intact).unwrap();
+        let refused = MempoolManager::new();
+        refused.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(
+            blvm_protocol::UtxoSet::default(),
+        )));
+        let refused_load = refused.load_from_disk(&path);
+        assert!(
+            refused_load.is_err(),
+            "a file the wired UTXO set refuses must return an error, got {refused_load:?}"
+        );
+        assert_eq!(refused.size(), 0);
+
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&dir, perms).unwrap();
+        let save = MempoolManager::new().save_to_disk(&path);
+        let after = std::fs::read(&path).unwrap_or_default();
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&dir, perms).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            save.is_err(),
+            "a save that cannot replace the file must fail, bytes={}",
+            after.len()
+        );
+        assert_eq!(after, intact, "a failed save must leave the previous dump");
     }
 
     /// P2SH of `OP_1`, spent by a direct push of that redeem. Standard under default policy.
@@ -9658,6 +9763,24 @@ mod tests {
         assert!(!mempool.add_transaction(unspendable).unwrap());
         assert!(mempool.add_transaction(valid).unwrap());
         assert_eq!(mempool.size(), 1);
+    }
+
+    #[test]
+    fn package_is_refused_while_the_utxo_lock_is_held() {
+        use std::sync::Arc;
+
+        let utxo_arc = Arc::new(tokio::sync::Mutex::new(blvm_protocol::UtxoSet::default()));
+        let mempool = MempoolManager::new();
+        mempool.set_utxo_set_arc(Arc::clone(&utxo_arc));
+        let first = legacy_empty_script();
+        let mut second = legacy_empty_script();
+        second.inputs[0].prevout.hash = [2u8; 32];
+        let _held = utxo_arc.blocking_lock();
+        let flags = mempool
+            .add_package_with_witnesses(vec![(first, None), (second, None)])
+            .unwrap();
+        assert_eq!(flags, vec![false, false]);
+        drop(_held);
     }
 
     #[test]

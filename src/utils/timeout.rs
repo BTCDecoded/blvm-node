@@ -86,16 +86,6 @@ pub fn storage_timeout_from_config(
         .unwrap_or(DEFAULT_STORAGE_TIMEOUT)
 }
 
-/// Network timeout duration from config, or default when config is None.
-#[inline]
-pub fn network_timeout_from_config(
-    config: Option<&crate::config::RequestTimeoutConfig>,
-) -> Duration {
-    config
-        .map(|c| Duration::from_secs(c.network_timeout_seconds))
-        .unwrap_or(DEFAULT_NETWORK_TIMEOUT)
-}
-
 /// RPC timeout duration from config, or default when config is None.
 #[inline]
 pub fn rpc_timeout_from_config(config: Option<&crate::config::RequestTimeoutConfig>) -> Duration {
@@ -153,4 +143,45 @@ pub fn lan_security_timeouts_from_config(
     let proto = protocol_verify_timeout_from_config(config);
     let headers = headers_verify_timeout_from_config(config);
     (proto, headers)
+}
+
+#[cfg(test)]
+mod network_timeout_field_tests {
+    use std::path::Path;
+
+    fn needle() -> String {
+        format!("{}{}", "network_timeout_", "seconds")
+    }
+
+    fn walk(dir: &Path, hits: &mut Vec<String>) {
+        let entries = std::fs::read_dir(dir).unwrap();
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, hits);
+            } else if let Ok(text) = std::fs::read_to_string(&path) {
+                if text.contains(&needle()) {
+                    hits.push(path.display().to_string());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn network_timeout_field_is_not_in_src() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut hits = Vec::new();
+        walk(&src, &mut hits);
+        assert!(hits.is_empty(), "src still names the removed field: {hits:?}");
+
+        let config = std::fs::read_to_string(src.join("config/mod.rs")).unwrap();
+        assert!(config.contains("connect_timeout_secs"));
+        assert!(config.contains("handshake_timeout_secs"));
+        assert!(config.contains("async_request_timeout_seconds"));
+        assert!(config.contains("rpc_timeout_seconds"));
+        let timeouts = std::fs::read_to_string(src.join("utils/timeout.rs")).unwrap();
+        assert!(timeouts.contains("fn rpc_timeout_from_config"));
+        assert!(timeouts.contains("pub async fn with_network_timeout"));
+        assert!(timeouts.contains("DEFAULT_NETWORK_TIMEOUT: Duration = Duration::from_secs(30)"));
+    }
 }

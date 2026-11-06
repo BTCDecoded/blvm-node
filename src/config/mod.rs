@@ -480,10 +480,6 @@ pub struct RequestTimeoutConfig {
     #[serde(default = "default_storage_timeout")]
     pub storage_timeout_seconds: u64,
 
-    /// Timeout for network operations (seconds)
-    #[serde(default = "default_network_timeout")]
-    pub network_timeout_seconds: u64,
-
     /// Timeout for RPC operations (seconds)
     #[serde(default = "default_rpc_timeout")]
     pub rpc_timeout_seconds: u64,
@@ -529,10 +525,6 @@ fn default_storage_timeout() -> u64 {
     10 // 10 seconds
 }
 
-fn default_network_timeout() -> u64 {
-    30 // 30 seconds
-}
-
 fn default_rpc_timeout() -> u64 {
     60 // 60 seconds
 }
@@ -565,7 +557,6 @@ impl Default for RequestTimeoutConfig {
             request_cleanup_interval_seconds: 60,
             pending_request_max_age_seconds: 300,
             storage_timeout_seconds: 10,
-            network_timeout_seconds: 30,
             rpc_timeout_seconds: 60,
             handshake_timeout_secs: 10,
             connect_timeout_secs: 10,

@@ -62,10 +62,11 @@ pub(crate) async fn handle_network_message(
         NetworkMessage::PeerDisconnected(addr) => {
             handle_peer_disconnected(nm, addr).await;
         }
-        NetworkMessage::RawMessageReceived(data, peer_addr) => {
+        NetworkMessage::RawMessageReceived(data, peer) => {
+            let peer_label = peer.clone();
             ignore_error(
-                || nm.handle_incoming_wire_tcp(peer_addr, data),
-                &format!("Error processing raw message from {peer_addr}"),
+                || nm.handle_incoming_identity(peer, data),
+                &format!("Error processing raw message from {peer_label}"),
             )
             .await;
         }
@@ -624,7 +625,13 @@ mod tests {
     async fn raw_message_received_invalid_wire_is_noop() {
         let nm = manager();
         let addr: SocketAddr = "127.0.0.1:18339".parse().unwrap();
-        handle_network_message(&nm, NetworkMessage::RawMessageReceived(vec![0xff], addr))
+        handle_network_message(
+            &nm,
+            NetworkMessage::RawMessageReceived(
+                vec![0xff],
+                crate::network::transport::PeerIdentity::Socket(addr),
+            ),
+        )
             .await
             .unwrap();
     }

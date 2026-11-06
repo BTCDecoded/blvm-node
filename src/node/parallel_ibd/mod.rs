@@ -9149,15 +9149,10 @@ impl ParallelIBD {
                                 );
                                 drop(standalone_tree);
                                 drop(standalone_db);
-                                if let Err(e) = std::fs::remove_dir_all(&utxo_store_dir) {
-                                    warn!(
-                                        "[IBD_UTXO_STORE] failed to remove stale standalone dir \
-                                         {}: {} — continuing with potentially stale data",
-                                        utxo_store_dir.display(),
-                                        e
-                                    );
-                                }
-                                // Re-open fresh (falls through to Case 3 below).
+                                reopen_after_stale_wipe(
+                                    || std::fs::remove_dir_all(&utxo_store_dir),
+                                    || Ok(()),
+                                )?;
                                 match crate::storage::database::create_ibd_utxo_standalone_db(
                                     &utxo_store_dir,
                                 ) {
@@ -9198,7 +9193,7 @@ impl ParallelIBD {
                                 // Check if main storage has UTXO data (legacy partial IBD).
                                 let main_tree =
                                     storage.open_tree("ibd_utxos").context("open ibd_utxos")?;
-                                let main_non_empty = !main_tree.is_empty().unwrap_or(true);
+                                let main_non_empty = main_utxo_tree_non_empty(main_tree.is_empty())?;
                                 if main_non_empty {
                                     // Case 2: legacy data in main storage — keep using it.
                                     // Migrating mid-IBD would require copying millions of entries.
@@ -10318,21 +10313,20 @@ impl ParallelIBD {
     }
 
     /// When block validation fails, dump block, witnesses, and UTXO set to disk so a test case can be built.
-    /// Directory: $BLVM_IBD_DUMP_DIR/height_{height}/. No-op when the env is unset (no /tmp default).
+    /// `dump_dir` is `ParallelIBDConfig.dump_dir` (the environment wins when that field is built).
+    /// Directory: `{dump_dir}/height_{height}/`. No-op when the directory is unset.
     /// Files: block.bin, witnesses.bin, utxo_set.bin, info.txt (height, error reason).
     pub(crate) fn dump_failed_block(
+        dump_dir: Option<&str>,
         height: u64,
         block: &Block,
         witnesses: &[Vec<Witness>],
         utxo_set: &UtxoSet,
         err: &anyhow::Error,
     ) {
-        let Ok(base) = std::env::var("BLVM_IBD_DUMP_DIR") else {
+        let Some(base) = dump_dir.map(str::trim).filter(|base| !base.is_empty()) else {
             return;
         };
-        if base.trim().is_empty() {
-            return;
-        }
         let dir = std::path::Path::new(&base).join(format!("height_{height}"));
         if let Err(e) = std::fs::create_dir_all(&dir) {
             error!("Failed to create dump dir {}: {}", dir.display(), e);
@@ -11042,6 +11036,46 @@ impl ParallelIBD {
 #[path = "mod_tests.rs"]
 mod tests;
 
+fn reopen_after_stale_wipe<T>(
+    wipe: impl FnOnce() -> std::io::Result<()>,
+    open_fresh: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    wipe().context("failed to remove stale standalone dir")?;
+    open_fresh()
+}
+
+fn main_utxo_tree_non_empty(is_empty: Result<bool>) -> Result<bool> {
+    Ok(!is_empty?)
+}
+
+#[cfg(test)]
+mod utxo_reset_tests {
+    use super::{main_utxo_tree_non_empty, reopen_after_stale_wipe};
+
+    #[test]
+    fn failed_utxo_reset_is_not_a_fresh_store() {
+        let mut opened = false;
+        let wiped = reopen_after_stale_wipe(
+            || Err(std::io::Error::other("busy")),
+            || {
+                opened = true;
+                Ok("fresh after stale-wipe")
+            },
+        );
+        assert!(
+            wiped.is_err(),
+            "a failed wipe must not open a fresh store, got {wiped:?}"
+        );
+        assert!(!opened, "a failed wipe must not open a fresh store");
+
+        let probed = main_utxo_tree_non_empty(Err(anyhow::anyhow!("probe failed")));
+        assert!(
+            probed.is_err(),
+            "an is_empty error must not take the empty-tree branch, got {probed:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod roster_target_tests {
     use super::roster_target_from_raw;
@@ -11051,5 +11085,50 @@ mod roster_target_tests {
         assert_eq!(roster_target_from_raw(None), Some(96));
         assert_eq!(roster_target_from_raw(Some("0")), None);
         assert_eq!(roster_target_from_raw(Some("150")), Some(100));
+    }
+}
+
+#[cfg(test)]
+mod dump_dir_tests {
+    use super::{ParallelIBD, ParallelIBDConfig};
+
+    #[test]
+    fn config_dump_dir_receives_the_failed_block() {
+        let previous = std::env::var("BLVM_IBD_DUMP_DIR").ok();
+        unsafe {
+            std::env::remove_var("BLVM_IBD_DUMP_DIR");
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "blvm-f56-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = ParallelIBDConfig::default();
+        config.dump_dir = Some(dir.to_string_lossy().into_owned());
+        let block = blvm_protocol::Block {
+            header: blvm_protocol::BlockHeader::default(),
+            transactions: Vec::new().into(),
+        };
+        let err = anyhow::anyhow!("bad");
+        ParallelIBD::dump_failed_block(
+            config.dump_dir.as_deref(),
+            41,
+            &block,
+            &[],
+            &blvm_protocol::UtxoSet::default(),
+            &err,
+        );
+        assert!(
+            dir.join("height_41").is_dir(),
+            "config dump_dir did not receive height_41"
+        );
+        match previous {
+            Some(value) => unsafe { std::env::set_var("BLVM_IBD_DUMP_DIR", value) },
+            None => unsafe { std::env::remove_var("BLVM_IBD_DUMP_DIR") },
+        }
     }
 }

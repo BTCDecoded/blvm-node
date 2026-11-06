@@ -23,6 +23,68 @@ use std::time::SystemTime;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::{debug, error, info, warn};
 
+fn process_ban_path(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("banlist.dat")
+}
+
+/// Read the process-local ban file. A missing file is an empty map.
+/// Every stored key is `SocketAddr::new(ip, 0)`.
+fn load_process_bans(dir: &std::path::Path) -> HashMap<SocketAddr, u64> {
+    let Ok(bytes) = std::fs::read(process_ban_path(dir)) else {
+        return HashMap::new();
+    };
+    if bytes.len() < 4 {
+        return HashMap::new();
+    }
+    let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let mut offset = 4;
+    let mut bans = HashMap::new();
+    for _ in 0..count {
+        if offset >= bytes.len() {
+            break;
+        }
+        let family = bytes[offset];
+        offset += 1;
+        let ip = if family == 4 && offset + 4 <= bytes.len() {
+            let octets: [u8; 4] = bytes[offset..offset + 4].try_into().unwrap();
+            offset += 4;
+            IpAddr::V4(octets.into())
+        } else if family == 6 && offset + 16 <= bytes.len() {
+            let octets: [u8; 16] = bytes[offset..offset + 16].try_into().unwrap();
+            offset += 16;
+            IpAddr::V6(octets.into())
+        } else {
+            break;
+        };
+        if offset + 8 > bytes.len() {
+            break;
+        }
+        let until = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+        offset += 8;
+        bans.insert(SocketAddr::new(ip, 0), until);
+    }
+    bans
+}
+
+fn write_process_bans(dir: &std::path::Path, bans: &HashMap<SocketAddr, u64>) {
+    let mut bytes = Vec::with_capacity(4 + bans.len() * 16);
+    bytes.extend_from_slice(&(bans.len() as u32).to_le_bytes());
+    for (addr, until) in bans {
+        match addr.ip() {
+            IpAddr::V4(ip) => {
+                bytes.push(4);
+                bytes.extend_from_slice(&ip.octets());
+            }
+            IpAddr::V6(ip) => {
+                bytes.push(6);
+                bytes.extend_from_slice(&ip.octets());
+            }
+        }
+        bytes.extend_from_slice(&until.to_le_bytes());
+    }
+    let _ = std::fs::write(process_ban_path(dir), bytes);
+}
+
 fn outbound_pick_tried() -> bool {
     SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -173,10 +235,18 @@ pub struct NetworkManager {
     /// Ban list (banned peers with unban timestamp)
     /// Read-heavy: many reads to check if peer is banned, fewer writes when banning/unbanning
     ban_list: Arc<RwLock<HashMap<SocketAddr, u64>>>, // addr -> unban timestamp
+    /// Directory of the process-local ban file. Absent keeps the map in memory.
+    ban_store_dir: Option<std::path::PathBuf>,
     /// Per-IP connection count (to prevent Sybil attacks)
     connections_per_ip: Arc<Mutex<HashMap<std::net::IpAddr, usize>>>,
     /// Per-peer message rate limiting (token bucket)
     peer_message_rates: Arc<Mutex<HashMap<SocketAddr, PeerRateLimiter>>>,
+    /// Iroh handshake state, keyed by endpoint bytes.
+    iroh_peer_states: Arc<Mutex<HashMap<Vec<u8>, blvm_protocol::network::PeerState>>>,
+    /// Iroh bans, keyed by endpoint bytes. TCP bans stay on `ban_list`.
+    iroh_bans: Arc<RwLock<HashMap<Vec<u8>, u64>>>,
+    /// Iroh message-rate entries, keyed by endpoint bytes.
+    iroh_message_rates: Arc<Mutex<HashMap<Vec<u8>, PeerRateLimiter>>>,
     /// Per-peer transaction rate limiting (separate from message rate limiting)
     peer_tx_rate_limiters: Arc<Mutex<HashMap<SocketAddr, PeerRateLimiter>>>,
     /// Per-peer transaction byte rate limiting (bytes per second)
@@ -507,6 +577,13 @@ impl NetworkManager {
                 .map(|limits| (limits.default_burst, limits.default_rate))
         });
         let serve_compact_filters = config.map(|c| c.serve_compact_filters).unwrap_or(false);
+        let ban_store_dir = config
+            .and_then(|c| c.storage.as_ref())
+            .map(|storage| std::path::PathBuf::from(&storage.data_dir));
+        let loaded_bans = ban_store_dir
+            .as_ref()
+            .map(|dir| load_process_bans(dir))
+            .unwrap_or_default();
         let headers_probe_timeout_secs = config
             .and_then(|c| c.ibd.as_ref())
             .map(|ibd| ibd.headers_timeout_secs)
@@ -546,9 +623,13 @@ impl NetworkManager {
             peer_states: Arc::new(RwLock::new(HashMap::new())),
             persistent_peers: Arc::new(Mutex::new(HashSet::new())),
             network_active: Arc::new(Mutex::new(true)),
-            ban_list: Arc::new(RwLock::new(HashMap::new())),
+            ban_list: Arc::new(RwLock::new(loaded_bans)),
+            ban_store_dir,
             connections_per_ip: Arc::new(Mutex::new(HashMap::new())),
             peer_message_rates: Arc::new(Mutex::new(HashMap::new())),
+            iroh_peer_states: Arc::new(Mutex::new(HashMap::new())),
+            iroh_bans: Arc::new(RwLock::new(HashMap::new())),
+            iroh_message_rates: Arc::new(Mutex::new(HashMap::new())),
             peer_tx_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             peer_tx_byte_rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             mempool_policy_config: config
@@ -788,7 +869,9 @@ impl NetworkManager {
                 let ban_until = current_timestamp() + 24 * 60 * 60;
                 let mut ban_list = self.ban_list.write().await;
                 ban_list.insert(SocketAddr::new(peer_addr.ip(), 0), ban_until);
+                let snapshot = ban_list.clone();
                 drop(ban_list);
+                self.persist_process_bans(&snapshot);
             } else if ban_for_violation {
                 warn!(
                     "Disconnecting local/onion peer {} for {} (not banning)",
@@ -2241,6 +2324,13 @@ impl NetworkManager {
         }
     }
 
+    pub(crate) fn pending_block_queue_len(&self) -> usize {
+        self.pending_blocks
+            .lock()
+            .map(|blocks| blocks.len())
+            .unwrap_or(0)
+    }
+
     /// Process all pending network messages without blocking
     /// Returns the number of messages processed
     pub async fn process_pending_messages(&self) -> Result<usize> {
@@ -2440,10 +2530,10 @@ impl NetworkManager {
                     });
                 }
             }
-            NetworkMessage::RawMessageReceived(data, peer_addr) => {
+            NetworkMessage::RawMessageReceived(data, peer) => {
                 // Process raw message - this will handle Version messages and send VerAck
-                if let Err(e) = self.handle_incoming_wire_tcp(peer_addr, data).await {
-                    debug!("Error processing raw message from {}: {}", peer_addr, e);
+                if let Err(e) = self.handle_incoming_identity(peer.clone(), data).await {
+                    debug!("Error processing raw message from {}: {}", peer, e);
                 }
             }
             _ => {
@@ -2917,6 +3007,13 @@ impl NetworkManager {
         })
     }
 
+    fn persist_process_bans(&self, bans: &HashMap<SocketAddr, u64>) {
+        let Some(dir) = &self.ban_store_dir else {
+            return;
+        };
+        write_process_bans(dir, bans);
+    }
+
     /// Ban a peer (with optional unban timestamp, 0 = permanent)
     pub fn ban_peer(&self, addr: SocketAddr, unban_timestamp: u64) {
         // Use block_in_place to avoid blocking async runtime
@@ -2930,7 +3027,9 @@ impl NetworkManager {
                 } else {
                     ban_list.insert(key, unban_timestamp);
                 }
+                let snapshot = ban_list.clone();
                 drop(ban_list);
+                self.persist_process_bans(&snapshot);
 
                 // Publish PeerBanned event for module subscribers
                 let ban_duration_secs = if unban_timestamp == 0 || unban_timestamp == u64::MAX {
@@ -3105,6 +3204,107 @@ impl NetworkManager {
                 false
             })
         })
+    }
+
+    /// Ban one Iroh endpoint. A second endpoint is a different key.
+    pub async fn ban_identity(&self, id: &super::transport::PeerIdentity) {
+        let super::transport::PeerIdentity::Iroh(endpoint) = id else {
+            return;
+        };
+        self.iroh_bans
+            .write()
+            .await
+            .insert(endpoint.clone(), u64::MAX);
+    }
+
+    /// Whether this Iroh endpoint is banned. TCP bans stay on `is_banned`.
+    pub async fn identity_is_banned(&self, id: &super::transport::PeerIdentity) -> bool {
+        let super::transport::PeerIdentity::Iroh(endpoint) = id else {
+            return false;
+        };
+        self.iroh_bans.read().await.contains_key(endpoint)
+    }
+
+    /// Record a handshake entry for this Iroh connection alone.
+    pub async fn remember_handshake(&self, id: &super::transport::PeerIdentity) {
+        let super::transport::PeerIdentity::Iroh(endpoint) = id else {
+            return;
+        };
+        self.iroh_peer_states
+            .lock()
+            .await
+            .entry(endpoint.clone())
+            .or_insert_with(blvm_protocol::network::PeerState::new);
+    }
+
+    pub async fn handshake_known(&self, id: &super::transport::PeerIdentity) -> bool {
+        let super::transport::PeerIdentity::Iroh(endpoint) = id else {
+            return false;
+        };
+        self.iroh_peer_states.lock().await.contains_key(endpoint)
+    }
+
+    /// One rate-limit entry per Iroh endpoint.
+    pub async fn note_message_rate(&self, id: &super::transport::PeerIdentity) {
+        let super::transport::PeerIdentity::Iroh(endpoint) = id else {
+            return;
+        };
+        self.iroh_message_rates
+            .lock()
+            .await
+            .entry(endpoint.clone())
+            .or_insert_with(|| PeerRateLimiter::new(1, 1));
+    }
+
+    pub async fn identity_rate_entries(
+        &self,
+        left: &super::transport::PeerIdentity,
+        right: &super::transport::PeerIdentity,
+    ) -> usize {
+        let rates = self.iroh_message_rates.lock().await;
+        [left, right]
+            .into_iter()
+            .filter(|id| match id {
+                super::transport::PeerIdentity::Iroh(endpoint) => rates.contains_key(endpoint),
+                super::transport::PeerIdentity::Socket(_) => false,
+            })
+            .count()
+    }
+
+    /// A socket used only to keep an Iroh frame on the existing TCP parse path.
+    /// It is not `0.0.0.0:0`, and it is not the handshake, ban, or rate key.
+    fn iroh_dispatch_socket(endpoint: &[u8]) -> SocketAddr {
+        let mut ip = [240, 0, 0, 1];
+        for (i, byte) in endpoint.iter().enumerate() {
+            ip[1 + (i % 3)] ^= *byte;
+        }
+        let port = u16::from(endpoint.first().copied().unwrap_or(1)).saturating_add(1);
+        SocketAddr::from((ip, port))
+    }
+
+    /// Ban, rate-limit, and handshake lookups for a queued frame.
+    /// An Iroh frame keeps its endpoint. A TCP frame keeps its socket.
+    pub(crate) async fn handle_incoming_identity(
+        &self,
+        peer: super::transport::PeerIdentity,
+        data: Vec<u8>,
+    ) -> Result<()> {
+        match peer {
+            super::transport::PeerIdentity::Socket(addr) => {
+                self.handle_incoming_wire_tcp(addr, data).await
+            }
+            #[cfg(feature = "iroh")]
+            super::transport::PeerIdentity::Iroh(endpoint) => {
+                let id = super::transport::PeerIdentity::Iroh(endpoint.clone());
+                if self.identity_is_banned(&id).await {
+                    return Ok(());
+                }
+                self.note_message_rate(&id).await;
+                self.remember_handshake(&id).await;
+                let addr = Self::iroh_dispatch_socket(&endpoint);
+                self.handle_incoming_wire_tcp(addr, data).await
+            }
+        }
     }
 
     /// Track bytes sent (async-safe)
@@ -3814,5 +4014,76 @@ mod block_fetch_timeout_tests {
         assert!(NetworkManager::disconnect_on_unrecognized_command(
             &bad_checksum
         ));
+    }
+}
+
+#[cfg(test)]
+mod ban_reload_tests {
+    use super::NetworkManager;
+    use crate::config::{NodeConfig, StorageConfig};
+    use std::net::SocketAddr;
+
+    fn manager(dir: &std::path::Path) -> NetworkManager {
+        let mut config = NodeConfig::default();
+        let mut storage = StorageConfig::default();
+        storage.data_dir = dir.to_string_lossy().into_owned();
+        config.storage = Some(storage);
+        NetworkManager::with_config(
+            "127.0.0.1:0".parse().unwrap(),
+            8,
+            crate::network::transport::TransportPreference::TCP_ONLY,
+            Some(&config),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_ban_is_present_after_a_new_manager_loads_the_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "blvm-f53-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let fresh = manager(&dir);
+        assert!(
+            fresh.get_banned_peers().is_empty(),
+            "a missing ban file starts empty"
+        );
+
+        let setban: SocketAddr = "203.0.113.9:8333".parse().unwrap();
+        let until = 1_900_000_000u64;
+        fresh.ban_peer(setban, until);
+
+        let loaded = manager(&dir);
+        let key = SocketAddr::new(setban.ip(), 0);
+        let banned = loaded.get_banned_peers();
+        assert!(
+            banned.iter().any(|(addr, ts)| *addr == key && *ts == until),
+            "setban was not reloaded: {banned:?}"
+        );
+
+        let violation_dir = dir.join("violation");
+        std::fs::create_dir_all(&violation_dir).unwrap();
+        let violator: SocketAddr = "198.51.100.8:8333".parse().unwrap();
+        let before = crate::utils::current_timestamp();
+        let first = manager(&violation_dir);
+        let _ = first
+            .disconnect_for_protocol_violation(violator, "bad-message", true)
+            .await;
+        let after = crate::utils::current_timestamp();
+        let vkey = SocketAddr::new(violator.ip(), 0);
+        let found = manager(&violation_dir)
+            .get_banned_peers()
+            .into_iter()
+            .find(|(addr, _)| *addr == vkey);
+        let Some((_, ts)) = found else {
+            panic!("protocol-violation ban was not reloaded");
+        };
+        let day = 24 * 60 * 60;
+        assert!(ts >= before + day && ts <= after + day);
     }
 }

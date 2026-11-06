@@ -745,17 +745,16 @@ impl Node {
         if current_height == 0 {
             if let Some(block_hash) = self.config_sub(|c| c.assumeutxo_blockhash.as_ref()) {
                 use crate::storage::assumeutxo::{
-                    AssumeUtxoManager, height_for_blockhash, write_base_blockhash_marker,
+                    open_trust_anchor_snapshot, write_base_blockhash_marker,
                 };
                 let network = self
                     .config
                     .as_ref()
                     .and_then(|c| c.protocol_version.as_deref())
                     .unwrap_or("regtest");
-                if let Some(snapshot_height) = height_for_blockhash(network, block_hash) {
-                    let data_dir = std::path::Path::new(&self.data_dir);
-                    let mut manager = AssumeUtxoManager::new(data_dir);
-                    if let Ok((utxo_set, metadata)) = manager.load_snapshot(snapshot_height) {
+                let data_dir = std::path::Path::new(&self.data_dir);
+                match open_trust_anchor_snapshot(data_dir, network, block_hash) {
+                    Ok(Some((utxo_set, metadata))) => {
                         if let Err(e) = self
                             .storage
                             .load_assumeutxo_snapshot(&utxo_set, &metadata, None)
@@ -780,16 +779,17 @@ impl Node {
                                 current_height
                             );
                         }
-                    } else {
+                    }
+                    Ok(None) => {
                         warn!(
-                            "AssumeUTXO: snapshot file not found for height {}. Falling back to full IBD.",
-                            snapshot_height
+                            "AssumeUTXO: block hash not in chainparams. Add to MAINNET_ASSUMEUTXO_DATA or REGTEST_ASSUMEUTXO_DATA. Falling back to full IBD."
                         );
                     }
-                } else {
-                    warn!(
-                        "AssumeUTXO: block hash not in chainparams. Add to MAINNET_ASSUMEUTXO_DATA or REGTEST_ASSUMEUTXO_DATA. Falling back to full IBD."
-                    );
+                    Err(e) => {
+                        warn!(
+                            "AssumeUTXO: {e}. Falling back to full IBD."
+                        );
+                    }
                 }
             }
         }

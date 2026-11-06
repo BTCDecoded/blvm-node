@@ -158,6 +158,16 @@ impl NetworkManager {
             return Ok(());
         };
         let payload_bytes = payload.len();
+        const UNSOLICITED_BLOCK_QUEUE_CAP: usize = 16;
+        if self.pending_block_queue_len() >= UNSOLICITED_BLOCK_QUEUE_CAP {
+            debug!(
+                "Dropping unsolicited block from {} (hash {}): {} already queued",
+                peer_addr,
+                hex::encode(block_hash),
+                UNSOLICITED_BLOCK_QUEUE_CAP
+            );
+            return Ok(());
+        }
         self.queue_block(payload);
         if let Ok(mut inv) = self.inventory().lock() {
             inv.mark_fulfilled(&block_hash);
@@ -1570,6 +1580,139 @@ mod plan_wire_locks {
             .await
             .unwrap();
         assert!(node.manager.try_recv_block().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unsolicited_blocks_stop_at_the_in_flight_window() {
+        use crate::network::protocol::BlockMessage;
+        use blvm_protocol::Block;
+
+        let node = wired().await;
+        for nonce in 0..17u64 {
+            let block = Block {
+                header: BlockHeader {
+                    version: 1,
+                    prev_block_hash: [0u8; 32],
+                    merkle_root: [5u8; 32],
+                    timestamp: 1_700_000_011,
+                    bits: 0x207fffff,
+                    nonce,
+                },
+                transactions: vec![spend(
+                    blvm_protocol::OutPoint {
+                        hash: [8u8; 32],
+                        index: nonce as u32,
+                    },
+                    1000,
+                )]
+                .into(),
+            };
+            let mut frame = vec![0u8; 28];
+            frame[16..20].copy_from_slice(&4u32.to_le_bytes());
+            node.manager
+                .handle_block_wire_message(
+                    node.peer,
+                    BlockMessage {
+                        block,
+                        witnesses: Vec::new(),
+                    },
+                    frame,
+                )
+                .await
+                .unwrap();
+        }
+        let mut queued = Vec::new();
+        while let Some(block) = node.manager.try_recv_block() {
+            queued.push(block);
+        }
+        assert_eq!(
+            queued.len(),
+            16,
+            "17 unsolicited blocks must leave 16 queued"
+        );
+
+        node.manager.queue_block(b"compact-completion".to_vec());
+        assert_eq!(
+            node.manager.try_recv_block().as_deref(),
+            Some(b"compact-completion".as_slice()),
+            "a direct queue_block must still append"
+        );
+
+        let requested = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [1u8; 32],
+                merkle_root: [9u8; 32],
+                timestamp: 1_700_000_099,
+                bits: 0x207fffff,
+                nonce: 99,
+            },
+            transactions: vec![spend(
+                blvm_protocol::OutPoint {
+                    hash: [4u8; 32],
+                    index: 0,
+                },
+                1000,
+            )]
+            .into(),
+        };
+        let hash = block_hash_from_header(&requested.header);
+        let mut waiting = node.manager.register_block_request(node.peer, hash);
+        for nonce in 0..16u64 {
+            let block = Block {
+                header: BlockHeader {
+                    version: 1,
+                    prev_block_hash: [2u8; 32],
+                    merkle_root: [6u8; 32],
+                    timestamp: 1_700_000_200,
+                    bits: 0x207fffff,
+                    nonce,
+                },
+                transactions: vec![spend(
+                    blvm_protocol::OutPoint {
+                        hash: [7u8; 32],
+                        index: nonce as u32,
+                    },
+                    1000,
+                )]
+                .into(),
+            };
+            let mut frame = vec![0u8; 28];
+            frame[16..20].copy_from_slice(&4u32.to_le_bytes());
+            node.manager
+                .handle_block_wire_message(
+                    node.peer,
+                    BlockMessage {
+                        block,
+                        witnesses: Vec::new(),
+                    },
+                    frame,
+                )
+                .await
+                .unwrap();
+        }
+        let mut frame = vec![0u8; 28];
+        frame[16..20].copy_from_slice(&4u32.to_le_bytes());
+        node.manager
+            .handle_block_wire_message(
+                node.peer,
+                BlockMessage {
+                    block: requested,
+                    witnesses: Vec::new(),
+                },
+                frame,
+            )
+            .await
+            .unwrap();
+        assert!(
+            waiting.try_recv().is_ok(),
+            "a requested block must not be dropped when the unsolicited queue is full"
+        );
+        let mut still_queued = 0;
+        while node.manager.try_recv_block().is_some() {
+            still_queued += 1;
+        }
+        assert_eq!(still_queued, 16);
     }
 
     fn spend(prevout: OutPoint, value: i64) -> Transaction {
