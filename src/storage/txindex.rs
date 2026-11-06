@@ -254,11 +254,23 @@ impl TxIndex {
         let metadata_data = bincode::serialize(&metadata)?;
         let block_key = self.block_tx_key(block_hash, tx_index);
 
-        self.tx_by_hash.insert(tx_hash.as_slice(), &tx_data)?;
-        self.tx_metadata
-            .insert(tx_hash.as_slice(), &metadata_data)?;
-        self.tx_by_block.insert(&block_key, tx_hash.as_slice())?;
-        Ok(())
+        crate::storage::database::commit_keyed(&[
+            (
+                self.tx_by_hash.as_ref(),
+                tx_hash.as_slice(),
+                Some(tx_data.as_slice()),
+            ),
+            (
+                self.tx_metadata.as_ref(),
+                tx_hash.as_slice(),
+                Some(metadata_data.as_slice()),
+            ),
+            (
+                self.tx_by_block.as_ref(),
+                block_key.as_slice(),
+                Some(tx_hash.as_slice()),
+            ),
+        ])
     }
 
     fn index_transaction_advanced(
@@ -835,22 +847,7 @@ impl TxIndex {
     }
 
     fn calculate_tx_size(&self, tx: &Transaction) -> u32 {
-        let mut size = 4;
-        size += 1;
-        for input in &tx.inputs {
-            size += 32;
-            size += 1;
-            size += input.script_sig.len() as u32;
-            size += 4;
-        }
-        size += 1;
-        for output in &tx.outputs {
-            size += 8;
-            size += 1;
-            size += output.script_pubkey.len() as u32;
-        }
-        size += 4;
-        size
+        blvm_protocol::serialization::serialize_transaction(tx).len() as u32
     }
 
     fn calculate_tx_weight(&self, tx: &Transaction) -> u32 {

@@ -524,19 +524,28 @@ impl BlockStore {
         #[cfg(not(feature = "block-compression"))]
         let data_to_store = block_data;
 
-        self.blocks.insert(block_hash.as_slice(), &data_to_store)?;
-
-        // Store header (never compressed - small and frequently accessed)
         let header_data = bincode::serialize(&block.header)?;
-        self.headers.insert(block_hash.as_slice(), &header_data)?;
-
-        // Store block metadata separately for fast RPC lookups (TX count, etc.)
         let metadata = BlockMetadata {
             n_tx: block.transactions.len() as u32,
         };
         let metadata_data = bincode::serialize(&metadata)?;
-        self.block_metadata
-            .insert(block_hash.as_slice(), &metadata_data)?;
+        crate::storage::database::commit_keyed(&[
+            (
+                self.blocks.as_ref(),
+                block_hash.as_slice(),
+                Some(data_to_store.as_slice()),
+            ),
+            (
+                self.headers.as_ref(),
+                block_hash.as_slice(),
+                Some(header_data.as_slice()),
+            ),
+            (
+                self.block_metadata.as_ref(),
+                block_hash.as_slice(),
+                Some(metadata_data.as_slice()),
+            ),
+        ])?;
 
         // Store header for median time-past calculation
         // We'll need height passed separately, so this will be called after store_height
@@ -558,20 +567,53 @@ impl BlockStore {
         let block_hash = self.block_hash(block);
         let row_key = block_height_row_key(height, &block_hash);
         let data_to_store = encode_wire_body_blob(wire_payload);
-        self.blocks.insert(row_key.as_slice(), &data_to_store)?;
-
         let header_data = bincode::serialize(&block.header)?;
-        self.headers.insert(row_key.as_slice(), &header_data)?;
-
         let metadata = BlockMetadata {
             n_tx: block.transactions.len() as u32,
         };
         let metadata_data = bincode::serialize(&metadata)?;
-        self.block_metadata
-            .insert(row_key.as_slice(), &metadata_data)?;
-
-        self.store_recent_header(height, &block.header)?;
-        Ok(())
+        let height_bytes = height.to_be_bytes();
+        let mut ops = vec![
+            (
+                self.blocks.as_ref(),
+                row_key.as_slice(),
+                Some(data_to_store.as_slice()),
+            ),
+            (
+                self.headers.as_ref(),
+                row_key.as_slice(),
+                Some(header_data.as_slice()),
+            ),
+            (
+                self.block_metadata.as_ref(),
+                row_key.as_slice(),
+                Some(metadata_data.as_slice()),
+            ),
+            (
+                self.hash_to_height.as_ref(),
+                block_hash.as_slice(),
+                Some(height_bytes.as_slice()),
+            ),
+            (
+                self.height_index.as_ref(),
+                height_bytes.as_slice(),
+                Some(block_hash.as_slice()),
+            ),
+            (
+                self.recent_headers.as_ref(),
+                height_bytes.as_slice(),
+                Some(header_data.as_slice()),
+            ),
+        ];
+        let remove_bytes = height.saturating_sub(12).to_be_bytes();
+        if height > 11 {
+            ops.push((
+                self.recent_headers.as_ref(),
+                remove_bytes.as_slice(),
+                None,
+            ));
+        }
+        crate::storage::database::commit_keyed(&ops)
     }
 
     /// Store a block with witness data and height
@@ -848,16 +890,12 @@ impl BlockStore {
     pub fn store_recent_header(&self, height: u64, header: &BlockHeader) -> Result<()> {
         let height_bytes = height.to_be_bytes();
         let header_data = bincode::serialize(header)?;
-        self.recent_headers.insert(&height_bytes, &header_data)?;
-
-        // Clean up old headers (keep only last 11 for median time-past)
-        // Remove headers older than height - 11
+        let mut batch = self.recent_headers.batch()?;
+        batch.put(&height_bytes, &header_data);
         if height > 11 {
-            let remove_height = height - 12;
-            let remove_bytes = remove_height.to_be_bytes();
-            self.recent_headers.remove(&remove_bytes)?;
+            batch.delete(&(height - 12).to_be_bytes());
         }
-
+        batch.commit()?;
         Ok(())
     }
 
@@ -1228,11 +1266,18 @@ impl BlockStore {
     /// Maintains both height→hash and hash→height indices for O(1) lookups
     pub fn store_height(&self, height: u64, hash: &Hash) -> Result<()> {
         let height_bytes = height.to_be_bytes();
-        // Store height → hash mapping
-        self.height_index.insert(&height_bytes, hash.as_slice())?;
-        // Store hash → height reverse mapping for O(1) lookup
-        self.hash_to_height.insert(hash.as_slice(), &height_bytes)?;
-        Ok(())
+        crate::storage::database::commit_keyed(&[
+            (
+                self.height_index.as_ref(),
+                height_bytes.as_slice(),
+                Some(hash.as_slice()),
+            ),
+            (
+                self.hash_to_height.as_ref(),
+                hash.as_slice(),
+                Some(height_bytes.as_slice()),
+            ),
+        ])
     }
 
     /// Record which height a block occupies without replacing the active chain's height entry.
@@ -1355,6 +1400,37 @@ impl BlockStore {
             }
         }
         Ok(Some(lo))
+    }
+
+    /// First missing height when a later height is stored.
+    ///
+    /// [`highest_stored_height`] stays the contiguous prefix so IBD resume does not move.
+    pub fn stored_height_gap(&self) -> Result<Option<u64>> {
+        let contiguous = match self.highest_stored_height()? {
+            Some(height) => height,
+            None => {
+                let mut probe = 1u64;
+                let mut step = 1u64;
+                while probe < 2_000_000_000 {
+                    if self.get_hash_by_height(probe)?.is_some() {
+                        return Ok(Some(0));
+                    }
+                    probe = probe.saturating_add(step);
+                    step = step.saturating_mul(2);
+                }
+                return Ok(None);
+            }
+        };
+        let mut probe = contiguous.saturating_add(1);
+        let mut step = 1u64;
+        while probe < 2_000_000_000 {
+            if self.get_hash_by_height(probe)?.is_some() {
+                return Ok(Some(contiguous.saturating_add(1)));
+            }
+            probe = probe.saturating_add(step);
+            step = step.saturating_mul(2);
+        }
+        Ok(None)
     }
 
     /// Get block height by hash (reverse lookup)

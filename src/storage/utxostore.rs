@@ -115,9 +115,8 @@ impl UtxoStore {
                 })
                 .collect::<Result<Vec<(Vec<u8>, Vec<u8>)>>>()?;
 
-            // Sequential database writes (database operations must be sequential)
+            let mut batch = self.utxos.batch()?;
             for (key, value) in serialized_utxos {
-                // Compress if enabled
                 #[cfg(feature = "utxo-compression")]
                 let data_to_store = if self.compression_enabled {
                     zstd::encode_all(&value[..], self.compression_level as i32)
@@ -129,18 +128,21 @@ impl UtxoStore {
                 #[cfg(not(feature = "utxo-compression"))]
                 let data_to_store = value;
 
-                self.utxos.insert(&key, &data_to_store)?;
+                batch.put(&key, &data_to_store);
             }
+            batch.commit()?;
         }
 
         #[cfg(not(feature = "production"))]
         {
-            // Store each UTXO sequentially
+            let mut pairs = Vec::new();
             for (outpoint, utxo) in utxo_set {
                 let key = self.outpoint_key(outpoint);
                 let value = self.serialize_utxo(utxo.as_ref())?;
-
-                // Compress if enabled
+                pairs.push((key, value));
+            }
+            let mut batch = self.utxos.batch()?;
+            for (key, value) in pairs {
                 #[cfg(feature = "utxo-compression")]
                 let data_to_store = if self.compression_enabled {
                     zstd::encode_all(&value[..], self.compression_level as i32)
@@ -152,8 +154,9 @@ impl UtxoStore {
                 #[cfg(not(feature = "utxo-compression"))]
                 let data_to_store = value;
 
-                self.utxos.insert(&key, &data_to_store)?;
+                batch.put(&key, &data_to_store);
             }
+            batch.commit()?;
         }
 
         Ok(())
@@ -210,8 +213,11 @@ impl UtxoStore {
     /// Remove a UTXO from the set
     pub fn remove_utxo(&self, outpoint: &OutPoint) -> Result<()> {
         let key = self.outpoint_key(outpoint);
-        self.utxos.remove(&key)?;
-        Ok(())
+        let legacy = self.legacy_outpoint_key(outpoint);
+        crate::storage::database::commit_keyed(&[
+            (self.utxos.as_ref(), key.as_slice(), None),
+            (self.utxos.as_ref(), legacy.as_slice(), None),
+        ])
     }
 
     /// Get a UTXO by outpoint
@@ -225,8 +231,10 @@ impl UtxoStore {
         if self.value_codec == crate::storage::utxo_value_codec::ValueCodec::Rkyv {
             if let Some(heed3_tree) = self.utxos.as_heed3_tree() {
                 let rtxn = heed3_tree.env().read_txn()?;
-                let slices = heed3_tree.get_many_heed3(&[key.as_slice()], &rtxn)?;
-                return match slices.into_iter().next().flatten() {
+                let legacy = self.legacy_outpoint_key(outpoint);
+                let slices =
+                    heed3_tree.get_many_heed3(&[key.as_slice(), legacy.as_slice()], &rtxn)?;
+                return match slices.into_iter().flatten().next() {
                     Some(bytes) => {
                         let archived = crate::storage::rkyv_codec::access_utxo(bytes)?;
                         Ok(Some(crate::storage::rkyv_codec::utxo_from_archived(
@@ -238,24 +246,28 @@ impl UtxoStore {
             }
         }
 
-        if let Some(data) = self.utxos.get(&key)? {
-            // Decompress if data is compressed (auto-detect via zstd magic bytes)
-            #[cfg(feature = "utxo-compression")]
-            let utxo_data = if Self::is_compressed(&data) {
-                crate::storage::zstd_limit::decode_bounded(&data[..])
-                    .map_err(|e| anyhow::anyhow!("UTXO decompression failed: {}", e))?
-            } else {
-                data
-            };
-
-            #[cfg(not(feature = "utxo-compression"))]
-            let utxo_data = data;
-
-            let utxo: UTXO = self.deserialize_utxo_data(&utxo_data)?;
-            Ok(Some(utxo))
+        let legacy = self.legacy_outpoint_key(outpoint);
+        let data = if let Some(data) = self.utxos.get(&key)? {
+            data
+        } else if let Some(data) = self.utxos.get(&legacy)? {
+            data
         } else {
-            Ok(None)
-        }
+            return Ok(None);
+        };
+        // Decompress if data is compressed (auto-detect via zstd magic bytes)
+        #[cfg(feature = "utxo-compression")]
+        let utxo_data = if Self::is_compressed(&data) {
+            crate::storage::zstd_limit::decode_bounded(&data[..])
+                .map_err(|e| anyhow::anyhow!("UTXO decompression failed: {}", e))?
+        } else {
+            data
+        };
+
+        #[cfg(not(feature = "utxo-compression"))]
+        let utxo_data = data;
+
+        let utxo: UTXO = self.deserialize_utxo_data(&utxo_data)?;
+        Ok(Some(utxo))
     }
 
     #[cfg(test)]
@@ -307,7 +319,7 @@ impl UtxoStore {
         self.utxos.len()
     }
 
-    /// Get total UTXO value. A value outside the money range is left out.
+    /// Get total UTXO value. A value outside the money range is an error.
     pub fn total_value(&self) -> Result<u64> {
         let mut total = 0u128;
 
@@ -327,8 +339,9 @@ impl UtxoStore {
             let utxo_data = value;
 
             let utxo: UTXO = self.deserialize_utxo_data(&utxo_data)?;
-            total =
-                total.saturating_add(crate::storage::chainstate::utxo_money_total([utxo.value]));
+            total = total.saturating_add(crate::storage::chainstate::utxo_money_total([
+                utxo.value,
+            ])?);
         }
 
         Ok(u64::try_from(total).unwrap_or(u64::MAX))
@@ -340,6 +353,14 @@ impl UtxoStore {
         key.extend_from_slice(&outpoint.hash);
         // Always 8-byte big-endian vout so keys match outpoint_from_key (was 4-byte u32 → load failed).
         key.extend_from_slice(&(outpoint.index as u64).to_be_bytes());
+        key
+    }
+
+    /// 32-byte txid plus a 4-byte big-endian vout. Readers still accept rows written this way.
+    fn legacy_outpoint_key(&self, outpoint: &OutPoint) -> [u8; 36] {
+        let mut key = [0u8; 36];
+        key[..32].copy_from_slice(&outpoint.hash);
+        key[32..].copy_from_slice(&outpoint.index.to_be_bytes());
         key
     }
 
@@ -554,7 +575,7 @@ mod tests {
     use blvm_protocol::opcodes::OP_1;
 
     #[test]
-    fn total_value_ignores_a_negative_value() {
+    fn total_value_rejects_a_negative_value() {
         let temp = tempfile::TempDir::new().unwrap();
         let storage = crate::storage::Storage::new(temp.path()).unwrap();
         let utxos = storage.utxos();
@@ -587,7 +608,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(utxos.utxo_count().unwrap(), 2);
-        assert_eq!(utxos.total_value().unwrap(), 50_000);
+        let err = utxos.total_value().unwrap_err();
+        assert!(
+            err.to_string().contains("outside the money range"),
+            "{err}"
+        );
     }
 
     #[test]

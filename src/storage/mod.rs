@@ -39,6 +39,8 @@ pub mod serialization_cache;
 pub mod txindex;
 pub mod utxo_value_codec;
 pub mod utxostore;
+#[cfg(test)]
+mod pass_fix_tests;
 #[cfg(any(
     feature = "block-compression",
     feature = "utxo-compression",
@@ -658,6 +660,7 @@ impl Storage {
                 Arc::clone(&db),
                 Arc::clone(&blockstore),
                 Arc::clone(&utxostore),
+                Arc::clone(&txindex),
                 network,
             );
 
@@ -677,6 +680,7 @@ impl Storage {
         db: Arc<dyn database::Database>,
         blockstore: Arc<blockstore::BlockStore>,
         utxostore: Arc<utxostore::UtxoStore>,
+        txindex: Arc<txindex::TxIndex>,
         network: blvm_protocol::types::Network,
     ) -> Option<Arc<pruning::PruningManager>> {
         pruning_config.map(|config| {
@@ -706,7 +710,8 @@ impl Storage {
                             );
                             return Arc::new(
                                 pruning::PruningManager::new(config, Arc::clone(&blockstore))
-                                    .with_network(network),
+                                    .with_network(network)
+                                    .with_tx_index(Arc::clone(&txindex)),
                             );
                         }
                     };
@@ -717,12 +722,14 @@ impl Storage {
                             commitment_store,
                             Arc::clone(&utxostore),
                         )
-                        .with_network(network),
+                        .with_network(network)
+                        .with_tx_index(Arc::clone(&txindex)),
                     )
                 } else {
                     Arc::new(
                         pruning::PruningManager::new(config, Arc::clone(&blockstore))
-                            .with_network(network),
+                            .with_network(network)
+                            .with_tx_index(Arc::clone(&txindex)),
                     )
                 }
             }
@@ -730,7 +737,8 @@ impl Storage {
             {
                 Arc::new(
                     pruning::PruningManager::new(config, Arc::clone(&blockstore))
-                        .with_network(network),
+                        .with_network(network)
+                        .with_tx_index(Arc::clone(&txindex)),
                 )
             }
         })
@@ -832,6 +840,7 @@ impl Storage {
             Arc::clone(&db),
             Arc::clone(&blockstore),
             Arc::clone(&utxostore),
+            Arc::clone(&txindex),
             network,
         );
 
@@ -1151,8 +1160,23 @@ impl Storage {
 
     /// Drop every IBD snapshot tree resume or admission might treat as the chain.
     pub(crate) fn clear_ibd_snapshot_trees(&self) {
-        for name in ["ibd_utxos", "ibd_utxos_ckpt_a", "ibd_utxos_ckpt_b"] {
+        let slot = self.chain().get_engine_ckpt_slot().unwrap_or(0);
+        let active = if slot & 1 == 0 {
+            "ibd_utxos_ckpt_a"
+        } else {
+            "ibd_utxos_ckpt_b"
+        };
+        let mut names = ["ibd_utxos", "ibd_utxos_ckpt_a", "ibd_utxos_ckpt_b"];
+        names.sort_by_key(|name| *name == active);
+        let mut opened = Vec::new();
+        for name in names {
             if let Ok(tree) = self.open_tree(name) {
+                opened.push(tree);
+            }
+        }
+        let refs: Vec<&dyn database::Tree> = opened.iter().map(|tree| tree.as_ref()).collect();
+        if database::clear_trees(&refs).is_err() {
+            for tree in &opened {
                 let _ = tree.clear();
             }
         }

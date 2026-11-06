@@ -413,7 +413,7 @@ impl BlockchainRpc {
         }
         let utxos = storage.utxos().get_all_utxos()?;
         let total =
-            crate::storage::chainstate::utxo_money_total(utxos.values().map(|utxo| utxo.value));
+            crate::storage::chainstate::utxo_money_total(utxos.values().map(|utxo| utxo.value))?;
         Ok((
             utxos.len() as u64,
             total,
@@ -444,10 +444,11 @@ impl BlockchainRpc {
             arr.copy_from_slice(&key);
             let outpoint = key_to_outpoint(&arr);
             let utxo = decode_utxo_with_codec(codec, &bytes)?;
-            txouts += 1;
-            if (0..=max).contains(&utxo.value) {
-                total = total.saturating_add(utxo.value as u128);
+            if !(0..=max).contains(&utxo.value) {
+                anyhow::bail!("UTXO value {} is outside the money range", utxo.value);
             }
+            txouts += 1;
+            total = total.saturating_add(utxo.value as u128);
             let serialized = serialize_coin_for_muhash(
                 &outpoint.hash,
                 outpoint.index,
@@ -527,6 +528,11 @@ impl BlockchainRpc {
         if let Some(ref storage) = self.storage {
             let (best_hash, height) = storage.chain().get_tip_hash_and_height()?;
             let stored_headers = storage.blocks().highest_stored_height().ok().flatten();
+            if let Ok(Some(gap)) = storage.blocks().stored_height_gap() {
+                tracing::warn!(
+                    "block height index has a gap at {gap}; later blocks sit past the contiguous prefix"
+                );
+            }
             let header_height = stored_headers.unwrap_or(height);
             let (in_ibd, verification_progress) = ibd_sync_fields(height, stored_headers);
             let softforks = self.softforks_json(height);
@@ -1052,19 +1058,27 @@ impl BlockchainRpc {
             }
         }
 
+        let tip_header = storage
+            .blocks()
+            .get_header(&metadata.block_hash)?
+            .ok_or_else(|| RpcError::invalid_params("snapshot block header is not stored"))?;
+
         // A checkpoint with rows is the chain. Leave it in place and the loaded
         // coins stay invisible while the old checkpoint coins remain spendable.
         storage.clear_ibd_snapshot_trees();
         storage.chain().force_reset_engine_checkpoint_metadata()?;
         storage.utxos().store_utxo_set(&utxo_set)?;
-        storage
-            .chain()
-            .set_snapshot_tip(&metadata.block_hash, metadata.block_height)?;
+        storage.chain().set_snapshot_tip(
+            &metadata.block_hash,
+            metadata.block_height,
+            &tip_header,
+        )?;
         storage
             .chain()
             .force_set_ibd_utxo_watermark(metadata.block_height)?;
-        let total_amount =
-            crate::storage::chainstate::utxo_money_total(utxo_set.values().map(|utxo| utxo.value));
+        let total_amount = crate::storage::chainstate::utxo_money_total(
+            utxo_set.values().map(|utxo| utxo.value),
+        )?;
         let stats = crate::storage::chainstate::UTXOStats {
             height: metadata.block_height,
             txouts: utxo_set.len() as u64,
@@ -1578,13 +1592,12 @@ impl BlockchainRpc {
                     .sum();
                 let utxo_increase = output_count as i64 - spent_prevouts as i64;
 
-                // Sum output values inside the money range. A value outside that range is left out.
                 let total_out = u64::try_from(crate::storage::chainstate::utxo_money_total(
                     block
                         .transactions
                         .iter()
                         .flat_map(|tx| tx.outputs.iter().map(|out| out.value)),
-                ))
+                )?)
                 .unwrap_or(u64::MAX);
 
                 // Calculate block subsidy
@@ -1595,7 +1608,7 @@ impl BlockchainRpc {
                     let coinbase_outputs =
                         u64::try_from(crate::storage::chainstate::utxo_money_total(
                             block.transactions[0].outputs.iter().map(|out| out.value),
-                        ))
+                        )?)
                         .unwrap_or(u64::MAX);
                     coinbase_outputs.saturating_sub(subsidy)
                 } else {
@@ -2029,8 +2042,7 @@ impl BlockchainRpc {
             decode_hash32(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
 
         if let Some(ref storage) = self.storage {
-            storage.chain().unmark_invalid(&hash)?;
-            storage.chain().block_index().clear_invalid_status(&hash)?;
+            storage.chain().reconsider(&hash)?;
             Ok(Value::Null)
         } else {
             // Graceful degradation: return informative error instead of failing silently
@@ -2430,6 +2442,11 @@ impl BlockchainRpc {
                 .unwrap_or_else(|| ZERO_HASH_STR.to_string());
 
             let stored_headers = storage.blocks().highest_stored_height()?;
+            if let Ok(Some(gap)) = storage.blocks().stored_height_gap() {
+                tracing::warn!(
+                    "block height index has a gap at {gap}; later blocks sit past the contiguous prefix"
+                );
+            }
             let headers = stored_headers.unwrap_or(height).max(height);
             let (in_ibd, verification_progress) = ibd_sync_fields(height, stored_headers);
             let mediantime = self.median_time_through_height(storage, height, tip_header.timestamp);
@@ -2695,7 +2712,7 @@ mod txoutset_tests {
     use blvm_protocol::{OutPoint, UTXO};
 
     #[tokio::test]
-    async fn txoutset_total_ignores_a_negative_value() {
+    async fn txoutset_total_rejects_a_negative_value() {
         let temp = tempfile::TempDir::new().unwrap();
         let storage = Arc::new(Storage::new(temp.path()).unwrap());
         storage
@@ -2729,13 +2746,14 @@ mod txoutset_tests {
             )
             .unwrap();
 
-        let info = BlockchainRpc::with_dependencies(storage)
+        let err = BlockchainRpc::with_dependencies(storage)
             .get_txoutset_info()
             .await
-            .unwrap();
-        let sats = (info["total_amount"].as_f64().unwrap() * 100_000_000.0).round() as u128;
-        assert_eq!(info["txouts"], 2);
-        assert_eq!(sats, 50_000);
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("outside the money range"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

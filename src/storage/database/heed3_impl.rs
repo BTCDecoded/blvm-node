@@ -780,6 +780,13 @@ pub struct Heed3Tree {
     name: String,
 }
 
+/// One put or delete inside [`Heed3Tree::commit_shared`].
+pub struct SharedWrite<'a> {
+    pub tree: &'a Heed3Tree,
+    pub key: &'a [u8],
+    pub value: Option<&'a [u8]>,
+}
+
 #[cfg(test)]
 thread_local! {
     static ABORT_THREE_PUTS_BEFORE_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1007,6 +1014,53 @@ impl Heed3Tree {
             third_tree
                 .db
                 .put(&mut wtxn, key.as_slice(), value.as_slice())?;
+        }
+        wtxn.commit()?;
+        Ok(())
+    }
+
+    /// Puts and deletes on trees that share this environment, in one write transaction.
+    pub fn commit_shared(ops: &[SharedWrite<'_>]) -> anyhow::Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let env = &ops[0].tree.env;
+        for op in ops {
+            if !std::sync::Arc::ptr_eq(env, &op.tree.env) {
+                anyhow::bail!("heed3 trees are not one environment");
+            }
+        }
+        let _guard = ops[0].tree.write_lock.lock();
+        let mut wtxn = env.write_txn()?;
+        for op in ops {
+            match op.value {
+                Some(value) => {
+                    op.tree.db.put(&mut wtxn, op.key, value)?;
+                }
+                None => {
+                    op.tree.db.delete(&mut wtxn, op.key)?;
+                }
+            }
+        }
+        wtxn.commit()?;
+        Ok(())
+    }
+
+    /// Clear every tree in one write transaction. The trees must share this environment.
+    pub fn clear_shared(trees: &[&Heed3Tree]) -> anyhow::Result<()> {
+        if trees.is_empty() {
+            return Ok(());
+        }
+        let env = &trees[0].env;
+        for tree in trees {
+            if !std::sync::Arc::ptr_eq(env, &tree.env) {
+                anyhow::bail!("heed3 trees are not one environment");
+            }
+        }
+        let _guard = trees[0].write_lock.lock();
+        let mut wtxn = env.write_txn()?;
+        for tree in trees {
+            tree.db.clear(&mut wtxn)?;
         }
         wtxn.commit()?;
         Ok(())

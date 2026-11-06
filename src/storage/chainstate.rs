@@ -11,16 +11,17 @@ use blvm_protocol::{BlockHeader, Hash};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Sum of UTXO values inside the money range. A value outside that range is left out.
-pub(crate) fn utxo_money_total(values: impl IntoIterator<Item = i64>) -> u128 {
+/// Sum of UTXO values. A value outside the money range is an error.
+pub(crate) fn utxo_money_total(values: impl IntoIterator<Item = i64>) -> Result<u128> {
     let max = blvm_protocol::constants::MAX_MONEY;
     let mut total = 0u128;
     for value in values {
-        if (0..=max).contains(&value) {
-            total = total.saturating_add(value as u128);
+        if !(0..=max).contains(&value) {
+            anyhow::bail!("UTXO value {value} is outside the money range");
         }
+        total = total.saturating_add(value as u128);
     }
-    total
+    Ok(total)
 }
 
 /// UTXO set statistics (cached for fast RPC lookups)
@@ -99,7 +100,7 @@ pub fn datadir_network_conflict(
 /// Unknown names are mainnet, matching a missing chain info record.
 pub fn consensus_network_from_stored_name(name: &str) -> Network {
     match name {
-        "testnet" => Network::Testnet,
+        "testnet" | "testnet3" => Network::Testnet,
         "testnet4" => Network::Testnet4,
         "regtest" => Network::Regtest,
         "signet" => Network::Signet,
@@ -198,22 +199,31 @@ impl ChainState {
         self.initialize_with_params(genesis_header, chain_params)
     }
 
-    /// Point the active tip at a loaded UTXO snapshot.
+    /// Point the active tip at a loaded UTXO snapshot and store that block's header.
     ///
-    /// The snapshot file does not carry a block header, so an existing header is kept
-    /// and a new chain record uses an empty header.
-    pub fn set_snapshot_tip(&self, block_hash: &Hash, height: u64) -> Result<()> {
+    /// The header hash has to be `block_hash`. A mismatch returns before the tip row changes.
+    pub fn set_snapshot_tip(
+        &self,
+        block_hash: &Hash,
+        height: u64,
+        tip_header: &BlockHeader,
+    ) -> Result<()> {
+        let header_hash = self.calculate_hash(tip_header);
+        if &header_hash != block_hash {
+            anyhow::bail!("snapshot header does not match the snapshot block hash");
+        }
         let mut info = match self.load_chain_info()? {
             Some(info) => info,
             None => ChainInfo {
                 tip_hash: *block_hash,
-                tip_header: BlockHeader::default(),
+                tip_header: tip_header.clone(),
                 height,
                 total_work: 0,
                 chain_params: ChainParams::default(),
             },
         };
         info.tip_hash = *block_hash;
+        info.tip_header = tip_header.clone();
         info.height = height;
         self.store_chain_info(&info)
     }
@@ -262,15 +272,14 @@ impl ChainState {
     /// Update chain tip and calculate incremental chainwork
     /// This should be called when a new block is connected to the chain
     pub fn update_tip(&self, tip_hash: &Hash, tip_header: &BlockHeader, height: u64) -> Result<()> {
-        self.block_index.insert(
+        let prepared = self.block_index.prepare_insert(
             tip_hash,
             height,
             &tip_header.prev_block_hash,
             BlockIndexStatus::Valid,
         )?;
-
-        self.cache_block_chainwork(tip_hash, tip_header, height)?;
-
+        let chainwork = self.chainwork_for_header(tip_header, height)?;
+        let block_work = Self::calculate_work_from_bits(tip_header.bits);
         let mut info = match self.load_chain_info()? {
             Some(i) => i,
             None => {
@@ -285,12 +294,45 @@ impl ChainState {
                 }
             }
         };
-
         info.tip_hash = *tip_hash;
         info.tip_header = tip_header.clone();
         info.height = height;
-        self.store_chain_info(&info)?;
-        Ok(())
+        let info_bytes = bincode::serialize(&info)?;
+        let work_bytes = block_work.to_be_bytes();
+        let chainwork_bytes = chainwork.to_be_bytes();
+        let mut ops = vec![
+            (
+                self.block_index.entries_tree().as_ref(),
+                tip_hash.as_slice(),
+                Some(prepared.entry.as_slice()),
+            ),
+            (
+                self.work_cache.as_ref(),
+                tip_hash.as_slice(),
+                Some(work_bytes.as_slice()),
+            ),
+            (
+                self.chainwork_cache.as_ref(),
+                tip_hash.as_slice(),
+                Some(chainwork_bytes.as_slice()),
+            ),
+            (
+                self.chain_info.as_ref(),
+                b"current".as_slice(),
+                Some(info_bytes.as_slice()),
+            ),
+        ];
+        if let Some(counter) = prepared.counter.as_ref() {
+            ops.insert(
+                1,
+                (
+                    self.block_index.entries_tree().as_ref(),
+                    crate::storage::block_index::SEQUENCE_COUNTER_KEY,
+                    Some(counter.as_slice()),
+                ),
+            );
+        }
+        crate::storage::database::commit_keyed(&ops)
     }
 
     /// Cache per-block and cumulative chainwork without changing the active tip.
@@ -302,9 +344,20 @@ impl ChainState {
     ) -> Result<()> {
         let chainwork = self.chainwork_for_header(header, height)?;
         let block_work = Self::calculate_work_from_bits(header.bits);
-        self.store_work(block_hash, block_work)?;
-        self.store_chainwork(block_hash, chainwork)?;
-        Ok(())
+        let work_bytes = block_work.to_be_bytes();
+        let chainwork_bytes = chainwork.to_be_bytes();
+        crate::storage::database::commit_keyed(&[
+            (
+                self.work_cache.as_ref(),
+                block_hash.as_slice(),
+                Some(work_bytes.as_slice()),
+            ),
+            (
+                self.chainwork_cache.as_ref(),
+                block_hash.as_slice(),
+                Some(chainwork_bytes.as_slice()),
+            ),
+        ])
     }
 
     fn chainwork_for_header(
@@ -724,25 +777,33 @@ impl ChainState {
             return Ok(());
         }
         let prev_count = self.get_engine_export_utxo_count()?.unwrap_or(0);
+        let current_wm = self.get_utxo_watermark()?.unwrap_or(0);
+        let slot_key: &[u8] = if slot & 1 == 0 {
+            b"ibd_engine_ckpt_height_0"
+        } else {
+            b"ibd_engine_ckpt_height_1"
+        };
+        let mut batch = self.chain_info.batch()?;
         if prev_count > 0 {
-            self.chain_info.insert(
+            batch.put(
                 b"ibd_engine_prev_accepted_utxo_count",
                 &prev_count.to_be_bytes(),
-            )?;
+            );
         }
-        self.persist_ibd_utxo_flush_checkpoint(height, muhash_running)?;
-        self.persist_engine_export_height(height)?;
-        self.chain_info
-            .insert(b"ibd_engine_ckpt_slot", &[slot & 1])?;
-        self.set_engine_ckpt_slot_height(slot, height)?;
-        self.chain_info
-            .insert(b"ibd_engine_export_utxo_count", &utxo_count.to_be_bytes())?;
-        self.chain_info.insert(
+        if height > current_wm {
+            batch.put(b"ibd_utxo_watermark", &height.to_be_bytes());
+        }
+        batch.put(b"ibd_utxo_muhash_running", muhash_running.as_slice());
+        batch.put(b"ibd_engine_export_height", &height.to_be_bytes());
+        batch.put(b"ibd_engine_ckpt_slot", &[slot & 1]);
+        batch.put(slot_key, &height.to_be_bytes());
+        batch.put(b"ibd_engine_export_utxo_count", &utxo_count.to_be_bytes());
+        batch.put(
             b"ibd_engine_export_wall_secs",
             &export_wall_secs.to_be_bytes(),
-        )?;
-        self.chain_info
-            .insert(b"ibd_engine_export_muhash", muhash_running.as_slice())?;
+        );
+        batch.put(b"ibd_engine_export_muhash", muhash_running.as_slice());
+        batch.commit()?;
         Ok(())
     }
 
@@ -753,15 +814,14 @@ impl ChainState {
     /// `ibd_engine_export_utxo_count` so the next startup treats the engine as if it has
     /// never exported a checkpoint.
     pub fn force_reset_engine_checkpoint_metadata(&self) -> Result<()> {
-        self.chain_info
-            .insert(b"ibd_engine_export_height", &0u64.to_be_bytes())?;
-        self.chain_info.insert(b"ibd_engine_ckpt_slot", &[0u8])?;
-        self.chain_info
-            .insert(b"ibd_engine_export_utxo_count", &0u64.to_be_bytes())?;
-        self.chain_info
-            .insert(b"ibd_engine_prev_accepted_utxo_count", &0u64.to_be_bytes())?;
-        let _ = self.chain_info.remove(b"ibd_engine_export_muhash");
-        let _ = self.chain_info.remove(b"ibd_engine_validation_tip");
+        let mut batch = self.chain_info.batch()?;
+        batch.put(b"ibd_engine_export_height", &0u64.to_be_bytes());
+        batch.put(b"ibd_engine_ckpt_slot", &[0u8]);
+        batch.put(b"ibd_engine_export_utxo_count", &0u64.to_be_bytes());
+        batch.put(b"ibd_engine_prev_accepted_utxo_count", &0u64.to_be_bytes());
+        batch.delete(b"ibd_engine_export_muhash");
+        batch.delete(b"ibd_engine_validation_tip");
+        batch.commit()?;
         Ok(())
     }
 
@@ -983,7 +1043,7 @@ impl ChainState {
         use crate::storage::assumeutxo::AssumeUtxoManager;
 
         let txouts = utxo_set.len() as u64;
-        let total_amount = utxo_money_total(utxo_set.values().map(|utxo| utxo.value));
+        let total_amount = utxo_money_total(utxo_set.values().map(|utxo| utxo.value))?;
         let muhash = AssumeUtxoManager::calculate_utxo_hash(utxo_set).unwrap_or([0u8; 32]);
 
         let stats = UTXOStats {
@@ -1181,15 +1241,44 @@ impl ChainState {
             })
             .as_secs();
         let value = timestamp.to_be_bytes();
-        self.invalid_blocks.insert(hash.as_slice(), &value)?;
-        self.block_index.mark_invalid(hash)?;
-        Ok(())
+        let index_bytes =
+            self.block_index
+                .serialized_with_status(hash, BlockIndexStatus::Invalid, false)?;
+        let mut ops = vec![(
+            self.invalid_blocks.as_ref(),
+            hash.as_slice(),
+            Some(value.as_slice()),
+        )];
+        if let Some(bytes) = index_bytes.as_ref() {
+            ops.push((
+                self.block_index.entries_tree().as_ref(),
+                hash.as_slice(),
+                Some(bytes.as_slice()),
+            ));
+        }
+        crate::storage::database::commit_keyed(&ops)
     }
 
     /// Remove a block from invalid blocks (reconsider)
     pub fn unmark_invalid(&self, hash: &Hash) -> Result<()> {
         self.invalid_blocks.remove(hash.as_slice())?;
         Ok(())
+    }
+
+    /// Clear the invalid-block row and the index status in one write transaction.
+    pub fn reconsider(&self, hash: &Hash) -> Result<()> {
+        let index_bytes =
+            self.block_index
+                .serialized_with_status(hash, BlockIndexStatus::Valid, true)?;
+        let mut ops = vec![(self.invalid_blocks.as_ref(), hash.as_slice(), None)];
+        if let Some(bytes) = index_bytes.as_ref() {
+            ops.push((
+                self.block_index.entries_tree().as_ref(),
+                hash.as_slice(),
+                Some(bytes.as_slice()),
+            ));
+        }
+        crate::storage::database::commit_keyed(&ops)
     }
 
     /// Check if a block is marked as invalid
@@ -1301,6 +1390,10 @@ mod tests {
             Network::Testnet
         );
         assert_eq!(
+            consensus_network_from_stored_name("testnet3"),
+            Network::Testnet
+        );
+        assert_eq!(
             consensus_network_from_stored_name("testnet4"),
             Network::Testnet4
         );
@@ -1337,7 +1430,7 @@ mod tests {
     }
 
     #[test]
-    fn utxo_stats_total_ignores_a_negative_value() {
+    fn utxo_stats_reject_a_value_outside_the_money_range() {
         use super::ChainState;
         use blvm_protocol::opcodes::OP_1;
         use blvm_protocol::{OutPoint, UTXO};
@@ -1374,12 +1467,14 @@ mod tests {
             }),
         );
         let block_hash = [2u8; 32];
-        chain
+        let err = chain
             .update_utxo_stats_cache(&block_hash, 1, &set, 1)
-            .unwrap();
-        let stats = chain.get_utxo_stats(&block_hash).unwrap().unwrap();
-        assert_eq!(stats.txouts, 2);
-        assert_eq!(stats.total_amount, 50_000);
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("outside the money range"),
+            "{err}"
+        );
+        assert!(chain.get_utxo_stats(&block_hash).unwrap().is_none());
     }
 
     #[test]

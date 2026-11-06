@@ -151,9 +151,11 @@ pub fn persist_commitment_failed(data_dir: &Path) -> Result<()> {
 /// True when a commitment mismatch has been persisted. The active chainstate must not start.
 pub fn active_chainstate_refused(data_dir: &Path) -> bool {
     let path = chainstate_snapshot_dir(data_dir).join(COMMITMENT_STATUS_FILE);
-    std::fs::read_to_string(path)
-        .map(|status| status.trim() == COMMITMENT_FAILED)
-        .unwrap_or(false)
+    match std::fs::metadata(&path) {
+        Ok(_) => true,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
 }
 
 /// True when this network's snapshot table includes `height`.
@@ -199,10 +201,7 @@ pub fn open_trust_anchor_snapshot(
         return Ok(None);
     };
     if data.hash_serialized.is_none() {
-        anyhow::bail!(
-            "assumeutxo height {} has no compiled hash",
-            data.height
-        );
+        anyhow::bail!("assumeutxo height {} has no compiled hash", data.height);
     }
     let mut manager = AssumeUtxoManager::new(data_dir);
     Ok(Some(manager.load_snapshot(data.height)?))
@@ -483,6 +482,13 @@ impl AssumeUtxoManager {
         pos += 1;
 
         let height = u64::from_le_bytes(data[pos..pos + 8].try_into()?);
+        pos += 8;
+        if pos != data.len() {
+            return Err(anyhow::anyhow!(
+                "UTXO entry has {} trailing bytes",
+                data.len() - pos
+            ));
+        }
 
         let utxo = UTXO {
             value,
@@ -559,6 +565,16 @@ impl AssumeUtxoManager {
                     (i as f64 / utxo_count as f64) * 100.0
                 );
             }
+        }
+        if utxo_set.len() as u64 != utxo_count {
+            anyhow::bail!(
+                "snapshot count {utxo_count} does not match {} outpoints",
+                utxo_set.len()
+            );
+        }
+        let computed = Self::calculate_utxo_hash(&utxo_set)?;
+        if computed != utxo_hash {
+            anyhow::bail!("snapshot header hash does not match the loaded set");
         }
         Ok((utxo_set, metadata))
     }
@@ -816,9 +832,7 @@ mod tests {
         let block_hash = [0x01u8; 32];
         let utxo_set = create_test_utxo_set();
         let manager = AssumeUtxoManager::new(dir.path());
-        manager
-            .create_snapshot(&utxo_set, block_hash, 100)
-            .unwrap();
+        manager.create_snapshot(&utxo_set, block_hash, 100).unwrap();
         assert!(dir.path().join("utxo_snapshot_100.dat").exists());
 
         let anchor = open_trust_anchor_snapshot(dir.path(), "regtest", &block_hash);
@@ -847,5 +861,86 @@ mod tests {
             .unwrap();
         let mut written = AssumeUtxoManager::new(dir.path());
         assert!(written.load_snapshot(800_000).is_ok());
+    }
+
+    #[test]
+    fn a_present_commitment_file_refuses_startup() {
+        let dir = tempdir().unwrap();
+        assert!(!active_chainstate_refused(dir.path()));
+        persist_commitment_failed(dir.path()).unwrap();
+        assert!(active_chainstate_refused(dir.path()));
+        let path = dir.path().join("chainstate_snapshot").join("commitment");
+        std::fs::write(&path, b"Fail").unwrap();
+        assert!(active_chainstate_refused(dir.path()));
+        std::fs::write(&path, b"").unwrap();
+        assert!(active_chainstate_refused(dir.path()));
+        std::fs::remove_file(&path).unwrap();
+        assert!(!active_chainstate_refused(dir.path()));
+    }
+
+    #[test]
+    fn snapshot_entry_rejects_bytes_after_the_height() {
+        let outpoint = OutPoint {
+            hash: [1u8; 32],
+            index: 1,
+        };
+        let utxo = UTXO {
+            value: 1,
+            script_pubkey: vec![0x51].into(),
+            height: 1,
+            is_coinbase: true,
+        };
+        let bytes = AssumeUtxoManager::serialize_utxo_entry(&outpoint, &utxo).unwrap();
+        assert!(AssumeUtxoManager::deserialize_utxo_entry(&bytes).is_ok());
+        let mut extra = bytes.clone();
+        extra.push(0xff);
+        assert!(AssumeUtxoManager::deserialize_utxo_entry(&extra).is_err());
+    }
+
+    #[test]
+    fn snapshot_count_and_header_hash_must_match_the_set() {
+        let mut set = UtxoSet::default();
+        let outpoint = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 1,
+            script_pubkey: vec![0x51].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        set.insert(outpoint, std::sync::Arc::new(utxo.clone()));
+        let entry = AssumeUtxoManager::serialize_utxo_entry(&outpoint, &utxo).unwrap();
+        let hash = AssumeUtxoManager::calculate_utxo_hash(&set).unwrap();
+        let mut matched = snapshot_bytes(&entry, 1, hash);
+        let loaded = AssumeUtxoManager::read_snapshot_from_reader(&mut matched.as_slice());
+        assert!(loaded.is_ok(), "{loaded:?}");
+
+        let duplicated = snapshot_bytes(&entry, 2, hash);
+        assert!(
+            AssumeUtxoManager::read_snapshot_from_reader(&mut duplicated.as_slice()).is_err()
+        );
+
+        let mut wrong = hash;
+        wrong[0] ^= 0xff;
+        let mismatched = snapshot_bytes(&entry, 1, wrong);
+        assert!(
+            AssumeUtxoManager::read_snapshot_from_reader(&mut mismatched.as_slice()).is_err()
+        );
+    }
+
+    fn snapshot_bytes(entry: &[u8], count: u64, utxo_hash: [u8; 32]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&SNAPSHOT_VERSION.to_le_bytes());
+        buf.extend_from_slice(&[9u8; 32]);
+        buf.extend_from_slice(&1u64.to_le_bytes());
+        buf.extend_from_slice(&utxo_hash);
+        buf.extend_from_slice(&count.to_le_bytes());
+        for _ in 0..count {
+            buf.extend_from_slice(&(entry.len() as u32).to_le_bytes());
+            buf.extend_from_slice(entry);
+        }
+        buf
     }
 }

@@ -84,13 +84,17 @@ pub fn parse_coin(data: &[u8]) -> Result<BitcoinCoreCoin> {
 /// Parse modern Core `Coin` value (`Coin::Unserialize` + `TxOutCompression`).
 pub fn parse_core_coin(data: &[u8]) -> Result<BitcoinCoreCoin> {
     let (code, len) = read_core_varint(data, 0)?;
-    let height = (code >> 1) as u32;
+    let height_code = code >> 1;
+    if height_code > u32::MAX as u64 {
+        return Err(anyhow::anyhow!("coin height does not fit in u32"));
+    }
+    let height = height_code as u32;
     let is_coinbase = (code & 1) != 0;
     let mut offset = len;
 
     let (compressed_amount, alen) = read_core_varint(data, offset)?;
     offset += alen;
-    let amount = decompress_amount(compressed_amount);
+    let amount = decompress_amount(compressed_amount)?;
 
     let (script, slen) = decompress_script_pubkey(data, offset)?;
     offset += slen;
@@ -269,6 +273,9 @@ pub fn core_utxo_key_to_outpoint_key(core_key: &[u8]) -> Result<Vec<u8>> {
     if prefix != b'C' && prefix != b'c' {
         return Err(anyhow::anyhow!("Not a coin key: prefix {}", prefix));
     }
+    if prefix == b'c' && core_key.len() < 34 {
+        return Err(anyhow::anyhow!("pre-0.15 coin key is not imported"));
+    }
     if core_key.len() < 34 {
         return Err(anyhow::anyhow!("Coin key too short"));
     }
@@ -356,26 +363,30 @@ fn read_compact_size(data: &[u8], offset: usize) -> Result<(u64, usize)> {
     }
 }
 
-/// Core `DecompressAmount`.
-pub fn decompress_amount(x: u64) -> u64 {
+/// Core `DecompressAmount`. The result must fit in a signed Bitcoin amount.
+pub fn decompress_amount(x: u64) -> Result<u64> {
     if x == 0 {
-        return 0;
+        return Ok(0);
     }
     let mut x = x - 1;
     let e = x % 10;
     x /= 10;
-    let n = if e < 9 {
+    let mut n = if e < 9 {
         let d = (x % 9) + 1;
         x /= 9;
         x * 10 + d
     } else {
         x + 1
     };
-    let mut n = n;
     for _ in 0..e {
-        n *= 10;
+        n = n
+            .checked_mul(10)
+            .ok_or_else(|| anyhow::anyhow!("decompressed amount does not fit in u64"))?;
     }
-    n
+    if n > i64::MAX as u64 {
+        return Err(anyhow::anyhow!("decompressed amount does not fit in i64"));
+    }
+    Ok(n)
 }
 
 fn decompress_script_pubkey(data: &[u8], offset: usize) -> Result<(Vec<u8>, usize)> {
@@ -449,9 +460,16 @@ fn decompress_script(n_size: u32, compressed: &[u8]) -> Result<Vec<u8>> {
             if compressed.len() != 32 {
                 return Err(anyhow::anyhow!("Invalid compressed pubkey size"));
             }
-            // Uncompressed pubkey recovery omitted — store compressed P2PK form.
-            let mut script = vec![0x21, (n_size - 2) as u8];
-            script.extend_from_slice(compressed);
+            let mut compressed_key = [0u8; 33];
+            compressed_key[0] = (n_size - 2) as u8;
+            compressed_key[1..].copy_from_slice(compressed);
+            let point = blvm_secp256k1::ecdsa::ge_from_compressed(&compressed_key).ok_or_else(
+                || anyhow::anyhow!("uncompressed pubkey does not decompress"),
+            )?;
+            let full = blvm_secp256k1::ecdsa::ge_to_uncompressed(&point);
+            let mut script = Vec::with_capacity(67);
+            script.push(65);
+            script.extend_from_slice(&full);
             script.push(0xac);
             Ok(script)
         }
@@ -496,13 +514,13 @@ mod tests {
 
     #[test]
     fn test_decompress_amount_zero() {
-        assert_eq!(decompress_amount(0), 0);
+        assert_eq!(decompress_amount(0).unwrap(), 0);
     }
 
     #[test]
     fn test_decompress_amount_satoshis() {
         // 1.00 BTC = 100_000_000 sats compresses to 9
-        assert_eq!(decompress_amount(9), 100_000_000);
+        assert_eq!(decompress_amount(9).unwrap(), 100_000_000);
     }
 
     #[test]
@@ -556,5 +574,51 @@ mod tests {
         let core_key = b"c\x01\x02\x03";
         assert_eq!(get_key_prefix(core_key), Some(b'c'));
         assert_eq!(convert_key(core_key).unwrap(), b"\x01\x02\x03");
+    }
+
+    #[test]
+    fn height_code_past_u32_is_rejected() {
+        let normal = [0x80, 0x48, 0x00, 0x06];
+        let coin = parse_core_coin(&normal).unwrap();
+        assert_eq!(coin.height, 100);
+        assert!(!coin.is_coinbase);
+        let wide = [0x9e, 0xfe, 0xfe, 0xff, 0x00, 0x00, 0x06];
+        assert!(parse_core_coin(&wide).is_err());
+    }
+
+    #[test]
+    fn decompressed_amount_must_fit_in_i64() {
+        assert_eq!(decompress_amount(9).unwrap(), 100_000_000);
+        assert!(decompress_amount(1000000000000).is_err());
+        assert!(decompress_amount(184467440730).is_err());
+    }
+
+    #[test]
+    fn special_script_4_is_uncompressed_p2pk() {
+        let mut x = [0u8; 32];
+        x.copy_from_slice(
+            &hex_decode("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"),
+        );
+        let script = decompress_script(4, &x).unwrap();
+        assert_eq!(script.len(), 67);
+        assert_eq!(script[0], 65);
+        assert_eq!(script[1], 0x04);
+        assert_eq!(&script[2..34], &x);
+        assert_eq!(script[66], 0xac);
+    }
+
+    #[test]
+    fn short_legacy_coin_key_is_not_imported() {
+        let mut key = vec![b'c'];
+        key.extend_from_slice(&[9u8; 32]);
+        let err = core_utxo_key_to_outpoint_key(&key).unwrap_err();
+        assert!(err.to_string().contains("pre-0.15"));
+    }
+
+    fn hex_decode(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+            .collect()
     }
 }

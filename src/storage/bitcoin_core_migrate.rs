@@ -573,6 +573,9 @@ impl Migrator {
                 continue;
             };
 
+            if prefix == b'c' && key.len() < 34 {
+                anyhow::bail!("pre-0.15 coin key is not imported");
+            }
             let coin = match prefix {
                 b'C' => parse_core_coin(&value)?,
                 b'c' => parse_coin(&value)?,
@@ -1297,13 +1300,16 @@ fn compute_core_chainstate_muhash(
         let Some(prefix) = get_key_prefix(&key) else {
             continue;
         };
+        if prefix == b'c' && key.len() < 34 {
+            anyhow::bail!("pre-0.15 coin key is not imported");
+        }
         let coin = match prefix {
             b'C' => parse_core_coin(&value)?,
             b'c' => parse_coin(&value)?,
             _ => continue,
         };
         if key.len() < 34 {
-            continue;
+            anyhow::bail!("Coin key too short");
         }
         let mut txid = [0u8; 32];
         txid.copy_from_slice(&key[1..33]);

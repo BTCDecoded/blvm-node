@@ -46,17 +46,19 @@ impl CommitmentStore {
     ) -> Result<()> {
         // Serialize commitment
         let commitment_data = bincode::serialize(commitment)?;
-
-        // Store by block hash
-        self.commitments
-            .insert(block_hash.as_slice(), &commitment_data)?;
-
-        // Store height index for quick lookup
         let height_bytes = height.to_be_bytes();
-        self.height_index
-            .insert(&height_bytes, block_hash.as_slice())?;
-
-        Ok(())
+        crate::storage::database::commit_keyed(&[
+            (
+                self.commitments.as_ref(),
+                block_hash.as_slice(),
+                Some(commitment_data.as_slice()),
+            ),
+            (
+                self.height_index.as_ref(),
+                height_bytes.as_slice(),
+                Some(block_hash.as_slice()),
+            ),
+        ])
     }
 
     /// Get UTXO commitment for a block hash

@@ -29,7 +29,13 @@ pub struct BlockIndexEntry {
 }
 
 /// Reserved tree key for the next sequence counter (not a block hash).
-const SEQUENCE_COUNTER_KEY: &[u8] = &[0xff; 32];
+pub(crate) const SEQUENCE_COUNTER_KEY: &[u8] = &[0xff; 32];
+
+/// Index bytes ready to commit with other trees.
+pub(crate) struct PreparedIndex {
+    pub entry: Vec<u8>,
+    pub counter: Option<Vec<u8>>,
+}
 
 /// Hash-keyed block tree index (persisted).
 pub struct BlockIndex {
@@ -47,6 +53,55 @@ impl BlockIndex {
         Ok(())
     }
 
+    pub(crate) fn entries_tree(&self) -> &Arc<dyn Tree> {
+        &self.entries
+    }
+
+    /// Bytes for an index row whose status is `status`.
+    ///
+    /// `only_if_different` skips a row that already has that status. A missing row is `None`.
+    pub(crate) fn serialized_with_status(
+        &self,
+        hash: &Hash,
+        status: BlockIndexStatus,
+        only_if_different: bool,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(mut entry) = self.get(hash)? else {
+            return Ok(None);
+        };
+        if only_if_different && entry.status == status {
+            return Ok(None);
+        }
+        entry.status = status;
+        Ok(Some(bincode::serialize(&entry)?))
+    }
+
+    /// Index row and, for a new hash, the next sequence counter. Does not write.
+    pub(crate) fn prepare_insert(
+        &self,
+        hash: &Hash,
+        height: u64,
+        prev_hash: &Hash,
+        status: BlockIndexStatus,
+    ) -> Result<PreparedIndex> {
+        let (sequence_id, counter) = if let Some(existing) = self.get(hash)? {
+            (existing.sequence_id, None)
+        } else {
+            let next = self.peek_next_sequence_id()?;
+            (next, Some(next.to_be_bytes().to_vec()))
+        };
+        let entry = BlockIndexEntry {
+            height,
+            prev_hash: *prev_hash,
+            status,
+            sequence_id,
+        };
+        Ok(PreparedIndex {
+            entry: bincode::serialize(&entry)?,
+            counter,
+        })
+    }
+
     /// Record or refresh a block in the index.
     pub fn insert(
         &self,
@@ -55,20 +110,20 @@ impl BlockIndex {
         prev_hash: &Hash,
         status: BlockIndexStatus,
     ) -> Result<()> {
-        let sequence_id = if let Some(existing) = self.get(hash)? {
-            existing.sequence_id
-        } else {
-            self.next_sequence_id()?
-        };
-        let entry = BlockIndexEntry {
-            height,
-            prev_hash: *prev_hash,
-            status,
-            sequence_id,
-        };
-        let data = bincode::serialize(&entry)?;
-        self.entries.insert(hash.as_slice(), &data)?;
-        Ok(())
+        let prepared = self.prepare_insert(hash, height, prev_hash, status)?;
+        let mut ops = vec![(
+            self.entries.as_ref(),
+            hash.as_slice(),
+            Some(prepared.entry.as_slice()),
+        )];
+        if let Some(counter) = prepared.counter.as_ref() {
+            ops.push((
+                self.entries.as_ref(),
+                SEQUENCE_COUNTER_KEY,
+                Some(counter.as_slice()),
+            ));
+        }
+        crate::storage::database::commit_keyed(&ops)
     }
 
     /// Batch-insert many blocks during IBD in a single write transaction.
@@ -112,7 +167,7 @@ impl BlockIndex {
         Ok(())
     }
 
-    fn next_sequence_id(&self) -> Result<u64> {
+    fn peek_next_sequence_id(&self) -> Result<u64> {
         let current = match self.entries.get(SEQUENCE_COUNTER_KEY)? {
             Some(bytes) if bytes.len() >= 8 => {
                 let mut arr = [0u8; 8];
@@ -121,10 +176,7 @@ impl BlockIndex {
             }
             _ => 0,
         };
-        let next = current.saturating_add(1);
-        self.entries
-            .insert(SEQUENCE_COUNTER_KEY, &next.to_be_bytes())?;
-        Ok(next)
+        Ok(current.saturating_add(1))
     }
 
     pub fn get(&self, hash: &Hash) -> Result<Option<BlockIndexEntry>> {

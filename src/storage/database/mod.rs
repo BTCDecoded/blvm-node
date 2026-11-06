@@ -234,6 +234,58 @@ pub trait BatchWriter {
     }
 }
 
+/// Apply puts and deletes in one LMDB transaction when every tree is heed3.
+///
+/// Other backends apply the operations one commit at a time.
+pub fn commit_keyed(ops: &[(&dyn Tree, &[u8], Option<&[u8]>)]) -> Result<()> {
+    if ops.is_empty() {
+        return Ok(());
+    }
+    #[cfg(feature = "heed3")]
+    if ops.iter().all(|(tree, _, _)| tree.as_heed3_tree().is_some()) {
+        let trees: Vec<&Heed3Tree> = ops
+            .iter()
+            .map(|(tree, _, _)| tree.as_heed3_tree().expect("heed3 tree"))
+            .collect();
+        let writes: Vec<heed3_impl::SharedWrite<'_>> = ops
+            .iter()
+            .enumerate()
+            .map(|(index, (_, key, value))| heed3_impl::SharedWrite {
+                tree: trees[index],
+                key,
+                value: *value,
+            })
+            .collect();
+        return Heed3Tree::commit_shared(&writes);
+    }
+    for (tree, key, value) in ops {
+        match value {
+            Some(bytes) => tree.insert(key, bytes)?,
+            None => tree.remove(key)?,
+        }
+    }
+    Ok(())
+}
+
+/// Clear trees in one LMDB transaction when every tree is heed3.
+pub fn clear_trees(trees: &[&dyn Tree]) -> Result<()> {
+    if trees.is_empty() {
+        return Ok(());
+    }
+    #[cfg(feature = "heed3")]
+    if trees.iter().all(|tree| tree.as_heed3_tree().is_some()) {
+        let heed: Vec<&Heed3Tree> = trees
+            .iter()
+            .map(|tree| tree.as_heed3_tree().expect("heed3 tree"))
+            .collect();
+        return Heed3Tree::clear_shared(&heed);
+    }
+    for tree in trees {
+        tree.clear()?;
+    }
+    Ok(())
+}
+
 /// Database backend type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseBackend {

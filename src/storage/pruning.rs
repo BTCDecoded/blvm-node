@@ -9,6 +9,7 @@
 use crate::config::{PruningConfig, PruningMode};
 use crate::network::filter_service::BlockFilterService;
 use crate::storage::blockstore::BlockStore;
+use crate::storage::txindex::TxIndex;
 #[cfg(feature = "utxo-commitments")]
 use crate::storage::commitment_store::CommitmentStore;
 #[cfg(feature = "utxo-commitments")]
@@ -46,6 +47,7 @@ pub struct PruningManager {
     #[cfg(feature = "utxo-commitments")]
     utxostore: Option<Arc<UtxoStore>>,
     filter_service: Option<Arc<BlockFilterService>>,
+    tx_index: Option<Arc<TxIndex>>,
     stats: std::sync::Mutex<PruningStats>,
 }
 
@@ -67,8 +69,15 @@ impl PruningManager {
             #[cfg(feature = "utxo-commitments")]
             utxostore: None,
             filter_service: None,
+            tx_index: None,
             stats: std::sync::Mutex::new(PruningStats::default()),
         }
+    }
+
+    /// Attach the transaction index so custom prune can drop it.
+    pub fn with_tx_index(mut self, tx_index: Arc<TxIndex>) -> Self {
+        self.tx_index = Some(tx_index);
+        self
     }
 
     /// Set the network for consensus-sensitive operations (e.g. UTXO reconstruction).
@@ -92,6 +101,7 @@ impl PruningManager {
             commitment_store: Some(commitment_store),
             utxostore: Some(utxostore),
             filter_service: None,
+            tx_index: None,
             stats: std::sync::Mutex::new(PruningStats::default()),
         }
     }
@@ -113,6 +123,7 @@ impl PruningManager {
             #[cfg(feature = "utxo-commitments")]
             utxostore,
             filter_service,
+            tx_index: None,
             stats: std::sync::Mutex::new(PruningStats::default()),
         }
     }
@@ -401,6 +412,20 @@ impl PruningManager {
         Ok(())
     }
 
+    fn drop_tx_index_for_block(&self, hash: &blvm_protocol::Hash) -> Result<()> {
+        let Some(index) = &self.tx_index else {
+            return Ok(());
+        };
+        let Some(block) = self.blockstore.get_block(hash)? else {
+            return Ok(());
+        };
+        for tx in &block.transactions {
+            let txid = blvm_protocol::block::calculate_tx_id(tx);
+            index.remove_transaction(&txid)?;
+        }
+        Ok(())
+    }
+
     fn prune_normal(
         &self,
         prune_to_height: u64,
@@ -528,7 +553,7 @@ impl PruningManager {
         keep_filters: bool,
         keep_filtered_blocks: bool,
         keep_witnesses: bool,
-        _keep_tx_index: bool,
+        keep_tx_index: bool,
     ) -> Result<PruningStats> {
         let mut stats = PruningStats::default();
 
@@ -548,6 +573,9 @@ impl PruningManager {
         for height in 0..actual_prune_height {
             if let Some(hash) = self.blockstore.get_hash_by_height(height)? {
                 // Remove block body if not keeping from this height
+                if !keep_tx_index {
+                    self.drop_tx_index_for_block(&hash)?;
+                }
                 if height < keep_bodies_from_height {
                     self.remove_body_if_undo_is_durable(&hash, &mut stats)?;
                 }
