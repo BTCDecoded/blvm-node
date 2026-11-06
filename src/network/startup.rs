@@ -108,6 +108,7 @@ pub(crate) async fn start_tcp_listener(nm: &NetworkManager, listen_addr: SocketA
                                 std::net::SocketAddr::new(socket_addr.ip(), 0),
                                 unban_timestamp,
                             );
+                            dos_protection.forget_connection_violation(ip).await;
                         }
                         drop(stream);
                         continue;
@@ -265,6 +266,7 @@ pub(crate) async fn start_quinn_listener(
                                         std::net::SocketAddr::new(socket_addr.ip(), 0),
                                         unban_timestamp,
                                     );
+                                    dos_protection.forget_connection_violation(ip).await;
                                 }
                                 drop(conn);
                                 continue;

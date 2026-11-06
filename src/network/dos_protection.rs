@@ -67,6 +67,10 @@ impl ConnectionRateLimiter {
         });
     }
 
+    pub fn active_ips(&self) -> std::collections::HashSet<IpAddr> {
+        self.connection_attempts.keys().copied().collect()
+    }
+
     /// Get current connection attempt count for an IP
     pub fn get_attempt_count(&self, ip: IpAddr) -> usize {
         self.connection_attempts
@@ -339,6 +343,10 @@ impl DosProtectionManager {
     pub async fn cleanup(&self) {
         let mut limiter = self.connection_rate_limiter.lock().await;
         limiter.cleanup();
+        let live = limiter.active_ips();
+        drop(limiter);
+        let mut violations = self.connection_violations.lock().await;
+        violations.retain(|ip, _| live.contains(ip));
     }
 
     /// Get connection attempt count for an IP
@@ -351,6 +359,11 @@ impl DosProtectionManager {
     pub async fn should_auto_ban(&self, ip: IpAddr) -> bool {
         let violations = self.connection_violations.lock().await;
         violations.get(&ip).copied().unwrap_or(0) >= self.auto_ban_connection_violations
+    }
+
+    /// Drop the violation row after the ban is recorded.
+    pub async fn forget_connection_violation(&self, ip: IpAddr) {
+        self.connection_violations.lock().await.remove(&ip);
     }
 
     /// Get DoS protection metrics
