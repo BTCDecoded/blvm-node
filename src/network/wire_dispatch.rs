@@ -2,7 +2,7 @@
 //!
 //! Handles special cases and routes messages to the appropriate handlers.
 
-#[cfg(feature = "protocol-verification")]
+#[cfg(feature = "spec-lock")]
 use blvm_spec_lock::spec_locked;
 
 use crate::network::NetworkMessage;
@@ -188,8 +188,8 @@ impl NetworkManager {
     /// state machine: verack is only sent inside this handler, which only executes after a
     /// valid version message is received.  The invariant requires integration-level proof;
     /// Z3 body translation is not applicable to async network handlers.
-    #[cfg_attr(feature = "protocol-verification", spec_locked("10.2.1"))]
-    #[cfg_attr(feature = "protocol-verification", blvm_spec_lock::ensures(true))]
+    #[cfg_attr(feature = "spec-lock", spec_locked("10.2.1"))]
+    #[cfg_attr(feature = "spec-lock", blvm_spec_lock::ensures(true))]
     pub(crate) async fn handle_version_received(
         &self,
         peer_addr: SocketAddr,

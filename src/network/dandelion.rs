@@ -12,6 +12,7 @@
 //! This provides formal anonymity guarantees against transaction origin analysis.
 
 #[cfg(feature = "dandelion")]
+#[cfg(feature = "spec-lock")]
 use blvm_spec_lock::spec_locked;
 
 use blvm_protocol::Hash;
@@ -208,7 +209,7 @@ impl<C: Clock> DandelionRelay<C> {
 
     /// Start stem phase for a transaction.
     /// Orange Paper 10.6: Single stem state per tx (|stem_states(tx)| ≤ 1).
-    #[spec_locked("10.6")]
+    #[cfg_attr(feature = "spec-lock", spec_locked("10.6"))]
     pub fn start_stem_phase(
         &mut self,
         tx_hash: Hash,
@@ -250,7 +251,7 @@ impl<C: Clock> DandelionRelay<C> {
 
     /// Check if transaction should fluff (transition to broadcast phase).
     /// Orange Paper 10.6: Timeout enforcement (elapsed > stem_timeout ⟹ Fluff).
-    #[spec_locked("10.6")]
+    #[cfg_attr(feature = "spec-lock", spec_locked("10.6"))]
     pub fn should_fluff(&mut self, tx_hash: &Hash) -> bool {
         if let Some(state) = self.stem_txs.get(tx_hash) {
             // Check timeout
@@ -277,7 +278,7 @@ impl<C: Clock> DandelionRelay<C> {
 
     /// Advance stem phase (move to next peer).
     /// Orange Paper 10.6: Bounded stem length (stem_hops(tx) ≤ max_stem_hops).
-    #[spec_locked("10.6")]
+    #[cfg_attr(feature = "spec-lock", spec_locked("10.6"))]
     pub fn advance_stem(&mut self, tx_hash: Hash, available_peers: &[String]) -> Option<String> {
         if let Some(state) = self.stem_txs.get_mut(&tx_hash) {
             state.hops += 1;
@@ -307,7 +308,7 @@ impl<C: Clock> DandelionRelay<C> {
 
     /// Transition transaction to fluff phase.
     /// Orange Paper 10.6: Eventual fluff (removes from stem, enters broadcast phase).
-    #[spec_locked("10.6")]
+    #[cfg_attr(feature = "spec-lock", spec_locked("10.6"))]
     pub fn transition_to_fluff(&mut self, tx_hash: Hash) -> DandelionPhase {
         self.stem_txs.remove(&tx_hash);
         debug!(
@@ -319,7 +320,7 @@ impl<C: Clock> DandelionRelay<C> {
 
     /// Get current phase for a transaction.
     /// Orange Paper 10.6: phase = Stem ⟹ single-peer relay (no broadcast).
-    #[spec_locked("10.6")]
+    #[cfg_attr(feature = "spec-lock", spec_locked("10.6"))]
     pub fn get_phase(&self, tx_hash: &Hash) -> Option<DandelionPhase> {
         if self.stem_txs.contains_key(tx_hash) {
             Some(DandelionPhase::Stem)

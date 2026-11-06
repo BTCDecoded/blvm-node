@@ -2,7 +2,7 @@
 //!
 //! Implements Bitcoin P2P protocol message serialization and deserialization.
 
-#[cfg(feature = "protocol-verification")]
+#[cfg(feature = "spec-lock")]
 use blvm_spec_lock::spec_locked;
 
 use crate::network::transport::TransportType;
@@ -1034,7 +1034,7 @@ impl ProtocolParser {
 
     /// Parse a raw message into a protocol message
     /// Orange Paper 10.1.1: ParseMessage, size bounds, checksum rejection
-    #[cfg_attr(feature = "protocol-verification", spec_locked("10.1.1"))]
+    #[cfg_attr(feature = "spec-lock", spec_locked("10.1.1"))]
     pub fn parse_message(data: &[u8]) -> Result<ProtocolMessage> {
         use tracing::{debug, warn};
 
@@ -1672,11 +1672,11 @@ impl ProtocolParser {
     /// Computes double SHA256 of payload and returns first 4 bytes.
     /// Orange Paper 10.1.1: CalculateChecksum, |result| = 4
     #[cfg_attr(
-        feature = "protocol-verification",
+        feature = "spec-lock",
         spec_locked("10.1.1", "CalculateChecksum")
     )]
     #[cfg_attr(
-        feature = "protocol-verification",
+        feature = "spec-lock",
         blvm_spec_lock::ensures(result.len() == 4)
     )]
     pub fn calculate_checksum(payload: &[u8]) -> [u8; 4] {

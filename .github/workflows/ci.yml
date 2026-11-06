@@ -404,6 +404,10 @@ jobs:
       - name: Run tests (rocksdb feature)
         run: cargo test --features rocksdb
 
+      # Redb and sled are optional backends. The default build is heed3 only.
+      - name: Run tests (redb and sled features)
+        run: cargo test --features redb,sled
+
       - name: Dump disk usage on failure
         if: failure()
         run: |

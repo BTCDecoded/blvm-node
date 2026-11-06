@@ -2,8 +2,6 @@
 //!
 //! Implements CPU, memory, and file descriptor limits for module processes.
 
-// nix imports are used conditionally within functions
-
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
