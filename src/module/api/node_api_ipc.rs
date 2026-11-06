@@ -148,6 +148,9 @@ impl NodeApiIpc {
             }
             RequestPayload::GetTxMetadata { .. } => MessageType::GetTxMetadata,
             RequestPayload::GetMempoolFeeRateSummary => MessageType::GetMempoolFeeRateSummary,
+            RequestPayload::SetAdvertisedServiceBits { .. } => {
+                MessageType::SetAdvertisedServiceBits
+            }
             RequestPayload::SubmitBlock { .. } => MessageType::SubmitBlock,
             RequestPayload::QueueReceivedBlock { .. } => MessageType::QueueReceivedBlock,
             RequestPayload::MergeBlockServeDenylist { .. } => MessageType::MergeBlockServeDenylist,
@@ -1128,6 +1131,19 @@ impl NodeAPI for NodeApiIpc {
         .await
     }
 
+    async fn set_advertised_service_bits(&self, bits: u64) -> Result<(), ModuleError> {
+        self.request(
+            RequestPayload::SetAdvertisedServiceBits { bits },
+            |payload| match payload {
+                ResponsePayload::AdvertisedServiceBitsSet => Ok(()),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
     async fn merge_block_serve_denylist(&self, block_hashes: &[Hash]) -> Result<(), ModuleError> {
         self.request(
             RequestPayload::MergeBlockServeDenylist {
@@ -1372,6 +1388,12 @@ mod tests {
                 block_bytes: vec![0x01, 0x02]
             }),
             MessageType::QueueReceivedBlock
+        ));
+        assert!(matches!(
+            NodeApiIpc::payload_to_message_type(&RequestPayload::SetAdvertisedServiceBits {
+                bits: 1 << 26
+            }),
+            MessageType::SetAdvertisedServiceBits
         ));
         assert!(matches!(
             NodeApiIpc::payload_to_message_type(&RequestPayload::MergeBlockServeDenylist {

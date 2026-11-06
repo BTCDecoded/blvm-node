@@ -43,6 +43,12 @@ pub trait WasmInvoker: Send + Sync {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, ModuleError>;
+
+    async fn on_event(
+        &self,
+        module_name: &str,
+        event_json: &str,
+    ) -> Result<String, ModuleError>;
 }
 
 /// IPC server that handles module connections
@@ -134,9 +140,21 @@ pub struct ModuleIpcHandle {
     pub(crate) pending_invocations:
         Arc<tokio::sync::Mutex<HashMap<u64, oneshot::Sender<InvocationResultMessage>>>>,
     pub(crate) next_invocation_id: Arc<AtomicU64>,
+    pub(crate) cli_registry: Arc<tokio::sync::RwLock<HashMap<String, CliSpec>>>,
 }
 
 impl ModuleIpcHandle {
+    /// Register a CLI spec without locking the IPC server (the accept loop holds that mutex).
+    pub async fn register_cli_spec(&self, module_id: String, spec: CliSpec) {
+        self.cli_registry.write().await.insert(module_id, spec);
+    }
+
+    /// Drop a CLI spec registered under `module_name`.
+    pub async fn unregister_cli_spec_by_name(&self, module_name: &str) {
+        let mut registry = self.cli_registry.write().await;
+        registry.retain(|id, _| id != module_name && !id.starts_with(&format!("{module_name}_")));
+    }
+
     /// Invoke a subprocess module's registered ModuleAPI method (node → module).
     pub async fn invoke_module_api(
         &self,
@@ -215,6 +233,7 @@ impl ModuleIpcServer {
             outgoing_tx_by_module: Arc::clone(&self.outgoing_tx_by_module),
             pending_invocations: Arc::clone(&self.pending_invocations),
             next_invocation_id: Arc::clone(&self.next_invocation_id),
+            cli_registry: Arc::clone(&self.cli_registry),
         }
     }
 
@@ -1469,6 +1488,23 @@ impl ModuleIpcServer {
                     request.correlation_id,
                     ResponsePayload::ReceivedBlockQueued,
                 ))
+            }
+            RequestPayload::SetAdvertisedServiceBits { bits } => {
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = node_api.set_advertised_service_bits(*bits).await;
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+                match result {
+                    Ok(()) => Ok(ResponseMessage::success(
+                        request.correlation_id,
+                        ResponsePayload::AdvertisedServiceBitsSet,
+                    )),
+                    Err(e) => Ok(ResponseMessage::error(
+                        request.correlation_id,
+                        e.to_string(),
+                    )),
+                }
             }
             RequestPayload::MergeBlockServeDenylist { block_hashes } => {
                 node_api

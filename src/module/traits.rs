@@ -593,6 +593,19 @@ pub trait NodeAPI: Send + Sync {
         ))
     }
 
+    /// Advertise `NODE_FIBRE` (`1 << 26`) on this node's version message while the caller is loaded.
+    /// Other bits are rejected. The node records the bit under the calling module's name.
+    async fn set_advertised_service_bits(&self, _bits: u64) -> Result<(), ModuleError> {
+        Err(ModuleError::OperationError(
+            "set_advertised_service_bits is not implemented for this NodeAPI".to_string(),
+        ))
+    }
+
+    /// Drop service bits previously set by `module_name`. Used on unload and crash.
+    async fn clear_module_service_bits(&self, _module_name: &str) -> Result<(), ModuleError> {
+        Ok(())
+    }
+
     /// Merge block hashes into the node's denylist for serving full `block` messages on the network
     /// (e.g. `getdata`). Additive; callers may include selective-sync, policy/compliance, or tests.
     /// Peers receive `notfound` for these hashes instead of a full block.

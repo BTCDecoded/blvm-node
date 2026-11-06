@@ -177,6 +177,7 @@ impl RequestValidator {
             | RequestPayload::SubmitMempoolTransaction { .. } => Ok(ValidationResult::Allowed),
             | RequestPayload::SubmitBlock { .. } => Ok(ValidationResult::Allowed),
             | RequestPayload::QueueReceivedBlock { .. } => Ok(ValidationResult::Allowed),
+            | RequestPayload::SetAdvertisedServiceBits { .. } => Ok(ValidationResult::Allowed),
             | RequestPayload::MergeBlockServeDenylist { .. }
             | RequestPayload::GetBlockServeDenylistSnapshot
             | RequestPayload::ClearBlockServeDenylist

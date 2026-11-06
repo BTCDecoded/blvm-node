@@ -135,6 +135,44 @@ impl ModuleApiHub {
         Arc::clone(&self.node_api)
     }
 
+    /// `get_block_height` for a WASM guest. Uses the permission set registered at load.
+    /// An id that was never registered is denied, so the checker defaults do not apply.
+    pub async fn wasm_host_get_block_height(
+        &self,
+        module_name: &str,
+    ) -> Result<u64, ModuleError> {
+        if !self
+            .permission_checker
+            .has_explicit_permissions(module_name)
+        {
+            return Err(ModuleError::PermissionDenied(
+                "WASM host call requires the permission set registered at load".to_string(),
+            ));
+        }
+        self.permission_checker
+            .check_api_call(module_name, &RequestPayload::GetBlockHeight)?;
+        self.node_api.get_block_height().await
+    }
+
+    /// `get_block` for a WASM guest. Uses the permission set registered at load.
+    pub async fn wasm_host_get_block(
+        &self,
+        module_name: &str,
+        hash: &crate::Hash,
+    ) -> Result<Option<crate::Block>, ModuleError> {
+        if !self
+            .permission_checker
+            .has_explicit_permissions(module_name)
+        {
+            return Err(ModuleError::PermissionDenied(
+                "WASM host call requires the permission set registered at load".to_string(),
+            ));
+        }
+        self.permission_checker
+            .check_api_call(module_name, &RequestPayload::GetBlock { hash: *hash })?;
+        self.node_api.get_block(hash).await
+    }
+
     /// Register a module's permissions
     pub fn register_module_permissions(
         &mut self,
@@ -151,6 +189,16 @@ impl ModuleApiHub {
             .unregister_module_permissions(module_name);
         let mut limiters = self.rate_limiters.lock().await;
         limiters.retain(|id, _| id != module_name && !id.starts_with(&format!("{module_name}_")));
+    }
+
+    /// Drop version-message service bits this module registered.
+    pub async fn clear_module_service_bits(
+        &self,
+        module_name: &str,
+    ) -> Result<(), ModuleError> {
+        self.node_api
+            .clear_module_service_bits(module_name)
+            .await
     }
 
     /// Handle a request from a module
@@ -539,6 +587,15 @@ impl ModuleApiHub {
                     .await?;
                 ResponsePayload::ReceivedBlockQueued
             }
+            RequestPayload::SetAdvertisedServiceBits { bits } => {
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = self.node_api.set_advertised_service_bits(*bits).await;
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+                result?;
+                ResponsePayload::AdvertisedServiceBitsSet
+            }
             RequestPayload::MergeBlockServeDenylist { block_hashes } => {
                 self.node_api
                     .merge_block_serve_denylist(block_hashes.as_slice())
@@ -700,6 +757,7 @@ impl ModuleApiHub {
             RequestPayload::SubmitMempoolTransaction { .. } => "submit_mempool_transaction",
             RequestPayload::SubmitBlock { .. } => "submit_block",
             RequestPayload::QueueReceivedBlock { .. } => "queue_received_block",
+            RequestPayload::SetAdvertisedServiceBits { .. } => "set_advertised_service_bits",
             RequestPayload::MergeBlockServeDenylist { .. } => "merge_block_serve_denylist",
             RequestPayload::GetBlockServeDenylistSnapshot => "get_block_serve_denylist_snapshot",
             RequestPayload::ClearBlockServeDenylist => "clear_block_serve_denylist",

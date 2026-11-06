@@ -176,6 +176,12 @@ impl PermissionChecker {
         }
     }
 
+    /// True when `register_module_permissions` stored a set for this id.
+    /// An id that was never registered still receives [`Self::check_api_call`] defaults.
+    pub fn has_explicit_permissions(&self, module_id: &str) -> bool {
+        self.module_permissions.contains_key(module_id)
+    }
+
     /// Register module-specific permissions
     pub fn register_module_permissions(&mut self, module_id: String, permissions: PermissionSet) {
         debug!(
@@ -300,6 +306,7 @@ impl PermissionChecker {
             RequestPayload::SubmitMempoolTransaction { .. } => Permission::SendTransactions,
             RequestPayload::SubmitBlock { .. } => Permission::SubmitBlock,
             RequestPayload::QueueReceivedBlock { .. } => Permission::QueueInboundBlock,
+            RequestPayload::SetAdvertisedServiceBits { .. } => Permission::QueueInboundBlock,
             RequestPayload::MergeBlockServeDenylist { .. } => Permission::NetworkAccess,
             RequestPayload::GetBlockServeDenylistSnapshot => Permission::ReadNetwork,
             RequestPayload::ClearBlockServeDenylist => Permission::NetworkAccess,
@@ -334,5 +341,56 @@ impl PermissionChecker {
 impl Default for PermissionChecker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::module::ipc::protocol::RequestPayload;
+
+    #[test]
+    fn explicit_registration_gates_get_block_height() {
+        let mut checker = PermissionChecker::new();
+        assert!(!checker.has_explicit_permissions("height-guest"));
+
+        let mut empty = PermissionSet::new();
+        empty.add(Permission::ReadBlockchain);
+        checker.register_module_permissions("height-guest".to_string(), empty);
+        assert!(checker.has_explicit_permissions("height-guest"));
+        assert!(
+            checker
+                .check_api_call("height-guest", &RequestPayload::GetBlockHeight)
+                .is_err()
+        );
+
+        let mut chain = PermissionSet::new();
+        chain.add(Permission::ReadChainState);
+        checker.register_module_permissions("height-guest".to_string(), chain);
+        assert!(
+            checker
+                .check_api_call("height-guest", &RequestPayload::GetBlockHeight)
+                .is_ok()
+        );
+        assert!(
+            checker
+                .check_api_call(
+                    "height-guest",
+                    &RequestPayload::GetBlock { hash: [0u8; 32] }
+                )
+                .is_err()
+        );
+
+        let mut blocks = PermissionSet::new();
+        blocks.add(Permission::ReadBlockchain);
+        checker.register_module_permissions("block-guest".to_string(), blocks);
+        assert!(
+            checker
+                .check_api_call(
+                    "block-guest",
+                    &RequestPayload::GetBlock { hash: [0u8; 32] }
+                )
+                .is_ok()
+        );
     }
 }

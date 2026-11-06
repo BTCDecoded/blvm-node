@@ -258,6 +258,8 @@ pub struct NetworkManager {
     /// Pending blocks queue (blocks received via BlockReceived message)
     /// Separate from main message channel to avoid draining other messages
     pending_blocks: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
+    /// Service bits a loaded module asked this node to advertise, keyed by module name.
+    module_service_bits: Arc<std::sync::Mutex<HashMap<String, u64>>>,
     /// Compact blocks waiting on `blocktxn` for the positions `getblocktxn` asked for.
     pub(crate) pending_compact:
         Arc<std::sync::Mutex<HashMap<[u8; 32], crate::network::compact_blocks::CompactAssembly>>>,
@@ -640,6 +642,7 @@ impl NetworkManager {
                 .map(|c| Arc::new(c.clone())),
             peer_spam_violations: Arc::new(Mutex::new(HashMap::new())),
             pending_blocks: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            module_service_bits: Arc::new(std::sync::Mutex::new(HashMap::new())),
             pending_compact: Arc::new(std::sync::Mutex::new(HashMap::new())),
             tx_requests: Arc::new(std::sync::Mutex::new(
                 crate::network::tx_inflight::TxRequestTracker::default(),
@@ -3770,6 +3773,12 @@ impl NetworkManager {
 
         services_with_filters |= crate::network::protocol::NODE_PACKAGE_RELAY;
 
+        if let Ok(bits) = self.module_service_bits.lock() {
+            for extra in bits.values() {
+                services_with_filters |= *extra;
+            }
+        }
+
         #[cfg(feature = "governance")]
         if self.governance_config.is_some() {
             services_with_filters |= crate::network::protocol::NODE_GOVERNANCE;
@@ -3781,6 +3790,24 @@ impl NetworkManager {
         }
 
         self.apply_history_service_bits(services_with_filters)
+    }
+
+    /// Record `NODE_FIBRE` for `module_name`. Other bits are dropped.
+    pub fn set_module_service_bits(&self, module_name: &str, bits: u64) {
+        let allowed = bits & crate::network::protocol::NODE_FIBRE;
+        if module_name.is_empty() || allowed == 0 {
+            return;
+        }
+        if let Ok(mut map) = self.module_service_bits.lock() {
+            map.insert(module_name.to_string(), allowed);
+        }
+    }
+
+    /// Drop service bits recorded for `module_name`.
+    pub fn clear_module_service_bits(&self, module_name: &str) {
+        if let Ok(mut map) = self.module_service_bits.lock() {
+            map.remove(module_name);
+        }
     }
 
     /// Storage with no genesis body cannot serve the full chain.
@@ -3904,6 +3931,34 @@ mod pruning_version_services {
         assert_eq!(bare & NODE_NETWORK_LIMITED, 0);
         assert_ne!(bare & NODE_PACKAGE_RELAY, 0);
         assert_eq!(bare & NODE_FIBRE, 0);
+
+        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let manager = NetworkManager::new(listen);
+        let addr = crate::network::protocol::NetworkAddress {
+            time: 0,
+            services: 0,
+            ip: [0u8; 16],
+            port: 0,
+        };
+        let version_bits = |nm: &NetworkManager| {
+            nm.create_version_message(
+                70015,
+                0,
+                0,
+                addr.clone(),
+                addr.clone(),
+                1,
+                String::new(),
+                0,
+                true,
+            )
+            .services
+        };
+        assert_eq!(version_bits(&manager) & NODE_FIBRE, 0);
+        manager.set_module_service_bits("relay-mod", NODE_FIBRE);
+        assert_ne!(version_bits(&manager) & NODE_FIBRE, 0);
+        manager.clear_module_service_bits("relay-mod");
+        assert_eq!(version_bits(&manager) & NODE_FIBRE, 0);
 
         let empty = tempfile::TempDir::new().unwrap();
         let mut config = PruningConfig::default();

@@ -161,6 +161,84 @@ impl WasmInvoker for ManagerWasmInvoker {
         let result = tokio::task::block_in_place(|| (**instance_guard).invoke_rpc(method, params));
         result
     }
+
+    async fn on_event(
+        &self,
+        module_name: &str,
+        event_json: &str,
+    ) -> Result<String, ModuleError> {
+        let wasm_guard = {
+            let modules = self.modules.lock().await;
+            let managed = modules.get(module_name).ok_or_else(|| {
+                ModuleError::OperationError(format!("No WASM module '{}' is loaded", module_name))
+            })?;
+            match &managed.wasm_instance {
+                Some(inst) => inst.clone(),
+                None => {
+                    return Err(ModuleError::OperationError(format!(
+                        "Module '{}' is not a WASM module",
+                        module_name
+                    )));
+                }
+            }
+        };
+        let instance_guard = wasm_guard.lock().await;
+        tokio::task::block_in_place(|| instance_guard.on_event(event_json))
+    }
+}
+
+#[cfg(feature = "wasm-modules")]
+fn wasm_host_node_call_blocking(
+    hub: &Arc<tokio::sync::Mutex<ModuleApiHub>>,
+    module_name: &str,
+    method: &str,
+    args: &str,
+) -> Result<String, String> {
+    let hub = Arc::clone(hub);
+    let module_name = module_name.to_string();
+    let method = method.to_string();
+    let args = args.to_string();
+    let runtime = tokio::runtime::Handle::current();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = runtime.block_on(async move {
+            let hub = hub.lock().await;
+            match method.as_str() {
+                "get_block_height" => hub
+                    .wasm_host_get_block_height(&module_name)
+                    .await
+                    .map(|height| height.to_string())
+                    .map_err(|e| e.to_string()),
+                "get_block" => {
+                    let hash = wasm_block_hash_arg(&args)?;
+                    hub.wasm_host_get_block(&module_name, &hash)
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(|block| {
+                            serde_json::to_string(&block).map_err(|e| e.to_string())
+                        })
+                }
+                _ => Err("host_node_call method not available".to_string()),
+            }
+        });
+        let _ = tx.send(result);
+    });
+    rx.recv().unwrap_or_else(|e| Err(e.to_string()))
+}
+
+#[cfg(feature = "wasm-modules")]
+fn wasm_block_hash_arg(args: &str) -> Result<crate::Hash, String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(args).map_err(|e| format!("get_block args: {e}"))?;
+    let hex_hash = parsed
+        .get("hash")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "get_block args require {\"hash\":\"<64 hex>\"}".to_string())?;
+    let bytes = hex::decode(hex_hash).map_err(|e| format!("get_block hash: {e}"))?;
+    let hash: crate::Hash = bytes
+        .try_into()
+        .map_err(|_| "get_block hash must be 32 bytes".to_string())?;
+    Ok(hash)
 }
 
 impl ModuleManager {
@@ -215,6 +293,19 @@ impl ModuleManager {
     #[cfg(feature = "wasm-modules")]
     pub fn set_wasm_loader(&mut self, loader: Arc<dyn WasmModuleLoader>) {
         self.wasm_loader = Some(loader);
+    }
+
+    /// Last `on_event` return string for a loaded WASM module.
+    #[cfg(feature = "wasm-modules")]
+    pub async fn wasm_last_on_event_result(&self, module_name: &str) -> Option<String> {
+        let instance = {
+            let modules = self.modules.lock().await;
+            modules
+                .get(module_name)
+                .and_then(|managed| managed.wasm_instance.clone())?
+        };
+        let guard = instance.lock().await;
+        guard.last_on_event_result()
     }
 
     /// Set node config overrides for modules ([modules.<name>] from config.toml).
@@ -475,6 +566,12 @@ impl ModuleManager {
                     }
                     if let Some(ref hub) = api_hub {
                         let mut h = hub.lock().await;
+                        if let Err(e) = h.clear_module_service_bits(&module_name).await {
+                            warn!(
+                                "Failed to clear service bits for crashed module {}: {}",
+                                module_name, e
+                            );
+                        }
                         h.unregister_module(&module_name).await;
                     }
 
@@ -714,34 +811,87 @@ impl ModuleManager {
                             about: None,
                             subcommands: vec![],
                         });
-                let wasm_instance = Some(Arc::new(tokio::sync::Mutex::new(instance)));
 
                 if let Some(ref api_hub) = self.api_hub {
                     let permissions = Self::parse_permissions_from_metadata(&metadata);
                     let mut hub_guard = api_hub.lock().await;
                     hub_guard.register_module_permissions(module_name.to_string(), permissions);
+                    drop(hub_guard);
+                    let hub = Arc::clone(api_hub);
+                    let call_name = module_name.to_string();
+                    instance.set_host_node_call(std::sync::Arc::new(move |method, args| {
+                        wasm_host_node_call_blocking(&hub, &call_name, method, args)
+                    }));
                 }
+
+                let event_types = instance.event_types().map_err(|e| {
+                    ModuleError::InitializationError(format!(
+                        "WASM module {module_name} event_types: {e}"
+                    ))
+                })?;
+                let (event_tx, mut event_rx) = mpsc::channel(32);
+                self.event_manager
+                    .subscribe_module(module_name.to_string(), event_types, event_tx)
+                    .await
+                    .map_err(|e| {
+                        ModuleError::InitializationError(format!(
+                            "WASM module {module_name} subscribe: {e}"
+                        ))
+                    })?;
+                let wasm_instance = Arc::new(tokio::sync::Mutex::new(instance));
+                let task_instance = Arc::clone(&wasm_instance);
+                let task_name = module_name.to_string();
+                let monitor_handle = tokio::spawn(async move {
+                    while let Some(msg) = event_rx.recv().await {
+                        let json = match serde_json::to_string(&msg) {
+                            Ok(json) => json,
+                            Err(e) => {
+                                warn!("WASM module {task_name} event encode: {e}");
+                                continue;
+                            }
+                        };
+                        let guard = task_instance.lock().await;
+                        if let Err(e) = tokio::task::block_in_place(|| guard.on_event(&json)) {
+                            warn!("WASM module {task_name} on_event: {e}");
+                        }
+                    }
+                });
 
                 let module_version = metadata.version.clone();
                 let managed = ManagedModule {
                     metadata,
                     process: None,
                     state: ModuleState::Running,
-                    monitor_handle: None,
+                    monitor_handle: Some(monitor_handle),
                     process_id: None,
-                    wasm_instance,
+                    wasm_instance: Some(wasm_instance),
                 };
                 modules.insert(module_name.to_string(), managed);
                 drop(modules);
                 #[cfg(unix)]
-                if let Some(ref ipc) = self.ipc_server {
-                    ipc.lock()
-                        .await
-                        .register_cli_spec(module_name.to_string(), cli_spec)
+                if let Some(ref ipc) = self.ipc_handle {
+                    ipc.register_cli_spec(module_name.to_string(), cli_spec)
                         .await;
                 }
                 #[cfg(not(unix))]
                 let _ = cli_spec;
+
+                {
+                    use crate::module::ipc::protocol::EventPayload;
+                    use crate::module::traits::EventType;
+                    let payload = EventPayload::ModuleInstalled {
+                        module_name: module_name.to_string(),
+                        version: module_version.clone(),
+                    };
+                    if let Err(e) = self
+                        .event_manager
+                        .publish_event(EventType::ModuleInstalled, payload)
+                        .await
+                    {
+                        warn!("Failed to publish ModuleInstalled: {}", e);
+                    }
+                }
+
                 let loaded_modules = self.event_manager.loaded_modules();
                 let mut loaded = loaded_modules.lock().await;
                 let timestamp = crate::utils::current_timestamp();
@@ -885,9 +1035,18 @@ impl ModuleManager {
                 }
             }
 
-            // Stop monitoring
+            // Stop monitoring (native process monitor, or the WASM event task)
             if let Some(handle) = managed.monitor_handle.take() {
                 handle.abort();
+            }
+            #[cfg(feature = "wasm-modules")]
+            if managed.wasm_instance.is_some() {
+                if let Err(e) = self.event_manager.unsubscribe_module(module_name).await {
+                    warn!(
+                        "Failed to unsubscribe WASM module {} from events: {}",
+                        module_name, e
+                    );
+                }
             }
 
             // Kill process if we have a reference
@@ -923,6 +1082,12 @@ impl ModuleManager {
             // Unregister permissions and rate limiters (API hub)
             if let Some(ref api_hub) = self.api_hub {
                 let mut hub = api_hub.lock().await;
+                if let Err(e) = hub.clear_module_service_bits(module_name).await {
+                    warn!(
+                        "Failed to clear service bits for unloaded module {}: {}",
+                        module_name, e
+                    );
+                }
                 hub.unregister_module(module_name).await;
             }
 

@@ -28,6 +28,16 @@ use crate::storage::Storage;
 use crate::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
 use hex;
 
+/// Module ids are `{name}_{32 hex}`. Service bits are stored under `name`, which is what unload uses.
+fn module_service_bit_owner(module_id: &str) -> &str {
+    if let Some((name, suffix)) = module_id.rsplit_once('_') {
+        if suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return name;
+        }
+    }
+    module_id
+}
+
 /// Node API implementation for modules
 pub struct NodeApiImpl {
     /// Storage reference for querying blockchain data
@@ -2268,6 +2278,34 @@ impl NodeAPI for NodeApiImpl {
             ));
         };
         nm.queue_block(block_bytes);
+        Ok(())
+    }
+
+    async fn set_advertised_service_bits(&self, bits: u64) -> Result<(), ModuleError> {
+        if bits != crate::network::protocol::NODE_FIBRE {
+            return Err(ModuleError::OperationError(
+                "only NODE_FIBRE may be advertised by a module".to_string(),
+            ));
+        }
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(
+                "module id required to advertise service bits".to_string(),
+            )
+        })?;
+        let name = module_service_bit_owner(&module_id);
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.set_module_service_bits(name, bits);
+        Ok(())
+    }
+
+    async fn clear_module_service_bits(&self, module_name: &str) -> Result<(), ModuleError> {
+        if let Some(nm) = self.network_manager.as_ref() {
+            nm.clear_module_service_bits(module_name);
+        }
         Ok(())
     }
 

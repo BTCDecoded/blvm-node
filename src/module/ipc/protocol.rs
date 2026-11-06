@@ -171,6 +171,8 @@ pub enum MessageType {
     GetTxMetadata,
     /// Positive mempool fee-rate summary. Added at end.
     GetMempoolFeeRateSummary,
+    /// Module asks the node to advertise `NODE_FIBRE` while that module is loaded.
+    SetAdvertisedServiceBits,
 }
 
 /// Request message from module to node
@@ -400,6 +402,10 @@ pub enum RequestPayload {
         txid: Hash,
     },
     GetMempoolFeeRateSummary,
+    /// `bits` must be `NODE_FIBRE` (`1 << 26`). The node keys the bit by the calling module.
+    SetAdvertisedServiceBits {
+        bits: u64,
+    },
 }
 
 /// CLI spec for module commands (JSON-serializable structure)
@@ -583,6 +589,8 @@ pub enum ResponsePayload {
     MempoolTransactionSubmitted(bool),
     TxMetadata(Option<crate::module::traits::TxBlockMetadata>),
     MempoolFeeRateSummary(crate::module::traits::MempoolFeeRateSummary),
+    /// Ack for [`RequestPayload::SetAdvertisedServiceBits`].
+    AdvertisedServiceBitsSet,
 }
 
 /// Event message from node to subscribed modules

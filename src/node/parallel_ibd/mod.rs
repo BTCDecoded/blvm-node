@@ -10800,7 +10800,7 @@ impl ParallelIBD {
             // RECENT_HEADERS_TABLE is a sliding window of the last ~11 blocks. Only the
             // final chunk's entries matter for the end state; passing empty for earlier
             // chunks produces the same result without touching the table N-1 extra times.
-            #[cfg(any(feature = "rocksdb", feature = "redb"))]
+            #[cfg(any(feature = "rocksdb", feature = "redb", feature = "heed3"))]
             let recent_entries: Vec<(u64, Vec<u8>)> = if is_last_chunk {
                 flush_order
                     .iter()

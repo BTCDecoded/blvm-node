@@ -5,4 +5,4 @@
 
 mod loader_trait;
 
-pub use loader_trait::{WasmModuleInstance, WasmModuleLoader};
+pub use loader_trait::{WasmHostNodeCall, WasmModuleInstance, WasmModuleLoader};
