@@ -2644,7 +2644,10 @@ impl MempoolManager {
                         }
                         snapshot
                     }
-                    None => UtxoSet::default(),
+                    None => {
+                        warn!("Package rejected: UTXO set is locked");
+                        return Ok(vec![false; txs.len()]);
+                    }
                 }
             };
             for (tx, _) in &txs {
@@ -4790,6 +4793,18 @@ mod tests {
         assert!(!Arc::ptr_eq(current, &arc));
         let guard = current.try_lock().expect("installed snapshot is free");
         assert!(guard.get(&fresh).is_some());
+    }
+
+    #[tokio::test]
+    async fn package_admission_refuses_a_busy_utxo_lock() {
+        use std::sync::Arc;
+
+        let mempool = MempoolManager::new();
+        let shared = Arc::new(tokio::sync::Mutex::new(blvm_protocol::UtxoSet::default()));
+        mempool.set_utxo_set_arc(Arc::clone(&shared));
+        let _held = shared.lock().await;
+        assert!(!mempool.add_package(vec![legacy_empty_script()]).unwrap());
+        assert_eq!(mempool.size(), 0);
     }
 
     #[test]
