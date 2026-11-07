@@ -2838,29 +2838,8 @@ impl ParallelIBDConfig {
         _synced_chain_height: u64,
         peer_addresses: &[String],
     ) -> Self {
-        let mut config = Self::from_config(ibd_config);
-
-        if config.preferred_peers.is_empty() && !Self::ibd_peers_env_explicit() {
-            let lan_peers: Vec<String> = peer_addresses
-                .iter()
-                .filter(|p| {
-                    p.parse::<SocketAddr>()
-                        .ok()
-                        .is_some_and(|a| is_lan_peer(&a))
-                })
-                .cloned()
-                .collect();
-            if !lan_peers.is_empty() {
-                info!(
-                    "IBD: auto-preferring {} LAN peer(s) for download (set BLVM_IBD_PEERS to override): {}",
-                    lan_peers.len(),
-                    lan_peers.join(", ")
-                );
-                config.preferred_peers = lan_peers;
-            }
-        }
-
-        config
+        let _peers = peer_addresses;
+        Self::from_config(ibd_config)
     }
 
     /// Minimum connected peers before starting block download.

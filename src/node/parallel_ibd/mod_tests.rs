@@ -1500,7 +1500,10 @@ fn empty_blvm_ibd_peers_env_allows_auto_lan() {
         }
         let peers = vec!["192.168.2.100:8333".to_string(), "8.8.8.8:8333".to_string()];
         let config = ParallelIBDConfig::resolve_for_session(None, 0, &peers);
-        assert_eq!(config.preferred_peers, vec!["192.168.2.100:8333"]);
+        assert!(
+            config.preferred_peers.is_empty(),
+            "a detected LAN peer does not become an exclusive download set"
+        );
     });
 }
 
@@ -1538,7 +1541,10 @@ fn resolve_auto_prefers_lan_peers() {
     with_ibd_env_cleared(|| {
         let peers = vec!["192.168.2.100:8333".to_string(), "8.8.8.8:8333".to_string()];
         let config = ParallelIBDConfig::resolve_for_session(None, 100_000, &peers);
-        assert_eq!(config.preferred_peers, vec!["192.168.2.100:8333"]);
+        assert!(
+            config.preferred_peers.is_empty(),
+            "a detected LAN peer stays eligible with the WAN peers"
+        );
         assert_eq!(config.min_peers_for_ibd(), 1);
     });
 }
