@@ -2650,11 +2650,52 @@ impl Default for ParallelIBDConfig {
     }
 }
 
-/// When `BLVM_IBD_PEERS` pins download peers (archive tip-now / LAN), skip public
-/// archive DNS seeding. DNS discovery was racing pinned `127.0.0.1:18333` and
-/// setting `target_height` to public tip (~1.4M) + polluting GetData (supply health).
+/// Skip archive DNS and roster top-up when a pin actually restricts download.
+///
+/// `BLVM_IBD_PIN_PEERS` always skips. `BLVM_IBD_PEERS` skips only when
+/// [`filter_ibd_download_peers`] would keep that list and drop the rest.
+/// A list that matches fewer than two connected peers does not skip.
 pub(crate) fn skip_ibd_archive_dns_seed() -> bool {
-    ParallelIBDConfig::ibd_peers_env_explicit() || crate::network::ibd_peers_pinned()
+    crate::network::ibd_peers_pinned()
+}
+
+pub(crate) fn skip_ibd_archive_dns_seed_for(connected: &[String]) -> bool {
+    if crate::network::ibd_peers_pinned() {
+        return true;
+    }
+    let Ok(raw) = std::env::var("BLVM_IBD_PEERS") else {
+        return false;
+    };
+    let preferred: Vec<String> = raw
+        .split(',')
+        .map(|peer| peer.trim().to_string())
+        .filter(|peer| !peer.is_empty())
+        .collect();
+    download_list_restricts(&preferred, connected)
+}
+
+fn download_list_restricts(preferred: &[String], connected: &[String]) -> bool {
+    if preferred.is_empty() || connected.is_empty() {
+        return false;
+    }
+    let matches = connected
+        .iter()
+        .filter(|peer| {
+            preferred.iter().any(|pref| {
+                peer.as_str() == pref.as_str()
+                    || (!pref.contains(':')
+                        && peer.starts_with(pref)
+                        && peer.as_bytes().get(pref.len()) == Some(&b':'))
+            })
+        })
+        .count();
+    if matches == 0 {
+        false
+    } else if matches < 2 && connected.len() >= 2 {
+        false
+    } else {
+        true
+    }
 }
 
 /// R-346: connected-peer count the IBD session keeps topping the roster up to
@@ -2689,13 +2730,6 @@ pub(crate) fn ibd_roster_topup_secs() -> u64 {
 }
 
 impl ParallelIBDConfig {
-    /// True when `BLVM_IBD_PEERS` is set to a non-empty value (empty string = unset).
-    fn ibd_peers_env_explicit() -> bool {
-        std::env::var("BLVM_IBD_PEERS")
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false)
-    }
-
     /// Build config from optional IbdConfig. ENV overrides config file.
     pub fn from_config(ibd_config: Option<&crate::config::IbdConfig>) -> Self {
         let chunk_size = std::env::var("BLVM_IBD_CHUNK_SIZE")
@@ -8375,8 +8409,8 @@ impl ParallelIBD {
         // reachable before we pass the local-block-store boundary and need network downloads.
         // Skip when BLVM_IBD_PEERS is pinned (LAN/Mode T archive tip-now) — DNS races the pin.
         if let Some(ref net) = network {
-            if skip_ibd_archive_dns_seed() {
-                info!("IBD: skipping archive DNS seed — BLVM_IBD_PEERS pinned");
+            if skip_ibd_archive_dns_seed_for(peer_ids) {
+                info!("IBD: skipping archive DNS seed — download peers are pinned");
             } else {
                 let net_clone = Arc::clone(net);
                 tokio::spawn(async move {
@@ -8392,7 +8426,9 @@ impl ParallelIBD {
         // peers thinned `ready` every run. Re-run `connect_peers_from_database` while the
         // session is live and the connected count is under target. Pinned peers: skip.
         if let Some(ref net) = network {
-            if let (Some(target), false) = (ibd_roster_target(), skip_ibd_archive_dns_seed()) {
+            if let (Some(target), false) =
+                (ibd_roster_target(), skip_ibd_archive_dns_seed_for(peer_ids))
+            {
                 let net_clone = Arc::clone(net);
                 let session_id = PARALLEL_IBD_SESSION_ID.load(Ordering::Acquire) + 1;
                 tokio::spawn(async move {
@@ -9172,7 +9208,8 @@ impl ParallelIBD {
                                 // Check if main storage has UTXO data (legacy partial IBD).
                                 let main_tree =
                                     storage.open_tree("ibd_utxos").context("open ibd_utxos")?;
-                                let main_non_empty = main_utxo_tree_non_empty(main_tree.is_empty())?;
+                                let main_non_empty =
+                                    main_utxo_tree_non_empty(main_tree.is_empty())?;
                                 if main_non_empty {
                                     // Case 2: legacy data in main storage — keep using it.
                                     // Migrating mid-IBD would require copying millions of entries.
@@ -10255,15 +10292,14 @@ impl ParallelIBD {
         );
         let ibd_block_outputs = match ibd_block_outputs {
             Some(ready) => Some(ready),
-            None if height < blvm_consensus::block::get_assume_valid_height() => {
-                precomputed_tx_ids.map(|ids| {
+            None if height < blvm_consensus::block::get_assume_valid_height() => precomputed_tx_ids
+                .map(|ids| {
                     std::sync::Arc::new(
                         blvm_consensus::utxo_overlay::build_block_output_utxo_cache(
                             block, ids, height,
                         ),
                     )
-                })
-            }
+                }),
             None => None,
         };
         context.ibd_block_outputs = ibd_block_outputs;

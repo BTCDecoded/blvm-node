@@ -671,7 +671,27 @@ fn pinned_ibd_peers_skips_archive_dns_seed() {
     unsafe {
         std::env::set_var("BLVM_IBD_PEERS", "127.0.0.1:18333");
     }
-    assert!(skip_ibd_archive_dns_seed());
+    assert!(
+        !skip_ibd_archive_dns_seed(),
+        "one named peer with no connected roster does not skip DNS"
+    );
+    let connected = vec![
+        "127.0.0.1:18333".to_string(),
+        "8.8.8.8:8333".to_string(),
+        "1.1.1.1:8333".to_string(),
+    ];
+    assert!(!skip_ibd_archive_dns_seed_for(&connected));
+    let alone = vec!["127.0.0.1:18333".to_string()];
+    assert!(skip_ibd_archive_dns_seed_for(&alone));
+    let two = vec![
+        "127.0.0.1:18333".to_string(),
+        "127.0.0.1:18334".to_string(),
+        "8.8.8.8:8333".to_string(),
+    ];
+    unsafe {
+        std::env::set_var("BLVM_IBD_PEERS", "127.0.0.1:18333,127.0.0.1:18334");
+    }
+    assert!(skip_ibd_archive_dns_seed_for(&two));
     unsafe {
         std::env::remove_var("BLVM_IBD_PEERS");
     }
