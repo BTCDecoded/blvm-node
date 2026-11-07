@@ -551,7 +551,13 @@ impl NetworkManager {
                     &ancestor,
                 )
             };
-            if header.version < 1
+            let version_ok = blvm_consensus::bip_validation::check_bip90_network(
+                header.version,
+                next_height,
+                consensus_network,
+            )
+            .unwrap_or(false);
+            if !version_ok
                 || header.timestamp == 0
                 || header.prev_block_hash != prev
                 || !meets
