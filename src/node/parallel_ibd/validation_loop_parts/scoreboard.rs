@@ -1247,62 +1247,12 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                 (rss, anon, file)
                             })
                             .unwrap_or((0, 0, 0));
-                        // Read mimalloc virtual vs RSS from /proc/self/smaps.
-                        let (mi_virtual_mb, mi_rss_mb) = {
-                            use std::io::BufRead;
-                            let mut vt = 0u64;
-                            let mut rt = 0u64;
-                            if let Ok(f) = std::fs::File::open("/proc/self/smaps") {
-                                let mut in_mi = false;
-                                for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
-                                    if line.ends_with("[anon:mimalloc]") {
-                                        in_mi = true;
-                                        if let Some(range) = line.split_whitespace().next() {
-                                            let mut p = range.splitn(2, '-');
-                                            if let (Some(s), Some(e)) = (p.next(), p.next()) {
-                                                let start = usize::from_str_radix(s, 16).unwrap_or(0);
-                                                let end = usize::from_str_radix(e, 16).unwrap_or(0);
-                                                vt += (end.saturating_sub(start) / 1024 / 1024) as u64;
-                                            }
-                                        }
-                                        continue;
-                                    }
-                                    if in_mi {
-                                        if line.starts_with("Rss:") {
-                                            if let Some(v) = line.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok()) {
-                                                rt += v / 1024;
-                                            }
-                                        }
-                                        if line.starts_with("VmFlags:") { in_mi = false; }
-                                    }
-                                }
-                            }
-                            (vt, rt)
-                        };
-                        // Top-N anon regions by RSS for fragmentation diagnosis.
-                        let top_anon = {
-                            use std::io::BufRead;
-                            let mut regions: Vec<(u64, String)> = Vec::new();
-                            if let Ok(f) = std::fs::File::open("/proc/self/smaps") {
-                                let mut cur_label = String::new();
-                                let mut cur_rss = 0u64;
-                                for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
-                                    if line.starts_with(|c: char| c.is_ascii_hexdigit()) {
-                                        if cur_rss > 100 * 1024 {
-                                            regions.push((cur_rss, cur_label.clone()));
-                                        }
-                                        let parts: Vec<&str> = line.splitn(6, ' ').collect();
-                                        cur_label = parts.last().cloned().unwrap_or("").trim().to_string();
-                                        if cur_label.is_empty() { cur_label = "[anon]".to_string(); }
-                                        cur_rss = 0;
-                                    } else if line.starts_with("Rss:") {
-                                        cur_rss = line.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-                                    }
-                                }
-                            }
-                            regions.sort_by(|a, b| b.0.cmp(&a.0));
-                            regions.into_iter().take(6).map(|(r, l)| format!("{}MB:{}", r/1024, l)).collect::<Vec<_>>().join(", ")
-                        };
+                        let smaps_report = parse_smaps_report(
+                            &std::fs::read_to_string("/proc/self/smaps").unwrap_or_default(),
+                        );
+                        let mi_virtual_mb = smaps_report.mi_virtual_mb;
+                        let mi_rss_mb = smaps_report.mi_rss_mb;
+                        let top_anon = smaps_report.top_anon;
                         // Estimate staged BTreeMap: each entry is Arc<UtxoDelta> which holds
                         // FxHashMap<OutPoint, Arc<UTXO>> (additions) + FxHashSet<[u8;36]> (deletions).
                         // At h=184k: ~1000 adds × (48B slot + 72B arc_utxo) + ~800 dels × 37B slot ≈ 150KB/block.
@@ -1310,17 +1260,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         let staged_est_kb = if staged_n == usize::MAX { 0u64 } else {
                             staged_n as u64 * utxos_per_block_est * 150 / 1024
                         };
-                        // Mimalloc region count.
-                        let mi_region_count = {
-                            use std::io::BufRead;
-                            let mut n = 0usize;
-                            if let Ok(f) = std::fs::File::open("/proc/self/smaps") {
-                                for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
-                                    if line.ends_with("[anon:mimalloc]") { n += 1; }
-                                }
-                            }
-                            n
-                        };
+                        let mi_region_count = smaps_report.mi_region_count;
                         // Inflight Arc<UTXO> heap (separate from inflight table in DashMap).
                         let inflight_arc_mb = (inflight_n as u64 * sz_arc_utxo as u64) / (1024 * 1024);
                         // Feeder + staged pipeline bytes (already computed above as KB, convert to MB).
@@ -4477,6 +4417,77 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     Ok(())
 }
 
+struct SmapsReport {
+    mi_virtual_mb: u64,
+    mi_rss_mb: u64,
+    top_anon: String,
+    mi_region_count: usize,
+}
+
+fn parse_smaps_report(text: &str) -> SmapsReport {
+    let mut mi_virtual_mb = 0u64;
+    let mut mi_rss_mb = 0u64;
+    let mut mi_region_count = 0usize;
+    let mut in_mi = false;
+    let mut regions: Vec<(u64, String)> = Vec::new();
+    let mut cur_label = String::new();
+    let mut cur_rss = 0u64;
+    for line in text.lines() {
+        if line.ends_with("[anon:mimalloc]") {
+            mi_region_count += 1;
+            in_mi = true;
+            if let Some(range) = line.split_whitespace().next() {
+                let mut parts = range.splitn(2, '-');
+                if let (Some(start), Some(end)) = (parts.next(), parts.next()) {
+                    let start = usize::from_str_radix(start, 16).unwrap_or(0);
+                    let end = usize::from_str_radix(end, 16).unwrap_or(0);
+                    mi_virtual_mb += (end.saturating_sub(start) / 1024 / 1024) as u64;
+                }
+            }
+        } else if in_mi {
+            if line.starts_with("Rss:") {
+                if let Some(v) = line.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok())
+                {
+                    mi_rss_mb += v / 1024;
+                }
+            }
+            if line.starts_with("VmFlags:") {
+                in_mi = false;
+            }
+        }
+        if line.starts_with(|c: char| c.is_ascii_hexdigit()) {
+            if cur_rss > 100 * 1024 {
+                regions.push((cur_rss, cur_label.clone()));
+            }
+            let parts: Vec<&str> = line.splitn(6, ' ').collect();
+            cur_label = parts.last().cloned().unwrap_or("").trim().to_string();
+            if cur_label.is_empty() {
+                cur_label = "[anon]".to_string();
+            }
+            cur_rss = 0;
+        } else if line.starts_with("Rss:") {
+            cur_rss = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+        }
+    }
+    regions.sort_by(|a, b| b.0.cmp(&a.0));
+    let top_anon = regions
+        .into_iter()
+        .take(6)
+        .map(|(rss, label)| format!("{}MB:{}", rss / 1024, label))
+        .collect::<Vec<_>>()
+        .join(", ");
+    SmapsReport {
+        mi_virtual_mb,
+        mi_rss_mb,
+        top_anon,
+        mi_region_count,
+    }
+}
+
 #[cfg(test)]
 mod duplicate_coinbase_depth_tests {
     use super::duplicate_coinbase_serial_height;
@@ -4489,5 +4500,21 @@ mod duplicate_coinbase_depth_tests {
         assert!(!duplicate_coinbase_serial_height(91855));
         assert!(!duplicate_coinbase_serial_height(91856));
         assert!(duplicate_coinbase_serial_height(91880));
+    }
+
+    #[test]
+    fn one_smaps_pass_matches_the_three_figures() {
+        let text = "\
+7f0000000000-7f0000100000 rw-p 00000000 00:00 0 [anon:mimalloc]
+Rss:              204800 kB
+VmFlags: rd wr mr mw me ac sd
+7f0000100000-7f0000200000 rw-p 00000000 00:00 0
+Rss:               4096 kB
+";
+        let report = super::parse_smaps_report(text);
+        assert_eq!(report.mi_region_count, 1);
+        assert_eq!(report.mi_virtual_mb, 1);
+        assert_eq!(report.mi_rss_mb, 200);
+        assert!(report.top_anon.contains("[anon:mimalloc]"));
     }
 }
