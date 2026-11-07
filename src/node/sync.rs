@@ -274,10 +274,7 @@ fn stored_copy_of_matching_witnesses<T: Clone>(wire: &[T]) -> Option<Vec<T>> {
 }
 
 /// The fork-choice deque takes the block the caller already owns. `Some` is the unused clone.
-fn cloned_fork_choice_entry<T: Clone, W: Clone>(
-    block: &T,
-    witnesses: &[W],
-) -> Option<(T, Vec<W>)> {
+fn cloned_fork_choice_entry<T: Clone, W: Clone>(block: &T, witnesses: &[W]) -> Option<(T, Vec<W>)> {
     let _ = (block, witnesses);
     None
 }
