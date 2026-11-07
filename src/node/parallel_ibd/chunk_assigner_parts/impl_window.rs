@@ -36,6 +36,17 @@ thread_local! {
     static WINDOW_TEST_FORCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Slow peers start `reserve` ahead of validation. A shorter live window still
+/// assigns its last height instead of none.
+pub(crate) fn slow_peer_walk_from(next_needed: u64, reserve: u64, window_hi: u64) -> u64 {
+    let from = next_needed.saturating_add(reserve);
+    if window_hi >= next_needed && from > window_hi {
+        window_hi
+    } else {
+        from
+    }
+}
+
 impl ChunkAssigner {
     /// `BLVM_IBD_ASSIGN`: `window` (default) or `legacy`.
     ///
@@ -669,7 +680,7 @@ impl ChunkAssigner {
         };
         let slow = Self::window_front_reserve() > 0 && (cooled || self.window_peer_is_slow(peer_id));
         let walk_from = if slow {
-            next_needed.saturating_add(Self::window_front_reserve())
+            slow_peer_walk_from(next_needed, Self::window_front_reserve(), window_hi)
         } else {
             next_needed
         };
@@ -1368,5 +1379,22 @@ impl ChunkAssigner {
             self.window_blk_ms_ema.load(Ordering::Relaxed),
             slow
         ))
+    }
+}
+
+#[cfg(test)]
+mod slow_walk_tests {
+    use super::slow_peer_walk_from;
+
+    #[test]
+    fn short_window_assigns_the_last_height() {
+        assert_eq!(slow_peer_walk_from(1_000, 256, 1_063), 1_063);
+        assert_eq!(slow_peer_walk_from(1_000, 256, 1_127), 1_127);
+        assert_eq!(slow_peer_walk_from(1_000, 256, 1_128), 1_128);
+    }
+
+    #[test]
+    fn long_window_keeps_the_reserve() {
+        assert_eq!(slow_peer_walk_from(1_000, 256, 3_047), 1_256);
     }
 }
