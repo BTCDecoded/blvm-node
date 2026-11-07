@@ -573,9 +573,6 @@ impl PruningManager {
         for height in 0..actual_prune_height {
             if let Some(hash) = self.blockstore.get_hash_by_height(height)? {
                 // Remove block body if not keeping from this height
-                if !keep_tx_index {
-                    self.drop_tx_index_for_block(&hash)?;
-                }
                 if height < keep_bodies_from_height {
                     self.remove_body_if_undo_is_durable(&hash, &mut stats)?;
                 }
