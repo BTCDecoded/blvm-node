@@ -84,11 +84,7 @@ pub fn parse_coin(data: &[u8]) -> Result<BitcoinCoreCoin> {
 /// Parse modern Core `Coin` value (`Coin::Unserialize` + `TxOutCompression`).
 pub fn parse_core_coin(data: &[u8]) -> Result<BitcoinCoreCoin> {
     let (code, len) = read_core_varint(data, 0)?;
-    let height_code = code >> 1;
-    if height_code > u32::MAX as u64 {
-        return Err(anyhow::anyhow!("coin height does not fit in u32"));
-    }
-    let height = height_code as u32;
+    let height = (code >> 1) as u32;
     let is_coinbase = (code & 1) != 0;
     let mut offset = len;
 
