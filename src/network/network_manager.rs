@@ -1628,10 +1628,16 @@ impl NetworkManager {
                     );
                     return false;
                 }
-                let payload = (block, witnesses, wire_payload);
+                let mut payload = Some((block, witnesses, wire_payload));
                 let mut delivered = false;
-                for sender in live {
-                    if sender.send(payload.clone()).is_ok() {
+                let last = live.len().saturating_sub(1);
+                for (i, sender) in live.into_iter().enumerate() {
+                    let message = if i == last {
+                        payload.take().expect("payload")
+                    } else {
+                        payload.as_ref().expect("payload").clone()
+                    };
+                    if sender.send(message).is_ok() {
                         delivered = true;
                     }
                 }
