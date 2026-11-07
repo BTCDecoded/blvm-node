@@ -205,6 +205,35 @@ fn custom_prune_drops_the_tx_index_when_asked() {
     manager.prune_to_height(2, 300, false).unwrap();
     assert!(index.get_metadata(&txid).unwrap().is_none());
     assert!(blockstore.get_block(&hash).unwrap().is_none());
+
+    let (_kept_dir, kept_db) = temp_db();
+    let kept_store = Arc::new(BlockStore::new(Arc::clone(&kept_db)).unwrap());
+    let kept_index = Arc::new(TxIndex::new(Arc::clone(&kept_db)).unwrap());
+    let kept_block = sample_block(2);
+    store_body(&kept_store, &kept_block, 0);
+    let kept_tx = &kept_block.transactions[0];
+    let kept_txid = blvm_protocol::block::calculate_tx_id(kept_tx);
+    let kept_hash = header_hash(&kept_block.header);
+    kept_index
+        .index_transaction(kept_tx, &kept_hash, 0, 0)
+        .unwrap();
+    let kept_config = PruningConfig {
+        mode: PruningMode::Custom {
+            keep_headers: true,
+            keep_bodies_from_height: 1,
+            keep_commitments: false,
+            keep_filters: false,
+            keep_filtered_blocks: false,
+            keep_witnesses: true,
+            keep_tx_index: true,
+        },
+        ..PruningConfig::default()
+    };
+    let kept_manager =
+        PruningManager::new(kept_config, Arc::clone(&kept_store)).with_tx_index(kept_index.clone());
+    kept_manager.prune_to_height(2, 300, false).unwrap();
+    assert!(kept_index.get_metadata(&kept_txid).unwrap().is_some());
+    assert!(kept_store.get_block(&kept_hash).unwrap().is_none());
 }
 
 #[test]
