@@ -16,6 +16,12 @@ pub(crate) fn node_is_in_ibd(chain_height: u64, best_header_height: Option<u64>)
     }
 }
 
+/// Block hash for the run-loop event. The wire header is the first 80 bytes.
+pub(crate) fn block_hash_from_wire_prefix(block_data: &[u8]) -> Option<[u8; 32]> {
+    let header = block_data.get(..80)?;
+    Some(crate::storage::hashing::double_sha256(header))
+}
+
 /// Main node run loop. Called from `Node::start()` after components are started.
 pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
     // Subscribe before any slow startup work so SIGTERM is not missed.
@@ -65,15 +71,9 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
             info!("Processing block from network");
             let blocks_arc = node.storage.blocks();
 
-            // Parse block to get hash for event publishing
-            use crate::node::block_processor::parse_block_from_wire;
+            // The header is the first 80 wire bytes. process_block parses the block once.
             let block_hash_for_validation =
-                if let Ok((block, _)) = parse_block_from_wire(&block_data) {
-                    use crate::storage::blockstore::BlockStore;
-                    blocks_arc.get_block_hash(&block)
-                } else {
-                    [0u8; 32]
-                };
+                block_hash_from_wire_prefix(&block_data).unwrap_or([0u8; 32]);
 
             // Publish block validation started event
             if let Some(event_publisher) = node
@@ -475,7 +475,7 @@ pub(crate) fn persist_connected_utxo_set(
 
 #[cfg(test)]
 mod tests {
-    use super::node_is_in_ibd;
+    use super::{block_hash_from_wire_prefix, node_is_in_ibd};
 
     #[test]
     fn node_is_in_ibd_follows_the_header_tip() {
@@ -483,6 +483,17 @@ mod tests {
         assert!(!node_is_in_ibd(5000, Some(5000)));
         assert!(node_is_in_ibd(999, None));
         assert!(!node_is_in_ibd(1000, Some(1000)));
+    }
+
+    #[test]
+    fn wire_prefix_hash_is_the_first_80_bytes() {
+        let mut data = vec![7u8; 120];
+        data[79] = 3;
+        data[80] = 9;
+        let hash = block_hash_from_wire_prefix(&data).unwrap();
+        assert_eq!(hash, crate::storage::hashing::double_sha256(&data[..80]));
+        assert_ne!(hash, crate::storage::hashing::double_sha256(&data));
+        assert!(block_hash_from_wire_prefix(&data[..79]).is_none());
     }
 
     #[test]
