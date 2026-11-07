@@ -631,8 +631,8 @@ mod tests {
                 crate::network::transport::PeerIdentity::Socket(addr),
             ),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

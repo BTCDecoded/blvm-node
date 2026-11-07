@@ -78,9 +78,7 @@ impl ChainStateAccess for NodeChainAccess {
         self.mempool.get_transactions()
     }
 
-    fn mempool_for_compact_block(
-        &self,
-    ) -> Vec<(Transaction, Vec<blvm_protocol::segwit::Witness>)> {
+    fn mempool_for_compact_block(&self) -> Vec<(Transaction, Vec<blvm_protocol::segwit::Witness>)> {
         self.mempool
             .get_transactions()
             .into_iter()

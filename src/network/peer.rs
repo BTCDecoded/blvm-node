@@ -171,7 +171,9 @@ fn enqueue_raw(
     }
 }
 
-pub(crate) fn raw_peer_identity(addr: &super::transport::TransportAddr) -> super::transport::PeerIdentity {
+pub(crate) fn raw_peer_identity(
+    addr: &super::transport::TransportAddr,
+) -> super::transport::PeerIdentity {
     use super::transport::{PeerIdentity, TransportAddr};
     match addr {
         TransportAddr::Tcp(sock) => PeerIdentity::Socket(*sock),
@@ -300,7 +302,8 @@ impl Peer {
                                 "Peer {:?} sent a frame that failed magic or checksum, disconnecting",
                                 transport_addr_clone
                             );
-                            let _ = message_tx_clone.send(checksum_disconnect(&transport_addr_clone));
+                            let _ =
+                                message_tx_clone.send(checksum_disconnect(&transport_addr_clone));
                             break;
                         }
                         if !reserve_raw_frame(data.len()).await {
@@ -1112,9 +1115,9 @@ mod shutdown_tests {
 #[cfg(test)]
 mod iroh_identity_tests {
     use super::{checksum_disconnect, enqueue_raw, raw_peer_identity};
+    use crate::network::NetworkMessage;
     use crate::network::network_manager::NetworkManager;
     use crate::network::transport::{PeerIdentity, TransportAddr};
-    use crate::network::NetworkMessage;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn two_iroh_endpoints_are_two_peers() {
@@ -1155,9 +1158,7 @@ mod iroh_identity_tests {
         assert!(manager.identity_is_banned(&id_a).await);
         assert!(!manager.identity_is_banned(&id_b).await);
 
-        manager
-            .remember_handshake(&id_a)
-            .await;
+        manager.remember_handshake(&id_a).await;
         assert!(manager.handshake_known(&id_a).await);
         assert!(!manager.handshake_known(&id_b).await);
 

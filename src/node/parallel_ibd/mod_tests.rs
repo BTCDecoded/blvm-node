@@ -3461,10 +3461,7 @@ fn bip54_period_boundary_reads_the_parent_timestamps() {
         ..parent
     };
     let older_hash = blvm_consensus::block::block_header_hash(&older);
-    storage
-        .blocks()
-        .store_header(&older_hash, &older)
-        .unwrap();
+    storage.blocks().store_header(&older_hash, &older).unwrap();
     storage.blocks().store_height(2017, &older_hash).unwrap();
 
     let signal = blvm_protocol::BlockHeader {

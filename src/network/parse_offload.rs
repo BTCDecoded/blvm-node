@@ -128,8 +128,10 @@ pub(crate) fn take_inbound_block(
         return Some(message);
     }
     match message {
-        NetworkMessage::RawMessageReceived(data, crate::network::transport::PeerIdentity::Socket(peer_addr))
-            if is_block_frame(&data) => {
+        NetworkMessage::RawMessageReceived(
+            data,
+            crate::network::transport::PeerIdentity::Socket(peer_addr),
+        ) if is_block_frame(&data) => {
             let nm = Arc::clone(nm);
             tokio::spawn(async move {
                 if let Err(e) = offload_block(nm, peer_addr, data).await {
