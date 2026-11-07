@@ -267,6 +267,12 @@ impl Clone for SyncCoordinator {
     }
 }
 
+/// A matching wire witness list is not copied. `Some` is the unused clone.
+fn stored_copy_of_matching_witnesses<T: Clone>(wire: &[T]) -> Option<Vec<T>> {
+    let _ = wire;
+    None
+}
+
 impl SyncCoordinator {
     /// Create a new sync coordinator
     pub fn new() -> Self {
@@ -474,7 +480,10 @@ impl SyncCoordinator {
 
         // Use wire witnesses when present; otherwise load from blockstore (fail closed post-SegWit).
         let (stored_witnesses, recent_headers) = if witnesses.len() == block.transactions.len() {
-            (None, mtp_headers_before(blockstore, current_height))
+            (
+                stored_copy_of_matching_witnesses(&witnesses),
+                mtp_headers_before(blockstore, current_height),
+            )
         } else {
             let (loaded, headers) = prepare_block_validation_context(
                 blockstore,
@@ -1136,6 +1145,12 @@ pub async fn run_utxo_commitments_initial_sync(
 mod tests {
     use super::*;
     use blvm_protocol::{Block, BlockHeader, Transaction};
+
+    #[test]
+    fn matching_witness_list_is_not_cloned() {
+        let wire = vec![vec![7u8; 72]; 4];
+        assert!(stored_copy_of_matching_witnesses(&wire).is_none());
+    }
 
     #[test]
     fn test_sync_coordinator_new() {
