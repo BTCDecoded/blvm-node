@@ -474,24 +474,18 @@ impl SyncCoordinator {
 
         // Use wire witnesses when present; otherwise load from blockstore (fail closed post-SegWit).
         let (stored_witnesses, recent_headers) = if witnesses.len() == block.transactions.len() {
-            (
-                witnesses.clone(),
-                mtp_headers_before(blockstore, current_height),
-            )
+            (None, mtp_headers_before(blockstore, current_height))
         } else {
-            prepare_block_validation_context(
+            let (loaded, headers) = prepare_block_validation_context(
                 blockstore,
                 &block,
                 current_height,
                 protocol.get_protocol_version(),
-            )?
+            )?;
+            (Some(loaded), headers)
         };
 
-        let witnesses_to_use = if witnesses.len() == block.transactions.len() {
-            &witnesses
-        } else {
-            &stored_witnesses
-        };
+        let witnesses_to_use = stored_witnesses.as_deref().unwrap_or(&witnesses);
 
         // Log recent headers availability for BIP113 median time validation
         if let Some(ref headers) = recent_headers {
