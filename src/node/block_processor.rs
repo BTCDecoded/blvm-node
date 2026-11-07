@@ -368,5 +368,5 @@ pub fn validate_block_with_context_and_undo(
     let (result, new_utxo_set, undo_log) =
         blvm_consensus::block::connect_block(block, witnesses, owned_utxo, height, &consensus_ctx)?;
     *utxo_set = new_utxo_set;
-    Ok((result, utxo_set.clone(), undo_log))
+    Ok((result, std::mem::take(utxo_set), undo_log))
 }
