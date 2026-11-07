@@ -123,16 +123,28 @@ pub(crate) fn remove_header_peer<T: PartialEq>(peers: &mut Vec<T>, peer: &T, idx
     idx
 }
 
-/// Move `peer` to the end and keep `idx`. Removing it from an earlier slot
-/// already leaves `idx` on the peer that followed it.
+/// Move `peer` to the end and select the peer that followed it.
+///
+/// Removing an earlier slot slides that follower into `idx`. The last slot
+/// does not slide: the peer is pushed back onto the same index, so the next
+/// request starts at the front. Adding 1 on top of either case skips a peer.
 pub(crate) fn move_header_peer_to_end<T: PartialEq + Clone>(
     peers: &mut Vec<T>,
     peer: &T,
     idx: usize,
 ) -> usize {
+    let len = peers.len();
+    if len == 0 {
+        return idx;
+    }
+    let pos = idx % len;
+    let selected_is_last = pos + 1 == len && peers.get(pos) == Some(peer);
     if let Some(found) = peers.iter().position(|a| a == peer) {
         let moved = peers.remove(found);
         peers.push(moved);
+        if selected_is_last && found + 1 == len {
+            return idx - pos;
+        }
     }
     idx
 }
@@ -1218,6 +1230,24 @@ mod n13_tests {
         let idx = move_header_peer_to_end(&mut peers, &"A", idx);
         assert_eq!(peers, vec!["B", "A"]);
         assert_eq!(peers[idx % peers.len()], "B");
+        let mut last = vec!["A", "B"];
+        let idx = header_index_after_batch(1, true, true);
+        let idx = move_header_peer_to_end(&mut last, &"B", idx);
+        assert_eq!(last[idx % last.len()], "A");
+    }
+
+    #[test]
+    fn short_batch_from_the_last_slot_asks_the_other_peer() {
+        let mut peers = vec!["A", "B"];
+        let idx = move_header_peer_to_end(&mut peers, &"A", 0);
+        assert!(!short_header_batch_completes(499, 900_000, 1, peers.len()));
+        assert_eq!(peers[idx % peers.len()], "B");
+        let mut last = vec!["A", "B"];
+        let idx = move_header_peer_to_end(&mut last, &"B", 1);
+        assert!(!short_header_batch_completes(499, 900_000, 1, last.len()));
+        assert_eq!(last[idx % last.len()], "A");
+        assert!(short_header_batch_completes(900_000, 900_000, 1, 2));
+        assert!(short_header_batch_completes(499, 900_000, 2, 2));
     }
 
     #[test]
