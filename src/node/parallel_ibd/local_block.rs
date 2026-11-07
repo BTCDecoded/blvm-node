@@ -1028,10 +1028,12 @@ fn coordinator_inject_one(
     reload_if_dispatched: bool,
 ) -> Result<bool> {
     if reorder_buffer.contains_key(&height) {
+        log_miss.remove(&height);
         return Ok(true); // already queued; caller can continue chaining
     }
     if already_dispatched.contains(&height) && !reload_if_dispatched {
         // Still in the pipeline (bridge/feeder/validation). Do not reload from disk.
+        log_miss.remove(&height);
         return Ok(true);
     }
     if !height_eligible_for_local_gap_fill(height, confirmed_body_height_at_start) {
@@ -1104,6 +1106,7 @@ pub fn coordinator_inject_local_gap(
     if height != validation_height.saturating_add(1) {
         return Ok(false);
     }
+    log_miss.retain(|h| *h >= height);
     let lookahead = gap_inject_lookahead();
     let mut any_success = false;
     // Only count heights newly inserted into reorder. Already-dispatched / already-queued
@@ -2407,6 +2410,96 @@ mod tests {
             reorder_buffer.contains_key(&500),
             "unconfirmed dispatched tip must reload from disk"
         );
+    }
+
+    #[test]
+    fn filled_gap_miss_leaves_the_log_and_the_cursor_drops_old_keys() {
+        let blockstore = temp_blockstore();
+        let mut reorder_buffer = std::collections::BTreeMap::new();
+        let already_dispatched = rustc_hash::FxHashSet::default();
+        let mut log_miss = rustc_hash::FxHashSet::default();
+        log_miss.insert(100);
+        assert!(
+            !coordinator_inject_local_gap(
+                &blockstore,
+                ProtocolVersion::BitcoinV1,
+                500,
+                0,
+                499,
+                &mut reorder_buffer,
+                &already_dispatched,
+                &mut log_miss,
+                true,
+            )
+            .unwrap()
+        );
+        assert!(
+            log_miss.contains(&500),
+            "a live miss inside the lookahead stays"
+        );
+        assert!(!log_miss.contains(&100), "a key below the cursor leaves");
+
+        let block = Block {
+            header: BlockHeader {
+                version: 4,
+                timestamp: 1_600_000_000,
+                ..Default::default()
+            },
+            transactions: vec![Transaction {
+                version: 1,
+                inputs: blvm_protocol::tx_inputs![],
+                outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                    value: 50_0000_0000,
+                    script_pubkey: vec![0x51],
+                }],
+                lock_time: 0,
+            }]
+            .into(),
+        };
+        reorder_buffer.insert(500, (Arc::new(block), Arc::new(Vec::new())));
+        log_miss.insert(500);
+        assert!(
+            coordinator_inject_local_gap(
+                &blockstore,
+                ProtocolVersion::BitcoinV1,
+                500,
+                0,
+                499,
+                &mut reorder_buffer,
+                &already_dispatched,
+                &mut log_miss,
+                true,
+            )
+            .unwrap()
+        );
+        assert!(
+            !log_miss.contains(&500),
+            "a queued height leaves the miss log"
+        );
+
+        reorder_buffer.clear();
+        let mut dispatched = rustc_hash::FxHashSet::default();
+        dispatched.insert(500);
+        log_miss.insert(500);
+        assert!(
+            coordinator_inject_local_gap(
+                &blockstore,
+                ProtocolVersion::BitcoinV1,
+                500,
+                0,
+                499,
+                &mut reorder_buffer,
+                &dispatched,
+                &mut log_miss,
+                true,
+            )
+            .unwrap()
+        );
+        assert!(
+            !log_miss.contains(&500),
+            "a dispatched height leaves the miss log"
+        );
+        assert!(reorder_buffer.is_empty());
     }
 
     #[test]
