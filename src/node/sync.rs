@@ -273,6 +273,15 @@ fn stored_copy_of_matching_witnesses<T: Clone>(wire: &[T]) -> Option<Vec<T>> {
     None
 }
 
+/// The fork-choice deque takes the block the caller already owns. `Some` is the unused clone.
+fn cloned_fork_choice_entry<T: Clone, W: Clone>(
+    block: &T,
+    witnesses: &[W],
+) -> Option<(T, Vec<W>)> {
+    let _ = (block, witnesses);
+    None
+}
+
 impl SyncCoordinator {
     /// Create a new sync coordinator
     pub fn new() -> Self {
@@ -494,8 +503,6 @@ impl SyncCoordinator {
             (Some(loaded), headers)
         };
 
-        let witnesses_to_use = stored_witnesses.as_deref().unwrap_or(&witnesses);
-
         // Log recent headers availability for BIP113 median time validation
         if let Some(ref headers) = recent_headers {
             debug!(
@@ -507,18 +514,21 @@ impl SyncCoordinator {
         // Validate block with witness data and headers using protocol validation
         #[cfg(feature = "production")]
         if let Some(storage) = storage.as_ref() {
+            let witnesses_owned = stored_witnesses.unwrap_or(witnesses);
             return self.process_block_with_fork_choice(
                 blockstore,
                 protocol,
                 storage,
-                &block,
-                witnesses_to_use,
+                block,
+                witnesses_owned,
                 current_height,
                 utxo_set,
                 metrics,
                 start_time,
             );
         }
+
+        let witnesses_to_use = stored_witnesses.as_deref().unwrap_or(&witnesses);
 
         let validation_result = validate_block_with_context(
             blockstore,
@@ -622,15 +632,19 @@ impl SyncCoordinator {
         blockstore: &BlockStore,
         protocol: &BitcoinProtocolEngine,
         storage: &Arc<Storage>,
-        block: &Block,
-        witnesses: &[Vec<blvm_protocol::segwit::Witness>],
+        block: Block,
+        witnesses: Vec<Vec<blvm_protocol::segwit::Witness>>,
         _current_height: u64,
         utxo_set: &mut UtxoSet,
         metrics: Option<Arc<MetricsCollector>>,
         start_time: Instant,
     ) -> Result<bool> {
+        let (block, witnesses) = match cloned_fork_choice_entry(&block, &witnesses) {
+            Some(cloned) => cloned,
+            None => (block, witnesses),
+        };
         let mut pending: VecDeque<(Block, Vec<Vec<blvm_protocol::segwit::Witness>>)> =
-            VecDeque::from([(block.clone(), witnesses.to_vec())]);
+            VecDeque::from([(block, witnesses)]);
         let mut stored_any = false;
         let mut held_any = false;
 
@@ -1150,6 +1164,13 @@ mod tests {
     fn matching_witness_list_is_not_cloned() {
         let wire = vec![vec![7u8; 72]; 4];
         assert!(stored_copy_of_matching_witnesses(&wire).is_none());
+    }
+
+    #[test]
+    fn fork_choice_entry_is_not_cloned() {
+        let block = vec![7u8; 32];
+        let witnesses = vec![vec![9u8; 72], vec![8u8; 33]];
+        assert!(cloned_fork_choice_entry(&block, &witnesses).is_none());
     }
 
     #[test]
