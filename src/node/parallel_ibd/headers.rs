@@ -116,6 +116,39 @@ pub(crate) fn empty_headers_is_ibd_tip(
     fetched_tip + 1 > start_height
 }
 
+/// Drop `peer` and keep `idx`. The peer that followed it slides into `idx`.
+/// Adding 1 after the removal skips that peer.
+pub(crate) fn remove_header_peer<T: PartialEq>(peers: &mut Vec<T>, peer: &T, idx: usize) -> usize {
+    peers.retain(|a| a != peer);
+    idx
+}
+
+/// Move `peer` to the end and keep `idx`. Removing it from an earlier slot
+/// already leaves `idx` on the peer that followed it.
+pub(crate) fn move_header_peer_to_end<T: PartialEq + Clone>(
+    peers: &mut Vec<T>,
+    peer: &T,
+    idx: usize,
+) -> usize {
+    if let Some(found) = peers.iter().position(|a| a == peer) {
+        let moved = peers.remove(found);
+        peers.push(moved);
+    }
+    idx
+}
+
+/// A short headers message is the peer's tip only when that tip has reached
+/// the requested target, or every peer in this round already answered short.
+pub(crate) fn short_header_batch_completes(
+    fetched_tip: u64,
+    end_height: u64,
+    short_replies_this_round: usize,
+    peer_count: usize,
+) -> bool {
+    fetched_tip >= end_height
+        || (peer_count > 0 && short_replies_this_round >= peer_count)
+}
+
 /// Download target when no peer has advertised a height above the tip.
 ///
 /// A caught-up node stays at `synced_tip`. Headers that extend the tip set
@@ -585,6 +618,7 @@ pub(crate) async fn download_headers(
     let request_floor = current_height;
     let mut consecutive_failures = 0;
     let mut current_peer_idx = 0;
+    let mut short_replies_this_round = 0usize;
     let mut last_progress_log = start_height;
     let mut last_progress_event = start_height;
     let start_time = std::time::Instant::now();
@@ -668,8 +702,7 @@ pub(crate) async fn download_headers(
 
         if let Err(e) = network.send_to_peer(peer_addr, wire_msg).await {
             debug!("Send failed to {}: {}", peer_addr, e);
-            peer_addrs.retain(|&a| a != peer_addr);
-            current_peer_idx += 1;
+            current_peer_idx = remove_header_peer(&mut peer_addrs, &peer_addr, current_peer_idx);
             consecutive_failures += 1;
             if consecutive_failures >= headers_max_failures {
                 return Err(anyhow::anyhow!("Too many failures"));
@@ -700,11 +733,8 @@ pub(crate) async fn download_headers(
                             peer_addr, fetched_tip, request_floor, end_height
                         );
                         consecutive_failures += 1;
-                        current_peer_idx += 1;
-                        if let Some(idx) = peer_addrs.iter().position(|&a| a == peer_addr) {
-                            let p = peer_addrs.remove(idx);
-                            peer_addrs.push(p);
-                        }
+                        current_peer_idx =
+                            move_header_peer_to_end(&mut peer_addrs, &peer_addr, current_peer_idx);
                         continue;
                     }
                     info!(
@@ -721,6 +751,7 @@ pub(crate) async fn download_headers(
                 );
                 let mut batch_entries: Vec<(blvm_protocol::Hash, BlockHeader, u64)> =
                     Vec::with_capacity(headers.len());
+                let mut peer_fault = false;
 
                 for header in &headers {
                     if !header_links_to_parent(blockstore, header, current_height, &last_hash)? {
@@ -808,6 +839,7 @@ pub(crate) async fn download_headers(
                             "[IBD_HEADER_WORK] height {} bits {:#x} are not the required work from {} — not storing",
                             current_height, header.bits, peer_addr
                         );
+                        peer_fault = true;
                         current_peer_idx += 1;
                         consecutive_failures += 1;
                         if consecutive_failures >= headers_max_failures {
@@ -917,25 +949,42 @@ pub(crate) async fn download_headers(
                 }
 
                 let max_headers = network.protocol_limits().max_headers_results;
-                if headers.len() < max_headers {
-                    let total = current_height - start_height;
-                    let elapsed = start_time.elapsed();
-                    let rate = if elapsed.as_secs_f64() > 0.0 {
-                        total as f64 / elapsed.as_secs_f64()
-                    } else {
-                        0.0
-                    };
-                    info!(
-                        "Header sync COMPLETE: {} headers in {:.1}s ({:.0} h/s) - chain tip reached",
-                        total,
-                        elapsed.as_secs_f64(),
-                        rate
+                if !peer_fault && headers.len() < max_headers {
+                    let fetched_tip = current_height.saturating_sub(1);
+                    short_replies_this_round += 1;
+                    if short_header_batch_completes(
+                        fetched_tip,
+                        end_height,
+                        short_replies_this_round,
+                        peer_addrs.len(),
+                    ) {
+                        let total = current_height - start_height;
+                        let elapsed = start_time.elapsed();
+                        let rate = if elapsed.as_secs_f64() > 0.0 {
+                            total as f64 / elapsed.as_secs_f64()
+                        } else {
+                            0.0
+                        };
+                        info!(
+                            "Header sync COMPLETE: {} headers in {:.1}s ({:.0} h/s) - chain tip reached",
+                            total,
+                            elapsed.as_secs_f64(),
+                            rate
+                        );
+                        return Ok(HeaderSyncResult {
+                            tip_height: fetched_tip,
+                            may_assign: header_presync.releases_assigner(),
+                        });
+                    }
+                    warn!(
+                        "[IBD_HEADER_SHORT] peer={} fetched_tip={} end={} — below target; rotate",
+                        peer_addr, fetched_tip, end_height
                     );
-                    return Ok(HeaderSyncResult {
-                        tip_height: current_height.saturating_sub(1),
-                        may_assign: header_presync.releases_assigner(),
-                    });
+                    current_peer_idx =
+                        move_header_peer_to_end(&mut peer_addrs, &peer_addr, current_peer_idx);
+                    continue;
                 }
+                short_replies_this_round = 0;
             }
             Ok(Err(_)) => {
                 debug!("Channel closed for request to {}", peer_addr);
@@ -1122,6 +1171,38 @@ mod n13_tests {
         assert!(!header_batch_rtt_should_rotate(400.0));
         assert!(header_batch_rtt_should_rotate(401.0));
         assert!(header_batch_rtt_should_rotate(1770.0));
+    }
+
+    #[test]
+    fn send_failure_selects_the_peer_that_followed() {
+        let mut peers = vec!["A", "B", "C"];
+        let idx = remove_header_peer(&mut peers, &"A", 0);
+        assert_eq!(peers, vec!["B", "C"]);
+        assert_eq!(peers[idx % peers.len()], "B");
+        let mut again = vec!["A", "B"];
+        let idx = remove_header_peer(&mut again, &"A", 0);
+        assert_eq!(again[idx % again.len()], "B");
+    }
+
+    #[test]
+    fn empty_non_tip_selects_the_peer_that_followed() {
+        let mut peers = vec!["A", "B", "C"];
+        let idx = move_header_peer_to_end(&mut peers, &"A", 0);
+        assert_eq!(peers, vec!["B", "C", "A"]);
+        assert_eq!(peers[idx % peers.len()], "B");
+        let mut two = vec!["A", "B"];
+        let idx = move_header_peer_to_end(&mut two, &"A", 0);
+        assert_eq!(two, vec!["B", "A"]);
+        assert_eq!(two[idx % two.len()], "B");
+    }
+
+    #[test]
+    fn short_batch_below_target_does_not_complete_until_every_peer() {
+        assert!(!short_header_batch_completes(499, 900_000, 1, 2));
+        assert!(short_header_batch_completes(499, 900_000, 2, 2));
+        assert!(short_header_batch_completes(900_000, 900_000, 1, 2));
+        assert!(!short_header_batch_completes(97_999, 100_000, 1, 3));
+        assert!(short_header_batch_completes(100_000, 100_000, 1, 3));
     }
 
     #[test]
