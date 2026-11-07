@@ -148,11 +148,14 @@ pub fn store_block_with_context_and_index(
         }
         #[cfg(feature = "production")]
         if let Ok(Some(undo)) = blockstore.get_undo_log(&block_hash) {
+            let mut undo_at = rustc_hash::FxHashMap::default();
+            for entry in &undo.entries {
+                undo_at.entry(entry.outpoint).or_insert(entry);
+            }
             for tx in block.transactions.iter() {
                 let tx_hash = blvm_protocol::block::calculate_tx_id(tx);
                 for input in tx.inputs.iter() {
-                    let Some(entry) = undo.entries.iter().find(|e| e.outpoint == input.prevout)
-                    else {
+                    let Some(entry) = undo_at.get(&input.prevout) else {
                         continue;
                     };
                     let Some(prev) = &entry.previous_utxo else {
