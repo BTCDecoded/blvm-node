@@ -21,7 +21,6 @@ use crate::storage::ibd_engine::{
 use crate::storage::ibd_utxo_store::{IbdUtxoStore, PendingFlushPackage};
 use crate::utils::time::current_timestamp;
 use anyhow::Result;
-use blvm_consensus::utxo_overlay::build_block_output_utxo_cache;
 use blvm_protocol::bip_validation::Bip30Index;
 use blvm_protocol::{
     BitcoinProtocolEngine, Block, BlockHeader, Hash, UTXO, UtxoSet, segwit::Witness,

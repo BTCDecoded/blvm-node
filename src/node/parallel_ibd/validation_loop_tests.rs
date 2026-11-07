@@ -548,19 +548,13 @@ fn r360_engine_prep_deferred_matches_dispatch_prep() {
         1_000,
     );
 
-    // Below assume-valid: ids filled, cache built and equal to the dispatch-side build.
+    // Below assume-valid the queued job does not hold the output map. Connect builds it.
     let mut ids = Vec::new();
-    let cache = engine_prep_deferred(&block, 1_000, 912_683, &mut ids).expect("cache below AV");
+    assert!(engine_prep_deferred(&block, 1_000, 912_683, &mut ids).is_none());
     assert_eq!(ids, expect_ids);
-    assert_eq!(cache.len(), expect_cache.len());
-    assert_eq!(cache.len(), 6);
-    for (op, u) in expect_cache.iter() {
-        let got = cache.get(op).expect("outpoint present");
-        assert_eq!(got.value, u.value);
-        assert_eq!(got.script_pubkey, u.script_pubkey);
-    }
+    assert_eq!(expect_cache.len(), 6);
 
-    // At/above assume-valid: ids still filled, no cache (matches dispatch `h < AV` gate).
+    // At/above assume-valid: ids still filled, no cache.
     let mut ids_hi = Vec::new();
     assert!(engine_prep_deferred(&block, 912_683, 912_683, &mut ids_hi).is_none());
     assert_eq!(ids_hi, expect_ids);

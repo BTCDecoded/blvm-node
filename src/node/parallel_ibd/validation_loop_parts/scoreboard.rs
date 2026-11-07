@@ -2737,22 +2737,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             // I2: pre-build output Arc map only on the assume-valid fast path (skip_signatures).
             // Above assume_valid_height connect_block builds locally when needed; skipping here
             // avoids N in-flight pipeline jobs each holding a full per-block output cache.
-            let t_disp_outcache = std::time::Instant::now();
-            let ibd_block_outputs = if !prep_deferred
-                && h < blvm_consensus::block::get_assume_valid_height()
-            {
-                Some(Arc::new(build_block_output_utxo_cache(
-                    block_arc_d.as_ref(),
-                    tx_ids_precomputed_d.as_slice(),
-                    h,
-                )))
-            } else {
-                None
-            };
-            super::ms_breakdown::note_dispatch_split_us(
-                disp_txid_us,
-                t_disp_outcache.elapsed().as_micros() as u64,
-            );
+            let ibd_block_outputs = None;
+            super::ms_breakdown::note_dispatch_split_us(disp_txid_us, 0);
 
             let job_send = if let Some(ref db) = utxo_engine {
                 if let Some(append_tx) = engine_append.sender() {

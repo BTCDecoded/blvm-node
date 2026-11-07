@@ -1880,17 +1880,9 @@ fn engine_prep_deferred(
     if tx_ids.is_empty() {
         crate::storage::disk_utxo::compute_tx_ids_only(block, tx_ids);
     }
-    if height < assume_valid_height {
-        Some(Arc::new(
-            blvm_consensus::utxo_overlay::build_block_output_utxo_cache(
-                block,
-                tx_ids.as_slice(),
-                height,
-            ),
-        ))
-    } else {
-        None
-    }
+    // Queued jobs must not hold the output map. Connect builds it and drops it.
+    let _ = (height, assume_valid_height);
+    None
 }
 
 struct LegacyValidateJob {

@@ -10274,6 +10274,19 @@ impl ParallelIBD {
             bip54_activation_override,
             bip54_boundary,
         );
+        let ibd_block_outputs = match ibd_block_outputs {
+            Some(ready) => Some(ready),
+            None if height < blvm_consensus::block::get_assume_valid_height() => {
+                precomputed_tx_ids.map(|ids| {
+                    std::sync::Arc::new(
+                        blvm_consensus::utxo_overlay::build_block_output_utxo_cache(
+                            block, ids, height,
+                        ),
+                    )
+                })
+            }
+            None => None,
+        };
         context.ibd_block_outputs = ibd_block_outputs;
         context.sequence_prev_mtp = Some(blockstore.sequence_prev_mtp_lookup());
         context.difficulty_ancestor = Some(blockstore.difficulty_ancestor_lookup());
