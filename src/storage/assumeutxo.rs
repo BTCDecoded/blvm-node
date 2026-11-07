@@ -151,9 +151,11 @@ pub fn persist_commitment_failed(data_dir: &Path) -> Result<()> {
 /// True when a commitment mismatch has been persisted. The active chainstate must not start.
 pub fn active_chainstate_refused(data_dir: &Path) -> bool {
     let path = chainstate_snapshot_dir(data_dir).join(COMMITMENT_STATUS_FILE);
-    std::fs::read_to_string(path)
-        .map(|status| status.trim() == COMMITMENT_FAILED)
-        .unwrap_or(false)
+    match std::fs::metadata(&path) {
+        Ok(_) => true,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
 }
 
 /// True when this network's snapshot table includes `height`.
@@ -871,6 +873,10 @@ mod tests {
         std::fs::write(&path, b"Fail").unwrap();
         assert!(active_chainstate_refused(dir.path()));
         std::fs::write(&path, b"").unwrap();
+        assert!(active_chainstate_refused(dir.path()));
+        std::fs::write(&path, b"failed").unwrap();
+        assert!(active_chainstate_refused(dir.path()));
+        std::fs::write(&path, b"Failed extra").unwrap();
         assert!(active_chainstate_refused(dir.path()));
         std::fs::remove_file(&path).unwrap();
         assert!(!active_chainstate_refused(dir.path()));
