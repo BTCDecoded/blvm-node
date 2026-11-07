@@ -690,6 +690,7 @@ async fn register_and_request_block(
         send_block_getdata_with_retry(Arc::clone(&network), peer_addr, wire_msg, height).await
     {
         network.cancel_block_request(peer_addr, block_hash);
+        crate::node::parallel_ibd::wire_hash_gate::forget_want(block_hash);
         return Err(e);
     }
     super::tip_stage::mark_getdata_from_peer(height, peer_id);
@@ -773,6 +774,7 @@ async fn enqueue_network_block_batch(
         // Cancel all registered receivers before propagating the error.
         for &hash in &hashes {
             network.cancel_block_request(peer_addr, hash);
+            crate::node::parallel_ibd::wire_hash_gate::forget_want(hash);
         }
         return Err(e);
     }

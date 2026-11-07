@@ -1528,6 +1528,7 @@ impl NetworkManager {
                     senders.retain(|s| !s.is_closed());
                     if senders.is_empty() {
                         pending.remove(&key);
+                        crate::node::parallel_ibd::wire_hash_gate::forget_want(block_hash);
                     }
                 }
             })
@@ -1547,6 +1548,7 @@ impl NetworkManager {
             tokio::runtime::Handle::current().block_on(async {
                 let mut pending = self.pending_block_requests.lock().await;
                 pending.remove(&key);
+                crate::node::parallel_ibd::wire_hash_gate::forget_want(block_hash);
             })
         });
     }
