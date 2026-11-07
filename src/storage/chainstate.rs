@@ -272,14 +272,13 @@ impl ChainState {
     /// Update chain tip and calculate incremental chainwork
     /// This should be called when a new block is connected to the chain
     pub fn update_tip(&self, tip_hash: &Hash, tip_header: &BlockHeader, height: u64) -> Result<()> {
-        let prepared = self.block_index.prepare_insert(
+        self.block_index.insert(
             tip_hash,
             height,
             &tip_header.prev_block_hash,
             BlockIndexStatus::Valid,
         )?;
-        let chainwork = self.chainwork_for_header(tip_header, height)?;
-        let block_work = Self::calculate_work_from_bits(tip_header.bits);
+        self.cache_block_chainwork(tip_hash, tip_header, height)?;
         let mut info = match self.load_chain_info()? {
             Some(i) => i,
             None => {
@@ -297,42 +296,7 @@ impl ChainState {
         info.tip_hash = *tip_hash;
         info.tip_header = tip_header.clone();
         info.height = height;
-        let info_bytes = bincode::serialize(&info)?;
-        let work_bytes = block_work.to_be_bytes();
-        let chainwork_bytes = chainwork.to_be_bytes();
-        let mut ops = vec![
-            (
-                self.block_index.entries_tree().as_ref(),
-                tip_hash.as_slice(),
-                Some(prepared.entry.as_slice()),
-            ),
-            (
-                self.work_cache.as_ref(),
-                tip_hash.as_slice(),
-                Some(work_bytes.as_slice()),
-            ),
-            (
-                self.chainwork_cache.as_ref(),
-                tip_hash.as_slice(),
-                Some(chainwork_bytes.as_slice()),
-            ),
-            (
-                self.chain_info.as_ref(),
-                b"current".as_slice(),
-                Some(info_bytes.as_slice()),
-            ),
-        ];
-        if let Some(counter) = prepared.counter.as_ref() {
-            ops.insert(
-                1,
-                (
-                    self.block_index.entries_tree().as_ref(),
-                    crate::storage::block_index::SEQUENCE_COUNTER_KEY,
-                    Some(counter.as_slice()),
-                ),
-            );
-        }
-        crate::storage::database::commit_keyed(&ops)
+        self.store_chain_info(&info)
     }
 
     /// Cache per-block and cumulative chainwork without changing the active tip.
