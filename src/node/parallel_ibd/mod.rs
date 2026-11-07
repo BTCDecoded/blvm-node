@@ -9703,7 +9703,7 @@ impl ParallelIBD {
         if confirmed_body_height_at_start == 0 {
             if let Ok(Some(header_max)) = blockstore.highest_stored_height() {
                 if header_max > 0 {
-                    let sparse_max = probe_highest_stored_body_height(&blockstore).unwrap_or(0);
+                    let sparse_max = sparse_local_body_max;
                     if sparse_max > 0 {
                         info!(
                             "IBD: sparse block bodies on disk up to height {} (header_max={}) \
