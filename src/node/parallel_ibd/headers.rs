@@ -145,8 +145,13 @@ pub(crate) fn short_header_batch_completes(
     short_replies_this_round: usize,
     peer_count: usize,
 ) -> bool {
-    fetched_tip >= end_height
-        || (peer_count > 0 && short_replies_this_round >= peer_count)
+    fetched_tip >= end_height || (peer_count > 0 && short_replies_this_round >= peer_count)
+}
+
+/// A slow full batch advances the peer index. A short batch does not: the
+/// short path moves that peer to the end, and adding 1 here skips the next one.
+pub(crate) fn header_index_after_batch(idx: usize, slow: bool, short_batch: bool) -> usize {
+    if slow && !short_batch { idx + 1 } else { idx }
 }
 
 /// Download target when no peer has advertised a height above the tip.
@@ -891,12 +896,13 @@ pub(crate) async fn download_headers(
                     batch_count,
                     store_start.elapsed()
                 );
-                if header_batch_rtt_should_rotate(latency_ms) {
+                let short_batch = headers.len() < network.protocol_limits().max_headers_results;
+                if header_batch_rtt_should_rotate(latency_ms) && !short_batch {
                     warn!(
                         "[IBD_HEADER_SLOW] peer={} rtt_ms={:.0} n={} — rotate",
                         peer_addr, latency_ms, batch_count
                     );
-                    current_peer_idx += 1;
+                    current_peer_idx = header_index_after_batch(current_peer_idx, true, false);
                 }
 
                 if current_height > last_progress_log && current_height - last_progress_log >= 20000
@@ -994,11 +1000,8 @@ pub(crate) async fn download_headers(
             Err(_) => {
                 debug!("Timeout waiting for headers from {}", peer_addr);
                 consecutive_failures += 1;
-                current_peer_idx += 1;
-                if let Some(idx) = peer_addrs.iter().position(|&a| a == peer_addr) {
-                    let p = peer_addrs.remove(idx);
-                    peer_addrs.push(p);
-                }
+                current_peer_idx =
+                    move_header_peer_to_end(&mut peer_addrs, &peer_addr, current_peer_idx);
             }
         }
 
@@ -1203,6 +1206,18 @@ mod n13_tests {
         assert!(short_header_batch_completes(900_000, 900_000, 1, 2));
         assert!(!short_header_batch_completes(97_999, 100_000, 1, 3));
         assert!(short_header_batch_completes(100_000, 100_000, 1, 3));
+    }
+
+    #[test]
+    fn slow_short_batch_keeps_the_index_for_the_move() {
+        assert_eq!(header_index_after_batch(0, true, true), 0);
+        assert_eq!(header_index_after_batch(0, true, false), 1);
+        assert_eq!(header_index_after_batch(0, false, true), 0);
+        let mut peers = vec!["A", "B"];
+        let idx = header_index_after_batch(0, true, true);
+        let idx = move_header_peer_to_end(&mut peers, &"A", idx);
+        assert_eq!(peers, vec!["B", "A"]);
+        assert_eq!(peers[idx % peers.len()], "B");
     }
 
     #[test]
