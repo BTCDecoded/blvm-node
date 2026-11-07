@@ -296,3 +296,57 @@ fn tip_update_stores_the_header_with_the_index() {
         super::block_index::BlockIndexStatus::Valid
     );
 }
+
+fn fdatasync_total(mode: &str) -> i32 {
+    let so = std::env::var("COUNT_SYNC_SO")
+        .unwrap_or_else(|_| "/home/josh/tmp/count-sync.so".to_string());
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("storage::pass_fix_tests::update_tip_syncs_once")
+        .arg("--exact")
+        .arg("--test-threads=1")
+        .env("F2_SYNC_MODE", mode)
+        .env("LD_PRELOAD", &so)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let text = format!("{stdout}{stderr}");
+    assert!(
+        output.status.success(),
+        "sync child {mode} failed\n{text}"
+    );
+    assert!(
+        text.contains("update_tip_syncs_once"),
+        "sync child {mode} did not run the test\n{text}"
+    );
+    let line = text
+        .lines()
+        .rev()
+        .find(|line| line.contains("SYNC_TOTAL fdatasync="))
+        .unwrap_or_else(|| panic!("no sync total\n{stderr}"));
+    line.split("fdatasync=")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn update_tip_syncs_once() {
+    if let Ok(mode) = std::env::var("F2_SYNC_MODE") {
+        let (_dir, db) = temp_db();
+        let chain = ChainState::new(db).unwrap();
+        if mode == "tip" {
+            let block = sample_block(9);
+            let hash = header_hash(&block.header);
+            chain.update_tip(&hash, &block.header, 0).unwrap();
+        }
+        return;
+    }
+    let open = fdatasync_total("open");
+    let both = fdatasync_total("tip");
+    assert_eq!(both - open, 1, "open={open} tip={both}");
+}
