@@ -100,8 +100,37 @@ fn ctr() -> &'static Counters {
     C.get_or_init(Counters::new)
 }
 
+fn body_dup_keep_floor() -> u64 {
+    #[cfg(test)]
+    let tip = {
+        let over = TEST_TIP.load(Ordering::Relaxed);
+        if over == 0 {
+            super::tip_stage::tracked_tip_height()
+        } else {
+            over
+        }
+    };
+    #[cfg(not(test))]
+    let tip = super::tip_stage::tracked_tip_height();
+    tip.saturating_sub(super::gap_admit_window())
+}
+
+fn drop_body_dup_below_floor() {
+    let floor = body_dup_keep_floor();
+    if floor == 0 {
+        return;
+    }
+    let c = ctr();
+    c.seen.retain(|h| *h >= floor);
+    c.discarded.retain(|h| *h >= floor);
+    c.last_bytes.retain(|h, _| *h >= floor);
+}
+
 /// Serializes test snapshots of the process-global counters. Production
 /// `note_body_rx` takes the same lock only in `cfg(test)`.
+#[cfg(test)]
+static TEST_TIP: AtomicU64 = AtomicU64::new(0);
+
 #[cfg(test)]
 fn body_dup_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -121,6 +150,7 @@ fn note_body_rx_inner(height: u64, bytes: u64) {
     if c.seen.insert(height) {
         c.distinct.fetch_add(1, Ordering::Relaxed);
     }
+    drop_body_dup_below_floor();
 }
 
 pub(crate) fn note_body_rx(height: u64, bytes: u64) {
@@ -152,6 +182,7 @@ pub(crate) fn note_discard(reason: DiscardReason, height: Option<u64>, bytes: u6
     if let Some(h) = height {
         c.discarded.insert(h);
     }
+    drop_body_dup_below_floor();
 }
 
 /// Which RequeueLoser branch ran. Counted even when the body is late-admitted.
@@ -335,6 +366,38 @@ mod tests {
             1,
             "one distinct height"
         );
+    }
+
+    #[test]
+    fn heights_behind_the_window_leave_the_body_dup_maps() {
+        let _guard = body_dup_test_lock();
+        let tip = 50_000_000u64;
+        TEST_TIP.store(tip, Ordering::Relaxed);
+        struct ClearTip;
+        impl Drop for ClearTip {
+            fn drop(&mut self) {
+                TEST_TIP.store(0, Ordering::Relaxed);
+            }
+        }
+        let _clear = ClearTip;
+        let window = super::super::gap_admit_window();
+        let floor = tip - window;
+        let below = floor - 1;
+        let inside = floor;
+        note_body_rx_inner(below, 100);
+        note_body_rx_inner(inside, 200);
+        note_body_rx_inner(tip, 300);
+        assert_eq!(last_bytes(below), 0);
+        assert_eq!(last_bytes(inside), 200);
+        assert_eq!(last_bytes(tip), 300);
+        note_discard(DiscardReason::AdmitDrop, Some(below), 100);
+        note_discard(DiscardReason::AdmitDrop, Some(inside), 200);
+        assert!(!height_was_discarded(below));
+        assert!(height_was_discarded(inside));
+        let before = snap_now();
+        note_body_rx_inner(inside, 200);
+        let after = snap_now();
+        assert_eq!(after.distinct.saturating_sub(before.distinct), 0);
     }
 
     #[test]
