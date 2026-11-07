@@ -63,17 +63,6 @@ impl FeederBuffer {
         self.len() == 0
     }
 
-    /// Sum `estimate_block_bytes` across all shards for accurate MEM_REPORT accounting.
-    /// The fixed 400 KB/block estimate underestimates post-SegWit blocks by 4–10×.
-    pub(crate) fn total_bytes_estimate(&self) -> usize {
-        use crate::node::parallel_ibd::types::estimate_block_bytes;
-        self.shards
-            .iter()
-            .flat_map(|m| m.values())
-            .map(|(blk, wit, ..)| estimate_block_bytes(blk, wit))
-            .sum()
-    }
-
     /// Minimum height currently buffered (any shard). Used for backpressure when the buffer is full.
     pub(crate) fn min_buffered_height(&self) -> Option<u64> {
         self.shards

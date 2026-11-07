@@ -1,3 +1,8 @@
+/// Heights where a duplicate coinbase must update the index before the next block is dispatched.
+pub(crate) fn duplicate_coinbase_serial_height(height: u64) -> bool {
+    height == 91842 || height == 91880
+}
+
 /// Run the IBD validation loop. Called from std::thread::spawn.
 pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     let feeder_state = params.feeder_state;
@@ -1223,7 +1228,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             0
                         } else {
                             feeder_state_w.0.try_lock()
-                                .map(|g| g.0.total_bytes_estimate() as u64 / 1024)
+                                .map(|g| g.2 as u64 / 1024)
                                 .unwrap_or(feeder_n as u64 * 400)
                         };
                         // Read actual RSS from /proc/self/smaps_rollup for ground truth.
@@ -2217,11 +2222,12 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         }
 
         // === DISPATCH PHASE: fill pipeline up to pipeline_depth_live ===
-        // The two historical duplicate-coinbase blocks sit in this range. Force depth=1
-        // so their BIP30 index updates are applied before the next height is dispatched.
-        // Otherwise pipeline_depth controls how far ahead the dispatcher can run, while
-        // n_validate_workers controls how many of those in-flight blocks execute concurrently.
-        let pipeline_depth_live: usize = if (91710..=91855).contains(&next_validation_height) {
+        // The two historical duplicate-coinbase blocks are 91842 and 91880. Force depth=1
+        // at those heights so their BIP30 index updates are applied before the next height
+        // is dispatched. Otherwise pipeline_depth controls how far ahead the dispatcher can
+        // run, while n_validate_workers controls how many of those in-flight blocks execute.
+        let pipeline_depth_live: usize = if duplicate_coinbase_serial_height(next_validation_height)
+        {
             1
         } else {
             pipeline_depth_for_pressure(memory::ibd_pressure_level_snapshot(), n_pipeline_depth)
@@ -4469,4 +4475,19 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
     info!("IBD shutdown: validation loop complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod duplicate_coinbase_depth_tests {
+    use super::duplicate_coinbase_serial_height;
+
+    #[test]
+    fn only_the_two_duplicate_heights_are_serial() {
+        assert!(!duplicate_coinbase_serial_height(91709));
+        assert!(!duplicate_coinbase_serial_height(91710));
+        assert!(duplicate_coinbase_serial_height(91842));
+        assert!(!duplicate_coinbase_serial_height(91855));
+        assert!(!duplicate_coinbase_serial_height(91856));
+        assert!(duplicate_coinbase_serial_height(91880));
+    }
 }
