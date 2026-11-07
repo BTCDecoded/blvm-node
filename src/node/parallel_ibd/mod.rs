@@ -9703,7 +9703,7 @@ impl ParallelIBD {
         if confirmed_body_height_at_start == 0 {
             if let Ok(Some(header_max)) = blockstore.highest_stored_height() {
                 if header_max > 0 {
-                    let sparse_max = sparse_local_body_max;
+                    let sparse_max = logged_sparse_body_height(sparse_local_body_max, &blockstore);
                     if sparse_max > 0 {
                         info!(
                             "IBD: sparse block bodies on disk up to height {} (header_max={}) \
@@ -11032,6 +11032,12 @@ impl ParallelIBD {
     }
 }
 
+/// Height the startup body log prints. The index walk already stored this value.
+fn logged_sparse_body_height(stored: u64, blockstore: &BlockStore) -> u64 {
+    let _ = blockstore;
+    stored
+}
+
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
@@ -11130,5 +11136,24 @@ mod dump_dir_tests {
             Some(value) => unsafe { std::env::set_var("BLVM_IBD_DUMP_DIR", value) },
             None => unsafe { std::env::remove_var("BLVM_IBD_DUMP_DIR") },
         }
+    }
+}
+
+#[cfg(test)]
+mod sparse_body_log_tests {
+    use super::logged_sparse_body_height;
+    use crate::storage::blockstore::BlockStore;
+    use crate::storage::database::{create_database, default_backend};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    #[test]
+    fn startup_log_prints_the_stored_body_height() {
+        let dir = TempDir::new().unwrap();
+        let db: Arc<dyn crate::storage::database::Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        std::mem::forget(dir);
+        let blockstore = BlockStore::new(db).unwrap();
+        assert_eq!(logged_sparse_body_height(9, &blockstore), 9);
     }
 }
