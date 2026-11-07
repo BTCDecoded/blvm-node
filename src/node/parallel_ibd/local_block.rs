@@ -91,7 +91,7 @@ pub fn probe_confirmed_body_height(blockstore: &BlockStore) -> Result<u64> {
             return Ok(false);
         }
         match blockstore.get_hash_by_height(h)? {
-            Some(hash) => Ok(blockstore.get_block(&hash)?.is_some()),
+            Some(hash) => blockstore.has_block_body(&hash),
             None => Ok(false),
         }
     };
