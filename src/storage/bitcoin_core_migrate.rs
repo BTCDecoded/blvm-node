@@ -6,7 +6,8 @@ use super::assumeutxo::AssumeUtxoManager;
 use super::bitcoin_core_blocks::{BitcoinCoreBlockReader, read_block_at_file_pos};
 use super::bitcoin_core_format::{
     BLOCK_HAVE_DATA, core_utxo_key_to_outpoint_key, get_key_prefix, parse_best_block_value,
-    parse_block_index_key, parse_coin, parse_core_coin, parse_disk_block_index, read_core_varint,
+    legacy_outpoint_key, parse_block_index_key, parse_coin, parse_core_coin,
+    parse_disk_block_index, BitcoinCoreCoin,
 };
 use super::bitcoin_core_obfuscation::CoreDbObfuscation;
 use super::bitcoin_core_storage::BitcoinCoreStorage;
@@ -569,45 +570,37 @@ impl Migrator {
                 continue;
             }
             self.chainstate_obf.deobfuscate_value(&key, &mut value);
-            let Some(prefix) = get_key_prefix(&key) else {
-                continue;
-            };
+            let coins = coins_for_core_key(&key, &value)?;
+            for (outpoint_key, coin) in coins {
+                let blvm_utxo = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+                    crate::storage::utxo_value_codec::ValueCodec::for_database(
+                        self.dest_db.as_ref(),
+                    ),
+                    &UTXO {
+                        value: coin.amount as i64,
+                        script_pubkey: coin.script.into(),
+                        height: coin.height as u64,
+                        is_coinbase: coin.is_coinbase,
+                    },
+                )?;
 
-            if prefix == b'c' && key.len() < 34 {
-                anyhow::bail!("pre-0.15 coin key is not imported");
-            }
-            let coin = match prefix {
-                b'C' => parse_core_coin(&value)?,
-                b'c' => parse_coin(&value)?,
-                _ => continue,
-            };
+                batch.push((outpoint_key, blvm_utxo));
 
-            let outpoint_key = core_utxo_key_to_outpoint_key(&key)?;
-            let blvm_utxo = crate::storage::utxo_value_codec::encode_utxo_with_codec(
-                crate::storage::utxo_value_codec::ValueCodec::for_database(self.dest_db.as_ref()),
-                &UTXO {
-                    value: coin.amount as i64,
-                    script_pubkey: coin.script.into(),
-                    height: coin.height as u64,
-                    is_coinbase: coin.is_coinbase,
-                },
-            )?;
-
-            batch.push((outpoint_key, blvm_utxo));
-
-            if batch.len() >= BATCH_SIZE {
-                self.flush_batch(dest_tree.as_ref(), &mut batch)?;
-                count += BATCH_SIZE as u64;
-                self.progress.coins_migrated.store(count, Ordering::Relaxed);
-                cp.utxos_migrated = count;
-                cp.last_utxo_key = Some(hex::encode(&key));
-                since_checkpoint += BATCH_SIZE as u64;
-                if since_checkpoint >= CHECKPOINT_UTXO_INTERVAL {
-                    self.save_checkpoint(cp)?;
-                    since_checkpoint = 0;
-                }
-                if count % 10_000 == 0 {
-                    info!("[CORE_IMPORT] Migrated {count} UTXOs...");
+                if batch.len() >= BATCH_SIZE {
+                    let flushed = batch.len() as u64;
+                    self.flush_batch(dest_tree.as_ref(), &mut batch)?;
+                    count += flushed;
+                    self.progress.coins_migrated.store(count, Ordering::Relaxed);
+                    cp.utxos_migrated = count;
+                    cp.last_utxo_key = Some(hex::encode(&key));
+                    since_checkpoint += flushed;
+                    if since_checkpoint >= CHECKPOINT_UTXO_INTERVAL {
+                        self.save_checkpoint(cp)?;
+                        since_checkpoint = 0;
+                    }
+                    if count % 10_000 == 0 {
+                        info!("[CORE_IMPORT] Migrated {count} UTXOs...");
+                    }
                 }
             }
         }
@@ -1087,9 +1080,13 @@ impl Migrator {
 
         let mut source_count = 0u64;
         for item in source_tree.iter() {
-            let (key, _) = item?;
+            let (key, mut value) = item?;
             match get_key_prefix(&key) {
-                Some(b'C') | Some(b'c') => source_count += 1,
+                Some(b'C') => source_count += 1,
+                Some(b'c') => {
+                    self.chainstate_obf.deobfuscate_value(&key, &mut value);
+                    source_count += coins_for_core_key(&key, &value)?.len() as u64;
+                }
                 _ => {}
             }
         }
@@ -1286,6 +1283,32 @@ impl Migrator {
     }
 }
 
+fn coins_for_core_key(key: &[u8], value: &[u8]) -> Result<Vec<(Vec<u8>, BitcoinCoreCoin)>> {
+    let Some(prefix) = get_key_prefix(key) else {
+        return Ok(Vec::new());
+    };
+    match prefix {
+        b'C' => {
+            let coin = parse_core_coin(value)?;
+            let outpoint_key = core_utxo_key_to_outpoint_key(key)?;
+            Ok(vec![(outpoint_key, coin)])
+        }
+        b'c' => {
+            if key.len() != 33 {
+                anyhow::bail!("pre-0.15 coin key is not a txid");
+            }
+            let mut txid = [0u8; 32];
+            txid.copy_from_slice(&key[1..33]);
+            let outputs = parse_coin(value)?;
+            Ok(outputs
+                .into_iter()
+                .map(|output| (legacy_outpoint_key(&txid, output.vout), output.coin))
+                .collect())
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
 /// Recompute Core-compatible MuHash3072 from Core chainstate `'C'`/`'c'` entries.
 fn compute_core_chainstate_muhash(
     chainstate_db: &Arc<dyn crate::storage::database::Database>,
@@ -1297,32 +1320,21 @@ fn compute_core_chainstate_muhash(
     for item in tree.iter() {
         let (key, mut value) = item?;
         obf.deobfuscate_value(&key, &mut value);
-        let Some(prefix) = get_key_prefix(&key) else {
-            continue;
-        };
-        if prefix == b'c' && key.len() < 34 {
-            anyhow::bail!("pre-0.15 coin key is not imported");
+        let coins = coins_for_core_key(&key, &value)?;
+        for (outpoint_key, coin) in coins {
+            let mut txid = [0u8; 32];
+            txid.copy_from_slice(&outpoint_key[0..32]);
+            let vout = u64::from_be_bytes(outpoint_key[32..40].try_into().unwrap());
+            let preimage = serialize_coin_for_muhash(
+                &txid,
+                vout as u32,
+                coin.height,
+                coin.is_coinbase,
+                coin.amount as i64,
+                &coin.script,
+            );
+            muhash = muhash.insert(&preimage);
         }
-        let coin = match prefix {
-            b'C' => parse_core_coin(&value)?,
-            b'c' => parse_coin(&value)?,
-            _ => continue,
-        };
-        if key.len() < 34 {
-            anyhow::bail!("Coin key too short");
-        }
-        let mut txid = [0u8; 32];
-        txid.copy_from_slice(&key[1..33]);
-        let (vout, _) = read_core_varint(&key, 33)?;
-        let preimage = serialize_coin_for_muhash(
-            &txid,
-            vout as u32,
-            coin.height,
-            coin.is_coinbase,
-            coin.amount as i64,
-            &coin.script,
-        );
-        muhash = muhash.insert(&preimage);
     }
 
     Ok(muhash.finalize())

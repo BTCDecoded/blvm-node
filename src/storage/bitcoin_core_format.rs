@@ -33,52 +33,82 @@ pub struct BitcoinCoreDiskBlockIndex {
     pub block_hash: [u8; 32],
 }
 
-/// Legacy coin parser (pre-0.15-style tests only).
-pub fn parse_coin(data: &[u8]) -> Result<BitcoinCoreCoin> {
+/// One unspent output from a Bitcoin Core 0.14 `CCoins` value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyOutput {
+    pub vout: u32,
+    pub coin: BitcoinCoreCoin,
+}
+
+/// Read a 0.14 `CCoins` value (`CCoins::Unserialize` in Bitcoin Core 0.14.2).
+///
+/// The key is `c` plus the txid. The vout is the availability index, not a
+/// suffix of the key. An empty value is an error.
+pub fn parse_coin(data: &[u8]) -> Result<Vec<LegacyOutput>> {
     let mut offset = 0;
-
-    let (code, code_len) = read_compact_size(data, offset)?;
-    offset += code_len;
-
-    let script_type = (code & 0x1f) as u8;
-    let script_len = if script_type == 0 {
-        let (len, len_bytes) = read_compact_size(data, offset)?;
-        offset += len_bytes;
-        len as usize
-    } else {
-        script_type as usize
-    };
-
-    if offset + script_len > data.len() {
-        return Err(anyhow::anyhow!("Insufficient data for script"));
+    let (_version, n) = read_core_varint(data, offset)?;
+    offset += n;
+    let (n_code, n) = read_core_varint(data, offset)?;
+    offset += n;
+    let is_coinbase = (n_code & 1) != 0;
+    let mut available = vec![(n_code & 2) != 0, (n_code & 4) != 0];
+    let mut mask_code = n_code / 8 + u64::from((n_code & 6) == 0);
+    while mask_code > 0 {
+        if offset >= data.len() {
+            return Err(anyhow::anyhow!("Insufficient data for Core VarInt"));
+        }
+        let byte = data[offset];
+        offset += 1;
+        for bit in 0..8 {
+            available.push((byte & (1 << bit)) != 0);
+        }
+        if byte != 0 {
+            mask_code -= 1;
+        }
     }
-
-    let script = data[offset..offset + script_len].to_vec();
-    offset += script_len;
-
-    if offset + 8 > data.len() {
-        return Err(anyhow::anyhow!("Insufficient data for amount"));
+    let mut outputs = Vec::new();
+    for (vout, is_available) in available.into_iter().enumerate() {
+        if !is_available {
+            continue;
+        }
+        let (compressed_amount, n) = read_core_varint(data, offset)?;
+        offset += n;
+        let amount = decompress_amount(compressed_amount)?;
+        let (script, n) = decompress_script_pubkey(data, offset)?;
+        offset += n;
+        outputs.push(LegacyOutput {
+            vout: vout as u32,
+            coin: BitcoinCoreCoin {
+                script,
+                amount,
+                height: 0,
+                is_coinbase,
+            },
+        });
     }
-    let amount = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
-    offset += 8;
-
-    if offset + 4 > data.len() {
-        return Err(anyhow::anyhow!("Insufficient data for height"));
+    let (height, n) = read_core_varint(data, offset)?;
+    offset += n;
+    if height > u32::MAX as u64 {
+        return Err(anyhow::anyhow!("coin height does not fit in u32"));
     }
-    let height = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
-    offset += 4;
-
-    if offset >= data.len() {
-        return Err(anyhow::anyhow!("Insufficient data for coinbase flag"));
+    if offset != data.len() {
+        return Err(anyhow::anyhow!(
+            "legacy coin has {} trailing bytes",
+            data.len() - offset
+        ));
     }
-    let is_coinbase = data[offset] != 0;
+    for output in &mut outputs {
+        output.coin.height = height as u32;
+    }
+    Ok(outputs)
+}
 
-    Ok(BitcoinCoreCoin {
-        script,
-        amount,
-        height,
-        is_coinbase,
-    })
+/// 40-byte outpoint key for one output of a 0.14 coin.
+pub fn legacy_outpoint_key(txid: &[u8; 32], vout: u32) -> Vec<u8> {
+    let mut key = Vec::with_capacity(40);
+    key.extend_from_slice(txid);
+    key.extend_from_slice(&u64::from(vout).to_be_bytes());
+    key
 }
 
 /// Parse modern Core `Coin` value (`Coin::Unserialize` + `TxOutCompression`).
@@ -335,34 +365,6 @@ pub fn read_core_varint(data: &[u8], offset: usize) -> Result<(u64, usize)> {
     }
 }
 
-/// Bitcoin P2P compact-size VarInt (used by legacy test coin parser).
-fn read_compact_size(data: &[u8], offset: usize) -> Result<(u64, usize)> {
-    if offset >= data.len() {
-        return Err(anyhow::anyhow!("Insufficient data for VarInt"));
-    }
-    let first_byte = data[offset];
-    if first_byte < 0xfd {
-        Ok((first_byte as u64, 1))
-    } else if first_byte == 0xfd {
-        if offset + 3 > data.len() {
-            return Err(anyhow::anyhow!("Insufficient data for VarInt (0xfd)"));
-        }
-        let value = u16::from_le_bytes(data[offset + 1..offset + 3].try_into().unwrap()) as u64;
-        Ok((value, 3))
-    } else if first_byte == 0xfe {
-        if offset + 5 > data.len() {
-            return Err(anyhow::anyhow!("Insufficient data for VarInt (0xfe)"));
-        }
-        let value = u32::from_le_bytes(data[offset + 1..offset + 5].try_into().unwrap()) as u64;
-        Ok((value, 5))
-    } else if offset + 9 > data.len() {
-        Err(anyhow::anyhow!("Insufficient data for VarInt (0xff)"))
-    } else {
-        let value = u64::from_le_bytes(data[offset + 1..offset + 9].try_into().unwrap());
-        Ok((value, 9))
-    }
-}
-
 /// Core `DecompressAmount`. The result must fit in a signed Bitcoin amount.
 pub fn decompress_amount(x: u64) -> Result<u64> {
     if x == 0 {
@@ -608,11 +610,29 @@ mod tests {
     }
 
     #[test]
-    fn short_legacy_coin_key_is_not_imported() {
-        let mut key = vec![b'c'];
-        key.extend_from_slice(&[9u8; 32]);
-        let err = core_utxo_key_to_outpoint_key(&key).unwrap_err();
-        assert!(err.to_string().contains("pre-0.15"));
+    fn legacy_p2pkh_coin_is_vout_zero() {
+        let mut value = vec![0x01, 0x02, 0x00, 0x00];
+        value.extend_from_slice(&[0x11; 20]);
+        value.push(0x64);
+        let outputs = parse_coin(&value).unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].vout, 0);
+        assert_eq!(outputs[0].coin.amount, 0);
+        assert_eq!(outputs[0].coin.height, 100);
+        assert!(!outputs[0].coin.is_coinbase);
+        assert_eq!(outputs[0].coin.script.len(), 25);
+        assert_eq!(&outputs[0].coin.script[..3], &[0x76, 0xa9, 0x14]);
+        assert_eq!(&outputs[0].coin.script[3..23], &[0x11; 20]);
+        assert_eq!(&outputs[0].coin.script[23..], &[0x88, 0xac]);
+        assert!(parse_coin(&[]).is_err());
+
+        let mut later = vec![0x01, 0x00, 0x01, 0x00, 0x00];
+        later.extend_from_slice(&[0x22; 20]);
+        later.push(0x64);
+        let outputs = parse_coin(&later).unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].vout, 2);
+        assert_eq!(outputs[0].coin.height, 100);
     }
 
     fn hex_decode(text: &str) -> Vec<u8> {

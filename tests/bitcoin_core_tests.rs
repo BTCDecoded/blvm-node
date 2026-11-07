@@ -70,28 +70,16 @@ mod bitcoin_core_tests {
 
     #[test]
     fn test_parse_coin_simple() {
-        // Create a simple coin format
-        // Format: VarInt(code) + script + amount(8) + height(4) + coinbase(1)
-        let mut data = Vec::new();
-
-        // VarInt code (0 = uncompressed, script length follows)
-        data.push(0x00);
-        // Script length VarInt (6 bytes)
-        data.push(0x06);
-        // Script (6 bytes)
-        data.extend_from_slice(b"script");
-        // Amount (8 bytes, little-endian)
-        data.extend_from_slice(&1000000u64.to_le_bytes());
-        // Height (4 bytes, little-endian)
-        data.extend_from_slice(&100u32.to_le_bytes());
-        // Coinbase flag (1 byte)
-        data.push(0x01);
-
-        let coin = parse_coin(&data).unwrap();
-        assert_eq!(coin.amount, 1000000);
-        assert_eq!(coin.height, 100);
-        assert!(coin.is_coinbase);
-        assert_eq!(coin.script, b"script");
+        let mut data = vec![0x01, 0x02, 0x00, 0x00];
+        data.extend_from_slice(&[0x11; 20]);
+        data.push(0x64);
+        let outputs = parse_coin(&data).unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].vout, 0);
+        assert_eq!(outputs[0].coin.amount, 0);
+        assert_eq!(outputs[0].coin.height, 100);
+        assert!(!outputs[0].coin.is_coinbase);
+        assert_eq!(outputs[0].coin.script.len(), 25);
     }
 
     #[test]
