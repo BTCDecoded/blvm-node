@@ -100,7 +100,7 @@ pub fn datadir_network_conflict(
 /// Unknown names are mainnet, matching a missing chain info record.
 pub fn consensus_network_from_stored_name(name: &str) -> Network {
     match name {
-        "testnet" | "testnet3" => Network::Testnet,
+        "testnet" => Network::Testnet,
         "testnet4" => Network::Testnet4,
         "regtest" => Network::Regtest,
         "signet" => Network::Signet,
@@ -1387,10 +1387,6 @@ mod tests {
         );
         assert_eq!(
             consensus_network_from_stored_name("testnet"),
-            Network::Testnet
-        );
-        assert_eq!(
-            consensus_network_from_stored_name("testnet3"),
             Network::Testnet
         );
         assert_eq!(
