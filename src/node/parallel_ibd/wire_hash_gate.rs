@@ -8,7 +8,6 @@
 use crate::node::parallel_ibd::latch_env;
 use crate::storage::hashing::double_sha256;
 use dashmap::DashMap;
-use dashmap::DashSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -40,7 +39,7 @@ impl Acc {
 
 struct State {
     want: DashMap<[u8; 32], u64>,
-    skipped: DashSet<[u8; 32]>,
+    skipped: DashMap<[u8; 32], u64>,
     skip: Acc,
     unknown: Acc,
     still_needed: Acc,
@@ -50,7 +49,7 @@ impl State {
     fn new() -> Self {
         Self {
             want: DashMap::new(),
-            skipped: DashSet::new(),
+            skipped: DashMap::new(),
             skip: Acc::new(),
             unknown: Acc::new(),
             still_needed: Acc::new(),
@@ -117,9 +116,22 @@ pub(crate) fn test_set_synced_tip(tip: u64) {
     }
 }
 
+/// Keep a skipped hash until validation has moved this far past its height.
+const SKIP_KEEP_BEHIND: u64 = 4096;
+
+fn drop_skipped_behind_cursor(st: &State) {
+    let Some(need) = next_needed() else {
+        return;
+    };
+    let floor = need.saturating_sub(SKIP_KEEP_BEHIND);
+    st.skipped.retain(|_, height| *height >= floor);
+}
+
 /// True if the hash-gate closed this oneshot on purpose (fetch must not abort).
 pub(crate) fn was_skipped(hash: [u8; 32]) -> bool {
-    state().skipped.contains(&hash)
+    let st = state();
+    drop_skipped_behind_cursor(st);
+    st.skipped.contains_key(&hash)
 }
 
 pub(crate) fn skip_n() -> u64 {
@@ -158,7 +170,8 @@ pub(crate) fn try_skip_obsolete_block_frame(data: &[u8]) -> Option<[u8; 32]> {
     }
     let st = state();
     st.skip.add(frame_b);
-    st.skipped.insert(hash);
+    st.skipped.insert(hash, h);
+    drop_skipped_behind_cursor(st);
     st.want.remove(&hash);
     Some(hash)
 }
