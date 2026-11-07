@@ -768,6 +768,7 @@ pub(crate) async fn download_headers(
                 );
                 let mut batch_entries: Vec<(blvm_protocol::Hash, BlockHeader, u64)> =
                     Vec::with_capacity(headers.len());
+                let mut pending_work: Vec<(u64, u64, u64)> = Vec::with_capacity(headers.len());
                 let mut peer_fault = false;
 
                 for header in &headers {
@@ -789,6 +790,7 @@ pub(crate) async fn download_headers(
                                 current_height = attach_h + 1;
                                 consecutive_failures = 0;
                                 batch_entries.clear();
+                                pending_work.clear();
                                 break;
                             }
                         }
@@ -806,6 +808,7 @@ pub(crate) async fn download_headers(
                                 last_hash = hh;
                                 consecutive_failures = 0;
                                 batch_entries.clear();
+                                pending_work.clear();
                                 break;
                             }
                         }
@@ -828,15 +831,10 @@ pub(crate) async fn download_headers(
                             ));
                         }
                         batch_entries.clear();
+                        pending_work.clear();
                         break;
                     }
 
-                    let pending: Vec<(u64, u64, u64)> = batch_entries
-                        .iter()
-                        .map(|(_, accepted, accepted_height)| {
-                            (*accepted_height, accepted.bits, accepted.timestamp)
-                        })
-                        .collect();
                     let stored_at = |h: u64| {
                         blockstore
                             .get_header_at_height(h)
@@ -844,14 +842,19 @@ pub(crate) async fn download_headers(
                             .flatten()
                             .map(|found| (found.bits, found.timestamp))
                     };
-                    let ancestor =
-                        crate::network::header_work::ancestor_seeing_pending(&pending, &stored_at);
-                    if !crate::network::header_work::header_meets_required_work(
-                        header,
-                        current_height,
-                        consensus_network,
-                        &ancestor,
-                    ) {
+                    let meets_work = {
+                        let ancestor = crate::network::header_work::ancestor_seeing_pending(
+                            &pending_work,
+                            &stored_at,
+                        );
+                        crate::network::header_work::header_meets_required_work(
+                            header,
+                            current_height,
+                            consensus_network,
+                            &ancestor,
+                        )
+                    };
+                    if !meets_work {
                         warn!(
                             "[IBD_HEADER_WORK] height {} bits {:#x} are not the required work from {} — not storing",
                             current_height, header.bits, peer_addr
@@ -879,6 +882,7 @@ pub(crate) async fn download_headers(
                     let header_hash = double_sha256(&header_data);
 
                     batch_entries.push((header_hash, header.clone(), current_height));
+                    pending_work.push((current_height, header.bits, header.timestamp));
                     header_presync.note(header);
 
                     last_hash = header_hash;
