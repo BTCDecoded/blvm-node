@@ -96,6 +96,9 @@ struct OrderedReadyInner {
     /// Next height we may emit to `out` (set on first `coordinator_will_send_height`).
     next_expected: Option<u64>,
     pending: BTreeMap<u64, ReadyItem>,
+    /// Byte estimate computed before this bridge lock, so the feeder insert does not
+    /// walk witness stacks while every other completion waits.
+    estimates: BTreeMap<u64, usize>,
     /// R-338: heights dropped by far-ahead eviction since the last
     /// [`OrderedReadyBridge::take_evicted_heights`]. The coordinator clears them from its
     /// `dispatched` set so the disk-reload chain can re-inject them (otherwise each is
@@ -117,6 +120,7 @@ impl OrderedReadyBridge {
             inner: Mutex::new(OrderedReadyInner {
                 next_expected: None,
                 pending: BTreeMap::new(),
+                estimates: BTreeMap::new(),
                 evicted_lost: Vec::new(),
             }),
             out,
@@ -163,10 +167,12 @@ impl OrderedReadyBridge {
     /// `validation_height` is the last applied height (`next_needed - 1`). Pass `0` in tests
     /// when the bridge cursor is already primed via [`Self::coordinator_will_send_height`].
     pub(crate) fn worker_complete(&self, h: u64, item: ReadyItem, validation_height: u64) {
+        let est = super::types::estimate_block_bytes(item.1.as_ref(), item.2.as_ref());
         let mut g = self
             .inner
             .lock()
             .expect("OrderedReadyBridge mutex poisoned");
+        g.estimates.insert(h, est);
         // W22/W40: drop duplicate/late completions only when clearly stale. If this height is
         // still validation's tip (or cursor is uninitialized), rewind/init instead of silent
         // drop — live soft-resume: GAP_STREAM → worker_complete drop → feeder=0 stall.
@@ -202,7 +208,8 @@ impl OrderedReadyBridge {
                 if h == n {
                     if let Some(feeder) = self.feeder_attached() {
                         // W56b: durable feeder insert before cursor advance.
-                        Self::insert_ready_into_feeder(&feeder, item);
+                        let est = g.estimates.remove(&h).unwrap_or(0);
+                        Self::insert_ready_into_feeder(&feeder, item, est);
                         g.next_expected = Some(n + 1);
                         sync_bridge_pending_count(&g);
                         return;
@@ -394,10 +401,12 @@ impl OrderedReadyBridge {
         feeder: &super::feeder::FeederState,
         validation_height: u64,
     ) -> Option<ReadyItem> {
+        let est = super::types::estimate_block_bytes(item.1.as_ref(), item.2.as_ref());
         let mut g = self
             .inner
             .lock()
             .expect("OrderedReadyBridge mutex poisoned");
+        g.estimates.insert(h, est);
         let next_needed = validation_height.saturating_add(1);
         // W40: uninitialized cursor — bind to tip so first emit is not parked forever in
         // pending (flush_unlocked no-ops when next_expected is None).
@@ -430,7 +439,8 @@ impl OrderedReadyBridge {
             return Some(item);
         }
         debug_assert_eq!(item.0, h);
-        Self::insert_ready_into_feeder(feeder, item);
+        let est = g.estimates.remove(&h).unwrap_or(0);
+        Self::insert_ready_into_feeder(feeder, item, est);
         g.next_expected = Some(h + 1);
         // W56: drain contiguous pending *into the feeder*, not the ready channel.
         // Channel flush advanced `next_expected` while items were still in-flight on
@@ -451,6 +461,7 @@ impl OrderedReadyBridge {
         feeder: &super::feeder::FeederState,
     ) {
         let h = item.0;
+        let est = super::types::estimate_block_bytes(item.1.as_ref(), item.2.as_ref());
         let mut g = self
             .inner
             .lock()
@@ -461,16 +472,16 @@ impl OrderedReadyBridge {
             sync_bridge_pending_count(&g);
             return;
         }
-        Self::insert_ready_into_feeder(feeder, item);
+        Self::insert_ready_into_feeder(feeder, item, est);
         g.next_expected = Some(h.saturating_add(1));
         g.pending.remove(&h);
+        g.estimates.remove(&h);
         Self::flush_contiguous_to_feeder(feeder, &mut g);
         sync_bridge_pending_count(&g);
     }
 
-    fn insert_ready_into_feeder(feeder: &super::feeder::FeederState, item: ReadyItem) {
+    fn insert_ready_into_feeder(feeder: &super::feeder::FeederState, item: ReadyItem, est: usize) {
         let (hh, b, w, keys, u, tx_ids, spec_adds) = item;
-        let est = super::types::estimate_block_bytes(b.as_ref(), w.as_ref());
         let wait_tip = super::IBD_FEEDER_WAIT_TIP.load(Ordering::Relaxed);
         let should_wake = {
             let mut fg = feeder.0.lock();
@@ -516,7 +527,9 @@ impl OrderedReadyBridge {
                 break;
             };
             debug_assert_eq!(item.0, n_scan);
-            let est = super::types::estimate_block_bytes(item.1.as_ref(), item.2.as_ref());
+            let est = g.estimates.remove(&n_scan).unwrap_or_else(|| {
+                super::types::estimate_block_bytes(item.1.as_ref(), item.2.as_ref())
+            });
             prepared.push((item, est));
             n_scan += 1;
         }
