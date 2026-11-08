@@ -1112,7 +1112,7 @@ mod shutdown_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "iroh"))]
 mod iroh_identity_tests {
     use super::{checksum_disconnect, enqueue_raw, raw_peer_identity};
     use crate::network::NetworkMessage;

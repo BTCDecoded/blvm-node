@@ -3229,6 +3229,7 @@ impl NetworkManager {
     }
 
     /// Ban one Iroh endpoint. A second endpoint is a different key.
+    #[cfg(feature = "iroh")]
     pub async fn ban_identity(&self, id: &super::transport::PeerIdentity) {
         let super::transport::PeerIdentity::Iroh(endpoint) = id else {
             return;
@@ -3240,6 +3241,7 @@ impl NetworkManager {
     }
 
     /// Whether this Iroh endpoint is banned. TCP bans stay on `is_banned`.
+    #[cfg(feature = "iroh")]
     pub async fn identity_is_banned(&self, id: &super::transport::PeerIdentity) -> bool {
         let super::transport::PeerIdentity::Iroh(endpoint) = id else {
             return false;
@@ -3248,6 +3250,7 @@ impl NetworkManager {
     }
 
     /// Record a handshake entry for this Iroh connection alone.
+    #[cfg(feature = "iroh")]
     pub async fn remember_handshake(&self, id: &super::transport::PeerIdentity) {
         let super::transport::PeerIdentity::Iroh(endpoint) = id else {
             return;
@@ -3259,6 +3262,7 @@ impl NetworkManager {
             .or_insert_with(blvm_protocol::network::PeerState::new);
     }
 
+    #[cfg(feature = "iroh")]
     pub async fn handshake_known(&self, id: &super::transport::PeerIdentity) -> bool {
         let super::transport::PeerIdentity::Iroh(endpoint) = id else {
             return false;
@@ -3267,6 +3271,7 @@ impl NetworkManager {
     }
 
     /// One rate-limit entry per Iroh endpoint.
+    #[cfg(feature = "iroh")]
     pub async fn note_message_rate(&self, id: &super::transport::PeerIdentity) {
         let super::transport::PeerIdentity::Iroh(endpoint) = id else {
             return;
@@ -3278,6 +3283,7 @@ impl NetworkManager {
             .or_insert_with(|| PeerRateLimiter::new(1, 1));
     }
 
+    #[cfg(feature = "iroh")]
     pub async fn identity_rate_entries(
         &self,
         left: &super::transport::PeerIdentity,
@@ -3295,6 +3301,7 @@ impl NetworkManager {
 
     /// A socket used only to keep an Iroh frame on the existing TCP parse path.
     /// It is not `0.0.0.0:0`, and it is not the handshake, ban, or rate key.
+    #[cfg(feature = "iroh")]
     fn iroh_dispatch_socket(endpoint: &[u8]) -> SocketAddr {
         let mut ip = [240, 0, 0, 1];
         for (i, byte) in endpoint.iter().enumerate() {
