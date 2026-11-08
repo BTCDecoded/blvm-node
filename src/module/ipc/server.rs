@@ -124,6 +124,28 @@ struct ModuleConnection<R: tokio::io::AsyncRead> {
     >,
 }
 
+impl<R: tokio::io::AsyncRead> Drop for ModuleConnection<R> {
+    fn drop(&mut self) {
+        // The read loop aborts this on a normal disconnect. Cancellation of the
+        // connection task skips that path, and dropping the handle leaves the
+        // write half open, so the client blocks instead of seeing a closed socket.
+        if let Some(handle) = self.writer_task_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+/// Abort accepted-connection tasks when the accept loop is dropped.
+struct AbortOnDrop(Vec<tokio::task::JoinHandle<()>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        for handle in &self.0 {
+            handle.abort();
+        }
+    }
+}
+
 /// Lock-free handle to IPC server state needed for cross-task invocations.
 ///
 /// Holding the full `Arc<Mutex<ModuleIpcServer>>` across an await would deadlock
@@ -736,17 +758,18 @@ impl ModuleIpcServer {
         }
         info!("Module IPC server listening on {:?}", self.socket_path);
         let ctx = self.connection_ctx();
+        let mut connections = AbortOnDrop(Vec::new());
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     debug!("New module connection");
                     let ctx = ctx.clone();
                     let node_api = Arc::clone(&node_api);
-                    tokio::spawn(async move {
+                    connections.0.push(tokio::spawn(async move {
                         if let Err(e) = ctx.handle_connection(stream, node_api).await {
                             error!("Module connection closed: {e}");
                         }
-                    });
+                    }));
                 }
                 Err(e) => error!("Failed to accept module connection: {}", e),
             }
@@ -768,6 +791,7 @@ impl ModuleIpcServer {
         }
         info!("Module IPC server listening on pipe {}", pipe_name);
         let ctx = self.connection_ctx();
+        let mut connections = AbortOnDrop(Vec::new());
         loop {
             let server = ServerOptions::new()
                 .first_pipe_instance(false)
@@ -780,11 +804,11 @@ impl ModuleIpcServer {
             debug!("New module connection (named pipe)");
             let ctx = ctx.clone();
             let node_api = Arc::clone(&node_api);
-            tokio::spawn(async move {
+            connections.0.push(tokio::spawn(async move {
                 if let Err(e) = ctx.handle_connection(server, node_api).await {
                     error!("Module connection closed: {e}");
                 }
-            });
+            }));
         }
     }
 }
@@ -1132,7 +1156,7 @@ impl ConnectionCtx {
         }
 
         // Close outgoing channel (will cause writer task to exit)
-        drop(connection.outgoing_tx);
+        drop(connection.outgoing_tx.take());
 
         // Abort writer task (which includes event forwarding)
         if let Some(handle) = connection.writer_task_handle.take() {
