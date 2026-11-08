@@ -56,7 +56,8 @@ fn timed_fluff_occurs_after_timeout() {
     d.set_fluff_probability(0.0); // ensure only timeout triggers
     let tx = [2u8; 32];
     let _ = d.start_stem_phase(tx, "p2".into(), &peers());
-    clock.advance(Duration::from_millis(25));
+    // Deadline is in [20ms, 30ms).
+    clock.advance(Duration::from_millis(30));
     d.set_clock(clock.clone());
     assert!(d.should_fluff(&tx));
 }
@@ -162,8 +163,8 @@ fn eclipse_subset_eventual_fluff() {
     let _ = d.start_stem_phase(tx, "p1".into(), &subset);
     // Advance hops without alternative path
     let _ = d.advance_stem(tx, &subset);
-    // Timeout guarantees fluff eventually
-    clock.advance(Duration::from_millis(60));
+    // Deadline is in [50ms, 75ms). Waiting 60ms is still inside that window.
+    clock.advance(Duration::from_millis(75));
     d.set_clock(clock.clone());
     assert!(d.should_fluff(&tx));
 }
