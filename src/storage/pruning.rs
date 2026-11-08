@@ -37,6 +37,10 @@ pub struct PruningStats {
     pub last_prune_height: Option<u64>,
 }
 
+pub(crate) fn incremental_prune_target(current_height: u64, window: u64, floor: u64) -> u64 {
+    current_height.saturating_sub(window.max(floor))
+}
+
 /// Pruning manager
 pub struct PruningManager {
     pub config: PruningConfig,
@@ -224,8 +228,13 @@ impl PruningManager {
             return Ok(None);
         }
 
-        // Calculate prune height: keep only the last prune_window_size blocks
-        let prune_to_height = current_height.saturating_sub(self.config.prune_window_size);
+        // The window can be smaller than the keep floor. Subtracting only the window
+        // makes prune_to_height refuse the call. Keep at least min_blocks_to_keep.
+        let prune_to_height = incremental_prune_target(
+            current_height,
+            self.config.prune_window_size,
+            self.config.min_blocks_to_keep,
+        );
 
         // Don't prune if window size is larger than current height
         if prune_to_height == 0 || prune_to_height >= current_height {
@@ -864,7 +873,36 @@ mod reconstruct_tests {
 
 #[cfg(test)]
 mod prune_undo_tests {
-    use super::body_is_prunable;
+    use super::{body_is_prunable, incremental_prune_target, PruningManager};
+    use crate::config::{PruningConfig, PruningMode};
+    use crate::storage::blockstore::BlockStore;
+    use crate::storage::database::{create_database, default_backend};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    #[test]
+    fn default_window_keeps_the_floor() {
+        assert_eq!(incremental_prune_target(1000, 144, 288), 712);
+        let temp_dir = TempDir::new().unwrap();
+        let db = Arc::from(create_database(temp_dir.path(), default_backend(), None).unwrap());
+        let blockstore = Arc::new(BlockStore::new(Arc::clone(&db)).unwrap());
+        let config = PruningConfig {
+            mode: PruningMode::Normal {
+                keep_from_height: 0,
+                min_recent_blocks: 0,
+            },
+            min_blocks_to_keep: 288,
+            prune_window_size: 144,
+            ..PruningConfig::default()
+        };
+        let manager = PruningManager::new(config, blockstore);
+        let short = manager.prune_to_height(1000 - 144, 1000, false).unwrap_err();
+        assert!(
+            short.to_string().contains("would leave 144"),
+            "{short}"
+        );
+        manager.prune_to_height(712, 1000, false).unwrap();
+    }
 
     #[test]
     fn a_body_without_undo_is_kept() {

@@ -1024,9 +1024,10 @@ impl BlockStore {
         for _ in 0..count {
             let height_bytes = height.to_be_bytes();
             if let Some(data) = self.recent_headers.get(&height_bytes)? {
-                if let Ok(header) = bincode::deserialize::<BlockHeader>(&data) {
-                    headers.push(header);
-                }
+                let header = bincode::deserialize::<BlockHeader>(&data).map_err(|err| {
+                    anyhow::anyhow!("damaged recent header at height {height}: {err}")
+                })?;
+                headers.push(header);
             }
             if height == 0 {
                 break;

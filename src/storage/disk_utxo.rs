@@ -105,12 +105,13 @@ pub(crate) fn load_keys_from_disk(
             let mut result = FxHashMap::with_capacity_and_hasher(keys.len(), Default::default());
             for (key, opt_bytes) in keys.iter().zip(slices) {
                 if let Some(bytes) = opt_bytes {
-                    if let Ok(archived) = crate::storage::rkyv_codec::access_utxo(bytes) {
-                        result.insert(
-                            *key,
-                            crate::storage::rkyv_codec::utxo_from_archived(archived),
-                        );
-                    }
+                    let archived = crate::storage::rkyv_codec::access_utxo(bytes).map_err(|err| {
+                        anyhow::anyhow!("damaged UTXO row: {err}")
+                    })?;
+                    result.insert(
+                        *key,
+                        crate::storage::rkyv_codec::utxo_from_archived(archived),
+                    );
                 }
             }
             return Ok((result, keys));
@@ -129,10 +130,9 @@ pub(crate) fn load_keys_from_disk(
     // lets validation workers achieve true N-way parallelism.
     for (key, value) in keys.iter().zip(values.into_iter()) {
         if let Some(data) = value {
-            if let Ok(utxo) = crate::storage::utxo_value_codec::decode_utxo_with_codec(codec, &data)
-            {
-                result.insert(*key, utxo);
-            }
+            let utxo = crate::storage::utxo_value_codec::decode_utxo_with_codec(codec, &data)
+                .map_err(|err| anyhow::anyhow!("damaged UTXO row: {err}"))?;
+            result.insert(*key, utxo);
         }
     }
     Ok((result, keys))

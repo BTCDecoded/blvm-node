@@ -471,7 +471,7 @@ fn default_ibd_eviction() -> String {
     "fifo".to_string()
 }
 fn default_ibd_utxo_prefetch_lookahead() -> u64 {
-    64
+    128
 }
 fn default_ibd_max_blocks_in_transit() -> usize {
     // Must stay in sync with chunk_size default: the per-peer blocks semaphore must have
@@ -520,7 +520,7 @@ impl Default for IbdConfig {
             earliest_first: false,
             prefetch_workers: None,
             prefetch_queue_size: None,
-            utxo_prefetch_lookahead: 64,
+            utxo_prefetch_lookahead: default_ibd_utxo_prefetch_lookahead(),
             max_blocks_in_transit_per_peer: 128,
             headers_timeout_secs: 30,
             headers_max_failures: 10,
@@ -790,6 +790,20 @@ mod ibd_engine_config_tests {
                 assert_eq!(d.muhash_persist_interval, 100);
             });
         });
+    }
+
+    #[test]
+    fn missing_ibd_table_uses_thirty_seconds_and_lookahead_128() {
+        let defaults = IbdConfig::default();
+        assert_eq!(defaults.headers_timeout_secs, default_ibd_headers_timeout());
+        assert_eq!(defaults.headers_timeout_secs, 30);
+        assert_eq!(
+            defaults.utxo_prefetch_lookahead,
+            default_ibd_utxo_prefetch_lookahead()
+        );
+        assert_eq!(defaults.utxo_prefetch_lookahead, 128);
+        assert_eq!(0usize.clamp(1, 512), 1);
+        assert_eq!(10_000usize.clamp(1, 512), 512);
     }
 
     #[serial_test::serial(ibd)]

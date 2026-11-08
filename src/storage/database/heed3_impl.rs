@@ -553,7 +553,7 @@ fn resolve_heed3_map_size_mb(
             "[HEED3] map_size {} MB from caller override (auto-tune skipped)",
             mb
         );
-        return apply_existing_mdb_headroom(mb, Some(data_dir));
+        return explicit_map_size_mb(mb, Some(data_dir));
     }
     if let Some(mb) = std::env::var("BLVM_HEED3_MAP_SIZE_MB")
         .ok()
@@ -563,7 +563,7 @@ fn resolve_heed3_map_size_mb(
             "[HEED3] map_size {} MB from BLVM_HEED3_MAP_SIZE_MB (auto-tune skipped)",
             mb
         );
-        return apply_existing_mdb_headroom(mb, Some(data_dir));
+        return explicit_map_size_mb(mb, Some(data_dir));
     }
     if let Some(mb) = storage_config
         .and_then(|s| s.heed3.as_ref())
@@ -573,7 +573,7 @@ fn resolve_heed3_map_size_mb(
             "[HEED3] map_size {} MB from [storage.heed3] map_size_mb (auto-tune skipped)",
             mb
         );
-        return apply_existing_mdb_headroom(mb, Some(data_dir));
+        return explicit_map_size_mb(mb, Some(data_dir));
     }
 
     let disk_free_mb = disk_free_mb_for_path(Some(data_dir));
@@ -609,6 +609,20 @@ fn map_size_mb_default(dbcache_mb: usize, data_dir: Option<&std::path::Path>) ->
 ///   mid-IBD (live 2026-07-14: HARD=1 + map=64 GiB + data.mdb=64 GiB → CATCH_UP restart
 ///   from stale `synced_tip`).
 /// - `BLVM_HEED3_MDB_MIN_HEADROOM_MB` — min free map when HARD=1 (default **32768** = 32 GiB).
+/// An explicit map is the requested size. A larger on-disk file raises it to
+/// that file's size. The 128 GiB headroom stays on the auto-tune path.
+fn explicit_map_size_mb(map_size_mb: usize, data_dir: Option<&std::path::Path>) -> usize {
+    let Some(dir) = data_dir else {
+        return map_size_mb;
+    };
+    let mdb = dir.join("heed3").join("data.mdb");
+    let Ok(meta) = std::fs::metadata(&mdb) else {
+        return map_size_mb;
+    };
+    let file_mb = (meta.len() / (1024 * 1024)) as usize;
+    map_size_mb.max(file_mb)
+}
+
 fn apply_existing_mdb_headroom(map_size_mb: usize, data_dir: Option<&std::path::Path>) -> usize {
     let Some(dir) = data_dir else {
         return map_size_mb;
@@ -1295,7 +1309,10 @@ impl BatchWriter for Heed3BatchWriter {
 
 #[cfg(test)]
 mod map_size_tests {
-    use super::{disk_based_map_size_mb, disk_free_mb_for_path, map_size_mb_for_existing_file};
+    use super::{
+        disk_based_map_size_mb, disk_free_mb_for_path, explicit_map_size_mb,
+        map_size_mb_for_existing_file,
+    };
 
     #[test]
     fn missing_path_uses_an_existing_parent() {
@@ -1331,5 +1348,20 @@ mod map_size_tests {
     fn map_size_cap_is_4tib() {
         let got = map_size_mb_for_existing_file(3 * 1024 * 1024, 10_000_000);
         assert_eq!(got, 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn explicit_map_stays_requested_until_the_file_is_larger() {
+        let empty = std::env::temp_dir().join(format!("blvm-explicit-map-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(explicit_map_size_mb(1, Some(&empty)), 1);
+
+        let dir = empty.join("with-file");
+        std::fs::create_dir_all(dir.join("heed3")).unwrap();
+        let file = std::fs::File::create(dir.join("heed3").join("data.mdb")).unwrap();
+        file.set_len(4 * 1024 * 1024).unwrap();
+        assert_eq!(explicit_map_size_mb(1, Some(&dir)), 4);
+        let _ = std::fs::remove_dir_all(&empty);
     }
 }

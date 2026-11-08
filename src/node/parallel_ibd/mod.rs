@@ -2630,7 +2630,7 @@ pub struct ParallelIBDConfig {
     pub prefetch_workers: Option<usize>,
     /// Prefetch queue size (None = auto)
     pub prefetch_queue_size: Option<usize>,
-    /// UTXO prefetch lookahead (default: 64)
+    /// UTXO prefetch lookahead (default: 128)
     pub utxo_prefetch_lookahead: u64,
     /// Max blocks in transit per peer (default: 16)
     pub max_blocks_in_transit_per_peer: usize,
@@ -2799,7 +2799,7 @@ impl ParallelIBDConfig {
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .or_else(|| ibd_config.map(|c| c.utxo_prefetch_lookahead))
-            .unwrap_or(128)
+            .unwrap_or(crate::config::IbdConfig::default().utxo_prefetch_lookahead)
             // Allow up to 512 blocks lookahead on high-RAM machines. The old cap of 128 was
             // conservative; the prefetch pool is bounded by max_prefetches_in_flight (derived
             // from available RAM) so increasing the lookahead distance only helps on machines
@@ -2811,7 +2811,9 @@ impl ParallelIBDConfig {
             .ok()
             .and_then(|s| s.parse().ok())
             .map(|n: usize| n.clamp(1, 512))
-            .or_else(|| ibd_config.map(|c| c.max_blocks_in_transit_per_peer))
+            .or_else(|| {
+                ibd_config.map(|c| c.max_blocks_in_transit_per_peer.clamp(1, 512))
+            })
             .unwrap_or(128);
         info!(
             "IBD: max_blocks_in_transit_per_peer={} (env>toml>128)",
@@ -2821,7 +2823,7 @@ impl ParallelIBDConfig {
             .ok()
             .and_then(|s| s.parse().ok())
             .or_else(|| ibd_config.map(|c| c.headers_timeout_secs))
-            .unwrap_or(5); // 5s: fail fast on unresponsive peers; parallel download handles retries
+            .unwrap_or_else(|| crate::config::IbdConfig::default().headers_timeout_secs);
         let headers_max_failures = std::env::var("BLVM_IBD_HEADERS_MAX_FAILURES")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -9129,12 +9131,15 @@ impl ParallelIBD {
                     match crate::storage::database::create_ibd_utxo_standalone_db(&utxo_store_dir) {
                         Ok(standalone_db) => {
                             let standalone_tree = standalone_db.open_tree("ibd_utxos");
-                            let standalone_non_empty = standalone_tree
-                                .as_ref()
-                                .ok()
-                                .and_then(|t| t.is_empty().ok())
-                                .map(|empty| !empty)
-                                .unwrap_or(false);
+                            let standalone_non_empty = match &standalone_tree {
+                                Ok(tree) => {
+                                    let empty = tree
+                                        .is_empty()
+                                        .context("standalone ibd_utxos is_empty")?;
+                                    !empty
+                                }
+                                Err(_) => false,
+                            };
 
                             // Case 0: standalone has data from a prior session BUT we are
                             // replaying from genesis (start_height == 0 ← watermark was not

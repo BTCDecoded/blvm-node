@@ -204,6 +204,30 @@ fn test_rbf_absolute_fee_bump() {
 }
 
 #[test]
+fn configured_fee_bump_refuses_one_hundred_satoshis() {
+    let mempool = MempoolManager::new();
+    admit_bare_op1(&mempool);
+    let mut rbf_config = RbfConfig::with_mode(RbfMode::Standard);
+    rbf_config.min_fee_rate_multiplier = 1.0;
+    rbf_config.min_fee_bump_satoshis = 50_000;
+    mempool.set_rbf_config(Some(rbf_config));
+
+    let existing_tx = create_rbf_tx(100_000, 90_000);
+    let small_bump = create_rbf_tx(100_000, 89_900);
+    let utxo_set = create_test_utxo_set();
+    let refused = mempool
+        .check_rbf_replacement(&small_bump, &existing_tx, &utxo_set, None)
+        .unwrap();
+    assert!(!refused);
+
+    let enough = create_rbf_tx(100_000, 40_000);
+    let accepted = mempool
+        .check_rbf_replacement(&enough, &existing_tx, &utxo_set, None)
+        .unwrap();
+    assert!(accepted);
+}
+
+#[test]
 fn test_rbf_config_with_mode() {
     // Test that with_mode sets appropriate defaults
     let conservative = RbfConfig::with_mode(RbfMode::Conservative);

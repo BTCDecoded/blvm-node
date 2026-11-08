@@ -107,13 +107,16 @@ pub(crate) fn header_batch_rtt_should_rotate(latency_ms: f64) -> bool {
 /// then CATCH_UP 480s backoff. Empty with **no progress** is rotate, not tip.
 pub(crate) fn empty_headers_is_ibd_tip(
     fetched_tip: u64,
-    start_height: u64,
     end_height: u64,
+    empty_replies_this_round: usize,
+    peer_count: usize,
 ) -> bool {
-    if fetched_tip >= end_height {
-        return true;
-    }
-    fetched_tip + 1 > start_height
+    short_header_batch_completes(
+        fetched_tip,
+        end_height,
+        empty_replies_this_round,
+        peer_count,
+    )
 }
 
 /// Drop `peer` and keep `idx`. The peer that followed it slides into `idx`.
@@ -627,6 +630,7 @@ pub(crate) async fn download_headers(
     let mut consecutive_failures = 0;
     let mut current_peer_idx = 0;
     let mut short_replies_this_round = 0usize;
+    let mut empty_replies_this_round = 0usize;
     let mut last_progress_log = start_height;
     let mut last_progress_event = start_height;
     let start_time = std::time::Instant::now();
@@ -735,7 +739,13 @@ pub(crate) async fn download_headers(
 
                 if headers.is_empty() {
                     let fetched_tip = current_height.saturating_sub(1);
-                    if !empty_headers_is_ibd_tip(fetched_tip, request_floor, end_height) {
+                    empty_replies_this_round += 1;
+                    if !empty_headers_is_ibd_tip(
+                        fetched_tip,
+                        end_height,
+                        empty_replies_this_round,
+                        peer_addrs.len(),
+                    ) {
                         warn!(
                             "[IBD_HEADER_EMPTY] peer={} fetched_tip={} start={} end={} — not IBD tip; rotate",
                             peer_addr, fetched_tip, request_floor, end_height
@@ -1247,15 +1257,16 @@ mod n13_tests {
     fn dest_bg_empty_headers_at_genesis_is_not_ibd_tip() {
         // dest-bg 2026-08-25T07:21Z: empty getheaders at height 1 → COMPLETE 0
         // against target 963969. Rotate, do not declare tip.
-        assert!(!empty_headers_is_ibd_tip(0, 1, 963_969));
-        // Genesis asks from height 1. One accepted header, then empty, is this peer's tip.
-        assert!(empty_headers_is_ibd_tip(1, 1, 963_969));
+        assert!(!empty_headers_is_ibd_tip(0, 963_969, 1, 2));
         assert!(
-            empty_headers_is_ibd_tip(961_638, 1, 963_969),
-            "progress then empty is BIP130 this-peer tip (dest-bf 961k complete)"
+            !empty_headers_is_ibd_tip(1, 963_969, 1, 2),
+            "one empty reply below the target rotates to the other peer"
         );
-        assert!(empty_headers_is_ibd_tip(963_969, 1, 963_969));
-        assert!(!empty_headers_is_ibd_tip(499_999, 500_000, 963_969));
+        assert!(!empty_headers_is_ibd_tip(961_638, 963_969, 1, 2));
+        assert!(empty_headers_is_ibd_tip(961_638, 963_969, 2, 2));
+        assert!(empty_headers_is_ibd_tip(1, 963_969, 1, 1));
+        assert!(empty_headers_is_ibd_tip(963_969, 963_969, 1, 2));
+        assert!(!empty_headers_is_ibd_tip(499_999, 963_969, 1, 2));
     }
 
     /// Testnet4 catch-up: rewind accepts a new 155498 in the batch, then the next

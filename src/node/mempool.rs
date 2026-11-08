@@ -27,6 +27,10 @@ struct RbfTracking {
     original_tx_hash: Hash,
 }
 
+fn effective_ranked_fee(fee: u64, delta: i64) -> u64 {
+    (fee as i64).saturating_add(delta).max(0) as u64
+}
+
 fn next_replacement_count(counts: impl IntoIterator<Item = u32>) -> u32 {
     counts.into_iter().max().unwrap_or(0).saturating_add(1)
 }
@@ -2044,10 +2048,12 @@ impl MempoolManager {
         let bandwidth = rate_sat_per_kvb
             .saturating_mul(new_tx_size as u128)
             .div_ceil(1000);
-        if (new_fee as i128) < existing_fee as i128 + bandwidth as i128 {
+        let min_bump = rbf_config.min_fee_bump_satoshis as i128;
+        let required = (bandwidth as i128).max(min_bump);
+        if (new_fee as i128) < existing_fee as i128 + required {
             warn!(
                 "RBF replacement rejected: absolute fee bump insufficient (required: {} sat, got: {} sat) for tx {}",
-                bandwidth,
+                required,
                 new_fee - existing_fee,
                 hex::encode(existing_tx_hash)
             );
@@ -3578,6 +3584,14 @@ impl MempoolManager {
         {
             let wtxid = crate::network::txhash::calculate_wtxid(&tx, witnesses.as_deref());
             let mut pool = self.pool_lock();
+            if pool.transactions.len() >= effective_policy.max_mempool_txs {
+                warn!(
+                    "Transaction {} rejected: mempool already holds {} transactions",
+                    hex::encode(tx_hash),
+                    pool.transactions.len()
+                );
+                return Ok(false);
+            }
             pool.transactions.insert(tx_hash, tx.clone());
             pool.wtxids.insert(tx_hash, wtxid);
             pool.adjusted_vsize.insert(tx_hash, candidate_vsize);
@@ -4021,7 +4035,7 @@ impl MempoolManager {
                 .get(tx_hash)
                 .copied()
                 .unwrap_or(0);
-            let effective_fee = (fee as i64 + delta).max(0) as u64;
+            let effective_fee = effective_ranked_fee(fee, delta);
             // Store fee rate in sat/vB (consistent with min_relay_fee_rate config units).
             let fee_rate = if size > 0 {
                 effective_fee / size as u64
@@ -4704,31 +4718,66 @@ impl MempoolManager {
 
     fn admit_core_dump(&self, dump: crate::node::core_mempool_dat::CoreMempoolDat) -> Result<()> {
         use blvm_protocol::block::calculate_tx_id;
-        let mut added = Vec::with_capacity(dump.txs.len());
-        for entry in dump.txs {
-            let hash = calculate_tx_id(&entry.tx);
-            match self.add_transaction_with_witness(entry.tx, entry.witnesses) {
-                Ok(true) => {
-                    if entry.fee_delta != 0 {
-                        self.prioritise_transaction(&hash, entry.fee_delta);
-                    }
-                    added.push(hash);
-                }
-                Ok(false) => {
-                    for hash in added.iter().rev() {
-                        let _ = self.remove_transaction(hash);
-                    }
-                    return Err(anyhow::anyhow!(
-                        "mempool.dat transaction was refused by policy"
-                    ));
-                }
-                Err(err) => {
-                    for hash in added.iter().rev() {
-                        let _ = self.remove_transaction(hash);
-                    }
-                    return Err(err);
+        let mut pending = dump.txs;
+        let mut added = Vec::new();
+        while !pending.is_empty() {
+            let mut created_by_pending: HashMap<OutPoint, Hash> = HashMap::new();
+            for entry in &pending {
+                let hash = calculate_tx_id(&entry.tx);
+                for index in 0..entry.tx.outputs.len() {
+                    created_by_pending.insert(
+                        OutPoint {
+                            hash,
+                            index: index as u32,
+                        },
+                        hash,
+                    );
                 }
             }
+            let mut deferred = Vec::new();
+            let mut progress = false;
+            for entry in pending {
+                let hash = calculate_tx_id(&entry.tx);
+                let waits_for_dump_parent = entry.tx.inputs.iter().any(|input| {
+                    created_by_pending
+                        .get(&input.prevout)
+                        .is_some_and(|parent| *parent != hash)
+                });
+                match self.add_transaction_with_witness(entry.tx.clone(), entry.witnesses.clone()) {
+                    Ok(true) => {
+                        if entry.fee_delta != 0 {
+                            self.prioritise_transaction(&hash, entry.fee_delta);
+                        }
+                        added.push(hash);
+                        progress = true;
+                    }
+                    Ok(false) if waits_for_dump_parent => deferred.push(entry),
+                    Ok(false) => {
+                        for hash in added.iter().rev() {
+                            let _ = self.remove_transaction(hash);
+                        }
+                        return Err(anyhow::anyhow!(
+                            "mempool.dat transaction was refused by policy"
+                        ));
+                    }
+                    Err(err) => {
+                        for hash in added.iter().rev() {
+                            let _ = self.remove_transaction(hash);
+                        }
+                        return Err(err);
+                    }
+                }
+            }
+            if deferred.is_empty() {
+                break;
+            }
+            if !progress {
+                for hash in added.iter().rev() {
+                    let _ = self.remove_transaction(hash);
+                }
+                return Err(anyhow::anyhow!("unknown_prevout"));
+            }
+            pending = deferred;
         }
         for (txid, delta) in dump.deltas {
             if delta != 0 {
@@ -4744,6 +4793,12 @@ impl MempoolManager {
             return Err(anyhow::anyhow!("mempool file is shorter than a count"));
         }
         let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        let remaining = data.len() - 4;
+        if count > remaining / 4 {
+            return Err(anyhow::anyhow!(
+                "mempool file transaction length is truncated"
+            ));
+        }
         let mut offset = 4;
         let mut decoded = Vec::with_capacity(count);
         for _ in 0..count {
@@ -4811,10 +4866,31 @@ fn decode_persisted_tx(bytes: &[u8]) -> Result<(Transaction, Option<Vec<Witness>
 #[cfg(test)]
 mod tests {
     use super::{
-        MempoolManager, decode_persisted_tx, encode_persisted_tx, replacement_clears_fee_rate,
+        MempoolManager, decode_persisted_tx, effective_ranked_fee, encode_persisted_tx,
+        replacement_clears_fee_rate,
     };
     use crate::config::MempoolPolicyConfig;
     use blvm_protocol::serialization::transaction::serialize_transaction;
+
+    #[test]
+    fn priority_delta_does_not_overflow_the_ranked_fee() {
+        assert_eq!(effective_ranked_fee(1_000, 0), 1_000);
+        assert_eq!(effective_ranked_fee(1_000, i64::MAX), i64::MAX as u64);
+        assert_eq!(effective_ranked_fee(1_000, -50), 950);
+    }
+
+    #[test]
+    fn legacy_mempool_count_is_rejected_before_reserve() {
+        let pool = MempoolManager::new();
+        let err = pool
+            .load_legacy_bytes(&u32::MAX.to_le_bytes())
+            .expect_err("a count larger than the file must fail");
+        assert!(
+            err.to_string().contains("truncated"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(pool.size(), 0);
+    }
 
     #[test]
     fn replacement_fee_rate_does_not_use_binary64() {
@@ -4840,6 +4916,33 @@ mod tests {
         assert_eq!(with_witness.len(), bare.len() + 6);
         let (_, wits) = decode_persisted_tx(&with_witness).unwrap();
         assert_eq!(wits.unwrap(), stacks);
+    }
+
+    #[test]
+    fn admission_stops_at_the_transaction_cap() {
+        let mempool = MempoolManager::new();
+        let mut policy = MempoolPolicyConfig::default();
+        policy.max_mempool_txs = 1;
+        policy.require_standard = false;
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        mempool.set_policy_config(Some(policy));
+        let mut first = legacy_empty_script();
+        first.inputs[0].prevout.hash = [1u8; 32];
+        let mut second = legacy_empty_script();
+        second.inputs[0].prevout.hash = [2u8; 32];
+        assert!(mempool.add_transaction(first).unwrap());
+        assert!(!mempool.add_transaction(second).unwrap());
+        assert_eq!(mempool.size(), 1);
+    }
+
+    #[test]
+    fn duplicate_mempool_input_is_refused() {
+        let mempool = MempoolManager::new();
+        let mut tx = legacy_empty_script();
+        tx.inputs.push(tx.inputs[0].clone());
+        assert!(!mempool.add_transaction(tx).unwrap());
+        assert_eq!(mempool.size(), 0);
     }
 
     #[test]
@@ -4987,6 +5090,60 @@ mod tests {
             after.len()
         );
         assert_eq!(after, intact, "a failed save must leave the previous dump");
+    }
+
+    #[test]
+    fn child_before_parent_dump_is_admitted() {
+        use blvm_protocol::block::calculate_tx_id;
+        let mempool = MempoolManager::new();
+        let mut policy = MempoolPolicyConfig::default();
+        policy.require_standard = false;
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        mempool.set_policy_config(Some(policy));
+
+        let script = vec![0x51, 0x61, 0x61, 0x61, 0x61];
+        let mut parent = legacy_empty_script();
+        parent.inputs[0].prevout.hash = [9u8; 32];
+        parent.outputs[0].value = 50_000;
+        parent.outputs[0].script_pubkey = script.clone();
+        let parent_hash = calculate_tx_id(&parent);
+        let mut child = legacy_empty_script();
+        child.inputs[0].prevout.hash = parent_hash;
+        child.outputs[0].value = 40_000;
+        child.outputs[0].script_pubkey = script.clone();
+
+        let mut utxo = blvm_protocol::UtxoSet::default();
+        utxo.insert(
+            parent.inputs[0].prevout,
+            std::sync::Arc::new(blvm_protocol::UTXO {
+                value: 60_000,
+                script_pubkey: vec![blvm_protocol::opcodes::OP_1].into(),
+                height: 1,
+                is_coinbase: false,
+            }),
+        );
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(utxo)));
+
+        let dump = crate::node::core_mempool_dat::CoreMempoolDat {
+            txs: vec![
+                crate::node::core_mempool_dat::CoreMempoolTx {
+                    tx: child,
+                    witnesses: None,
+                    time: 1,
+                    fee_delta: 0,
+                },
+                crate::node::core_mempool_dat::CoreMempoolTx {
+                    tx: parent,
+                    witnesses: None,
+                    time: 1,
+                    fee_delta: 0,
+                },
+            ],
+            ..Default::default()
+        };
+        mempool.admit_core_dump(dump).unwrap();
+        assert_eq!(mempool.size(), 2);
     }
 
     /// P2SH of `OP_1`, spent by a direct push of that redeem. Standard under default policy.

@@ -546,11 +546,23 @@ impl AssumeUtxoManager {
             utxo_count,
         };
 
+        const MAX_SNAPSHOT_UTXOS: u64 = 500_000_000;
+        const MAX_SNAPSHOT_ENTRY_LEN: usize = 4_000_000;
+        if utxo_count > MAX_SNAPSHOT_UTXOS {
+            return Err(anyhow::anyhow!(
+                "snapshot UTXO count {utxo_count} exceeds {MAX_SNAPSHOT_UTXOS}"
+            ));
+        }
         let mut utxo_set =
             UtxoSet::with_capacity_and_hasher(utxo_count as usize, Default::default());
         for i in 0..utxo_count {
             reader.read_exact(&mut buf4)?;
             let entry_len = u32::from_le_bytes(buf4) as usize;
+            if entry_len > MAX_SNAPSHOT_ENTRY_LEN {
+                return Err(anyhow::anyhow!(
+                    "UTXO entry length {entry_len} exceeds {MAX_SNAPSHOT_ENTRY_LEN}"
+                ));
+            }
             let mut entry = vec![0u8; entry_len];
             reader.read_exact(&mut entry)?;
             let (outpoint, utxo) = Self::deserialize_utxo_entry(&entry)?;
@@ -700,6 +712,20 @@ mod tests {
         }
 
         utxo_set
+    }
+
+    #[test]
+    fn snapshot_entry_longer_than_four_million_bytes_is_rejected() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&SNAPSHOT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 32]);
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 32]);
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&4_000_001u32.to_le_bytes());
+        let err = AssumeUtxoManager::read_snapshot_from_reader(&mut std::io::Cursor::new(bytes))
+            .expect_err("an oversized entry must fail before it is read");
+        assert!(err.to_string().contains("exceeds 4000000"), "{err}");
     }
 
     #[test]

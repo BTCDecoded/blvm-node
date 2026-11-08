@@ -635,6 +635,12 @@ impl TxIndex {
         loop {
             let block_key = self.block_tx_key(block_hash, tx_index);
             if let Some(tx_hash_data) = self.tx_by_block.get(&block_key)? {
+                if tx_hash_data.len() != 32 {
+                    return Err(anyhow::anyhow!(
+                        "tx_by_block row {tx_index} is {} bytes, expected 32",
+                        tx_hash_data.len()
+                    ));
+                }
                 let mut tx_hash = [0u8; 32];
                 tx_hash.copy_from_slice(&tx_hash_data);
                 if let Some(tx) = self.get_transaction(&tx_hash)? {
@@ -904,6 +910,18 @@ mod tests {
         let db = Arc::from(create_database(dir.path(), DatabaseBackend::Heed3, None).unwrap());
         let index = TxIndex::with_config(db, config).unwrap();
         (dir, index)
+    }
+
+    #[test]
+    fn short_block_tx_row_is_an_error() {
+        let (_dir, index) = open_index(IndexingConfig::default());
+        let block_hash = [3u8; 32];
+        let key = index.block_tx_key(&block_hash, 0);
+        index.tx_by_block.insert(&key, &[0xff]).unwrap();
+        let err = index
+            .get_block_transactions(&block_hash)
+            .expect_err("a one-byte tx hash must not panic");
+        assert!(err.to_string().contains("expected 32"), "{err}");
     }
 
     #[test]
