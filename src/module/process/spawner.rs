@@ -129,18 +129,21 @@ impl ModuleProcessSpawner {
             binary_path, command
         );
 
-        let landlock = crate::module::sandbox::landlock::ModuleLandlock::prepare(
-            binary_path,
-            &module_data_dir,
-            &socket_path,
-            &self.modules_dir,
-        )
-        .map_err(|e| {
-            ModuleError::InitializationError(format!(
-                "refusing to spawn module {module_name} without a Landlock domain: {e}"
-            ))
-        })?;
-        landlock.arm_tokio(&mut command);
+        #[cfg(target_os = "linux")]
+        {
+            let landlock = crate::module::sandbox::landlock::ModuleLandlock::prepare(
+                binary_path,
+                &module_data_dir,
+                &socket_path,
+                &self.modules_dir,
+            )
+            .map_err(|e| {
+                ModuleError::InitializationError(format!(
+                    "refusing to spawn module {module_name} without a Landlock domain: {e}"
+                ))
+            })?;
+            landlock.arm_tokio(&mut command);
+        }
 
         let mut child = command.spawn().map_err(|e| {
             ModuleError::InitializationError(format!("Failed to spawn module process: {e}"))

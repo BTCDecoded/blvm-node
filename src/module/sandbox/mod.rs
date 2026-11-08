@@ -4,6 +4,7 @@
 //! Resource limits are applied with `prlimit` after the child starts.
 
 pub mod filesystem;
+#[cfg(target_os = "linux")]
 pub mod landlock;
 pub mod process;
 
