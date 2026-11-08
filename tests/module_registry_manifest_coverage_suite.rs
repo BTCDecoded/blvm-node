@@ -19,6 +19,13 @@ fn manifest_with_threshold(threshold: &str) -> ModuleManifest {
         config_schema: HashMap::new(),
         binary: None,
         downloads: HashMap::new(),
+        network: Default::default(),
+        replaces: Vec::new(),
+        provides_apis: Vec::new(),
+        requires_apis: Vec::new(),
+        min_node_version: None,
+        services: Vec::new(),
+        fee_estimators: Vec::new(),
         signatures: Some(SignatureSection {
             threshold: Some(threshold.into()),
             maintainers: vec![MaintainerSignature {

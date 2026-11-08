@@ -8,21 +8,67 @@ use tracing::{debug, warn};
 use crate::module::api::events::EventManager;
 use crate::module::ipc::protocol::EventPayload;
 use crate::module::traits::EventType;
-use crate::{Block, Hash, Transaction};
+use crate::{Block, Hash};
 
 /// Event publisher that publishes node events to modules over the IPC event bus.
 pub struct EventPublisher {
     event_manager: Arc<EventManager>,
+    chain_tx: std::sync::Mutex<
+        Option<tokio::sync::mpsc::UnboundedSender<crate::module::timers::ChainEvent>>,
+    >,
 }
 
 impl EventPublisher {
     /// Create a new event publisher
     pub fn new(event_manager: Arc<EventManager>) -> Self {
-        Self { event_manager }
+        Self {
+            event_manager,
+            chain_tx: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub fn set_chain_sender(
+        &self,
+        tx: tokio::sync::mpsc::UnboundedSender<crate::module::timers::ChainEvent>,
+    ) {
+        if let Ok(mut slot) = self.chain_tx.lock() {
+            *slot = Some(tx.clone());
+        }
+        crate::module::timers::clock::install_chain_feed(tx);
+    }
+
+    fn note_connected(&self, hash: Hash, height: u64, mtp: u64) {
+        let Ok(slot) = self.chain_tx.lock() else {
+            return;
+        };
+        if let Some(tx) = slot.as_ref() {
+            let _ = tx.send(crate::module::timers::ChainEvent::Connected { height, hash, mtp });
+        }
+    }
+
+    fn note_disconnected(&self, hash: Hash, height: u64) {
+        let Ok(slot) = self.chain_tx.lock() else {
+            return;
+        };
+        if let Some(tx) = slot.as_ref() {
+            let _ = tx.send(crate::module::timers::ChainEvent::Disconnected { height, hash });
+        }
     }
 
     /// Publish new block event (`blvm-zmq` and other modules consume via `subscribe_events`).
     pub async fn publish_new_block(&self, block: &Block, block_hash: &Hash, height: u64) {
+        self.publish_new_block_at(block, block_hash, height, block.header.timestamp)
+            .await;
+    }
+
+    pub async fn publish_new_block_at(
+        &self,
+        block: &Block,
+        block_hash: &Hash,
+        height: u64,
+        mtp: u64,
+    ) {
+        self.note_connected(*block_hash, height, mtp);
         debug!(
             "Publishing NewBlock event for block {:?} at height {}",
             block_hash, height
@@ -42,34 +88,10 @@ impl EventPublisher {
         }
     }
 
-    /// Publish new transaction event (mempool and modules such as `blvm-zmq`).
-    ///
-    /// # Arguments
-    ///
-    /// * `tx` - Transaction object (for callers that need the full tx; modules typically refetch)
-    /// * `tx_hash` - Transaction hash
-    /// * `_is_mempool_entry` - reserved for future payload fields / parity with Bitcoin Core ZMQ
-    pub async fn publish_new_transaction(
-        &self,
-        _tx: &Transaction,
-        tx_hash: &Hash,
-        _is_mempool_entry: bool,
-    ) {
-        debug!("Publishing NewTransaction event for tx {:?}", tx_hash);
-
-        let payload = EventPayload::NewTransaction { tx_hash: *tx_hash };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::NewTransaction, payload)
-            .await
-        {
-            warn!("Failed to publish NewTransaction event: {}", e);
-        }
-    }
 
     /// Publish block disconnected event (chain reorg)
     pub async fn publish_block_disconnected(&self, hash: &Hash, height: u64) {
+        self.note_disconnected(*hash, height);
         debug!(
             "Publishing BlockDisconnected event for block {:?} at height {}",
             hash, height
@@ -412,222 +434,16 @@ impl EventPublisher {
         }
     }
 
-    /// Publish broadcast started event
-    pub async fn publish_broadcast_started(&self, message_type: &str, target_peers: usize) {
-        let payload = EventPayload::BroadcastStarted {
-            message_type: message_type.to_string(),
-            target_peers,
-        };
 
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::BroadcastStarted, payload)
-            .await
-        {
-            warn!("Failed to publish BroadcastStarted event: {}", e);
-        }
-    }
 
-    /// Publish broadcast completed event
-    pub async fn publish_broadcast_completed(
-        &self,
-        message_type: &str,
-        successful: usize,
-        failed: usize,
-    ) {
-        let payload = EventPayload::BroadcastCompleted {
-            message_type: message_type.to_string(),
-            successful,
-            failed,
-        };
 
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::BroadcastCompleted, payload)
-            .await
-        {
-            warn!("Failed to publish BroadcastCompleted event: {}", e);
-        }
-    }
 
-    /// Publish route discovered event
-    pub async fn publish_route_discovered(
-        &self,
-        destination: &[u8],
-        route_path: &[String],
-        route_cost: u64,
-    ) {
-        let payload = EventPayload::RouteDiscovered {
-            destination: destination.to_vec(),
-            route_path: route_path.to_vec(),
-            route_cost,
-        };
 
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::RouteDiscovered, payload)
-            .await
-        {
-            warn!("Failed to publish RouteDiscovered event: {}", e);
-        }
-    }
 
-    /// Publish route failed event
-    pub async fn publish_route_failed(&self, destination: &[u8], reason: &str) {
-        let payload = EventPayload::RouteFailed {
-            destination: destination.to_vec(),
-            reason: reason.to_string(),
-        };
 
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::RouteFailed, payload)
-            .await
-        {
-            warn!("Failed to publish RouteFailed event: {}", e);
-        }
-    }
 
-    /// Publish connection attempt event
-    pub async fn publish_connection_attempt(
-        &self,
-        peer_addr: &str,
-        success: bool,
-        error: Option<&str>,
-    ) {
-        let payload = EventPayload::ConnectionAttempt {
-            peer_addr: peer_addr.to_string(),
-            success,
-            error: error.map(|s| s.to_string()),
-        };
 
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::ConnectionAttempt, payload)
-            .await
-        {
-            warn!("Failed to publish ConnectionAttempt event: {}", e);
-        }
-    }
 
-    /// Publish address discovered event
-    pub async fn publish_address_discovered(&self, peer_addr: &str, source: &str) {
-        let payload = EventPayload::AddressDiscovered {
-            peer_addr: peer_addr.to_string(),
-            source: source.to_string(),
-        };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::AddressDiscovered, payload)
-            .await
-        {
-            warn!("Failed to publish AddressDiscovered event: {}", e);
-        }
-    }
-
-    /// Publish address expired event
-    pub async fn publish_address_expired(&self, peer_addr: &str) {
-        let payload = EventPayload::AddressExpired {
-            peer_addr: peer_addr.to_string(),
-        };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::AddressExpired, payload)
-            .await
-        {
-            warn!("Failed to publish AddressExpired event: {}", e);
-        }
-    }
-
-    /// Publish network partition event
-    pub async fn publish_network_partition(
-        &self,
-        partition_id: &[u8],
-        disconnected_peers: &[String],
-        partition_size: usize,
-    ) {
-        let payload = EventPayload::NetworkPartition {
-            partition_id: partition_id.to_vec(),
-            disconnected_peers: disconnected_peers.to_vec(),
-            partition_size,
-        };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::NetworkPartition, payload)
-            .await
-        {
-            warn!("Failed to publish NetworkPartition event: {}", e);
-        }
-    }
-
-    /// Publish network reconnected event
-    pub async fn publish_network_reconnected(
-        &self,
-        partition_id: &[u8],
-        reconnected_peers: &[String],
-    ) {
-        let payload = EventPayload::NetworkReconnected {
-            partition_id: partition_id.to_vec(),
-            reconnected_peers: reconnected_peers.to_vec(),
-        };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::NetworkReconnected, payload)
-            .await
-        {
-            warn!("Failed to publish NetworkReconnected event: {}", e);
-        }
-    }
-
-    /// Publish DoS attack detected event
-    pub async fn publish_dos_attack_detected(
-        &self,
-        peer_addr: &str,
-        attack_type: &str,
-        severity: &str,
-    ) {
-        let payload = EventPayload::DoSAttackDetected {
-            peer_addr: peer_addr.to_string(),
-            attack_type: attack_type.to_string(),
-            severity: severity.to_string(),
-        };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::DoSAttackDetected, payload)
-            .await
-        {
-            warn!("Failed to publish DoSAttackDetected event: {}", e);
-        }
-    }
-
-    /// Publish rate limit exceeded event
-    pub async fn publish_rate_limit_exceeded(
-        &self,
-        peer_addr: &str,
-        limit_type: &str,
-        current_rate: f64,
-        limit: f64,
-    ) {
-        let payload = EventPayload::RateLimitExceeded {
-            peer_addr: peer_addr.to_string(),
-            limit_type: limit_type.to_string(),
-            current_rate,
-            limit,
-        };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::RateLimitExceeded, payload)
-            .await
-        {
-            warn!("Failed to publish RateLimitExceeded event: {}", e);
-        }
-    }
 
     // === Mempool Events ===
 
@@ -704,83 +520,9 @@ impl EventPublisher {
         }
     }
 
-    /// Publish script verification started event
-    pub async fn publish_script_verification_started(&self, tx_hash: &Hash, input_index: usize) {
-        let payload = EventPayload::ScriptVerificationStarted {
-            tx_hash: *tx_hash,
-            input_index,
-        };
 
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::ScriptVerificationStarted, payload)
-            .await
-        {
-            warn!("Failed to publish ScriptVerificationStarted event: {}", e);
-        }
-    }
 
-    /// Publish script verification completed event
-    pub async fn publish_script_verification_completed(
-        &self,
-        tx_hash: &Hash,
-        input_index: usize,
-        success: bool,
-        verification_time_ms: u64,
-    ) {
-        let payload = EventPayload::ScriptVerificationCompleted {
-            tx_hash: *tx_hash,
-            input_index,
-            success,
-            verification_time_ms,
-        };
 
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::ScriptVerificationCompleted, payload)
-            .await
-        {
-            warn!("Failed to publish ScriptVerificationCompleted event: {}", e);
-        }
-    }
-
-    /// Publish UTXO validation started event
-    pub async fn publish_utxo_validation_started(&self, block_hash: &Hash, height: u64) {
-        let payload = EventPayload::UTXOValidationStarted {
-            block_hash: *block_hash,
-            height,
-        };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::UTXOValidationStarted, payload)
-            .await
-        {
-            warn!("Failed to publish UTXOValidationStarted event: {}", e);
-        }
-    }
-
-    /// Publish UTXO validation completed event
-    pub async fn publish_utxo_validation_completed(
-        &self,
-        block_hash: &Hash,
-        height: u64,
-        success: bool,
-    ) {
-        let payload = EventPayload::UTXOValidationCompleted {
-            block_hash: *block_hash,
-            height,
-            success,
-        };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::UTXOValidationCompleted, payload)
-            .await
-        {
-            warn!("Failed to publish UTXOValidationCompleted event: {}", e);
-        }
-    }
 
     /// Publish difficulty adjusted event
     pub async fn publish_difficulty_adjusted(
@@ -804,61 +546,8 @@ impl EventPublisher {
         }
     }
 
-    /// Publish soft fork activated event
-    pub async fn publish_soft_fork_activated(&self, fork_name: &str, height: u64) {
-        let payload = EventPayload::SoftForkActivated {
-            fork_name: fork_name.to_string(),
-            height,
-        };
 
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::SoftForkActivated, payload)
-            .await
-        {
-            warn!("Failed to publish SoftForkActivated event: {}", e);
-        }
-    }
 
-    /// Publish soft fork locked in event
-    pub async fn publish_soft_fork_locked_in(&self, fork_name: &str, height: u64) {
-        let payload = EventPayload::SoftForkLockedIn {
-            fork_name: fork_name.to_string(),
-            height,
-        };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::SoftForkLockedIn, payload)
-            .await
-        {
-            warn!("Failed to publish SoftForkLockedIn event: {}", e);
-        }
-    }
-
-    /// Publish consensus rule violation event
-    pub async fn publish_consensus_rule_violation(
-        &self,
-        rule_name: &str,
-        block_hash: Option<&Hash>,
-        tx_hash: Option<&Hash>,
-        error: &str,
-    ) {
-        let payload = EventPayload::ConsensusRuleViolation {
-            rule_name: rule_name.to_string(),
-            block_hash: block_hash.copied(),
-            tx_hash: tx_hash.copied(),
-            error: error.to_string(),
-        };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::ConsensusRuleViolation, payload)
-            .await
-        {
-            warn!("Failed to publish ConsensusRuleViolation event: {}", e);
-        }
-    }
 
     // === Sync Events ===
 
@@ -1009,183 +698,16 @@ impl EventPublisher {
         }
     }
 
-    /// Publish mining job created event
-    pub async fn publish_mining_job_created(&self, job_id: &str, prev_hash: &Hash, height: u64) {
-        let payload = EventPayload::MiningJobCreated {
-            job_id: job_id.to_string(),
-            prev_hash: *prev_hash,
-            height,
-        };
 
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::MiningJobCreated, payload)
-            .await
-        {
-            warn!("Failed to publish MiningJobCreated event: {}", e);
-        }
-    }
 
-    /// Publish share submitted event
-    pub async fn publish_share_submitted(
-        &self,
-        job_id: &str,
-        share_hash: &Hash,
-        miner_id: Option<&str>,
-    ) {
-        let payload = EventPayload::ShareSubmitted {
-            job_id: job_id.to_string(),
-            share_hash: *share_hash,
-            miner_id: miner_id.map(|s| s.to_string()),
-        };
 
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::ShareSubmitted, payload)
-            .await
-        {
-            warn!("Failed to publish ShareSubmitted event: {}", e);
-        }
-    }
 
-    /// Publish merge mining reward event
-    pub async fn publish_merge_mining_reward(
-        &self,
-        secondary_chain: &str,
-        reward_amount: u64,
-        block_hash: &Hash,
-    ) {
-        let payload = EventPayload::MergeMiningReward {
-            secondary_chain: secondary_chain.to_string(),
-            reward_amount,
-            block_hash: *block_hash,
-        };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::MergeMiningReward, payload)
-            .await
-        {
-            warn!("Failed to publish MergeMiningReward event: {}", e);
-        }
-    }
-
-    /// Publish mining pool connected event
-    pub async fn publish_mining_pool_connected(&self, pool_url: &str, pool_id: Option<&str>) {
-        let payload = EventPayload::MiningPoolConnected {
-            pool_url: pool_url.to_string(),
-            pool_id: pool_id.map(|s| s.to_string()),
-        };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::MiningPoolConnected, payload)
-            .await
-        {
-            warn!("Failed to publish MiningPoolConnected event: {}", e);
-        }
-    }
-
-    /// Publish mining pool disconnected event
-    pub async fn publish_mining_pool_disconnected(&self, pool_url: &str, reason: &str) {
-        let payload = EventPayload::MiningPoolDisconnected {
-            pool_url: pool_url.to_string(),
-            reason: reason.to_string(),
-        };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::MiningPoolDisconnected, payload)
-            .await
-        {
-            warn!("Failed to publish MiningPoolDisconnected event: {}", e);
-        }
-    }
 
     // === Extended module / mining events ===
 
-    /// Publish selective sync policy applied event
-    pub async fn publish_selective_sync_policy_applied(
-        &self,
-        policy_source: &str,
-        registry_count: usize,
-    ) {
-        let payload = EventPayload::SelectiveSyncPolicyApplied {
-            policy_source: policy_source.to_string(),
-            registry_count,
-        };
 
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::SelectiveSyncPolicyApplied, payload)
-            .await
-        {
-            warn!("Failed to publish SelectiveSyncPolicyApplied event: {}", e);
-        }
-    }
 
-    /// Publish action executed event (miningos)
-    pub async fn publish_action_executed(
-        &self,
-        action_id: &str,
-        action_type: &str,
-        target: &str,
-        success: bool,
-    ) {
-        let payload = EventPayload::ActionExecuted {
-            action_id: action_id.to_string(),
-            action_type: action_type.to_string(),
-            target: target.to_string(),
-            success,
-        };
 
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::ActionExecuted, payload)
-            .await
-        {
-            warn!("Failed to publish ActionExecuted event: {}", e);
-        }
-    }
-
-    /// Publish module purchase completed event
-    pub async fn publish_module_purchase_completed(
-        &self,
-        module_id: &str,
-        payment_id: &str,
-        amount_sats: u64,
-    ) {
-        let payload = EventPayload::ModulePurchaseCompleted {
-            module_id: module_id.to_string(),
-            payment_id: payment_id.to_string(),
-            amount_sats,
-        };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::ModulePurchaseCompleted, payload)
-            .await
-        {
-            warn!("Failed to publish ModulePurchaseCompleted event: {}", e);
-        }
-    }
-
-    /// Publish IBD block filtered event
-    pub async fn publish_ibd_block_filtered(&self, block_hash: &Hash, height: u64, reason: &str) {
-        let payload = EventPayload::IBDBlockFiltered {
-            block_hash: *block_hash,
-            height,
-            reason: reason.to_string(),
-        };
-
-        if let Err(e) = self
-            .event_manager
-            .publish_event(EventType::IBDBlockFiltered, payload)
-            .await
-        {
-            warn!("Failed to publish IBDBlockFiltered event: {}", e);
-        }
-    }
 
     /// Generic event publishing method (for any event type)
     /// Publish configuration loaded/changed event
@@ -1338,6 +860,22 @@ impl EventPublisher {
             .await
         {
             warn!("Failed to publish HealthCheck event: {}", e);
+        }
+    }
+
+    /// First native table for this tip. The estimator calls this after a recompute.
+    pub async fn publish_fee_table_ready(&self, tip_hash: Hash, tip_height: u64, generation: u64) {
+        let payload = EventPayload::FeeTableReady {
+            tip_hash,
+            tip_height,
+            generation,
+        };
+        if let Err(e) = self
+            .event_manager
+            .publish_event(EventType::FeeTableReady, payload)
+            .await
+        {
+            warn!("Failed to publish FeeTableReady event: {}", e);
         }
     }
 

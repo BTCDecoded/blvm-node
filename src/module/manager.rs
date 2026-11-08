@@ -79,6 +79,18 @@ pub struct ModuleManager {
     node_socket_path: Option<PathBuf>,
     /// Node P2P listen address injected into module spawn env (`MODULE_CONFIG_NODE_P2P_LISTEN_*`).
     node_p2p_listen: std::sync::RwLock<Option<std::net::SocketAddr>>,
+    /// Shared timer service. Attached to the IPC server when `start` runs.
+    timer_service: Option<crate::module::timers::TimerService>,
+    /// Module metrics. Cleared when a module unloads or crashes.
+    metrics_manager: Option<Arc<crate::module::metrics::MetricsManager>>,
+    /// Operator HTTP allow-list and proxy. Applied when the API hub starts.
+    http_policy: crate::module::http::HttpPolicy,
+    /// Inbound listeners. Unload and crash drop them.
+    service_host: crate::module::services::ServiceHost,
+    /// `[services.<name>]` from node config.
+    service_configs: HashMap<String, crate::config::HostedServiceConfig>,
+    /// Drops a module's fee estimators on unload and crash.
+    fee_estimator: Option<Arc<crate::node::fee_estimator::FeeEstimator>>,
 }
 
 /// Managed module instance
@@ -93,6 +105,8 @@ struct ManagedModule {
     monitor_handle: Option<JoinHandle<()>>,
     /// Process ID for tracking (native only)
     process_id: Option<u32>,
+    /// Handshake id `{name}_{32 hex}`. Metrics are stored under this id.
+    module_id: String,
     /// WASM instance (in-process; None for native modules)
     #[cfg(feature = "wasm-modules")]
     wasm_instance: Option<Arc<tokio::sync::Mutex<Arc<dyn WasmModuleInstance>>>>,
@@ -162,11 +176,7 @@ impl WasmInvoker for ManagerWasmInvoker {
         result
     }
 
-    async fn on_event(
-        &self,
-        module_name: &str,
-        event_json: &str,
-    ) -> Result<String, ModuleError> {
+    async fn on_event(&self, module_name: &str, event_json: &str) -> Result<String, ModuleError> {
         let wasm_guard = {
             let modules = self.modules.lock().await;
             let managed = modules.get(module_name).ok_or_else(|| {
@@ -214,9 +224,7 @@ fn wasm_host_node_call_blocking(
                     hub.wasm_host_get_block(&module_name, &hash)
                         .await
                         .map_err(|e| e.to_string())
-                        .and_then(|block| {
-                            serde_json::to_string(&block).map_err(|e| e.to_string())
-                        })
+                        .and_then(|block| serde_json::to_string(&block).map_err(|e| e.to_string()))
                 }
                 _ => Err("host_node_call method not available".to_string()),
             }
@@ -239,6 +247,16 @@ fn wasm_block_hash_arg(args: &str) -> Result<crate::Hash, String> {
         .try_into()
         .map_err(|_| "get_block hash must be 32 bytes".to_string())?;
     Ok(hash)
+}
+
+fn safe_module_dir_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
 }
 
 impl ModuleManager {
@@ -286,7 +304,248 @@ impl ModuleManager {
             registry_url: None,
             allow_unsigned_modules: false,
             node_p2p_listen: std::sync::RwLock::new(None),
+            timer_service: None,
+            metrics_manager: None,
+            http_policy: crate::module::http::HttpPolicy::default(),
+            service_host: crate::module::services::ServiceHost::new(),
+            service_configs: HashMap::new(),
+            fee_estimator: None,
         }
+    }
+
+    /// The node's fee estimator. Unload and crash drop that module's names.
+    pub fn set_fee_estimator(
+        &mut self,
+        estimator: Arc<crate::node::fee_estimator::FeeEstimator>,
+    ) {
+        self.fee_estimator = Some(estimator);
+    }
+
+    /// Install the node timer service. Call this before `start`.
+    pub fn set_timer_service(&mut self, service: crate::module::timers::TimerService) {
+        self.timer_service = Some(service);
+    }
+
+    /// Operator HTTP allow-list and proxy. Call this before `start`.
+    pub fn set_http_policy(&mut self, policy: crate::module::http::HttpPolicy) {
+        self.http_policy = policy;
+    }
+
+    /// `[services.<name>]` entries. Call this before modules load.
+    pub fn set_service_configs(
+        &mut self,
+        configs: HashMap<String, crate::config::HostedServiceConfig>,
+    ) {
+        self.service_configs = configs;
+    }
+
+    /// Listener table shared with the API hub.
+    pub fn service_host(&self) -> crate::module::services::ServiceHost {
+        self.service_host.clone()
+    }
+
+    /// Rename the first existing `replaces` data directory onto this module
+    /// when the new directory does not exist yet.
+    pub fn adopt_replaced_data(
+        &self,
+        manifest: &crate::module::registry::manifest::ModuleManifest,
+    ) -> Result<(), ModuleError> {
+        let new_dir = self.spawner.data_dir.join(&manifest.name);
+        if new_dir.exists() {
+            return Ok(());
+        }
+        for old_name in &manifest.replaces {
+            if !safe_module_dir_name(old_name) || old_name == &manifest.name {
+                return Err(ModuleError::InvalidManifest(format!(
+                    "refusing to rename module data from '{old_name}'"
+                )));
+            }
+            let old_dir = self.spawner.data_dir.join(old_name);
+            if !old_dir.is_dir() {
+                continue;
+            }
+            if let Some(parent) = new_dir.parent() {
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    ModuleError::InitializationError(format!(
+                        "failed to create module data parent: {err}"
+                    ))
+                })?;
+            }
+            std::fs::rename(&old_dir, &new_dir).map_err(|err| {
+                ModuleError::InitializationError(format!(
+                    "failed to rename module data '{old_name}' to '{}': {err}",
+                    manifest.name
+                ))
+            })?;
+            info!(
+                from = %old_name,
+                to = %manifest.name,
+                "renamed module data directory"
+            );
+            return Ok(());
+        }
+        Ok(())
+    }
+
+    /// A loaded module whose manifest `provides_apis` contains the contract
+    /// satisfies `requires_apis`. The name of that module is not part of the match.
+    pub async fn check_requires_apis(
+        &self,
+        manifest: &crate::module::registry::manifest::ModuleManifest,
+    ) -> Result<(), ModuleError> {
+        for api in &manifest.requires_apis {
+            if !self.service_host.provides_api(api).await {
+                return Err(ModuleError::DependencyMissing(format!(
+                    "required api '{api}' is not provided by a loaded module"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Remember `provides_apis` after a successful load.
+    pub async fn record_declaration(
+        &self,
+        manifest: &crate::module::registry::manifest::ModuleManifest,
+    ) {
+        self.service_host
+            .record_provides(&manifest.name, manifest.provides_apis.clone())
+            .await;
+    }
+
+    /// Bind `[services.*]` listeners this manifest declares and the operator enabled.
+    pub async fn bind_declared_services(
+        &self,
+        manifest: &crate::module::registry::manifest::ModuleManifest,
+    ) -> Result<(), ModuleError> {
+        let requests = self.collect_bind_requests(manifest)?;
+        if requests.is_empty() {
+            return Ok(());
+        }
+        let allowed = manifest.capabilities.iter().any(|cap| {
+            crate::module::security::permissions::parse_permission_string(cap)
+                == Some(crate::module::security::permissions::Permission::HostService)
+        });
+        if !allowed {
+            return Err(ModuleError::OperationError(format!(
+                "module {} declares a hosted service but does not have host_service",
+                manifest.name
+            )));
+        }
+        #[cfg(unix)]
+        {
+            let Some(handle) = self.ipc_handle.clone() else {
+                return Err(ModuleError::OperationError(
+                    "hosted service requires the module IPC server".to_string(),
+                ));
+            };
+            let module_id = {
+                let modules = self.modules.lock().await;
+                modules.get(&manifest.name).map(|module| module.module_id.clone())
+            };
+            let Some(module_id) = module_id else {
+                return Err(ModuleError::OperationError(
+                    "hosted service bind requires the module to be loaded".to_string(),
+                ));
+            };
+            let handler = Arc::new(crate::module::services::IpcHostedModule { handle, module_id });
+            self.service_host
+                .bind(&manifest.name, requests, handler)
+                .await
+                .map_err(ModuleError::OperationError)?;
+            return Ok(());
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = requests;
+            Err(ModuleError::OperationError(
+                "hosted services require the Unix IPC server".to_string(),
+            ))
+        }
+    }
+
+    fn collect_bind_requests(
+        &self,
+        manifest: &crate::module::registry::manifest::ModuleManifest,
+    ) -> Result<Vec<crate::module::services::BindRequest>, ModuleError> {
+        let mut requests = Vec::new();
+        for svc in &manifest.services {
+            let Some(cfg) = self.service_configs.get(&svc.name) else {
+                continue;
+            };
+            if cfg.module != manifest.name {
+                continue;
+            }
+            let Some(listen) = cfg.listen.as_deref().filter(|listen| !listen.is_empty()) else {
+                continue;
+            };
+            if cfg.module.is_empty() {
+                return Err(ModuleError::OperationError(format!(
+                    "services.{}.module is required when listen is set",
+                    svc.name
+                )));
+            }
+            let listen = listen.parse().map_err(|err| {
+                ModuleError::OperationError(format!(
+                    "services.{} listen '{listen}' is not a socket address: {err}",
+                    svc.name
+                ))
+            })?;
+            let kind = match svc.kind.as_str() {
+                "http" => crate::module::services::ServiceKind::Http,
+                "stream" => crate::module::services::ServiceKind::Stream,
+                other => {
+                    return Err(ModuleError::OperationError(format!(
+                        "service {} kind '{other}' is not http or stream",
+                        svc.name
+                    )));
+                }
+            };
+            requests.push(crate::module::services::BindRequest {
+                name: svc.name.clone(),
+                kind,
+                listen,
+                max_connections: cfg.max_connections.unwrap_or(
+                    crate::module::services::DEFAULT_MAX_CONNECTIONS,
+                ),
+                tls_cert: cfg.tls_cert.clone(),
+            });
+        }
+        Ok(requests)
+    }
+
+    /// Record a stopped module so `unload_module` runs listener cleanup.
+    /// Does not spawn a process.
+    pub async fn remember_stopped_module(&mut self, name: &str) {
+        let mut modules = self.modules.lock().await;
+        modules.insert(
+            name.to_string(),
+            ManagedModule {
+                metadata: ModuleMetadata {
+                    name: name.to_string(),
+                    version: "0.0.0".to_string(),
+                    description: String::new(),
+                    author: String::new(),
+                    capabilities: Vec::new(),
+                    rpc_overrides: Vec::new(),
+                    dependencies: HashMap::new(),
+                    optional_dependencies: HashMap::new(),
+                    entry_point: name.to_string(),
+                },
+                process: None,
+                state: ModuleState::Stopped,
+                monitor_handle: None,
+                process_id: None,
+                module_id: format!("{name}_00000000000000000000000000000000"),
+                #[cfg(feature = "wasm-modules")]
+                wasm_instance: None,
+            },
+        );
+    }
+
+    /// Install the module metrics manager. Unload and crash clear that module's series.
+    pub fn set_metrics_manager(&mut self, manager: Arc<crate::module::metrics::MetricsManager>) {
+        self.metrics_manager = Some(manager);
     }
 
     /// Set the WASM module loader (injected by binary; e.g. from blvm-sdk).
@@ -489,6 +748,11 @@ impl ModuleManager {
         let api_hub = Arc::new(tokio::sync::Mutex::new(ModuleApiHub::new(Arc::clone(
             &node_api,
         ))));
+        {
+            let mut hub = api_hub.lock().await;
+            hub.set_http_policy(self.http_policy.clone());
+            hub.set_service_host(self.service_host.clone());
+        }
         self.api_hub = Some(Arc::clone(&api_hub));
 
         // Start IPC server in background task (Unix only: domain sockets)
@@ -497,6 +761,9 @@ impl ModuleManager {
             let mut ipc_server = ModuleIpcServer::new(&socket_path)
                 .with_event_manager(Arc::clone(&self.event_manager))
                 .with_api_hub(Arc::clone(&api_hub));
+            if let Some(service) = self.timer_service.clone() {
+                ipc_server = ipc_server.with_timer_service(service);
+            }
             #[cfg(all(unix, feature = "wasm-modules"))]
             if self.wasm_loader.is_some() {
                 let invoker = Arc::new(ManagerWasmInvoker {
@@ -506,6 +773,13 @@ impl ModuleManager {
             }
             // Capture a lock-free handle before moving the server into Arc<Mutex>.
             let ipc_handle = ipc_server.handle();
+            if let Some(service) = self.timer_service.clone() {
+                service
+                    .set_transport(Arc::new(
+                        crate::module::ipc::server::IpcTimerTransport::new(ipc_handle.clone()),
+                    ))
+                    .await;
+            }
             let ipc_server = Arc::new(tokio::sync::Mutex::new(ipc_server));
             self.ipc_server = Some(Arc::clone(&ipc_server));
             self.ipc_handle = Some(ipc_handle);
@@ -520,6 +794,10 @@ impl ModuleManager {
         let modules = Arc::clone(&self.modules);
         let event_manager = Arc::clone(&self.event_manager);
         let api_hub = self.api_hub.clone();
+        let timer_service = self.timer_service.clone();
+        let metrics_manager = self.metrics_manager.clone();
+        let service_host = self.service_host.clone();
+        let fee_estimator = self.fee_estimator.clone();
         #[cfg(unix)]
         let ipc_server = self.ipc_server.clone();
         if let Some(mut crash_rx) = self.crash_rx.take() {
@@ -543,26 +821,44 @@ impl ModuleManager {
                     };
 
                     // Remove crashed module
-                    {
+                    let crashed_module_id = {
                         let mut modules = modules.lock().await;
                         if let Some(mut managed) = modules.remove(&module_name) {
                             // Stop monitoring
                             if let Some(handle) = managed.monitor_handle.take() {
                                 handle.abort();
                             }
-                            // Update state to Error
                             managed.state = ModuleState::Error(error.to_string());
+                            Some(managed.module_id)
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(module_id) = crashed_module_id.as_deref() {
+                        if let Some(metrics) = &metrics_manager {
+                            metrics.clear_module_metrics(module_id).await;
                         }
                     }
 
                     // Clean up: loaded_modules, CLI spec, API hub (same as explicit unload)
                     event_manager.remove_loaded_module(&module_name).await;
+                    if let Some(service) = &timer_service {
+                        service.detach_module(&module_name, None).await;
+                    }
                     #[cfg(unix)]
                     if let Some(ref ipc) = ipc_server {
-                        ipc.lock()
-                            .await
-                            .unregister_cli_spec_by_name(&module_name)
-                            .await;
+                        let ipc = ipc.lock().await;
+                        if let Some(module_id) = crashed_module_id.as_deref() {
+                            ipc.unregister_cli_spec(module_id).await;
+                        }
+                        ipc.unregister_cli_spec_by_name(&module_name).await;
+                    }
+                    service_host.forget(&module_name).await;
+                    if let Some(estimator) = &fee_estimator {
+                        if let Some(module_id) = crashed_module_id.as_deref() {
+                            estimator.drop_module_estimates(module_id);
+                        }
+                        estimator.drop_module_estimates_named(&module_name);
                     }
                     if let Some(ref hub) = api_hub {
                         let mut h = hub.lock().await;
@@ -675,6 +971,9 @@ impl ModuleManager {
                         };
                         for dependent in removed {
                             event_manager.remove_loaded_module(&dependent).await;
+                            if let Some(service) = &timer_service {
+                                service.detach_module(&dependent, None).await;
+                            }
                             #[cfg(unix)]
                             if let Some(ref ipc) = ipc_server {
                                 ipc.lock()
@@ -773,7 +1072,7 @@ impl ModuleManager {
         merged_config.insert("version".to_string(), metadata.version.clone());
         let config_for_wasm = merged_config.clone();
         let context = ModuleContext::new(
-            module_id,
+            module_id.clone(),
             socket_path.to_string_lossy().to_string(),
             data_dir.to_string_lossy().to_string(),
             merged_config,
@@ -864,6 +1163,7 @@ impl ModuleManager {
                     state: ModuleState::Running,
                     monitor_handle: Some(monitor_handle),
                     process_id: None,
+                    module_id: module_id.clone(),
                     wasm_instance: Some(wasm_instance),
                 };
                 modules.insert(module_name.to_string(), managed);
@@ -917,9 +1217,14 @@ impl ModuleManager {
         let monitor = ModuleProcessMonitor::new(self.crash_tx.clone());
         let module_name_clone = module_name.to_string();
         let shared_process_for_monitor = Arc::clone(&shared_process);
+        let resource_sandbox = self.spawner.process_sandbox();
         let monitor_handle = tokio::spawn(async move {
             if let Err(e) = monitor
-                .monitor_module_shared(module_name_clone.clone(), shared_process_for_monitor)
+                .monitor_module_shared(
+                    module_name_clone.clone(),
+                    shared_process_for_monitor,
+                    resource_sandbox,
+                )
                 .await
             {
                 error!("Module {} monitor error: {}", module_name_clone, e);
@@ -939,6 +1244,7 @@ impl ModuleManager {
             state: ModuleState::Running,
             monitor_handle: Some(monitor_handle),
             process_id,
+            module_id,
             #[cfg(feature = "wasm-modules")]
             wasm_instance: None,
         };
@@ -992,12 +1298,9 @@ impl ModuleManager {
         let dependents = self.get_dependent_modules(module_name).await;
 
         let mut modules = self.modules.lock().await;
-        let module_id = modules
-            .get(module_name)
-            .map(|_m| format!("{}_{}", module_name, new_request_id())) // We don't store module_id, so generate one
-            .unwrap_or_else(|| module_name.to_string());
 
         if let Some(mut managed) = modules.remove(module_name) {
+            let metrics_id = managed.module_id.clone();
             // Publish ModuleStateChanged and ModuleHealthChanged before teardown
             let old_state = format!("{:?}", managed.state);
             let old_health = match &managed.state {
@@ -1006,6 +1309,14 @@ impl ModuleManager {
                 ModuleState::Stopped | ModuleState::Error(_) => "unhealthy",
             };
             drop(modules);
+            self.service_host.forget(module_name).await;
+            if let Some(estimator) = &self.fee_estimator {
+                estimator.drop_module_estimates(&metrics_id);
+                estimator.drop_module_estimates_named(module_name);
+            }
+            if let Some(metrics) = &self.metrics_manager {
+                metrics.clear_module_metrics(&metrics_id).await;
+            }
             {
                 use crate::module::ipc::protocol::EventPayload;
                 use crate::module::traits::EventType;
@@ -1065,10 +1376,12 @@ impl ModuleManager {
             // Unregister CLI spec (WASM modules register on load; native remove on disconnect, but we clean up here too)
             #[cfg(unix)]
             if let Some(ref ipc) = self.ipc_server {
-                ipc.lock()
-                    .await
-                    .unregister_cli_spec_by_name(module_name)
-                    .await;
+                let ipc = ipc.lock().await;
+                ipc.unregister_cli_spec(&metrics_id).await;
+                ipc.unregister_cli_spec_by_name(module_name).await;
+            }
+            if let Some(service) = &self.timer_service {
+                service.detach_module(module_name, None).await;
             }
 
             // Unregister all RPC extension endpoints and core overrides owned by this module.
@@ -1502,25 +1815,6 @@ impl ModuleManager {
         Ok(())
     }
 
-    /// Validate optional dependencies (soft dependencies)
-    /// Returns list of missing optional dependencies (non-fatal)
-    pub async fn validate_optional_dependencies(&self, module_name: &str) -> Vec<String> {
-        let modules = self.modules.lock().await;
-        let module = match modules.get(module_name) {
-            Some(m) => m,
-            None => return Vec::new(),
-        };
-
-        let mut missing = Vec::new();
-        for dep_name in module.metadata.optional_dependencies.keys() {
-            if !modules.contains_key(dep_name) {
-                missing.push(dep_name.clone());
-            }
-        }
-
-        missing
-    }
-
     /// Get list of modules that depend on a given module (required or optional)
     pub async fn get_dependent_modules(&self, module_name: &str) -> Vec<String> {
         let modules = self.modules.lock().await;
@@ -1539,12 +1833,6 @@ impl ModuleManager {
         }
 
         dependents
-    }
-
-    /// Check if a module can be safely unloaded (no dependents)
-    pub async fn can_unload_module(&self, module_name: &str) -> Result<bool, ModuleError> {
-        let dependents = self.get_dependent_modules(module_name).await;
-        Ok(dependents.is_empty())
     }
 
     /// Apply `disabled_modules`, `enabled_modules` allowlist, and version constraints.
@@ -2382,6 +2670,56 @@ entry_point = "{name}"
         let filtered =
             manager.filter_discovered_for_auto_load(vec![fake_discovered("alpha", "0.1.0")]);
         assert!(filtered.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unload_clears_the_module_metric_series() {
+        use crate::module::metrics::manager::{Metric, MetricValue};
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut manager = ModuleManager::new(temp.path(), temp.path(), temp.path());
+        let metrics = Arc::new(crate::module::metrics::MetricsManager::new());
+        manager.set_metrics_manager(Arc::clone(&metrics));
+        let module_id = "fees_0123456789abcdef0123456789abcdef".to_string();
+        metrics
+            .report_metric(
+                module_id.clone(),
+                Metric {
+                    name: "depth".into(),
+                    value: MetricValue::Gauge(1.0),
+                    labels: HashMap::new(),
+                    timestamp: 1,
+                },
+            )
+            .await;
+        {
+            let mut modules = manager.modules.lock().await;
+            modules.insert(
+                "fees".into(),
+                ManagedModule {
+                    metadata: ModuleMetadata {
+                        name: "fees".into(),
+                        version: "0.1.0".into(),
+                        description: String::new(),
+                        author: String::new(),
+                        capabilities: Vec::new(),
+                        rpc_overrides: Vec::new(),
+                        dependencies: HashMap::new(),
+                        optional_dependencies: HashMap::new(),
+                        entry_point: "fees".into(),
+                    },
+                    process: None,
+                    state: ModuleState::Stopped,
+                    monitor_handle: None,
+                    process_id: None,
+                    module_id: module_id.clone(),
+                    #[cfg(feature = "wasm-modules")]
+                    wasm_instance: None,
+                },
+            );
+        }
+        manager.unload_module("fees").await.unwrap();
+        assert!(metrics.get_module_metrics(&module_id).await.is_empty());
     }
 
     #[test]

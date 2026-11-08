@@ -165,8 +165,11 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        let fee = h.api.get_fee_estimate(6).await.unwrap();
-        assert!(fee <= 1_000_000);
+        let err = h.api.get_fee_estimate(6).await.unwrap_err();
+        assert!(
+            format!("{err:?}").contains("fee estimate unavailable (warming up)"),
+            "{err:?}"
+        );
         let txs = h.api.get_mempool_transactions().await.unwrap();
         assert!(txs.contains(&h.mempool_tx_hash));
         assert!(h.api.get_block(&h.wire_hash).await.unwrap().is_some());

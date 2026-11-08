@@ -11,6 +11,7 @@ pub mod chain_selector;
 pub mod core_mempool_dat;
 pub mod data_dir_lock;
 pub mod event_publisher;
+pub mod fee_estimator;
 pub mod health;
 pub mod mempool;
 pub mod metrics;
@@ -140,6 +141,11 @@ impl Node {
         storage.set_pruning_network(pruning_network);
         let storage_arc = Arc::new(storage);
         let mempool_manager_arc = Arc::new(mempool::MempoolManager::new());
+        let fee_estimator = Arc::new(fee_estimator::FeeEstimator::new(
+            crate::config::FeeEstimatorConfig::default(),
+            protocol_version == ProtocolVersion::Regtest,
+        ));
+        mempool_manager_arc.set_fee_estimator(Some(fee_estimator));
 
         // Create network manager (config will be applied later if available)
         let network = NetworkManager::new(network_addr).with_dependencies(
@@ -388,6 +394,29 @@ impl Node {
                 mempool_policy.eviction_strategy,
                 mempool_policy.reject_spam_in_mempool
             );
+        }
+
+        let fees_cfg = config.fees.clone().unwrap_or_default();
+        if let Some(estimator) = self.mempool_manager.fee_estimator() {
+            estimator.configure(
+                fees_cfg.clone(),
+                self.protocol_version == ProtocolVersion::Regtest,
+            )?;
+            estimator.set_relay_floor(self.mempool_manager.min_relay_fee_sat_per_kvb());
+            let state_path = std::path::Path::new(&fees_cfg.state_path);
+            let current_height = self
+                .storage
+                .chain()
+                .get_height()
+                .ok()
+                .flatten()
+                .unwrap_or(0);
+            if let Err(err) = estimator.load_state(state_path, current_height) {
+                warn!(
+                    "Failed to load fee estimator state from {}: {err}",
+                    state_path.display()
+                );
+            }
         }
 
         // Governance handled via module system - no direct webhook client needed
@@ -1357,6 +1386,47 @@ impl Node {
             // Note: Payment state machine will be set after payment processor initialization
             // We'll update it via Arc::get_mut if possible, or store it separately
 
+            let timer_store = match self
+                .storage
+                .open_tree(crate::module::timers::persist::MODULE_TIMERS_TREE)
+            {
+                Ok(tree) => Some(tree),
+                Err(err) => {
+                    warn!("timer persistence unavailable: {err}");
+                    None
+                }
+            };
+            let timer_journal = match self
+                .storage
+                .open_tree(crate::module::timers::journal::MODULE_TIMER_JOURNAL)
+            {
+                Ok(tree) => Some(tree),
+                Err(err) => {
+                    warn!("timer journal unavailable: {err}");
+                    None
+                }
+            };
+            let timer_service = match self.config.as_ref() {
+                Some(config) => crate::module::timers::TimerService::spawn_stored(
+                    config.timers.clone(),
+                    config.module_timers.clone(),
+                    timer_store.clone(),
+                    timer_journal.clone(),
+                ),
+                None => crate::module::timers::TimerService::spawn_stored(
+                    crate::module::timers::TimerConfig::default(),
+                    std::collections::HashMap::new(),
+                    timer_store,
+                    timer_journal,
+                ),
+            };
+            node_api_impl.set_timer_service(timer_service.clone());
+            self.metrics.set_timer_service(timer_service.clone());
+
+            let module_metrics = Arc::new(crate::module::metrics::MetricsManager::new());
+            node_api_impl.attach_metrics_manager(Arc::clone(&module_metrics));
+            self.metrics.set_module_metrics(Arc::clone(&module_metrics));
+
             let mut node_api = Arc::new(node_api_impl);
             self.network
                 .set_node_api(Arc::clone(&node_api) as Arc<dyn crate::module::traits::NodeAPI>)
@@ -1403,12 +1473,32 @@ impl Node {
                 module_manager.lock().await.with_rpc_server(rpc_server);
             }
 
-            module_manager
-                .lock()
-                .await
-                .start(&socket_path, node_api)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to start module manager: {}", e))?;
+            {
+                let mut manager = module_manager.lock().await;
+                manager.set_timer_service(timer_service);
+                manager.set_metrics_manager(module_metrics);
+                if let Some(config) = self.config.as_ref() {
+                    let mut allow = std::collections::HashMap::new();
+                    for (id, entry) in &config.module_network {
+                        allow.insert(id.clone(), entry.http_allow.clone());
+                    }
+                    manager.set_http_policy(crate::module::http::HttpPolicy {
+                        allow,
+                        proxy: config
+                            .network
+                            .as_ref()
+                            .and_then(|network| network.http_proxy.clone()),
+                    });
+                    manager.set_service_configs(config.services.clone());
+                }
+                if let Some(estimator) = self.mempool_manager.fee_estimator() {
+                    manager.set_fee_estimator(estimator);
+                }
+                manager
+                    .start(&socket_path, node_api)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to start module manager: {}", e))?;
+            }
 
             info!("Module manager started");
 
@@ -1521,9 +1611,13 @@ impl Node {
             // Clone event_manager Arc while lock is held so we can use it after
             let event_manager = Arc::clone(module_manager.lock().await.event_manager());
 
+            let publisher = Arc::new(EventPublisher::new(event_manager));
+            if let Some(service) = self.metrics.timer_service() {
+                publisher.set_chain_sender(service.chain_sender());
+            }
             self.module_subsystem
                 .get_or_insert_with(Default::default)
-                .event_publisher = Some(Arc::new(EventPublisher::new(event_manager)));
+                .event_publisher = Some(publisher);
             info!("Event publisher initialized");
 
             // Set EventPublisher on MempoolManager for mempool event publishing
@@ -2576,6 +2670,21 @@ impl Node {
                     Ok(()) => info!("Saved mempool to {}", path.display()),
                     Err(e) => warn!("Failed to save mempool to {}: {}", path.display(), e),
                 }
+            }
+        }
+        if let Some(estimator) = self.mempool_manager.fee_estimator() {
+            let state_path = self
+                .config
+                .as_ref()
+                .and_then(|cfg| cfg.fees.as_ref())
+                .map(|fees| fees.state_path.clone())
+                .unwrap_or_else(|| crate::config::FeeEstimatorConfig::default().state_path);
+            let path = std::path::Path::new(&state_path);
+            if let Err(err) = estimator.save_state(path) {
+                warn!(
+                    "Failed to save fee estimator state to {}: {err}",
+                    path.display()
+                );
             }
         }
 

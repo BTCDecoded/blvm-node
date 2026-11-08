@@ -151,6 +151,24 @@ impl NodeApiIpc {
             RequestPayload::SetAdvertisedServiceBits { .. } => {
                 MessageType::SetAdvertisedServiceBits
             }
+            RequestPayload::TimerCreate { .. } => MessageType::TimerCreate,
+            RequestPayload::TimerCancel { .. } => MessageType::TimerCancel,
+            RequestPayload::TimerPause { .. } => MessageType::TimerPause,
+            RequestPayload::TimerResume { .. } => MessageType::TimerResume,
+            RequestPayload::TimerTrigger { .. } => MessageType::TimerTrigger,
+            RequestPayload::TimerGet { .. } => MessageType::TimerGet,
+            RequestPayload::TimerList => MessageType::TimerList,
+            RequestPayload::HandshakeV2 { .. } => MessageType::HandshakeV2,
+            RequestPayload::SubscribeModuleEventNames { .. } => {
+                MessageType::SubscribeModuleEventNames
+            }
+            RequestPayload::HttpRequest { .. } => MessageType::HttpRequest,
+            RequestPayload::HttpPost { .. } => MessageType::HttpPost,
+            RequestPayload::StreamSend { .. } => MessageType::StreamSend,
+            RequestPayload::StreamClose { .. } => MessageType::StreamClose,
+            RequestPayload::RegisterFeeEstimators { .. } => MessageType::RegisterFeeEstimators,
+            RequestPayload::SubmitFeeTable { .. } => MessageType::SubmitFeeTable,
+            RequestPayload::GetFeeTable { .. } => MessageType::GetFeeTable,
             RequestPayload::SubmitBlock { .. } => MessageType::SubmitBlock,
             RequestPayload::QueueReceivedBlock { .. } => MessageType::QueueReceivedBlock,
             RequestPayload::MergeBlockServeDenylist { .. } => MessageType::MergeBlockServeDenylist,
@@ -488,6 +506,110 @@ impl NodeAPI for NodeApiIpc {
             RequestPayload::CheckTransactionInMempool { tx_hash: *tx_hash },
             |payload| match payload {
                 ResponsePayload::CheckTransactionInMempool(b) => Ok(b),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn register_fee_estimators(
+        &self,
+        _module_id: &str,
+        specs: Vec<crate::module::ipc::protocol::FeeEstimatorSpecWire>,
+    ) -> Result<crate::module::ipc::protocol::FeeEstimatorRegistrationWire, ModuleError> {
+        self.request(
+            RequestPayload::RegisterFeeEstimators { specs },
+            |payload| match payload {
+                ResponsePayload::FeeEstimatorsRegistered(registration) => Ok(registration),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn submit_fee_table(
+        &self,
+        _module_id: &str,
+        table: crate::module::ipc::protocol::ExternalFeeTableWire,
+    ) -> Result<u64, ModuleError> {
+        self.request(
+            RequestPayload::SubmitFeeTable { table },
+            |payload| match payload {
+                ResponsePayload::FeeTableAccepted { generation } => Ok(generation),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn get_fee_table(
+        &self,
+        view: &str,
+        mode: &str,
+        targets: &[u32],
+    ) -> Result<crate::module::ipc::protocol::NativeFeeTableWire, ModuleError> {
+        self.request(
+            RequestPayload::GetFeeTable {
+                view: view.to_string(),
+                mode: mode.to_string(),
+                targets: targets.to_vec(),
+            },
+            |payload| match payload {
+                ResponsePayload::NativeFeeTable(table) => Ok(table),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn http_get(
+        &self,
+        url: &str,
+        accept: Option<&str>,
+        timeout_ms: u32,
+    ) -> Result<(u16, Vec<u8>), ModuleError> {
+        self.request(
+            RequestPayload::HttpRequest {
+                url: url.to_string(),
+                accept: accept.map(str::to_string),
+                timeout_ms,
+            },
+            |payload| match payload {
+                ResponsePayload::HttpResponse { status, body, .. } => Ok((status, body)),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn http_post(
+        &self,
+        url: &str,
+        content_type: &str,
+        body: Vec<u8>,
+        authorization: Option<&str>,
+        timeout_ms: u32,
+    ) -> Result<(u16, Vec<u8>), ModuleError> {
+        self.request(
+            RequestPayload::HttpPost {
+                url: url.to_string(),
+                content_type: content_type.to_string(),
+                body,
+                timeout_ms,
+                authorization: authorization.map(str::to_string),
+            },
+            |payload| match payload {
+                ResponsePayload::HttpResponse { status, body, .. } => Ok((status, body)),
                 _ => Err(ModuleError::OperationError(
                     "Unexpected response type".to_string(),
                 )),
@@ -1285,6 +1407,115 @@ impl NodeAPI for NodeApiIpc {
                 )),
             },
         )
+        .await
+    }
+
+    async fn timer_create(
+        &self,
+        spec: crate::module::timers::types::TimerSpec,
+        mode: crate::module::timers::types::CreateMode,
+    ) -> Result<crate::module::timers::types::TimerInfo, ModuleError> {
+        self.request(
+            RequestPayload::TimerCreate { spec, mode },
+            |payload| match payload {
+                ResponsePayload::TimerCreated(info) => Ok(info),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn timer_cancel(
+        &self,
+        target: crate::module::timers::types::TimerTarget,
+    ) -> Result<(), ModuleError> {
+        self.request(
+            RequestPayload::TimerCancel { target },
+            |payload| match payload {
+                ResponsePayload::Bool(true) => Ok(()),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn timer_pause(
+        &self,
+        target: crate::module::timers::types::TimerTarget,
+    ) -> Result<(), ModuleError> {
+        self.request(
+            RequestPayload::TimerPause { target },
+            |payload| match payload {
+                ResponsePayload::Bool(true) => Ok(()),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn timer_resume(
+        &self,
+        target: crate::module::timers::types::TimerTarget,
+    ) -> Result<(), ModuleError> {
+        self.request(
+            RequestPayload::TimerResume { target },
+            |payload| match payload {
+                ResponsePayload::Bool(true) => Ok(()),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn timer_trigger(
+        &self,
+        target: crate::module::timers::types::TimerTarget,
+    ) -> Result<(), ModuleError> {
+        self.request(
+            RequestPayload::TimerTrigger { target },
+            |payload| match payload {
+                ResponsePayload::Bool(true) => Ok(()),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn timer_get(
+        &self,
+        target: crate::module::timers::types::TimerTarget,
+    ) -> Result<crate::module::timers::types::TimerInfo, ModuleError> {
+        self.request(
+            RequestPayload::TimerGet { target },
+            |payload| match payload {
+                ResponsePayload::TimerInfo(info) => Ok(info),
+                _ => Err(ModuleError::OperationError(
+                    "Unexpected response type".to_string(),
+                )),
+            },
+        )
+        .await
+    }
+
+    async fn timer_list(
+        &self,
+    ) -> Result<Vec<crate::module::timers::types::TimerInfo>, ModuleError> {
+        self.request(RequestPayload::TimerList, |payload| match payload {
+            ResponsePayload::TimerList(info) => Ok(info),
+            _ => Err(ModuleError::OperationError(
+                "Unexpected response type".to_string(),
+            )),
+        })
         .await
     }
 

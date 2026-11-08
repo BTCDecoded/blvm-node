@@ -597,13 +597,98 @@ impl RpcServer {
         }
     }
 
+    async fn list_timers(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, crate::rpc::errors::RpcError> {
+        let service = self
+            .metrics
+            .as_ref()
+            .and_then(|metrics| metrics.timer_service());
+        let Some(service) = service else {
+            return Ok(serde_json::json!([]));
+        };
+        let module = params.get(0).and_then(|value| value.as_str());
+        let infos = service.list_all(module).await;
+        serde_json::to_value(infos).map_err(|err| {
+            crate::rpc::errors::RpcError::internal_error(format!(
+                "Failed to serialize timers: {err}"
+            ))
+        })
+    }
+
+    async fn timer_stats(&self) -> Result<serde_json::Value, crate::rpc::errors::RpcError> {
+        let Some(metrics) = &self.metrics else {
+            return Ok(serde_json::json!({ "note": "timer service not configured" }));
+        };
+        let Some(service) = metrics.timer_service() else {
+            return Ok(serde_json::json!({ "note": "timer service not configured" }));
+        };
+        Ok(service.stats())
+    }
+
+    async fn timer_journal(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, crate::rpc::errors::RpcError> {
+        let service = self
+            .metrics
+            .as_ref()
+            .and_then(|metrics| metrics.timer_service());
+        let Some(service) = service else {
+            return Ok(serde_json::json!([]));
+        };
+        let from = params.get(0).and_then(|value| value.as_u64()).unwrap_or(0);
+        let to = params
+            .get(1)
+            .and_then(|value| value.as_u64())
+            .unwrap_or(u64::MAX);
+        let module = params.get(2).and_then(|value| value.as_str());
+        if from > to {
+            return Err(crate::rpc::errors::RpcError::invalid_params(
+                "journal range is reversed".to_string(),
+            ));
+        }
+        let records = service.journal_entries(from, to, module).map_err(|err| {
+            crate::rpc::errors::RpcError::internal_error(format!("timer journal: {err}"))
+        })?;
+        serde_json::to_value(records).map_err(|err| {
+            crate::rpc::errors::RpcError::internal_error(format!(
+                "Failed to serialize timer journal: {err}"
+            ))
+        })
+    }
+
+    async fn verify_timer_journal(
+        &self,
+    ) -> Result<serde_json::Value, crate::rpc::errors::RpcError> {
+        let Some(service) = self
+            .metrics
+            .as_ref()
+            .and_then(|metrics| metrics.timer_service())
+        else {
+            return Ok(serde_json::json!({ "ok": true, "records": 0 }));
+        };
+        match service.verify_journal() {
+            Ok(()) => Ok(serde_json::json!({ "ok": true })),
+            Err(brk) => Ok(serde_json::json!({
+                "ok": false,
+                "index": brk.index,
+                "reason": brk.reason,
+            })),
+        }
+    }
+
     /// Handle Prometheus metrics endpoint
     async fn handle_metrics_endpoint(
         server: Arc<Self>,
     ) -> Result<Response<Full<Bytes>>, hyper::Error> {
         // Get metrics if available
         let metrics_text = if let Some(ref metrics_collector) = server.metrics {
-            Self::format_prometheus_metrics(metrics_collector.collect())
+            let mut text = Self::format_prometheus_metrics(metrics_collector.collect());
+            text.push_str(&metrics_collector.timer_prometheus());
+            text.push_str(&metrics_collector.module_prometheus().await);
+            text
         } else {
             // Return empty metrics if collector not available
             "# No metrics available\n".to_string()
@@ -1459,6 +1544,7 @@ impl RpcServer {
             "generatetoaddress" => self.mining.generate_to_address(&params).await,
             "submitblock" => self.mining.submit_block(&params).await,
             "estimatesmartfee" => self.mining.estimate_smart_fee(&params).await,
+            "listfeeestimators" => self.mining.list_fee_estimators(),
             "prioritisetransaction" => self.mining.prioritise_transaction(&params).await,
             "getblockfilter" => self
                 .blockchain
@@ -1496,11 +1582,16 @@ impl RpcServer {
             "logging" => self.control.logging(&params).await,
             "gethealth" => self.control.gethealth(&params).await,
             "getmetrics" => self.control.getmetrics(&params).await,
+            "listtimers" => self.list_timers(&params).await,
+            "gettimerstats" => self.timer_stats().await,
+            "gettimerjournal" => self.timer_journal(&params).await,
+            "verifytimerjournal" => self.verify_timer_journal().await,
             "loadmodule" => self.control.loadmodule(&params).await,
             "unloadmodule" => self.control.unloadmodule(&params).await,
             "reloadmodule" => self.control.reloadmodule(&params).await,
             "listmodules" => self.control.listmodules(&params).await,
             "getmoduleclispecs" => self.control.getmoduleclispecs(&params).await,
+            "getmoduleaudit" => self.control.getmoduleaudit(&params).await,
             "runmodulecli" => self.control.runmodulecli(&params).await,
             "getdescriptorinfo" | "analyzepsbt" => {
                 let overrides = self.rpc_core_overrides.read().await;

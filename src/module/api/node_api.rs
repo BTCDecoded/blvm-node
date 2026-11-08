@@ -13,7 +13,6 @@ thread_local! {
 }
 
 use crate::module::api::events::EventManager;
-use crate::module::hooks::HookManager;
 use crate::module::ipc::protocol::EventPayload;
 use crate::module::ipc::protocol::ModuleMessage;
 use crate::module::metrics::manager::{Metric, MetricsManager};
@@ -30,12 +29,135 @@ use hex;
 
 /// Module ids are `{name}_{32 hex}`. Service bits are stored under `name`, which is what unload uses.
 fn module_service_bit_owner(module_id: &str) -> &str {
-    if let Some((name, suffix)) = module_id.rsplit_once('_') {
-        if suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return name;
+    crate::module::module_name_from_id(module_id)
+}
+
+fn fee_spec_from_wire(
+    spec: crate::module::ipc::protocol::FeeEstimatorSpecWire,
+) -> Result<crate::node::fee_estimator::FeeEstimatorSpec, (String, String)> {
+    let name = spec.name.clone();
+    let modes = spec
+        .modes
+        .iter()
+        .map(|mode| match mode.as_str() {
+            "conservative" => Ok(crate::node::fee_estimator::FeeMode::Conservative),
+            "economical" => Ok(crate::node::fee_estimator::FeeMode::Economical),
+            _ => Err("bad_mode"),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|code| (name.clone(), code.to_string()))?;
+    let default_merge = match spec.default_merge.as_str() {
+        "lower_only" => crate::node::fee_estimator::ExternalMode::LowerOnly,
+        "replace" => crate::node::fee_estimator::ExternalMode::Replace,
+        _ => return Err((name, "bad_merge".to_string())),
+    };
+    Ok(crate::node::fee_estimator::FeeEstimatorSpec {
+        name: spec.name,
+        description: spec.description,
+        modes,
+        default_merge,
+        auto_priority: spec.auto_priority,
+    })
+}
+
+fn fee_table_from_wire(
+    table: crate::module::ipc::protocol::ExternalFeeTableWire,
+) -> Result<crate::node::fee_estimator::ExternalFeeTable, ModuleError> {
+    let mode = match table.mode.as_deref() {
+        None => None,
+        Some("conservative") => Some(crate::node::fee_estimator::FeeMode::Conservative),
+        Some("economical") => Some(crate::node::fee_estimator::FeeMode::Economical),
+        Some(_) => {
+            return Err(ModuleError::OperationError("bad_mode".to_string()));
         }
+    };
+    Ok(crate::node::fee_estimator::ExternalFeeTable {
+        estimator: table.estimator,
+        tip_hash: table.tip_hash,
+        upstream_height: table.upstream_height,
+        mode,
+        quotes: table.quotes,
+    })
+}
+
+fn registration_to_wire(
+    registration: crate::node::fee_estimator::FeeEstimatorRegistration,
+    early: Vec<(String, String)>,
+) -> crate::module::ipc::protocol::FeeEstimatorRegistrationWire {
+    let mut rejected: Vec<_> = registration
+        .rejected
+        .into_iter()
+        .map(|(name, err)| crate::module::ipc::protocol::FeeNameRejectionWire {
+            name,
+            error: name_error_code(err).to_string(),
+        })
+        .collect();
+    rejected.extend(
+        early
+            .into_iter()
+            .map(|(name, error)| crate::module::ipc::protocol::FeeNameRejectionWire { name, error }),
+    );
+    crate::module::ipc::protocol::FeeEstimatorRegistrationWire {
+        accepted: registration.accepted,
+        rejected,
     }
-    module_id
+}
+
+fn name_error_code(err: crate::node::fee_estimator::FeeNameError) -> &'static str {
+    use crate::node::fee_estimator::FeeNameError;
+    match err {
+        FeeNameError::Reserved => "reserved",
+        FeeNameError::BadFormat => "bad_format",
+        FeeNameError::Taken => "taken",
+        FeeNameError::DescriptionTooLong => "description_too_long",
+        FeeNameError::EmptyModes => "empty_modes",
+        FeeNameError::BadMerge => "bad_merge",
+    }
+}
+
+fn submit_error_code(err: crate::node::fee_estimator::SubmitFeeTableError) -> &'static str {
+    use crate::node::fee_estimator::SubmitFeeTableError;
+    match err {
+        SubmitFeeTableError::NotOwner => "not_owner",
+        SubmitFeeTableError::UnknownEstimator => "unknown_estimator",
+        SubmitFeeTableError::EmptyQuotes => "empty_quotes",
+        SubmitFeeTableError::TooManyQuotes => "too_many_quotes",
+        SubmitFeeTableError::BadTarget => "bad_target",
+        SubmitFeeTableError::TargetsNotIncreasing => "targets_not_increasing",
+        SubmitFeeTableError::RateTooLow => "rate_too_low",
+        SubmitFeeTableError::RateTooHigh => "rate_too_high",
+        SubmitFeeTableError::StaleTip => "stale_tip",
+        SubmitFeeTableError::HeightLag => "height_lag",
+        SubmitFeeTableError::RateLimited => "rate_limited",
+        SubmitFeeTableError::BadMode => "bad_mode",
+    }
+}
+
+fn attached_estimator(
+    api: &NodeApiImpl,
+) -> Result<Arc<crate::node::fee_estimator::FeeEstimator>, ModuleError> {
+    let mempool = api.mempool_manager.as_ref().ok_or_else(|| {
+        ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
+    })?;
+    mempool.fee_estimator().ok_or_else(|| {
+        ModuleError::OperationError("fee estimator is not attached".to_string())
+    })
+}
+
+fn fee_quote_to_wire(quote: crate::node::fee_estimator::FeeQuote) -> crate::module::ipc::protocol::FeeQuoteWire {
+    let source = match quote.source {
+        crate::node::fee_estimator::FeeSource::History => "history",
+        crate::node::fee_estimator::FeeSource::Mempool => "mempool",
+        crate::node::fee_estimator::FeeSource::Min => "min",
+        crate::node::fee_estimator::FeeSource::External => "external",
+        crate::node::fee_estimator::FeeSource::ExternalMin => "external_min",
+    };
+    crate::module::ipc::protocol::FeeQuoteWire {
+        sat_per_kvb: quote.sat_per_kvb,
+        blocks: quote.blocks,
+        source: source.to_string(),
+        estimator: quote.estimator,
+    }
 }
 
 /// Node API implementation for modules
@@ -52,10 +174,10 @@ pub struct NodeApiImpl {
     network_manager: Option<Arc<NetworkManager>>,
     /// RPC server (optional, for RPC endpoint registration)
     rpc_server: Option<Arc<crate::rpc::server::RpcServer>>,
-    /// Hook manager (optional, for module hooks)
-    hook_manager: Option<Arc<tokio::sync::RwLock<HookManager>>>,
     /// Timer manager (optional, for timers and scheduled tasks)
     timer_manager: Option<Arc<crate::module::timers::manager::TimerManager>>,
+    /// Timer service. Owns module timers for this node.
+    timer_service: Option<crate::module::timers::TimerService>,
     /// Module ID (for timer/task registration)
     module_id_for_timers: Option<String>,
     /// Metrics manager (optional, for metrics reporting)
@@ -109,8 +231,8 @@ impl NodeApiImpl {
             mempool_manager: None,
             network_manager: None,
             rpc_server: None,
-            hook_manager: None,
             timer_manager: None,
+            timer_service: None,
             module_id_for_timers: None,
             metrics_manager: None,
             module_id_for_metrics: None,
@@ -143,8 +265,8 @@ impl NodeApiImpl {
             mempool_manager: None,
             network_manager: None,
             rpc_server: None,
-            hook_manager: None,
             timer_manager: None,
+            timer_service: None,
             module_id_for_timers: None,
             metrics_manager: None,
             module_id_for_metrics: None,
@@ -180,9 +302,9 @@ impl NodeApiImpl {
             mempool_manager,
             network_manager,
             rpc_server: None,
-            hook_manager: None,
             ipc_server: None,
             timer_manager: None,
+            timer_service: None,
             module_id_for_timers: None,
             metrics_manager: None,
             module_id_for_metrics: None,
@@ -282,11 +404,6 @@ impl NodeApiImpl {
         self.module_data_dir = Some(data_dir);
     }
 
-    /// Set hook manager (for late initialization)
-    pub fn set_hook_manager(&mut self, hook_manager: Arc<tokio::sync::RwLock<HookManager>>) {
-        self.hook_manager = Some(hook_manager);
-    }
-
     /// Set timer manager (for late initialization)
     pub fn set_timer_manager(
         &mut self,
@@ -297,6 +414,30 @@ impl NodeApiImpl {
         self.module_id_for_timers = Some(module_id);
     }
 
+    /// Install the node timer service.
+    pub fn set_timer_service(&mut self, timer_service: crate::module::timers::TimerService) {
+        self.timer_service = Some(timer_service);
+    }
+
+    fn timer_module_id(&self) -> Result<String, crate::module::traits::ModuleError> {
+        let raw = self.get_module_id().ok_or_else(|| {
+            crate::module::traits::ModuleError::OperationError(
+                "module id required for timers".to_string(),
+            )
+        })?;
+        Ok(crate::module::module_name_from_id(&raw).to_string())
+    }
+
+    fn timer_service(
+        &self,
+    ) -> Result<&crate::module::timers::TimerService, crate::module::traits::ModuleError> {
+        self.timer_service.as_ref().ok_or_else(|| {
+            crate::module::traits::ModuleError::OperationError(
+                "timer service is not available".to_string(),
+            )
+        })
+    }
+
     /// Set metrics manager (for late initialization)
     pub fn set_metrics_manager(
         &mut self,
@@ -305,6 +446,14 @@ impl NodeApiImpl {
     ) {
         self.metrics_manager = Some(metrics_manager);
         self.module_id_for_metrics = Some(module_id);
+    }
+
+    /// Attach the node-wide metrics manager. Reports use the calling module id.
+    pub fn attach_metrics_manager(
+        &mut self,
+        metrics_manager: Arc<crate::module::metrics::manager::MetricsManager>,
+    ) {
+        self.metrics_manager = Some(metrics_manager);
     }
 
     /// Set RPC server (for late initialization)
@@ -610,6 +759,7 @@ impl NodeAPI for NodeApiImpl {
         .map_err(|e| ModuleError::op_err("Task join error", e))?
     }
 
+    /// Pool average and median. Not a confirmation-target fee estimate.
     async fn get_mempool_fee_rate_summary(
         &self,
     ) -> Result<crate::module::traits::MempoolFeeRateSummary, ModuleError> {
@@ -737,15 +887,6 @@ impl NodeAPI for NodeApiImpl {
     }
 
     async fn get_mempool_size(&self) -> Result<MempoolSize, ModuleError> {
-        // Check hooks for cached value first
-        if let Some(hook_mgr) = &self.hook_manager {
-            let hooks = hook_mgr.read().await;
-            if let Some(cached_stats) = hooks.get_mempool_stats_cached().await {
-                return Ok(cached_stats);
-            }
-        }
-
-        // Fall back to normal calculation
         let mempool = self.mempool_manager.as_ref().ok_or_else(|| {
             ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
         })?;
@@ -992,54 +1133,111 @@ impl NodeAPI for NodeApiImpl {
                 "target_blocks must be at least 1".to_string(),
             ));
         }
-        // Check hooks for cached value first
-        if let Some(hook_mgr) = &self.hook_manager {
-            let hooks = hook_mgr.read().await;
-            if let Some(cached_estimate) = hooks.get_fee_estimate_cached(target_blocks).await {
-                return Ok(cached_estimate);
-            }
-        }
 
-        // Fall back to normal calculation
         let mempool = self.mempool_manager.as_ref().ok_or_else(|| {
             ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
         })?;
-
-        // Implement fee estimation algorithm
-        // Uses a simple approach: calculate fee rate histogram from mempool
-        // and return the fee rate needed for target_blocks confirmation
-
-        let mempool = Arc::clone(mempool);
-        let storage = Arc::clone(&self.storage);
-        let fee_rates = tokio::task::spawn_blocking(move || {
-            mempool.fee_rates_for_storage(Some(storage.as_ref()))
-        })
-        .await
-        .map_err(|e| ModuleError::op_err("Task join error", e))?;
-
-        let mut fee_rates = fee_rates;
-        if fee_rates.is_empty() {
-            return Err(ModuleError::OperationError(
-                "mempool has no fee rates".to_string(),
-            ));
-        }
-
-        // Sort fee rates and find the rate needed for target_blocks confirmation
-        // Simple approach: use median fee rate, adjusted for target blocks
-        fee_rates.sort();
-        let median_idx = fee_rates.len() / 2;
-        let median_fee_rate = fee_rates[median_idx];
-
-        // Median fee rate scaled by target confirmation window.
-        let adjusted_fee_rate = if target_blocks > 6 {
-            median_fee_rate / 2 // Lower fee for longer confirmation time
-        } else if target_blocks > 1 {
-            median_fee_rate // Standard fee
+        let no_estimate = if mempool.size() == 0 {
+            "mempool has no fee rates"
         } else {
-            median_fee_rate * 2 // Higher fee for immediate confirmation
+            "fee estimate unavailable (warming up)"
         };
+        let Some(estimator) = mempool.fee_estimator() else {
+            return Err(ModuleError::OperationError(no_estimate.to_string()));
+        };
+        match estimator
+            .quote(
+                target_blocks,
+                crate::node::fee_estimator::FeeMode::Conservative,
+                crate::node::fee_estimator::SourceView::Combined,
+            )
+            .await
+        {
+            Ok(quote) => {
+                let sat_per_vb = (u128::from(quote.sat_per_kvb) + 999) / 1000;
+                Ok(u64::try_from(sat_per_vb).unwrap_or(u64::MAX).max(1))
+            }
+            Err(crate::node::fee_estimator::FeeUnavailable::ExternalStale) => {
+                Err(ModuleError::OperationError(
+                    "external fee estimator is stale".to_string(),
+                ))
+            }
+            Err(_) => Err(ModuleError::OperationError(no_estimate.to_string())),
+        }
+    }
 
-        Ok(adjusted_fee_rate.max(1)) // Minimum 1 sat/vbyte
+    async fn register_fee_estimators(
+        &self,
+        module_id: &str,
+        specs: Vec<crate::module::ipc::protocol::FeeEstimatorSpecWire>,
+    ) -> Result<crate::module::ipc::protocol::FeeEstimatorRegistrationWire, ModuleError> {
+        let estimator = attached_estimator(self)?;
+        let mut prepared = Vec::new();
+        let mut rejected = Vec::new();
+        for spec in specs {
+            let name = spec.name.clone();
+            match fee_spec_from_wire(spec) {
+                Ok(spec) => prepared.push(spec),
+                Err((code, _)) => rejected.push((name, code)),
+            }
+        }
+        let registration = estimator.register_estimators(module_id, prepared);
+        Ok(registration_to_wire(registration, rejected))
+    }
+
+    async fn submit_fee_table(
+        &self,
+        module_id: &str,
+        table: crate::module::ipc::protocol::ExternalFeeTableWire,
+    ) -> Result<u64, ModuleError> {
+        let estimator = attached_estimator(self)?;
+        let table = fee_table_from_wire(table)?;
+        estimator
+            .submit_fee_table(module_id, table, std::time::Instant::now())
+            .map_err(|err| ModuleError::OperationError(submit_error_code(err).to_string()))
+    }
+
+    async fn get_fee_table(
+        &self,
+        view: &str,
+        mode: &str,
+        targets: &[u32],
+    ) -> Result<crate::module::ipc::protocol::NativeFeeTableWire, ModuleError> {
+        let estimator = attached_estimator(self)?;
+        let view = match view {
+            "combined" => crate::node::fee_estimator::SourceView::Combined,
+            "history" => crate::node::fee_estimator::SourceView::History,
+            "mempool" => crate::node::fee_estimator::SourceView::Mempool,
+            _ => {
+                return Err(ModuleError::OperationError("bad_view".to_string()));
+            }
+        };
+        let mode = match mode {
+            "conservative" => crate::node::fee_estimator::FeeMode::Conservative,
+            "economical" => crate::node::fee_estimator::FeeMode::Economical,
+            _ => {
+                return Err(ModuleError::OperationError("bad_mode".to_string()));
+            }
+        };
+        match estimator.native_fee_table(view, mode, targets).await {
+            Ok((tip_hash, tip_height, generation, quotes)) => {
+                Ok(crate::module::ipc::protocol::NativeFeeTableWire {
+                    tip_hash,
+                    tip_height,
+                    generation,
+                    quotes: quotes
+                        .into_iter()
+                        .map(|(target, quote)| (target, quote.map(fee_quote_to_wire)))
+                        .collect(),
+                })
+            }
+            Err(crate::node::fee_estimator::NativeFeeRead::TooManyTargets) => {
+                Err(ModuleError::OperationError("too_many_quotes".to_string()))
+            }
+            Err(crate::node::fee_estimator::NativeFeeRead::Unavailable(err)) => {
+                Err(ModuleError::OperationError(format!("{err:?}")))
+            }
+        }
     }
 
     async fn register_rpc_endpoint(
@@ -1201,18 +1399,98 @@ impl NodeAPI for NodeApiImpl {
             .map_err(ModuleError::OperationError)
     }
 
+    async fn timer_create(
+        &self,
+        spec: crate::module::timers::types::TimerSpec,
+        mode: crate::module::timers::types::CreateMode,
+    ) -> Result<crate::module::timers::types::TimerInfo, ModuleError> {
+        let module_id = self.timer_module_id()?;
+        self.timer_service()?
+            .create(&module_id, spec, mode)
+            .await
+            .map_err(|e| ModuleError::OperationError(e.to_string()))
+    }
+
+    async fn timer_cancel(
+        &self,
+        target: crate::module::timers::types::TimerTarget,
+    ) -> Result<(), ModuleError> {
+        let module_id = self.timer_module_id()?;
+        self.timer_service()?
+            .cancel(&module_id, target)
+            .await
+            .map_err(|e| ModuleError::OperationError(e.to_string()))
+    }
+
+    async fn timer_pause(
+        &self,
+        target: crate::module::timers::types::TimerTarget,
+    ) -> Result<(), ModuleError> {
+        let module_id = self.timer_module_id()?;
+        self.timer_service()?
+            .pause(&module_id, target)
+            .await
+            .map_err(|e| ModuleError::OperationError(e.to_string()))
+    }
+
+    async fn timer_resume(
+        &self,
+        target: crate::module::timers::types::TimerTarget,
+    ) -> Result<(), ModuleError> {
+        let module_id = self.timer_module_id()?;
+        self.timer_service()?
+            .resume(&module_id, target)
+            .await
+            .map_err(|e| ModuleError::OperationError(e.to_string()))
+    }
+
+    async fn timer_trigger(
+        &self,
+        target: crate::module::timers::types::TimerTarget,
+    ) -> Result<(), ModuleError> {
+        let module_id = self.timer_module_id()?;
+        self.timer_service()?
+            .trigger(&module_id, target)
+            .await
+            .map_err(|e| ModuleError::OperationError(e.to_string()))
+    }
+
+    async fn timer_get(
+        &self,
+        target: crate::module::timers::types::TimerTarget,
+    ) -> Result<crate::module::timers::types::TimerInfo, ModuleError> {
+        let module_id = self.timer_module_id()?;
+        self.timer_service()?
+            .get(&module_id, target)
+            .await
+            .map_err(|e| ModuleError::OperationError(e.to_string()))
+    }
+
+    async fn timer_list(
+        &self,
+    ) -> Result<Vec<crate::module::timers::types::TimerInfo>, ModuleError> {
+        let module_id = self.timer_module_id()?;
+        self.timer_service()?
+            .list(&module_id)
+            .await
+            .map_err(|e| ModuleError::OperationError(e.to_string()))
+    }
+
     async fn report_metric(&self, metric: Metric) -> Result<(), ModuleError> {
         let metrics_manager = self.metrics_manager.as_ref().ok_or_else(|| {
             ModuleError::OperationError(module_error_msg::METRICS_MANAGER_NOT_AVAILABLE.to_string())
         })?;
 
-        let module_id = self.module_id_for_metrics.as_ref().ok_or_else(|| {
-            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET_FOR_METRICS.to_string())
-        })?;
+        let module_id = self
+            .get_module_id()
+            .or_else(|| self.module_id_for_metrics.clone())
+            .ok_or_else(|| {
+                ModuleError::OperationError(
+                    module_error_msg::MODULE_ID_NOT_SET_FOR_METRICS.to_string(),
+                )
+            })?;
 
-        metrics_manager
-            .report_metric(module_id.clone(), metric)
-            .await;
+        metrics_manager.report_metric(module_id, metric).await;
         Ok(())
     }
 
@@ -1550,11 +1828,7 @@ impl NodeAPI for NodeApiImpl {
         let mut result = Vec::new();
         for (module_id, metadata, state) in module_info_list {
             // Extract module name from module_id (format: {module_name}_{uuid})
-            let module_name = module_id
-                .split('_')
-                .next()
-                .unwrap_or(&module_id)
-                .to_string();
+            let module_name = crate::module::module_name_from_id(&module_id).to_string();
 
             result.push(crate::module::traits::ModuleInfo {
                 module_id: module_id.clone(),
@@ -1587,7 +1861,7 @@ impl NodeAPI for NodeApiImpl {
                 .unwrap_or(crate::module::traits::ModuleState::Stopped);
 
             // Extract module name from module_id
-            let module_name = module_id.split('_').next().unwrap_or(module_id).to_string();
+            let module_name = crate::module::module_name_from_id(module_id).to_string();
 
             return Ok(Some(crate::module::traits::ModuleInfo {
                 module_id: module_id.to_string(),
@@ -1600,7 +1874,7 @@ impl NodeAPI for NodeApiImpl {
         }
 
         // If not found by full ID, try by module name (first part before _)
-        let module_name = module_id.split('_').next().unwrap_or(module_id);
+        let module_name = crate::module::module_name_from_id(module_id);
         if let Some(metadata) = manager.get_module_metadata(module_name).await {
             let state = manager
                 .get_module_state(module_name)
@@ -1641,7 +1915,7 @@ impl NodeAPI for NodeApiImpl {
         }
 
         // Check by module name
-        let module_name = module_id.split('_').next().unwrap_or(module_id);
+        let module_name = crate::module::module_name_from_id(module_id);
         Ok(manager.get_module_state(module_name).await.is_some())
     }
 
@@ -1653,8 +1927,27 @@ impl NodeAPI for NodeApiImpl {
         let event_manager = self.event_manager.as_ref().ok_or_else(|| {
             ModuleError::OperationError(module_error_msg::EVENT_MANAGER_NOT_AVAILABLE.to_string())
         })?;
-
-        event_manager.publish_event(event_type, payload).await
+        let EventPayload::ModuleEvent { name, data, .. } = payload else {
+            return Err(ModuleError::PermissionDenied(
+                "modules may publish only ModuleEvent".to_string(),
+            ));
+        };
+        if event_type != EventType::ModuleEvent {
+            return Err(ModuleError::PermissionDenied(
+                "modules may publish only ModuleEvent".to_string(),
+            ));
+        }
+        let source_module = self.get_module_id().unwrap_or_default();
+        event_manager
+            .publish_event(
+                EventType::ModuleEvent,
+                EventPayload::ModuleEvent {
+                    source_module,
+                    name,
+                    data,
+                },
+            )
+            .await
     }
 
     async fn call_module(
@@ -1944,7 +2237,7 @@ impl NodeAPI for NodeApiImpl {
 
         let manager = module_manager.lock().await;
         // Extract module name from module_id (format: {module_name}_{uuid})
-        let module_name = module_id.split('_').next().unwrap_or(module_id);
+        let module_name = crate::module::module_name_from_id(module_id);
 
         // Get module state
         if let Ok(reported) = self.reported_health.lock() {
@@ -1991,7 +2284,7 @@ impl NodeAPI for NodeApiImpl {
 
         let mut result = Vec::new();
         for module_id in modules {
-            let module_name = module_id.split('_').next().unwrap_or(&module_id);
+            let module_name = crate::module::module_name_from_id(&module_id);
             if let Some(state) = manager.get_module_state(module_name).await {
                 let health = match state {
                     ModuleState::Running => crate::module::process::monitor::ModuleHealth::Healthy,
@@ -2288,9 +2581,7 @@ impl NodeAPI for NodeApiImpl {
             ));
         }
         let module_id = self.get_module_id().ok_or_else(|| {
-            ModuleError::OperationError(
-                "module id required to advertise service bits".to_string(),
-            )
+            ModuleError::OperationError("module id required to advertise service bits".to_string())
         })?;
         let name = module_service_bit_owner(&module_id);
         let Some(nm) = self.network_manager.as_ref() else {
@@ -2480,5 +2771,64 @@ mod mempool_size_tests {
         assert!(api.get_fee_estimate(0).await.is_err());
         assert!(api.get_fee_estimate(1).await.is_err());
         assert!(api.get_fee_estimate(100).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn module_fee_estimate_quotes_the_next_block_in_sat_per_vb() {
+        use blvm_protocol::segwit::transaction_weight_from_stacks;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let mempool = Arc::new(MempoolManager::new());
+        let mut fees = crate::config::FeeEstimatorConfig::default();
+        fees.health_required = Some(false);
+        fees.projection_full_threshold = 0.0;
+        let estimator = Arc::new(crate::node::fee_estimator::FeeEstimator::new(fees, true));
+        estimator.mark_table_stale_for_test();
+        mempool.set_fee_estimator(Some(estimator));
+
+        let empty = NodeApiImpl::with_dependencies(
+            Arc::clone(&storage),
+            None,
+            None,
+            Some(Arc::clone(&mempool)),
+            None,
+        );
+        let err = empty.get_fee_estimate(1).await.unwrap_err();
+        assert!(
+            format!("{err:?}").contains("mempool has no fee rates"),
+            "{err:?}"
+        );
+
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        mempool.set_policy_config(Some(policy));
+        let funding = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let mut tx = spend(funding, 50_000);
+        tx.inputs[0].script_sig = vec![OP_1];
+        let vsize = transaction_weight_from_stacks(&tx, None)
+            .unwrap()
+            .div_ceil(4)
+            .max(1) as i64;
+        tx.outputs[0].value = 50_000;
+        let utxo = UTXO {
+            value: 50_000 + vsize,
+            script_pubkey: vec![OP_1].into(),
+            height: 0,
+            is_coinbase: false,
+        };
+        let coins = Arc::new(tokio::sync::Mutex::new(blvm_protocol::UtxoSet::default()));
+        coins.lock().await.insert(funding, Arc::new(utxo));
+        mempool.set_utxo_set_arc(coins);
+        assert!(mempool.add_transaction(tx).unwrap());
+
+        let api = NodeApiImpl::with_dependencies(storage, None, None, Some(mempool), None);
+        assert_eq!(api.get_fee_estimate(1).await.unwrap(), 1);
+        assert_eq!(api.get_fee_estimate(1008).await.unwrap(), 1);
     }
 }

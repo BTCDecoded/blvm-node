@@ -70,6 +70,13 @@ fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
         config_schema: HashMap::new(),
         binary: None,
         downloads: HashMap::new(),
+        network: Default::default(),
+        replaces: Vec::new(),
+        provides_apis: Vec::new(),
+        requires_apis: Vec::new(),
+        min_node_version: None,
+        services: Vec::new(),
+        fee_estimators: Vec::new(),
         signatures: Some(signature_section),
         payment: Some(payment_section),
     }
@@ -164,6 +171,13 @@ async fn test_handle_get_module_free_module() {
         config_schema: HashMap::new(),
         binary: None,
         downloads: HashMap::new(),
+        network: Default::default(),
+        replaces: Vec::new(),
+        provides_apis: Vec::new(),
+        requires_apis: Vec::new(),
+        min_node_version: None,
+        services: Vec::new(),
+        fee_estimators: Vec::new(),
         signatures: None,
         payment: None, // No payment required
     };

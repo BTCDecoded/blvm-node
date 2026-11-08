@@ -570,17 +570,98 @@ Submits a new block to the network.
 
 ### estimatesmartfee
 
-Estimates fee rate for confirmation target.
+Estimates a fee rate for a confirmation target. `feerate` is BTC per kvB (`sat_per_kvb / 100_000_000`).
 
-**Parameters**:
-1. `conf_target` (numeric, required) - Confirmation target (blocks)
-2. `estimate_mode` (string, optional) - "UNSET", "ECONOMICAL", "CONSERVATIVE"
+**Parameters** (positional):
 
-**Returns**:
+1. `conf_target` (numeric, optional, default `6`) - Confirmation target, from 1 to 1008.
+2. `estimate_mode` (string, optional, default `"conservative"`) - `unset`, `economical`, or `conservative`. Matching is case-insensitive. `unset` is conservative.
+3. `fee_rate_estimator` (string, optional, default `"none"`) - `none` (the resolved estimator's combined quote), `history`, `mempool`, or a registered estimator name. `none`, `history`, and `mempool` are the native columns. A registered name returns that estimator's merged quote for this call. Matching is case-insensitive.
+4. `verbosity` (numeric, optional, default `0`) - `0`, `1`, or `2`.
+
+An unknown mode, an unknown estimator, a target outside 1 to 1008, or a verbosity outside 0 to 2 is an `invalid_params` error. A registered name with no fresh table returns the failure object below with `reason` `"external_stale"`.
+
+**Returns**, verbosity 0:
+
 ```json
 {
   "feerate": 0.00001000,
-  "blocks": 2
+  "blocks": 6
+}
+```
+
+`blocks` is the requested target. A history-only quote whose returned target is larger than the request reports that returned target instead. A one-block history quote is reported as 2.
+
+Verbosity 1 adds `source` (`"history"`, `"mempool"`, `"min"`, `"external"`, or `"external_min"`), `mempool_healthy` (bool), `requested_estimator`, `active_estimator`, and `degraded`. `"min"` means both native layers had a value and the published rate is the lower one. `"external"` means a module table replaced the native quote. `"external_min"` means a module table lowered it. `degraded` is true when the configured estimator was missing or stale and the quote fell back to `native`.
+
+Verbosity 2 also adds `tip_height`, `tip_hash` (display byte order), `table_age_secs`, and `health`:
+
+```json
+{
+  "feerate": 0.00001000,
+  "blocks": 1,
+  "source": "mempool",
+  "mempool_healthy": true,
+  "tip_height": 5,
+  "tip_hash": "0505050505050505050505050505050505050505050505050505050505050505",
+  "table_age_secs": 0.01,
+  "health": { "window": 6, "ratio": 0.2, "required_ratio": 0.75 }
+}
+```
+
+`health.window` is `health_window_blocks`. `health.ratio` is found weight over block weight in the current ring. `health.required_ratio` is `health_min_ratio`.
+
+When no rate is available, verbosity 0 is:
+
+```json
+{
+  "errors": ["Insufficient data or no feerate found"],
+  "blocks": 6
+}
+```
+
+`blocks` is the requested target. Verbosity 1 and 2 add `reason`: `"warming_up"`, `"mempool_unhealthy"`, `"empty_mempool"`, `"disabled"`, or `"external_stale"`. They also add `requested_estimator`, `active_estimator`, and `degraded` when an estimator is attached. With no estimator attached, verbosity 0 stays the object above and verbosity 1 or higher uses `"disabled"`.
+
+### listfeeestimators
+
+Lists `native` and every estimator a module has registered. A configured name that no module has registered is included with `resolved` false.
+
+**Parameters**: none.
+
+**Returns**:
+
+```json
+[
+  {
+    "name": "native",
+    "module": null,
+    "description": "built-in",
+    "resolved": true,
+    "fresh": true,
+    "last_submit_age_secs": null,
+    "active": true
+  }
+]
+```
+
+`module` is the session id that registered the name. `fresh` means a stored table is still inside `ttl_secs` and matches the node's tip. `last_submit_age_secs` is the age of that table, or null when the name has no table. `active` is the name currently merged into the combined quote.
+
+### REST fee routes
+
+`GET /api/v1/fees/estimate?blocks=N&mode=conservative|economical`
+
+`blocks` defaults to 6 and must be from 1 to 1008. `mode` is optional and case-insensitive; only `conservative` and `economical` are accepted. The handler calls `estimatesmartfee` with that target and mode, so `data` is the verbosity 0 object above, inside the REST envelope (`data`, `meta.version` `"1.0"`, `meta.request_id`). A bad `blocks` or `mode` is HTTP 400. The body message is `blocks must be between 1 and 1008` or `mode must be conservative or economical`.
+
+`GET /api/v1/fees/lnd`
+
+Raw JSON for lnd `SparseConfFeeSource`, not the REST envelope. Integer sat/kvB, conservative combined quotes, for each configured `lnd_targets` entry that has a quote. The map below shows three of those keys. `current_block_hash` is display byte order. `min_relay_feerate` is the relay floor in sat/kvB. HTTP 503 `fee estimates unavailable` when the map would be empty.
+
+```json
+{
+  "current_block_height": 0,
+  "current_block_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "fee_by_block_target": { "1": 10000, "6": 10000, "1008": 10000 },
+  "min_relay_feerate": 1000
 }
 ```
 
@@ -854,6 +935,50 @@ Returns Prometheus metrics.
 **Parameters**: None
 
 **Returns**: Prometheus-formatted metrics (text)
+
+---
+
+### listtimers
+
+Lists module timers. An optional module name limits the result to that module.
+
+**Parameters**: `[module]`
+
+**Returns**: Array of timer info objects
+
+---
+
+### gettimerstats
+
+Returns the timer service counters: fire outcomes, lateness samples, and acknowledgement samples.
+
+**Parameters**: None
+
+**Returns**: Object with `fires`, `lateness_count`, `ack_count`, and `skipped_rate`
+
+The Prometheus metrics endpoint also includes `blvm_timer_active`, `blvm_timer_fires_total`, `blvm_timer_lateness_ms`, `blvm_timer_ack_ms`, and `blvm_timer_breaker_trips_total`.
+
+---
+
+### gettimerjournal
+
+Returns the append-only audit journal for timers created with `Durable { audit: true }`. Each record's hash is `SHA256(prev_hash || canonical_bytes)`. This detects a changed record. It does not stop someone who can rewrite the whole tree and recompute every hash. Copy the latest hash to a log the datadir writer cannot change if that distinction matters.
+
+**Parameters**: `[from, to, module]`
+
+`from` and `to` are inclusive indexes. Omit them for the whole chain. `module` keeps one module's records.
+
+**Returns**: Array of journal records
+
+---
+
+### verifytimerjournal
+
+Recomputes the journal hash chain.
+
+**Parameters**: None
+
+**Returns**: `{ "ok": true }` or `{ "ok": false, "index", "reason" }` for the first break.
 
 ---
 

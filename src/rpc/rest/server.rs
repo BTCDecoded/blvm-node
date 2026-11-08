@@ -2128,7 +2128,7 @@ impl RestApiServer {
             );
         }
 
-        // Parse path: /api/v1/fees/estimate?blocks=N (optional query param)
+        // Parse path: /api/v1/fees/estimate?blocks=N&mode=conservative|economical
         let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
         if path_parts.len() < 4
@@ -2148,21 +2148,10 @@ impl RestApiServer {
 
         match path_parts.get(3) {
             Some(&"estimate") => {
-                // Parse query parameters for target blocks
-                // Format: /api/v1/fees/estimate?blocks=6
-                let target_blocks = uri
-                    .query()
-                    .and_then(|q| {
-                        q.split('&').find_map(|param| {
-                            let mut parts = param.split('=');
-                            if parts.next() == Some("blocks") {
-                                parts.next().and_then(|v| v.parse::<u64>().ok())
-                            } else {
-                                None
-                            }
-                        })
-                    })
-                    .unwrap_or(6); // Default to 6 blocks if not specified
+                // Format: /api/v1/fees/estimate?blocks=6&mode=economical
+                let target_blocks = query_value(uri.query(), "blocks")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(6);
 
                 if !(1..=1008).contains(&target_blocks) {
                     return Self::error_response_with_headers(
@@ -2175,7 +2164,26 @@ impl RestApiServer {
                     );
                 }
 
-                match fees::get_fee_estimate(&server.mining, Some(target_blocks)).await {
+                let mode = match query_value(uri.query(), "mode") {
+                    None => None,
+                    Some(mode) => match mode.to_ascii_lowercase().as_str() {
+                        "conservative" | "economical" => Some(mode.to_ascii_lowercase()),
+                        _ => {
+                            return Self::error_response_with_headers(
+                                security_headers,
+                                StatusCode::BAD_REQUEST,
+                                "BAD_REQUEST",
+                                "mode must be conservative or economical",
+                                None,
+                                request_id,
+                            );
+                        }
+                    },
+                };
+
+                match fees::get_fee_estimate(&server.mining, Some(target_blocks), mode.as_deref())
+                    .await
+                {
                     Ok(data) => {
                         Self::success_response_with_headers(data, request_id, security_headers)
                     }
@@ -2189,11 +2197,22 @@ impl RestApiServer {
                     ),
                 }
             }
+            Some(&"lnd") => match fees::lnd_fee_estimate(&server.mining).await {
+                Ok(data) => raw_json_response(StatusCode::OK, data, security_headers),
+                Err(err) => Self::error_response_with_headers(
+                    security_headers,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "SERVICE_UNAVAILABLE",
+                    &err.to_string(),
+                    None,
+                    request_id,
+                ),
+            },
             _ => Self::error_response_with_headers(
                 security_headers,
                 StatusCode::NOT_FOUND,
                 "NOT_FOUND",
-                &format!("Fee endpoint not found: {path}. Supported: estimate"),
+                &format!("Fee endpoint not found: {path}. Supported: estimate, lnd"),
                 None,
                 request_id,
             ),
@@ -2285,6 +2304,44 @@ impl RestApiServer {
     }
 }
 
+fn raw_json_response(
+    status: StatusCode,
+    body: Value,
+    security_headers_enabled: bool,
+) -> Response<Full<Bytes>> {
+    let text = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
+    let mut response = Response::builder()
+        .status(status)
+        .header("Content-Type", "application/json")
+        .header("Content-Length", text.len())
+        .body(Full::new(Bytes::from(text)))
+        .unwrap_or_else(|_| {
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Full::new(Bytes::from(
+                    "{\"error\":\"Internal server error\"}",
+                )))
+                .expect("Fallback response should always succeed")
+        });
+    if security_headers_enabled {
+        response = RestApiServer::add_security_headers(response, true);
+    }
+    response
+}
+
+fn query_value<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
+    query.and_then(|query| {
+        query.split('&').find_map(|param| {
+            let mut parts = param.splitn(2, '=');
+            if parts.next() == Some(key) {
+                parts.next()
+            } else {
+                None
+            }
+        })
+    })
+}
+
 #[cfg(test)]
 mod fee_request_tests {
     use super::*;
@@ -2313,5 +2370,87 @@ mod fee_request_tests {
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("BAD_REQUEST"), "{text}");
         assert!(!text.contains("INTERNAL_ERROR"), "{text}");
+    }
+
+    async fn fee_text(query: &str) -> (StatusCode, String) {
+        let server = Arc::new(RestApiServer::new(
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::new(blockchain::BlockchainRpc::new()),
+            Arc::new(network::NetworkRpc::new()),
+            Arc::new(mempool::MempoolRpc::new()),
+            Arc::new(mining::MiningRpc::new()),
+            Arc::new(rawtx::RawTxRpc::new()),
+        ));
+        let uri: Uri = format!("/api/v1/fees/estimate?{query}").parse().unwrap();
+        let response = RestApiServer::handle_fee_request(
+            server,
+            Method::GET,
+            "/api/v1/fees/estimate",
+            &uri,
+            "req".to_string(),
+        )
+        .await;
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn economical_mode_is_accepted_and_an_unknown_mode_is_rejected() {
+        let (status, text) = fee_text("blocks=6&mode=ECONOMICAL").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            text.contains("\"blocks\":6") || text.contains("\"blocks\": 6"),
+            "{text}"
+        );
+        assert!(!text.contains("INTERNAL_ERROR"), "{text}");
+
+        let (status, text) = fee_text("blocks=6&mode=unset").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            text.contains("mode must be conservative or economical"),
+            "{text}"
+        );
+
+        let (status, text) = fee_text("blocks=6").await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+    }
+
+    #[tokio::test]
+    async fn the_lnd_route_is_503_without_estimates_and_listed_as_supported() {
+        let server = Arc::new(RestApiServer::new(
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::new(blockchain::BlockchainRpc::new()),
+            Arc::new(network::NetworkRpc::new()),
+            Arc::new(mempool::MempoolRpc::new()),
+            Arc::new(mining::MiningRpc::new()),
+            Arc::new(rawtx::RawTxRpc::new()),
+        ));
+        let uri: Uri = "/api/v1/fees/lnd".parse().unwrap();
+        let response = RestApiServer::handle_fee_request(
+            Arc::clone(&server),
+            Method::GET,
+            "/api/v1/fees/lnd",
+            &uri,
+            "req".to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("fee estimates unavailable"), "{text}");
+
+        let missing = RestApiServer::handle_fee_request(
+            server,
+            Method::GET,
+            "/api/v1/fees/other",
+            &"/api/v1/fees/other".parse().unwrap(),
+            "req".to_string(),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let body = missing.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("Supported: estimate, lnd"), "{text}");
     }
 }

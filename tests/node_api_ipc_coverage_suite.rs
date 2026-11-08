@@ -952,6 +952,23 @@ mod tests {
             })
             .await
             .unwrap();
+        assert!(!resp.success);
+        let id = client.next_correlation_id();
+        let resp = client
+            .request(RequestMessage {
+                correlation_id: id,
+                request_type: MessageType::PublishEvent,
+                payload: RequestPayload::PublishEvent {
+                    event_type: EventType::ModuleEvent,
+                    payload: EventPayload::ModuleEvent {
+                        source_module: "forged".into(),
+                        name: "fee".into(),
+                        data: b"{}".to_vec(),
+                    },
+                },
+            })
+            .await
+            .unwrap();
         assert!(resp.success);
         match resp.payload {
             Some(ResponsePayload::EventPublished) => {}

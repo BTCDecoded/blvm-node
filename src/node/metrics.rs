@@ -150,6 +150,10 @@ pub struct MetricsCollector {
     system: Arc<Mutex<SystemMetrics>>,
     /// Start time for uptime calculation
     start_time: SystemTime,
+    /// Module timer service, rendered on the Prometheus endpoint.
+    timer_service: std::sync::Mutex<Option<crate::module::timers::TimerService>>,
+    /// Module-reported metrics, rendered on the same Prometheus endpoint.
+    module_metrics: std::sync::Mutex<Option<Arc<crate::module::metrics::MetricsManager>>>,
 }
 
 impl MetricsCollector {
@@ -162,7 +166,53 @@ impl MetricsCollector {
             performance: Arc::new(Mutex::new(PerformanceMetrics::default())),
             system: Arc::new(Mutex::new(SystemMetrics::default())),
             start_time: SystemTime::now(),
+            timer_service: std::sync::Mutex::new(None),
+            module_metrics: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Attach module metrics so `GET /metrics` includes `blvm_module_*`.
+    pub fn set_module_metrics(&self, manager: Arc<crate::module::metrics::MetricsManager>) {
+        *self
+            .module_metrics
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(manager);
+    }
+
+    pub async fn module_prometheus(&self) -> String {
+        let manager = self
+            .module_metrics
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        match manager {
+            Some(manager) => manager.format_prometheus().await,
+            None => String::new(),
+        }
+    }
+
+    /// Attach the timer service so its counters appear on the metrics endpoint.
+    pub fn set_timer_service(&self, service: crate::module::timers::TimerService) {
+        *self
+            .timer_service
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(service);
+    }
+
+    pub fn timer_prometheus(&self) -> String {
+        self.timer_service
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_ref()
+            .map(|service| service.prometheus())
+            .unwrap_or_default()
+    }
+
+    pub fn timer_service(&self) -> Option<crate::module::timers::TimerService> {
+        self.timer_service
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
     }
 
     /// Collect all metrics into a single structure

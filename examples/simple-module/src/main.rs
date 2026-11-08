@@ -160,6 +160,7 @@ async fn handle_invocation(
             }
         }
         InvocationType::Rpc { .. } => (false, None, Some("RPC not implemented".to_string())),
+        _ => (false, None, Some("unsupported invocation".to_string())),
     };
     InvocationResultMessage {
         correlation_id: invocation.correlation_id,

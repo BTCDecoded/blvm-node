@@ -94,7 +94,7 @@ impl ModuleRouter {
         if let Some(module_manager) = &self.module_manager {
             let manager = module_manager.lock().await;
             // Extract module name from target_id (format: {module_name}_{uuid})
-            let target_module_name = target_id.split('_').next().unwrap_or(&target_id);
+            let target_module_name = crate::module::module_name_from_id(&target_id);
 
             // Validate required dependencies
             if let Err(e) = manager

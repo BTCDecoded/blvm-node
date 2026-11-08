@@ -74,6 +74,10 @@ impl ManifestValidator {
             errors.extend(dep_errors);
         }
 
+        if let Err(host_errors) = self.validate_hosted_declarations(manifest) {
+            errors.extend(host_errors);
+        }
+
         if errors.is_empty() {
             debug!("Manifest validation passed for module: {}", manifest.name);
             ValidationResult::Valid
@@ -181,6 +185,70 @@ impl ManifestValidator {
             }
         }
 
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// `[[services]]` and `http_wants` require `min_node_version`, checked with
+    /// `matches_version_constraint` against this crate's version.
+    fn validate_hosted_declarations(
+        &self,
+        manifest: &ModuleManifest,
+    ) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+        let declares_host =
+            !manifest.services.is_empty() || !manifest.network.http_wants.is_empty();
+        if declares_host {
+            match manifest
+                .min_node_version
+                .as_deref()
+                .map(str::trim)
+                .filter(|constraint| !constraint.is_empty())
+            {
+                None => errors.push(
+                    "min_node_version is required when [[services]] or [network].http_wants is set"
+                        .to_string(),
+                ),
+                Some(constraint) => {
+                    let node = env!("CARGO_PKG_VERSION");
+                    if !crate::module::version_constraint::matches_version_constraint(
+                        node, constraint,
+                    ) {
+                        errors.push(format!(
+                            "min_node_version constraint '{constraint}' is not satisfied by node {node}"
+                        ));
+                    }
+                }
+            }
+        }
+        for svc in &manifest.services {
+            if !self.is_valid_name(&svc.name) {
+                errors.push(format!("Invalid service name: {}", svc.name));
+            }
+            if svc.kind != "http" && svc.kind != "stream" {
+                errors.push(format!(
+                    "Invalid service kind '{}' for {} (expected http or stream)",
+                    svc.kind, svc.name
+                ));
+            }
+        }
+        for old in &manifest.replaces {
+            if !self.is_valid_name(old) {
+                errors.push(format!("Invalid replaces name: {old}"));
+            }
+        }
+        for api in manifest
+            .provides_apis
+            .iter()
+            .chain(manifest.requires_apis.iter())
+        {
+            if api.is_empty() || api.contains(['/', '\\']) {
+                errors.push(format!("Invalid api contract: {api}"));
+            }
+        }
         if errors.is_empty() {
             Ok(())
         } else {

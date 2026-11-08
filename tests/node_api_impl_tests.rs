@@ -395,6 +395,87 @@ async fn test_node_api_report_metric_via_manager() {
 }
 
 #[tokio::test]
+async fn test_node_api_report_metric_uses_the_calling_module() {
+    use blvm_node::module::metrics::manager::{Metric, MetricValue, MetricsManager};
+    use std::collections::HashMap;
+
+    let (_dir, storage) = storage_with_chain();
+    let mut api = NodeApiImpl::new(storage);
+    let manager = Arc::new(MetricsManager::new());
+    api.attach_metrics_manager(Arc::clone(&manager));
+    NodeApiImpl::set_current_module_id("fees_0123456789abcdef0123456789abcdef".into());
+    api.report_metric(Metric {
+        name: "depth".into(),
+        value: MetricValue::Gauge(3.0),
+        labels: HashMap::new(),
+        timestamp: 1,
+    })
+    .await
+    .unwrap();
+    NodeApiImpl::clear_current_module_id();
+    let metrics = api
+        .get_module_metrics("fees_0123456789abcdef0123456789abcdef")
+        .await
+        .unwrap();
+    assert_eq!(metrics.len(), 1);
+    assert!(api.get_module_metrics("cov-mod").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn module_publish_rejects_core_events_and_stamps_the_session() {
+    use blvm_node::module::api::events::EventManager;
+    use blvm_node::module::ipc::protocol::{EventPayload, ModuleMessage};
+    use blvm_node::module::traits::EventType;
+    use tokio::sync::mpsc;
+
+    let (_dir, storage) = storage_with_chain();
+    let events = Arc::new(EventManager::new());
+    let api = NodeApiImpl::with_event_manager(storage, Arc::clone(&events), "unused".into());
+    let (tx, mut rx) = mpsc::channel(4);
+    events
+        .subscribe_module("listener".into(), vec![EventType::ModuleEvent], tx)
+        .await
+        .unwrap();
+    NodeApiImpl::set_current_module_id("fees_0123456789abcdef0123456789abcdef".into());
+    let denied = api
+        .publish_event(
+            EventType::NewBlock,
+            EventPayload::NewBlock {
+                block_hash: [0; 32],
+                height: 1,
+            },
+        )
+        .await;
+    assert!(denied.is_err());
+    api.publish_event(
+        EventType::ModuleEvent,
+        EventPayload::ModuleEvent {
+            source_module: "forged".into(),
+            name: "fee".into(),
+            data: b"{}".to_vec(),
+        },
+    )
+    .await
+    .unwrap();
+    NodeApiImpl::clear_current_module_id();
+    let ModuleMessage::Event(message) = rx.recv().await.unwrap() else {
+        panic!("expected an event");
+    };
+    match message.payload {
+        EventPayload::ModuleEvent {
+            source_module,
+            name,
+            ..
+        } => {
+            assert_eq!(source_module, "fees_0123456789abcdef0123456789abcdef");
+            assert_ne!(source_module, "forged");
+            assert_eq!(name, "fee");
+        }
+        other => panic!("expected ModuleEvent, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn test_node_api_register_and_cancel_timer() {
     use async_trait::async_trait;
     use blvm_node::module::timers::manager::{TimerCallback, TimerManager};

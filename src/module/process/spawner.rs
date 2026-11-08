@@ -3,6 +3,7 @@
 //! Handles spawning module processes as separate executables with process isolation.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::process::Stdio;
 use tokio::process::{Child, Command};
 use tokio::time::{Duration, timeout};
@@ -13,7 +14,7 @@ use crate::utils::retry::{RetryConfig, retry_async_with_backoff};
 use crate::module::ipc::ModuleIpcClient;
 #[cfg(unix)]
 use crate::module::ipc::protocol::{MessageType, RequestMessage, RequestPayload};
-use crate::module::sandbox::{FileSystemSandbox, NetworkSandbox, ProcessSandbox, SandboxConfig};
+use crate::module::sandbox::{FileSystemSandbox, ProcessSandbox, SandboxConfig};
 use crate::module::traits::{ModuleContext, ModuleError};
 
 /// Spawn and manage module processes
@@ -25,11 +26,9 @@ pub struct ModuleProcessSpawner {
     /// IPC socket directory
     pub socket_dir: PathBuf,
     /// Process sandbox for resource limits
-    process_sandbox: Option<ProcessSandbox>,
+    process_sandbox: Option<Arc<ProcessSandbox>>,
     /// File system sandbox for access control
     filesystem_sandbox: Option<FileSystemSandbox>,
-    /// Network sandbox for network isolation
-    network_sandbox: NetworkSandbox,
     /// Module resource limits configuration
     resource_limits_config: Option<crate::config::ModuleResourceLimitsConfig>,
 }
@@ -56,9 +55,8 @@ impl ModuleProcessSpawner {
 
         // Initialize sandboxes with config
         let sandbox_config = SandboxConfig::with_resource_limits(&data_dir_path, &limits_config);
-        let process_sandbox = Some(ProcessSandbox::new(sandbox_config));
+        let process_sandbox = Some(Arc::new(ProcessSandbox::new(sandbox_config)));
         let filesystem_sandbox = Some(FileSystemSandbox::new(&data_dir_path));
-        let network_sandbox = NetworkSandbox::new(); // No network access by default
 
         Self {
             modules_dir: modules_dir.as_ref().to_path_buf(),
@@ -66,9 +64,13 @@ impl ModuleProcessSpawner {
             socket_dir: socket_dir.as_ref().to_path_buf(),
             process_sandbox,
             filesystem_sandbox,
-            network_sandbox,
             resource_limits_config: Some(limits_config),
         }
+    }
+
+    /// Shared sandbox so the process monitor can sample the CPU limit.
+    pub fn process_sandbox(&self) -> Option<Arc<ProcessSandbox>> {
+        self.process_sandbox.clone()
     }
 
     /// Spawn a module process

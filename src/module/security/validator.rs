@@ -105,7 +105,9 @@ impl RequestValidator {
         // Using match ensures exhaustiveness when new variants are added
         match payload {
             // Handshake is always allowed (first message)
-            RequestPayload::Handshake { .. } => Ok(ValidationResult::Allowed),
+            RequestPayload::Handshake { .. } | RequestPayload::HandshakeV2 { .. } => {
+                Ok(ValidationResult::Allowed)
+            }
             // Read-only operations - all allowed
             RequestPayload::GetBlock { .. }
             | RequestPayload::GetBlockHeader { .. }
@@ -115,6 +117,7 @@ impl RequestValidator {
             | RequestPayload::GetBlockHeight
             | RequestPayload::GetUtxo { .. }
             | RequestPayload::SubscribeEvents { .. }
+            | RequestPayload::SubscribeModuleEventNames { .. }
             // Mempool API - read-only
             | RequestPayload::GetMempoolTransactions
             | RequestPayload::GetMempoolTransaction { .. }
@@ -134,6 +137,9 @@ impl RequestValidator {
             // Additional Mempool API - read-only
             | RequestPayload::CheckTransactionInMempool { .. }
             | RequestPayload::GetFeeEstimate { .. }
+            | RequestPayload::RegisterFeeEstimators { .. }
+            | RequestPayload::SubmitFeeTable { .. }
+            | RequestPayload::GetFeeTable { .. }
             // Filesystem API - validated by sandbox
             | RequestPayload::ReadFile { .. }
             | RequestPayload::WriteFile { .. }
@@ -150,6 +156,13 @@ impl RequestValidator {
             | RequestPayload::RegisterTimer { .. }
             | RequestPayload::CancelTimer { .. }
             | RequestPayload::ScheduleTask { .. }
+            | RequestPayload::TimerCreate { .. }
+            | RequestPayload::TimerCancel { .. }
+            | RequestPayload::TimerPause { .. }
+            | RequestPayload::TimerResume { .. }
+            | RequestPayload::TimerTrigger { .. }
+            | RequestPayload::TimerGet { .. }
+            | RequestPayload::TimerList
             // Metrics and Telemetry - read-only reporting
             | RequestPayload::ReportMetric { .. }
             | RequestPayload::GetModuleMetrics { .. }
@@ -191,25 +204,12 @@ impl RequestValidator {
             | RequestPayload::SetBlockServeMaintenanceMode { .. }
             | RequestPayload::GetTxMetadata { .. }
             | RequestPayload::GetMempoolFeeRateSummary
-            | RequestPayload::RegisterCliSpec { .. } => Ok(ValidationResult::Allowed),
+            | RequestPayload::RegisterCliSpec { .. }
+            | RequestPayload::HttpRequest { .. }
+            | RequestPayload::HttpPost { .. }
+            | RequestPayload::StreamSend { .. }
+            | RequestPayload::StreamClose { .. } => Ok(ValidationResult::Allowed),
         }
-    }
-
-    /// Validate that a module cannot modify consensus state
-    ///
-    /// This is a safeguard - modules should never have write access,
-    /// but we validate explicitly to be defensive.
-    pub fn validate_no_consensus_modification(
-        &self,
-        module_id: &str,
-        operation: &str,
-    ) -> Result<(), ModuleError> {
-        // IPC paths are treated as read-only with respect to consensus; nothing here rejects yet.
-        debug!(
-            "Validated no consensus modification for module {} operation: {}",
-            module_id, operation
-        );
-        Ok(())
     }
 
     /// Validate resource limits (rate limiting, etc.)

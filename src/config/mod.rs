@@ -17,6 +17,9 @@ pub use rpc::*;
 pub mod mempool;
 pub use mempool::*;
 
+pub mod fees;
+pub use fees::*;
+
 pub mod ibd;
 pub use ibd::*;
 
@@ -93,14 +96,14 @@ pub fn default_enabled_modules() -> HashMap<String, String> {
     [
         ("blvm-miniscript", "0.1.*"),
         ("blvm-zmq", "0.1.*"),
-        ("blvm-wallet-index", "0.1.*"),
+        ("blvm-index", "0.1.*"),
     ]
     .into_iter()
     .map(|(name, constraint)| (name.to_string(), constraint.to_string()))
     .collect()
 }
 
-/// Loopback ZeroMQ binds for a fresh install. Wallet-index ports stay closed until configured.
+/// Loopback ZeroMQ binds for a fresh install. Electrum and Esplora stay closed until `[services]` sets `listen`.
 fn default_module_configs() -> HashMap<String, HashMap<String, String>> {
     let zmq = [
         ("hashblock", "tcp://127.0.0.1:28332"),
@@ -290,7 +293,7 @@ pub struct ModuleConfig {
 
     /// Enabled modules and optional version constraints.
     ///
-    /// The baseline is `blvm-miniscript`, `blvm-zmq`, and `blvm-wallet-index` at `0.1.*`.
+    /// The baseline is `blvm-miniscript`, `blvm-zmq`, and `blvm-index` at `0.1.*`.
     /// A `[modules]` table starts from that set. An inline `name = "0.1.*"` adds or replaces
     /// one pin. A present `enabled_modules` key replaces the whole set; an empty list loads
     /// only binaries already on disk. `disabled_modules` wins over a pin at load time.
@@ -878,7 +881,7 @@ pub struct NodeConfig {
     pub signet_challenge: Option<String>,
 
     /// Module system configuration. Omitted in a config file ⇒ `ModuleConfig::default()`
-    /// (the three default modules, bootstrap if missing).
+    /// (`blvm-miniscript`, `blvm-zmq`, and `blvm-index`, bootstrap if missing).
     #[serde(default = "default_modules_option")]
     pub modules: Option<ModuleConfig>,
 
@@ -965,11 +968,63 @@ pub struct NodeConfig {
     /// Mempool configuration
     pub mempool: Option<MempoolPolicyConfig>,
 
+    /// Fee estimator. Absent means the built-in estimator with its defaults.
+    #[serde(default)]
+    pub fees: Option<FeeEstimatorConfig>,
+
     /// RBF (Replace-By-Fee) configuration
     pub rbf: Option<RbfConfig>,
 
     /// REST API configuration
     pub rest_api: Option<RestApiConfig>,
+
+    /// Module timer service (`[timers]`).
+    #[serde(default)]
+    pub timers: crate::module::timers::TimerConfig,
+
+    /// Per-module timer caps (`[module_timers.<name>]`).
+    #[serde(default)]
+    pub module_timers: std::collections::HashMap<String, crate::module::timers::ModuleTimerLimits>,
+
+    /// Operator HTTP allow-list per module (`[module_network.<id>]`). Not `[modules]`.
+    #[serde(default)]
+    pub module_network: std::collections::HashMap<String, ModuleNetworkConfig>,
+
+    /// Node-wide broker proxy (`[network] http_proxy`).
+    #[serde(default)]
+    pub network: Option<BrokerNetworkConfig>,
+
+    /// Inbound listeners the node binds for a module (`[services.<name>]`).
+    #[serde(default)]
+    pub services: std::collections::HashMap<String, HostedServiceConfig>,
+}
+
+/// `[services.<name>]`. An unset `listen` does not bind.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HostedServiceConfig {
+    #[serde(default)]
+    pub module: String,
+    #[serde(default)]
+    pub listen: Option<String>,
+    #[serde(default)]
+    pub tls_cert: Option<String>,
+    /// Unset uses the design example of 256.
+    #[serde(default)]
+    pub max_connections: Option<u32>,
+}
+
+/// `[module_network.<id>] http_allow = ["https://mempool.space"]`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModuleNetworkConfig {
+    #[serde(default)]
+    pub http_allow: Vec<String>,
+}
+
+/// `[network] http_proxy = "socks5h://127.0.0.1:9050"`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BrokerNetworkConfig {
+    #[serde(default)]
+    pub http_proxy: Option<String>,
 }
 
 /// Transport preference configuration (serializable)
@@ -1059,7 +1114,13 @@ impl Default for NodeConfig {
             logging: None,
             mempool: None,
             rbf: None,
+            fees: None,
             rest_api: None,
+            timers: crate::module::timers::TimerConfig::default(),
+            module_timers: std::collections::HashMap::new(),
+            module_network: std::collections::HashMap::new(),
+            network: None,
+            services: std::collections::HashMap::new(),
         }
     }
 }
@@ -1156,6 +1217,12 @@ impl NodeConfig {
         }
         if let Some(ref mut mempool) = self.mempool {
             mempool.mempool_persistence_path = expand_tilde_path(&mempool.mempool_persistence_path);
+        }
+        if let Some(ref mut fees) = self.fees {
+            fees.state_path = expand_tilde_path(&fees.state_path);
+            if let Some(path) = fees.eval_log_path.as_ref() {
+                fees.eval_log_path = Some(expand_tilde_path(path));
+            }
         }
     }
 
@@ -1312,6 +1379,10 @@ impl NodeConfig {
                     mempool.mempool_expiry_hours
                 );
             }
+        }
+
+        if let Some(ref fees) = self.fees {
+            fees.validate()?;
         }
 
         if let Some(ref ibd) = self.ibd_protection {

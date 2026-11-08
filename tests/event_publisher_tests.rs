@@ -2,9 +2,7 @@
 
 use blvm_node::module::api::events::EventManager;
 use blvm_node::node::event_publisher::EventPublisher;
-use blvm_node::{Block, BlockHeader, Hash, Transaction};
-use blvm_protocol::tx_inputs;
-use blvm_protocol::tx_outputs;
+use blvm_node::{Block, BlockHeader, Hash};
 use std::sync::Arc;
 
 fn create_test_block() -> Block {
@@ -18,18 +16,6 @@ fn create_test_block() -> Block {
             nonce: 0,
         },
         transactions: vec![].into_boxed_slice(),
-    }
-}
-
-fn create_test_transaction() -> Transaction {
-    Transaction {
-        version: 1,
-        inputs: tx_inputs![],
-        outputs: tx_outputs![blvm_protocol::TransactionOutput {
-            value: 1000,
-            script_pubkey: vec![0x51], // OP_1
-        }],
-        lock_time: 0,
     }
 }
 
@@ -55,33 +41,6 @@ async fn test_publish_new_block() {
 }
 
 #[tokio::test]
-async fn test_publish_new_transaction() {
-    let event_manager = Arc::new(EventManager::new());
-    let publisher = EventPublisher::new(event_manager);
-    let tx = create_test_transaction();
-    let tx_hash: Hash = [0xbb; 32];
-
-    // Should publish without error
-    publisher.publish_new_transaction(&tx, &tx_hash, true).await;
-}
-
-#[tokio::test]
-async fn test_publish_new_transaction_mempool_entry() {
-    let event_manager = Arc::new(EventManager::new());
-    let publisher = EventPublisher::new(event_manager);
-    let tx = create_test_transaction();
-    let tx_hash: Hash = [0xcc; 32];
-
-    // Test with is_mempool_entry = true
-    publisher.publish_new_transaction(&tx, &tx_hash, true).await;
-
-    // Test with is_mempool_entry = false
-    publisher
-        .publish_new_transaction(&tx, &tx_hash, false)
-        .await;
-}
-
-#[tokio::test]
 async fn test_publish_multiple_blocks() {
     let event_manager = Arc::new(EventManager::new());
     let publisher = EventPublisher::new(event_manager);
@@ -98,16 +57,3 @@ async fn test_publish_multiple_blocks() {
     }
 }
 
-#[tokio::test]
-async fn test_publish_multiple_transactions() {
-    let event_manager = Arc::new(EventManager::new());
-    let publisher = EventPublisher::new(event_manager);
-
-    for i in 0..5 {
-        let tx = create_test_transaction();
-        let mut tx_hash = [0u8; 32];
-        tx_hash[0] = i;
-
-        publisher.publish_new_transaction(&tx, &tx_hash, true).await;
-    }
-}

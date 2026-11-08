@@ -60,17 +60,10 @@ async fn module_manager_dependency_helpers_without_modules() {
 
     assert!(
         manager
-            .validate_optional_dependencies("missing-module")
-            .await
-            .is_empty()
-    );
-    assert!(
-        manager
             .get_dependent_modules("missing-module")
             .await
             .is_empty()
     );
-    assert!(manager.can_unload_module("missing-module").await.unwrap());
 }
 
 #[tokio::test]

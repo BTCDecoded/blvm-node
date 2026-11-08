@@ -20,11 +20,12 @@ With no `[block_validation]` table, the binary seeds mainnet `912683` with the c
 
 1. [RBF Configuration](#rbf-configuration)
 2. [Mempool Policies](#mempool-policies)
-3. [Network Configuration](#network-configuration)
-4. [Storage Configuration](#storage-configuration)
-5. [Module Configuration](#module-configuration)
-6. [RPC Configuration](#rpc-configuration)
-7. [Example Configurations](#example-configurations)
+3. [Fee Estimator](#fee-estimator)
+4. [Network Configuration](#network-configuration)
+5. [Storage Configuration](#storage-configuration)
+6. [Module Configuration](#module-configuration)
+7. [RPC Configuration](#rpc-configuration)
+8. [Example Configurations](#example-configurations)
 
 ## RBF Configuration
 
@@ -65,6 +66,42 @@ mempool_expiry_hours = 336
 persist_mempool = false
 mempool_persistence_path = "data/mempool.dat"
 ```
+
+## Fee Estimator
+
+Omit `[fees]` to use the built-in defaults. The estimator stays on. Bucket spacing, decays, and success thresholds are fixed. Setting both `history_enabled` and `mempool_enabled` to false is a startup error. Every other key is rejected by name when it is outside the range below.
+
+`health_required` omitted is false on regtest and true on every other network.
+
+```toml
+[fees]
+enabled = true
+history_enabled = true
+mempool_enabled = true
+allow_mempool_only = true
+
+mempool_horizon_blocks = 1            # 1..=12
+mempool_percentile_conservative = 50  # 1..=99; a lower percentile is a higher rate
+mempool_percentile_economical = 75    # 1..=99, and >= conservative
+projection_full_threshold = 0.95      # 0.0 disables the short-block floor
+
+health_window_blocks = 6              # 1..=144
+health_min_ratio = 0.75               # 0.0..=1.0
+# health_required = true
+
+recompute_interval_secs = 7           # 1..=300
+multiplier = 1.0                      # 0.5..=10.0; scales the estimate, not the floor
+# min_fee_sat_per_kvb = 1000          # optional extra floor, sat/kvB, with the relay floor
+
+state_path = "data/fee_estimator.dat"
+persist_interval_blocks = 6           # 1..=1008
+max_state_age_blocks = 6048
+# eval_log_path = "data/fee-eval.jsonl"  # optional; one JSONL line per accepted block
+
+lnd_targets = [1, 2, 3, 6, 12, 24, 48, 144, 504, 1008]
+```
+
+`lnd_targets` is used only by `GET /api/v1/fees/lnd`. JSON-RPC `estimatesmartfee` and the REST fee routes are in [RPC_REFERENCE.md](./RPC_REFERENCE.md). When `eval_log_path` is set, each accepted block appends the pre-block quotes and that block's fee-rate band. `scripts/score-fee-eval.py` scores the file.
 
 ## Network Configuration
 
@@ -232,4 +269,5 @@ max_descendant_count = 25
 
 - [RBF_CONFIGURATION.md](./RBF_CONFIGURATION.md) - Detailed RBF configuration
 - [MEMPOOL_POLICIES.md](./MEMPOOL_POLICIES.md) - Detailed mempool policy configuration
+- [RPC_REFERENCE.md](./RPC_REFERENCE.md) - `estimatesmartfee` and the REST fee routes
 

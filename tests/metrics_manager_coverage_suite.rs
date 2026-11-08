@@ -70,3 +70,28 @@ async fn metrics_manager_format_prometheus() {
     assert!(text.contains("histogram"));
     assert!(text.contains("module_id=\"mod-p\""));
 }
+
+#[tokio::test]
+async fn module_metrics_are_appended_for_the_metrics_endpoint() {
+    use blvm_node::node::metrics::MetricsCollector;
+    use std::sync::Arc;
+
+    let mgr = Arc::new(MetricsManager::new());
+    mgr.report_metric(
+        "mod-p".into(),
+        Metric {
+            name: "depth".into(),
+            value: MetricValue::Gauge(1.5),
+            labels: HashMap::new(),
+            timestamp: 0,
+        },
+    )
+    .await;
+    let collector = MetricsCollector::new();
+    collector.set_module_metrics(Arc::clone(&mgr));
+    let text = collector.module_prometheus().await;
+    assert!(text.contains("blvm_module_depth"));
+    assert!(text.contains("module_id=\"mod-p\""));
+    mgr.clear_module_metrics("mod-p").await;
+    assert!(collector.module_prometheus().await.is_empty());
+}

@@ -10331,7 +10331,17 @@ impl ParallelIBD {
 
         *utxo_set = new_utxo_set;
         match result {
-            ValidationResult::Valid => Ok((tx_ids, utxo_delta, undo_log)),
+            ValidationResult::Valid => {
+                let hash = blockstore.get_block_hash(block);
+                let mtp = recent_headers
+                    .filter(|headers| !headers.is_empty())
+                    .map(|headers| blvm_protocol::bip113::get_median_time_past(headers))
+                    .unwrap_or(block.header.timestamp);
+                crate::module::timers::dispatch_chain(
+                    crate::module::timers::ChainEvent::Connected { height, hash, mtp },
+                );
+                Ok((tx_ids, utxo_delta, undo_log))
+            }
             ValidationResult::Invalid(reason) => Err(anyhow::anyhow!(
                 "Block validation failed at height {}: {}",
                 height,

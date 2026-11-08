@@ -205,6 +205,9 @@ fn prepare_linux(
     for path in RO_DIRS {
         add_if_exists(&ruleset, Path::new(path), ro)?;
     }
+    // GPU builds link libcudart from here. The loader has to read it.
+    add_if_exists(&ruleset, Path::new("/opt/cuda"), ro)?;
+    add_if_exists(&ruleset, Path::new("/opt/cuda/lib64"), ro)?;
     for path in RO_FILES {
         add_if_exists(&ruleset, Path::new(path), FS_READ_FILE)?;
     }

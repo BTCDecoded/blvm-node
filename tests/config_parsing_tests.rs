@@ -31,10 +31,13 @@ fn test_module_config_default() {
     assert_eq!(
         config
             .enabled_modules
-            .get("blvm-wallet-index")
+            .get("blvm-index")
             .map(String::as_str),
         Some("0.1.*")
     );
+    assert!(config.enabled_modules.get("blvm-wallet-index").is_none());
+    assert!(config.enabled_modules.get("blvm-fees").is_none());
+    assert!(config.enabled_modules.get("blvm-upstream").is_none());
     assert!(config.registry_url.is_some());
     assert!(config.disabled_modules.is_empty());
     assert!(config.module_database_backend.is_none());
@@ -176,7 +179,7 @@ transport_preference = "tcponly"
     assert_eq!(
         modules
             .enabled_modules
-            .get("blvm-wallet-index")
+            .get("blvm-index")
             .map(String::as_str),
         Some("0.1.*")
     );
@@ -189,7 +192,7 @@ transport_preference = "tcponly"
             .map(String::as_str),
         Some("tcp://127.0.0.1:28332")
     );
-    assert!(modules.module_configs.get("blvm-wallet-index").is_none());
+    assert!(modules.module_configs.get("blvm-index").is_none());
 }
 
 #[test]
@@ -219,7 +222,7 @@ blvm-payment = "0.1.*"
     assert_eq!(
         modules
             .enabled_modules
-            .get("blvm-wallet-index")
+            .get("blvm-index")
             .map(String::as_str),
         Some("0.1.*")
     );
@@ -283,7 +286,7 @@ blvm-zmq = "0.3.*"
     assert_eq!(
         modules
             .enabled_modules
-            .get("blvm-wallet-index")
+            .get("blvm-index")
             .map(String::as_str),
         Some("0.1.*")
     );
@@ -320,7 +323,7 @@ enabled_modules = ["blvm-miniscript", "blvm-zmq"]
             .map(String::as_str),
         Some("*")
     );
-    assert!(modules.enabled_modules.get("blvm-wallet-index").is_none());
+    assert!(modules.enabled_modules.get("blvm-index").is_none());
 }
 
 #[test]
@@ -350,7 +353,7 @@ hashblock = "tcp://127.0.0.1:28332"
     assert_eq!(
         modules
             .enabled_modules
-            .get("blvm-wallet-index")
+            .get("blvm-index")
             .map(String::as_str),
         Some("0.1.*")
     );

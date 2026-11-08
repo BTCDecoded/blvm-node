@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod known_trees;
-pub use known_trees::KNOWN_TREE_NAMES;
+pub use known_trees::{KNOWN_TREE_NAMES, is_removed_module_tree};
 
 #[cfg(feature = "heed3")]
 mod heed3_impl;
@@ -242,7 +242,10 @@ pub fn commit_keyed(ops: &[(&dyn Tree, &[u8], Option<&[u8]>)]) -> Result<()> {
         return Ok(());
     }
     #[cfg(feature = "heed3")]
-    if ops.iter().all(|(tree, _, _)| tree.as_heed3_tree().is_some()) {
+    if ops
+        .iter()
+        .all(|(tree, _, _)| tree.as_heed3_tree().is_some())
+    {
         let trees: Vec<&Heed3Tree> = ops
             .iter()
             .map(|(tree, _, _)| tree.as_heed3_tree().expect("heed3 tree"))
@@ -739,7 +742,7 @@ mod sled_impl {
         }
 
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
-            if name.starts_with("module_") || name == "modules" {
+            if super::is_removed_module_tree(name) {
                 return Err(anyhow::anyhow!(
                     "Module storage has been removed. Use blvm_sdk::module::open_module_db."
                 ));
@@ -890,6 +893,10 @@ pub(crate) mod redb_impl {
     static VAULTS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("vaults");
     static POOLS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pools");
     static BATCHES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("batches");
+    static MODULE_TIMERS_TABLE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("module_timers");
+    static MODULE_TIMER_JOURNAL_TABLE: TableDefinition<&[u8], &[u8]> =
+        TableDefinition::new("module_timer_journal");
     // Module DB tables (used by blvm-sdk open_module_db)
     static SCHEMA_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("schema");
     static ITEMS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("items");
@@ -1010,6 +1017,8 @@ pub(crate) mod redb_impl {
                             let _ = write_txn.open_table(VAULTS_TABLE)?;
                             let _ = write_txn.open_table(POOLS_TABLE)?;
                             let _ = write_txn.open_table(BATCHES_TABLE)?;
+                            let _ = write_txn.open_table(MODULE_TIMERS_TABLE)?;
+                            let _ = write_txn.open_table(MODULE_TIMER_JOURNAL_TABLE)?;
                             // Module storage table
                             let _ = write_txn.open_table(INVALID_BLOCKS_TABLE)?;
                             let _ = write_txn.open_table(CHAIN_TIPS_TABLE)?;
@@ -1086,6 +1095,8 @@ pub(crate) mod redb_impl {
                 let _ = write_txn.open_table(VAULTS_TABLE)?;
                 let _ = write_txn.open_table(POOLS_TABLE)?;
                 let _ = write_txn.open_table(BATCHES_TABLE)?;
+                let _ = write_txn.open_table(MODULE_TIMERS_TABLE)?;
+                let _ = write_txn.open_table(MODULE_TIMER_JOURNAL_TABLE)?;
                 // Module DB tables (blvm-sdk open_module_db)
                 let _ = write_txn.open_table(SCHEMA_TABLE)?;
                 let _ = write_txn.open_table(ITEMS_TABLE)?;
@@ -1132,6 +1143,8 @@ pub(crate) mod redb_impl {
                 "vaults" => Some(&VAULTS_TABLE),
                 "pools" => Some(&POOLS_TABLE),
                 "batches" => Some(&BATCHES_TABLE),
+                "module_timers" => Some(&MODULE_TIMERS_TABLE),
+                "module_timer_journal" => Some(&MODULE_TIMER_JOURNAL_TABLE),
                 // Module DB tables (blvm-sdk open_module_db)
                 "schema" => Some(&SCHEMA_TABLE),
                 "items" => Some(&ITEMS_TABLE),
@@ -1260,7 +1273,7 @@ pub(crate) mod redb_impl {
         }
 
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
-            if name.starts_with("module_") || name == "modules" {
+            if super::is_removed_module_tree(name) {
                 return Err(anyhow::anyhow!(
                     "Module storage has been removed. Use blvm_sdk::module::open_module_db."
                 ));
@@ -2317,7 +2330,7 @@ pub mod rocksdb_impl {
         }
 
         fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
-            if name.starts_with("module_") || name == "modules" {
+            if super::is_removed_module_tree(name) {
                 return Err(anyhow::anyhow!(
                     "Module storage has been removed. Use blvm_sdk::module::open_module_db."
                 ));

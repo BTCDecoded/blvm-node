@@ -18,6 +18,7 @@ blvm-node implements Phase 2 and 3 high availability features for production dep
 - Storage metrics (database size, UTXO count)
 - RPC metrics (requests processed, errors)
 - Mempool metrics (transaction count, size)
+- Module metrics reported through the module API (`blvm_module_*`, labeled by `module_id`). Unload removes that module's series.
 
 **Example** (use the same host:port as `--rpc-addr`; mainnet **8332**, testnet **18332**, regtest **18443**):
 

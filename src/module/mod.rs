@@ -13,9 +13,20 @@
 //! - **State Separation**: Module state is completely separate from consensus state
 
 pub mod api;
+
+/// Module ids are `{name}_{32 hex}`. Names may contain underscores.
+/// A suffix that is not 32 hex characters is part of the name.
+pub fn module_name_from_id(module_id: &str) -> &str {
+    if let Some((name, suffix)) = module_id.rsplit_once('_') {
+        if suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return name;
+        }
+    }
+    module_id
+}
 pub mod encryption;
+pub mod http;
 pub mod github_release_install;
-pub mod hooks;
 pub mod integration;
 pub mod inter_module;
 pub mod ipc;
@@ -28,6 +39,7 @@ pub mod registry;
 pub mod rpc;
 pub mod sandbox;
 pub mod security;
+pub mod services;
 pub mod timers;
 pub mod traits;
 pub mod validation;

@@ -67,6 +67,7 @@ const HELP_COMMANDS: &[&str] = &[
     "generatetoaddress",
     "submitblock",
     "estimatesmartfee",
+    "listfeeestimators",
     "stop",
     "uptime",
     "getmemoryinfo",
@@ -78,6 +79,7 @@ const HELP_COMMANDS: &[&str] = &[
     "reloadmodule",
     "listmodules",
     "getmoduleclispecs",
+    "getmoduleaudit",
     "runmodulecli",
 ];
 
@@ -555,6 +557,29 @@ impl ControlRpc {
         Ok(json!("Module reloaded"))
     }
 
+    /// Recent module API audit entries, oldest first within the returned window.
+    ///
+    /// Params: [limit] (optional number, default 100, capped at 1000)
+    pub async fn getmoduleaudit(&self, params: &Value) -> RpcResult<Value> {
+        debug!("RPC: getmoduleaudit");
+        let limit = match params.get(0) {
+            None => 100u64,
+            Some(value) => value.as_u64().ok_or_else(|| {
+                RpcError::invalid_params("getmoduleaudit limit must be a number".to_string())
+            })?,
+        };
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX).min(1000);
+        let mgr = self.module_manager.as_ref().ok_or_else(|| {
+            RpcError::internal_error("Module system not available".to_string())
+        })?;
+        let manager = mgr.lock().await;
+        let Some(hub) = manager.api_hub_arc() else {
+            return Ok(json!([]));
+        };
+        let entries = hub.lock().await.get_audit_log(limit);
+        Ok(json!(entries))
+    }
+
     /// List loaded modules
     ///
     /// Params: [] (no parameters)
@@ -705,6 +730,9 @@ impl ControlRpc {
                 }
                 "getmoduleclispecs" => {
                     "Get CLI specs from all loaded modules for dynamic CLI building.\n\nResult:\n{ \"sync-policy\": {...}, \"hello\": {...} } (object mapping CLI name to spec)\n\nExamples:\n> bitcoin-cli getmoduleclispecs"
+                }
+                "getmoduleaudit" => {
+                    "Return recent module API audit entries.\n\nArguments:\n1. limit (numeric, optional, default=100) Number of newest entries to return. Capped at 1000.\n\nResult:\n[ { \"module_id\": \"...\", \"api_call\": \"...\", \"timestamp\": n, \"success\": true }, ... ]\n\nExamples:\n> bitcoin-cli getmoduleaudit\n> bitcoin-cli getmoduleaudit 20"
                 }
                 "runmodulecli" => {
                     "Run a module CLI subcommand.\n\nArguments:\n1. module_name (string, required) CLI name from getmoduleclispecs\n2. subcommand (string, required) Subcommand name\n3. ...args (strings, optional) Arguments for the subcommand\n\nResult:\n{ \"stdout\": \"...\", \"stderr\": \"...\", \"exit_code\": 0 }\n\nExamples:\n> bitcoin-cli runmodulecli \"sync-policy\" \"list\""

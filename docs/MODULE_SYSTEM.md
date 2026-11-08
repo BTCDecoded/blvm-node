@@ -289,6 +289,16 @@ The manifest is organized into logical sections:
 5. **Configuration Schema**: Descriptions of configurable options
 6. **Advanced Features** (optional): Signatures, binary verification, payment config
 
+## Module timers
+
+Modules schedule work through the node timer service (`TimerCreate` and the related IPC calls). The node owns the clock, the heap, and delivery. A fire is an invocation, `InvocationType::Timer`, and the module answers with `InvocationResultPayload::Timer`. Events are not used for this, because the event bus can drop a message.
+
+`[timers]` in the node config sets the quotas. `[module_timers.<name>]` overrides `max_timers` for one module. The owner is the module name from the handshake.
+
+Durable timers live in the node database tree `module_timers`, not in the module's own database. Unload and disconnect detach them; they stay in the tree and resume when the module connects again. `delete_module_timers` removes that module's records. The node has no uninstall path that calls it yet. `Persist::Durable { audit: true }` also appends to `module_timer_journal`. That journal detects a changed record. It does not stop someone who can rewrite the tree and recompute every hash. `gettimerjournal` and `verifytimerjournal` read and check it.
+
+The legacy `RegisterTimer`, `CancelTimer`, and `ScheduleTask` calls answer `timer_unsupported:use TimerCreate`.
+
 ## Module Storage
 
 Each module has its **own separate database** at `data/modules/<name>/db/`. By default, modules align with the node’s backend choice (**`auto` → heed3** in typical release builds; module subprocesses use **heed3_module** when the chain uses heed3). Supported backends include **heed3**, **rocksdb**, **redb**, and **sled**. Configurable via `database_backend` in module config or `[modules.<name>]`; when not set, inheritance follows `module_subprocess_database_backend_preference` and related merge rules.

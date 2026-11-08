@@ -249,8 +249,9 @@ impl ProcessSandbox {
 
     /// Apply resource limits to a process
     ///
-    /// On Unix (Linux): uses `prlimit` for memory, FDs, processes; CPU % not yet supported.
-    /// On Windows: uses job objects (memory limit, kill-on-close). CPU % not yet supported.
+    /// On Unix (Linux): uses `prlimit` for memory, FDs, and processes.
+    /// CPU percentage is sampled by the process monitor (`monitor_resources`), not `prlimit`.
+    /// On Windows: uses job objects (memory limit, kill-on-close). CPU percentage uses the same monitor.
     pub fn apply_limits(&self, pid: Option<u32>) -> Result<(), ModuleError> {
         let limits = &self.config.resource_limits;
 
@@ -327,13 +328,7 @@ impl ProcessSandbox {
                         }
                     }
 
-                    // CPU percentage limits require cgroups/scheduling policy; not enforced via prlimit.
-                    if limits.max_cpu_percent.is_some() {
-                        debug!(
-                            "CPU percentage limit ({:?}) is monitored via monitor_resources, not prlimit",
-                            limits.max_cpu_percent
-                        );
-                    }
+                    // CPU percentage is not a prlimit. The process monitor samples it.
 
                     // Return early since we've applied limits via prlimit
                     return Ok(());

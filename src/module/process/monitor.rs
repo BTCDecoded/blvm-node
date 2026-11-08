@@ -7,6 +7,7 @@ use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use crate::module::process::spawner::ModuleProcess;
+use crate::module::sandbox::process::{ProcessSandbox, ResourceLimits};
 use crate::module::traits::ModuleError;
 use std::sync::Arc;
 
@@ -122,6 +123,7 @@ impl ModuleProcessMonitor {
         &self,
         module_name: String,
         shared_process: Arc<tokio::sync::Mutex<ModuleProcess>>,
+        resource_sandbox: Option<Arc<ProcessSandbox>>,
     ) -> Result<(), ModuleError> {
         info!("Starting health monitoring for module: {}", module_name);
 
@@ -210,6 +212,42 @@ impl ModuleProcessMonitor {
                         "Module {} has no IPC client for heartbeat check",
                         module_name
                     );
+                }
+            }
+
+            if let Some(sandbox) = resource_sandbox.as_ref() {
+                let pid = shared_process.lock().await.id();
+                if let Some(pid) = pid {
+                    match sandbox.monitor_resources(Some(pid)).await {
+                        Ok(usage) => {
+                            let configured = &sandbox.config().resource_limits;
+                            let cpu_limits = ResourceLimits {
+                                max_cpu_percent: configured.max_cpu_percent,
+                                max_memory_bytes: None,
+                                max_file_descriptors: None,
+                                max_child_processes: None,
+                            };
+                            if cpu_limits.max_cpu_percent.is_some()
+                                && usage.exceeds_limits(&cpu_limits)
+                            {
+                                let error_msg = format!(
+                                    "Module {module_name} exceeded CPU limit: {:.1}% > {}%",
+                                    usage.cpu_percent,
+                                    cpu_limits.max_cpu_percent.unwrap_or(0)
+                                );
+                                warn!("{error_msg}");
+                                let _ = shared_process.lock().await.kill().await;
+                                let _ = self.crash_tx.send((
+                                    module_name.clone(),
+                                    ModuleError::ModuleCrashed(error_msg),
+                                ));
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Module {module_name} CPU sample failed: {e}");
+                        }
+                    }
                 }
             }
 

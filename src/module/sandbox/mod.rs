@@ -5,9 +5,7 @@
 
 pub mod filesystem;
 pub mod landlock;
-pub mod network;
 pub mod process;
 
 pub use filesystem::FileSystemSandbox;
-pub use network::NetworkSandbox;
 pub use process::{ProcessSandbox, ResourceLimits, SandboxConfig};

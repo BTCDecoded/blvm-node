@@ -46,7 +46,7 @@ pub fn builtin_default_module_repo(name: &str) -> Option<&'static str> {
     match name {
         "blvm-miniscript" => Some("BTCDecoded/blvm-miniscript"),
         "blvm-zmq" => Some("BTCDecoded/blvm-zmq"),
-        "blvm-wallet-index" => Some("BTCDecoded/blvm-wallet-index"),
+        "blvm-index" => Some("BTCDecoded/blvm-index"),
         _ => None,
     }
 }
@@ -326,8 +326,8 @@ mod tests {
             Some("BTCDecoded/blvm-zmq")
         );
         assert_eq!(
-            builtin_default_module_repo("blvm-wallet-index"),
-            Some("BTCDecoded/blvm-wallet-index")
+            builtin_default_module_repo("blvm-index"),
+            Some("BTCDecoded/blvm-index")
         );
         assert!(builtin_default_module_repo("blvm-payment").is_none());
     }

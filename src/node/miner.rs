@@ -639,7 +639,7 @@ impl TransactionSelector {
 }
 
 /// Header, a 3-byte transaction count, and a coinbase that will gain a witness commitment.
-const TEMPLATE_RESERVE_WEIGHT: u64 = 4_000;
+pub(crate) const TEMPLATE_RESERVE_WEIGHT: u64 = 4_000;
 const TEMPLATE_RESERVE_BYTES: usize = (TEMPLATE_RESERVE_WEIGHT / 4) as usize;
 
 /// BIP141 weight: `3 × stripped size + total size`.
@@ -1422,6 +1422,7 @@ impl MiningCoordinator {
             .chain()
             .get_tip_hash_and_height()
             .map_err(|e| anyhow::anyhow!("Failed to get chain tip: {e}"))?;
+        let old_bits = storage.chain().get_tip_header().ok().flatten().map(|header| header.bits);
         let connect_height = tip_height + 1;
 
         let mut utxo = match storage.open_engine_resume_snapshot()? {
@@ -1452,15 +1453,37 @@ impl MiningCoordinator {
         if !accepted {
             anyhow::bail!("Mined block rejected at height {connect_height}");
         }
-        self.mempool.remove_for_connected_block(&block.transactions);
+        let block_hash = storage.blocks().get_block_hash(&block);
+        let obs = crate::node::fee_estimator::block_observation(
+            &block,
+            &witnesses,
+            connect_height,
+            block_hash,
+        );
+        self.mempool
+            .remove_for_connected_block_at(obs, &block.transactions);
 
         info!("Mined block connected at height {connect_height}");
         if let Some(ep) = &self.event_publisher {
-            let block_hash = storage.blocks().get_block_hash(&block);
-            ep.publish_new_block(&block, &block_hash, connect_height)
+            let mtp = storage
+                .blocks()
+                .headers_before_height_for_mtp(connect_height)
+                .ok()
+                .filter(|headers| !headers.is_empty())
+                .map(|headers| blvm_protocol::bip113::get_median_time_past(&headers))
+                .unwrap_or(block.header.timestamp);
+            ep.publish_new_block_at(&block, &block_hash, connect_height, mtp)
                 .await;
             ep.publish_block_mined(&block_hash, connect_height, None)
                 .await;
+            if let Some(old_bits) = old_bits.filter(|bits| *bits != block.header.bits) {
+                ep.publish_difficulty_adjusted(
+                    old_bits as u32,
+                    block.header.bits as u32,
+                    connect_height,
+                )
+                .await;
+            }
         }
         Ok(())
     }

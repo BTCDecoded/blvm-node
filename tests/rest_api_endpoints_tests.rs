@@ -305,7 +305,7 @@ mod tests {
     #[tokio::test]
     async fn test_fees_estimate() {
         let mining = create_test_mining_rpc();
-        let result = fees::get_fee_estimate(&mining, Some(6)).await;
+        let result = fees::get_fee_estimate(&mining, Some(6), None).await;
 
         assert!(result.is_ok());
         let estimate = result.unwrap();
@@ -319,7 +319,7 @@ mod tests {
     #[tokio::test]
     async fn test_fees_estimate_default() {
         let mining = create_test_mining_rpc();
-        let result = fees::get_fee_estimate(&mining, None).await;
+        let result = fees::get_fee_estimate(&mining, None, None).await;
 
         assert!(result.is_ok());
         let estimate = result.unwrap();

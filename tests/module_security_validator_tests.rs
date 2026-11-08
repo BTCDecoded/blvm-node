@@ -71,16 +71,6 @@ fn test_validator_allows_subscribe_events() {
 }
 
 #[test]
-fn test_validator_no_consensus_modification() {
-    let validator = RequestValidator::new();
-
-    // All current operations are read-only, so this should always pass
-    // When write operations are added, they should be rejected here
-    let result = validator.validate_no_consensus_modification("test-module", "GetChainTip");
-    assert!(result.is_ok());
-}
-
-#[test]
 fn test_validator_concurrent_requests() {
     use std::sync::Arc;
     let validator = Arc::new(RequestValidator::new());

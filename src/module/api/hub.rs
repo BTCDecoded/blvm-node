@@ -23,10 +23,8 @@ pub struct ModuleApiHub {
     /// Request validator for consensus protection
     request_validator: RequestValidator,
     /// Request audit log (for security tracking) - bounded to last 1000 entries
-    #[allow(dead_code)]
     audit_log: VecDeque<AuditEntry>,
     /// Maximum audit log size
-    #[allow(dead_code)]
     max_audit_entries: usize,
     /// Per-module rate limiters (token bucket algorithm, same as RPC)
     rate_limiters: Arc<Mutex<HashMap<String, ModuleRateLimiter>>>,
@@ -34,16 +32,25 @@ pub struct ModuleApiHub {
     default_rate_limit_burst: u32,
     /// Default rate limit rate (requests per second)
     default_rate_limit_rate: u32,
+    /// Outbound HTTP broker. Default policy is deny.
+    http_broker: crate::module::http::HttpBroker,
+    /// Inbound listeners. `start` installs the manager's host.
+    service_host: crate::module::services::ServiceHost,
 }
 
 /// Audit entry for tracking module API usage
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields are used by external consumers of the API
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct AuditEntry {
     pub module_id: String,
     pub api_call: String,
     pub timestamp: u64,
     pub success: bool,
+    /// Set for brokered HTTP. Absent on other API calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// HTTP status, when the broker got a response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
 }
 
 /// Token bucket rate limiter for module requests
@@ -108,7 +115,19 @@ impl ModuleApiHub {
             rate_limiters: Arc::new(Mutex::new(HashMap::new())),
             default_rate_limit_burst: 1000, // Higher than RPC (modules may make more calls)
             default_rate_limit_rate: 100,   // 100 req/sec per module
+            http_broker: crate::module::http::HttpBroker::default(),
+            service_host: crate::module::services::ServiceHost::new(),
         }
+    }
+
+    /// Operator allow-list and optional proxy for the HTTP broker.
+    pub fn set_http_policy(&mut self, policy: crate::module::http::HttpPolicy) {
+        self.http_broker.set_policy(policy);
+    }
+
+    /// Share the manager's listener table so `StreamSend` reaches the socket.
+    pub fn set_service_host(&mut self, host: crate::module::services::ServiceHost) {
+        self.service_host = host;
     }
 
     /// Create a new rate limiter (reuses same algorithm as RpcRateLimiter)
@@ -137,10 +156,7 @@ impl ModuleApiHub {
 
     /// `get_block_height` for a WASM guest. Uses the permission set registered at load.
     /// An id that was never registered is denied, so the checker defaults do not apply.
-    pub async fn wasm_host_get_block_height(
-        &self,
-        module_name: &str,
-    ) -> Result<u64, ModuleError> {
+    pub async fn wasm_host_get_block_height(&self, module_name: &str) -> Result<u64, ModuleError> {
         if !self
             .permission_checker
             .has_explicit_permissions(module_name)
@@ -192,13 +208,8 @@ impl ModuleApiHub {
     }
 
     /// Drop version-message service bits this module registered.
-    pub async fn clear_module_service_bits(
-        &self,
-        module_name: &str,
-    ) -> Result<(), ModuleError> {
-        self.node_api
-            .clear_module_service_bits(module_name)
-            .await
+    pub async fn clear_module_service_bits(&self, module_name: &str) -> Result<(), ModuleError> {
+        self.node_api.clear_module_service_bits(module_name).await
     }
 
     /// Handle a request from a module
@@ -366,8 +377,15 @@ impl ModuleApiHub {
                 ResponsePayload::CheckTransactionInMempool(exists)
             }
             RequestPayload::GetFeeEstimate { target_blocks } => {
-                let fee_rate = self.node_api.get_fee_estimate(*target_blocks).await?;
-                ResponsePayload::FeeEstimate(fee_rate)
+                match self.node_api.get_fee_estimate(*target_blocks).await {
+                    Ok(fee_rate) => ResponsePayload::FeeEstimate(fee_rate),
+                    Err(err) => {
+                        return Ok(ResponseMessage::error(
+                            request.correlation_id,
+                            err.to_string(),
+                        ));
+                    }
+                }
             }
             // Filesystem API
             RequestPayload::ReadFile { path } => {
@@ -427,7 +445,12 @@ impl ModuleApiHub {
             }
             // Metrics and Telemetry
             RequestPayload::ReportMetric { metric } => {
-                self.node_api.report_metric(metric.clone()).await?;
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = self.node_api.report_metric(metric.clone()).await;
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+                result?;
                 ResponsePayload::MetricReported
             }
             RequestPayload::GetModuleMetrics { module_id } => {
@@ -460,11 +483,23 @@ impl ModuleApiHub {
                 event_type,
                 payload,
             } => {
-                self.node_api
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = self
+                    .node_api
                     .publish_event(*event_type, payload.clone())
-                    .await?;
+                    .await;
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+                if let Err(err) = result {
+                    return Ok(ResponseMessage::error(
+                        request.correlation_id,
+                        err.to_string(),
+                    ));
+                }
                 ResponsePayload::EventPublished
             }
+            RequestPayload::SubscribeModuleEventNames { .. } => ResponsePayload::SubscribeAck,
             // Module-to-Module Communication
             RequestPayload::CallModule {
                 target_module_id,
@@ -690,26 +725,272 @@ impl ModuleApiHub {
                 self.node_api.unregister_core_rpc_override(method).await?;
                 ResponsePayload::CoreRpcOverrideUnregistered
             }
-            // Timers and Scheduled Tasks - not supported over IPC (callbacks cannot be serialized)
-            RequestPayload::RegisterTimer { .. } => {
-                return Err(crate::module::traits::ModuleError::OperationError(
-                    "Timer registration requires a callback which cannot be serialized over IPC. \
-                     Use module-side timer management (e.g. tokio::spawn with sleep)."
-                        .to_string(),
+            RequestPayload::RegisterTimer { .. }
+            | RequestPayload::CancelTimer { .. }
+            | RequestPayload::ScheduleTask { .. } => {
+                return Ok(ResponseMessage::error(
+                    request.correlation_id,
+                    crate::module::timers::types::LEGACY_TIMER_UNSUPPORTED.to_string(),
                 ));
             }
-            RequestPayload::CancelTimer { .. } => {
+            RequestPayload::TimerCreate { spec, mode } => {
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = self.node_api.timer_create(spec.clone(), *mode).await;
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+                ResponsePayload::TimerCreated(result?)
+            }
+            RequestPayload::TimerCancel { target } => {
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = self.node_api.timer_cancel(target.clone()).await;
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+                result?;
+                ResponsePayload::Bool(true)
+            }
+            RequestPayload::TimerPause { target } => {
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = self.node_api.timer_pause(target.clone()).await;
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+                result?;
+                ResponsePayload::Bool(true)
+            }
+            RequestPayload::TimerResume { target } => {
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = self.node_api.timer_resume(target.clone()).await;
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+                result?;
+                ResponsePayload::Bool(true)
+            }
+            RequestPayload::TimerTrigger { target } => {
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = self.node_api.timer_trigger(target.clone()).await;
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+                result?;
+                ResponsePayload::Bool(true)
+            }
+            RequestPayload::TimerGet { target } => {
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = self.node_api.timer_get(target.clone()).await;
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+                ResponsePayload::TimerInfo(result?)
+            }
+            RequestPayload::TimerList => {
+                crate::module::api::node_api::NodeApiImpl::set_current_module_id(
+                    module_id.to_string(),
+                );
+                let result = self.node_api.timer_list().await;
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+                ResponsePayload::TimerList(result?)
+            }
+            RequestPayload::HandshakeV2 { .. } => {
                 return Err(crate::module::traits::ModuleError::OperationError(
-                    "Timer cancellation not supported over IPC. Use module-side timer management."
-                        .to_string(),
+                    "HandshakeV2 is handled at connection setup".to_string(),
                 ));
             }
-            RequestPayload::ScheduleTask { .. } => {
-                return Err(crate::module::traits::ModuleError::OperationError(
-                    "Task scheduling requires a callback which cannot be serialized over IPC. \
-                     Use module-side task management (e.g. tokio::spawn)."
-                        .to_string(),
-                ));
+            RequestPayload::HttpPost {
+                url,
+                content_type,
+                body,
+                timeout_ms,
+                authorization,
+            } => {
+                match self
+                    .http_broker
+                    .execute_post(
+                        module_id,
+                        url,
+                        content_type,
+                        body,
+                        authorization.as_deref(),
+                        *timeout_ms,
+                    )
+                    .await
+                {
+                    Ok(fetched) => {
+                        let status = fetched.status;
+                        let origin = fetched.origin;
+                        self.log_audit(
+                            module_id.to_string(),
+                            operation_id.to_string(),
+                            true,
+                            Some(origin),
+                            Some(status),
+                        );
+                        return Ok(ResponseMessage::success(
+                            request.correlation_id,
+                            ResponsePayload::HttpResponse {
+                                status,
+                                content_type: fetched.content_type,
+                                body: fetched.body,
+                            },
+                        ));
+                    }
+                    Err(err) => {
+                        self.log_audit(
+                            module_id.to_string(),
+                            operation_id.to_string(),
+                            false,
+                            err.origin,
+                            err.status,
+                        );
+                        return Ok(ResponseMessage::error(
+                            request.correlation_id,
+                            err.message,
+                        ));
+                    }
+                }
+            }
+            RequestPayload::HttpRequest {
+                url,
+                accept,
+                timeout_ms,
+            } => {
+                match self
+                    .http_broker
+                    .execute(module_id, url, accept.as_deref(), *timeout_ms)
+                    .await
+                {
+                    Ok(fetched) => {
+                        let status = fetched.status;
+                        let origin = fetched.origin;
+                        self.log_audit(
+                            module_id.to_string(),
+                            operation_id.to_string(),
+                            true,
+                            Some(origin),
+                            Some(status),
+                        );
+                        return Ok(ResponseMessage::success(
+                            request.correlation_id,
+                            ResponsePayload::HttpResponse {
+                                status,
+                                content_type: fetched.content_type,
+                                body: fetched.body,
+                            },
+                        ));
+                    }
+                    Err(err) => {
+                        self.log_audit(
+                            module_id.to_string(),
+                            operation_id.to_string(),
+                            false,
+                            err.origin,
+                            err.status,
+                        );
+                        return Ok(ResponseMessage::error(
+                            request.correlation_id,
+                            err.message,
+                        ));
+                    }
+                }
+            }
+            RequestPayload::StreamSend { conn_id, bytes } => {
+                let name = crate::module::module_name_from_id(module_id);
+                match self.service_host.write(name, *conn_id, bytes).await {
+                    Ok(()) => {
+                        self.log_audit(
+                            module_id.to_string(),
+                            operation_id.to_string(),
+                            true,
+                            None,
+                            None,
+                        );
+                        return Ok(ResponseMessage::success(
+                            request.correlation_id,
+                            ResponsePayload::Bool(true),
+                        ));
+                    }
+                    Err(message) => {
+                        self.log_audit(
+                            module_id.to_string(),
+                            operation_id.to_string(),
+                            false,
+                            None,
+                            None,
+                        );
+                        return Ok(ResponseMessage::error(request.correlation_id, message));
+                    }
+                }
+            }
+            RequestPayload::RegisterFeeEstimators { specs } => {
+                match self
+                    .node_api
+                    .register_fee_estimators(module_id, specs.clone())
+                    .await
+                {
+                    Ok(registration) => ResponsePayload::FeeEstimatorsRegistered(registration),
+                    Err(err) => {
+                        return Ok(ResponseMessage::error(
+                            request.correlation_id,
+                            err.to_string(),
+                        ));
+                    }
+                }
+            }
+            RequestPayload::SubmitFeeTable { table } => {
+                match self
+                    .node_api
+                    .submit_fee_table(module_id, table.clone())
+                    .await
+                {
+                    Ok(generation) => ResponsePayload::FeeTableAccepted { generation },
+                    Err(err) => {
+                        return Ok(ResponseMessage::error(
+                            request.correlation_id,
+                            err.to_string(),
+                        ));
+                    }
+                }
+            }
+            RequestPayload::GetFeeTable { view, mode, targets } => {
+                match self.node_api.get_fee_table(view, mode, targets).await {
+                    Ok(table) => ResponsePayload::NativeFeeTable(table),
+                    Err(err) => {
+                        return Ok(ResponseMessage::error(
+                            request.correlation_id,
+                            err.to_string(),
+                        ));
+                    }
+                }
+            }
+            RequestPayload::StreamClose { conn_id } => {
+                let name = crate::module::module_name_from_id(module_id);
+                match self.service_host.close(name, *conn_id).await {
+                    Ok(()) => {
+                        self.log_audit(
+                            module_id.to_string(),
+                            operation_id.to_string(),
+                            true,
+                            None,
+                            None,
+                        );
+                        return Ok(ResponseMessage::success(
+                            request.correlation_id,
+                            ResponsePayload::Bool(true),
+                        ));
+                    }
+                    Err(message) => {
+                        self.log_audit(
+                            module_id.to_string(),
+                            operation_id.to_string(),
+                            false,
+                            None,
+                            None,
+                        );
+                        return Ok(ResponseMessage::error(request.correlation_id, message));
+                    }
+                }
             }
             #[allow(unreachable_patterns)]
             other => {
@@ -720,7 +1001,7 @@ impl ModuleApiHub {
         };
 
         // Log audit entry (use operation ID from earlier)
-        self.log_audit(module_id.to_string(), operation_id.to_string(), true);
+        self.log_audit(module_id.to_string(), operation_id.to_string(), true, None, None);
 
         Ok(ResponseMessage::success(request.correlation_id, response))
     }
@@ -738,6 +1019,7 @@ impl ModuleApiHub {
             RequestPayload::GetBlockHeight => "get_block_height",
             RequestPayload::GetUtxo { .. } => "get_utxo",
             RequestPayload::SubscribeEvents { .. } => "subscribe_events",
+            RequestPayload::SubscribeModuleEventNames { .. } => "subscribe_events",
             RequestPayload::GetMempoolTransactions => "get_mempool_transactions",
             RequestPayload::GetMempoolTransaction { .. } => "get_mempool_transaction",
             RequestPayload::GetMempoolSize => "get_mempool_size",
@@ -789,6 +1071,14 @@ impl ModuleApiHub {
             RequestPayload::RegisterTimer { .. } => "register_timer",
             RequestPayload::CancelTimer { .. } => "cancel_timer",
             RequestPayload::ScheduleTask { .. } => "schedule_task",
+            RequestPayload::TimerCreate { .. } => "timer_create",
+            RequestPayload::TimerCancel { .. } => "timer_cancel",
+            RequestPayload::TimerPause { .. } => "timer_pause",
+            RequestPayload::TimerResume { .. } => "timer_resume",
+            RequestPayload::TimerTrigger { .. } => "timer_trigger",
+            RequestPayload::TimerGet { .. } => "timer_get",
+            RequestPayload::TimerList => "timer_list",
+            RequestPayload::HandshakeV2 { .. } => "handshake",
             // Metrics and Telemetry
             RequestPayload::ReportMetric { .. } => "report_metric",
             RequestPayload::GetModuleMetrics { .. } => "get_module_metrics",
@@ -811,11 +1101,25 @@ impl ModuleApiHub {
             RequestPayload::SendMeshPacketToPeer { .. } => "send_mesh_packet_to_peer",
             RequestPayload::SendStratumV2MessageToPeer { .. } => "send_peer_transport_payload",
             RequestPayload::RegisterCliSpec { .. } => "register_cli_spec",
+            RequestPayload::HttpRequest { .. } => "http_request",
+            RequestPayload::HttpPost { .. } => "http_post",
+            RequestPayload::StreamSend { .. } => "stream_send",
+            RequestPayload::StreamClose { .. } => "stream_close",
+            RequestPayload::RegisterFeeEstimators { .. } => "register_fee_estimators",
+            RequestPayload::SubmitFeeTable { .. } => "submit_fee_table",
+            RequestPayload::GetFeeTable { .. } => "get_fee_table",
         }
     }
 
     /// Log an audit entry
-    fn log_audit(&mut self, module_id: String, api_call: String, success: bool) {
+    fn log_audit(
+        &mut self,
+        module_id: String,
+        api_call: String,
+        success: bool,
+        origin: Option<String>,
+        status: Option<u16>,
+    ) {
         let timestamp = crate::utils::current_timestamp();
 
         let entry = AuditEntry {
@@ -823,6 +1127,8 @@ impl ModuleApiHub {
             api_call: api_call.clone(),
             timestamp,
             success,
+            origin,
+            status,
         };
 
         // Store in-memory log (for programmatic access)

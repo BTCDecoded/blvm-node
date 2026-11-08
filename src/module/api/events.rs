@@ -37,6 +37,8 @@ pub struct EventManager {
     /// Event delivery statistics (for monitoring and debugging)
     /// (module_id -> (successful_deliveries, failed_deliveries, channel_full_count))
     delivery_stats: Arc<TokioMutex<HashMap<String, (u64, u64, u64)>>>,
+    /// Optional name allow-list for `EventType::ModuleEvent`. Absent means every name.
+    module_event_names: Arc<TokioMutex<HashMap<String, Vec<String>>>>,
 }
 
 impl EventManager {
@@ -47,6 +49,17 @@ impl EventManager {
             module_channels: Arc::new(TokioMutex::new(HashMap::new())),
             loaded_modules: Arc::new(TokioMutex::new(HashMap::new())),
             delivery_stats: Arc::new(TokioMutex::new(HashMap::new())),
+            module_event_names: Arc::new(TokioMutex::new(HashMap::new())),
+        }
+    }
+
+    /// Restrict `ModuleEvent` delivery for one subscriber. An empty list clears the filter.
+    pub async fn set_module_event_filter(&self, module_id: &str, names: Vec<String>) {
+        let mut filters = self.module_event_names.lock().await;
+        if names.is_empty() {
+            filters.remove(module_id);
+        } else {
+            filters.insert(module_id.to_string(), names);
         }
     }
 
@@ -84,11 +97,7 @@ impl EventManager {
         }
 
         // Extract module name from module_id (format: {module_name}_{uuid})
-        let subscribing_module_name = module_id
-            .split('_')
-            .next()
-            .unwrap_or(&module_id)
-            .to_string();
+        let subscribing_module_name = crate::module::module_name_from_id(&module_id).to_string();
 
         // If module subscribes to ModuleLoaded:
         // 1. Send it events for all already-loaded modules (hotloaded modules get existing modules)
@@ -171,6 +180,7 @@ impl EventManager {
         let mut subscribers = self.subscribers.lock().await;
         let mut channels = self.module_channels.lock().await;
         let mut stats = self.delivery_stats.lock().await;
+        self.module_event_names.lock().await.remove(module_id);
 
         // Remove module channel
         channels.remove(module_id);
@@ -194,11 +204,27 @@ impl EventManager {
     ) -> Result<(), ModuleError> {
         debug!("Publishing event: {:?}", event_type);
 
+        let module_event_name = match &payload {
+            EventPayload::ModuleEvent { name, .. } => Some(name.clone()),
+            _ => None,
+        };
+
         let subscribers = self.subscribers.lock().await;
         let channels = self.module_channels.lock().await;
+        let filters = self.module_event_names.lock().await;
 
         // Get list of modules subscribed to this event type
         let module_ids = subscribers.get(&event_type).cloned().unwrap_or_default();
+        let module_ids: Vec<String> = module_ids
+            .into_iter()
+            .filter(|id| match &module_event_name {
+                Some(name) => match filters.get(id) {
+                    Some(allowed) => allowed.iter().any(|candidate| candidate == name),
+                    None => true,
+                },
+                None => true,
+            })
+            .collect();
 
         if module_ids.is_empty() {
             return Ok(()); // No subscribers
@@ -219,6 +245,7 @@ impl EventManager {
         };
 
         // Explicitly drop locks before sending to avoid deadlock
+        drop(filters);
         drop(subscribers);
         drop(channels);
 
@@ -296,5 +323,57 @@ impl EventManager {
 impl Default for EventManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn module_event_name_filter_drops_other_names() {
+        let events = EventManager::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        events
+            .subscribe_module("listener".into(), vec![EventType::ModuleEvent], tx)
+            .await
+            .unwrap();
+        events
+            .set_module_event_filter("listener", vec!["keep".into()])
+            .await;
+        events
+            .publish_event(
+                EventType::ModuleEvent,
+                EventPayload::module_event("drop", Vec::new()),
+            )
+            .await
+            .unwrap();
+        events
+            .publish_event(
+                EventType::ModuleEvent,
+                EventPayload::module_event("keep", Vec::new()),
+            )
+            .await
+            .unwrap();
+        let ModuleMessage::Event(message) = rx.recv().await.unwrap() else {
+            panic!("expected an event");
+        };
+        match message.payload {
+            EventPayload::ModuleEvent { name, .. } => assert_eq!(name, "keep"),
+            other => panic!("expected ModuleEvent, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn reserved_event_slots_keep_their_bincode_indexes() {
+        // Fieldless EventType discriminants are the bincode indexes. ModuleEvent stays last.
+        assert_eq!(EventType::NewBlock as isize, 0);
+        assert_eq!(EventType::ReservedPaymentRequestCreated as isize, 4);
+        assert_eq!(EventType::DifficultyAdjusted as isize, 51);
+        assert_eq!(EventType::BanListShared as isize, 105);
+        assert_eq!(EventType::BanListReceived as isize, 106);
+        assert_eq!(EventType::ModuleEvent as isize, 118);
     }
 }

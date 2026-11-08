@@ -70,25 +70,6 @@ pub struct ModuleInfo {
     pub api_version: u32,
 }
 
-/// Module hooks for providing cached data (advisory only)
-///
-/// Modules can implement this trait to provide cached values for expensive operations.
-/// All hooks are advisory - the node can ignore them if needed.
-/// All hooks have timeouts to prevent hanging on unresponsive modules.
-#[async_trait]
-pub trait ModuleHooks: Send + Sync {
-    /// Hook called when getting fee estimate
-    /// Return Some(u64) to use cached value, None to calculate normally
-    /// Timeout: 100ms (fail fast if module unresponsive)
-    async fn get_fee_estimate_cached(&self, target_blocks: u32)
-    -> Result<Option<u64>, ModuleError>;
-
-    /// Hook called when getting mempool stats
-    /// Return Some(MempoolStats) to use cached value, None to calculate normally
-    /// Timeout: 50ms (fail fast if module unresponsive)
-    async fn get_mempool_stats_cached(&self) -> Result<Option<MempoolSize>, ModuleError>;
-}
-
 /// Module trait that all modules must implement
 ///
 /// This trait is implemented by module binaries (separate processes),
@@ -206,7 +187,8 @@ pub trait NodeAPI: Send + Sync {
     }
 
     /// Positive mempool fee rates, summarized. Empty pool is zeros.
-    /// The caller applies its own target fee rate.
+    /// This is a pool statistic, not a confirmation-target fee estimate.
+    /// Callers that need an estimate use [`NodeAPI::get_fee_estimate`].
     async fn get_mempool_fee_rate_summary(&self) -> Result<MempoolFeeRateSummary, ModuleError> {
         Ok(MempoolFeeRateSummary::default())
     }
@@ -332,6 +314,71 @@ pub trait NodeAPI: Send + Sync {
         delay_seconds: u64,
         callback: Arc<dyn crate::module::timers::manager::TaskCallback>,
     ) -> Result<crate::module::timers::manager::TaskId, ModuleError>;
+
+    /// Create a timer from a spec. The owner is the calling module.
+    async fn timer_create(
+        &self,
+        _spec: crate::module::timers::types::TimerSpec,
+        _mode: crate::module::timers::types::CreateMode,
+    ) -> Result<crate::module::timers::types::TimerInfo, ModuleError> {
+        Err(ModuleError::OperationError(
+            "timer service is not available".to_string(),
+        ))
+    }
+
+    /// Cancel one of the caller's timers. A foreign id is `NotFound`.
+    async fn timer_cancel(
+        &self,
+        _target: crate::module::timers::types::TimerTarget,
+    ) -> Result<(), ModuleError> {
+        Err(ModuleError::OperationError(
+            "timer service is not available".to_string(),
+        ))
+    }
+
+    async fn timer_pause(
+        &self,
+        _target: crate::module::timers::types::TimerTarget,
+    ) -> Result<(), ModuleError> {
+        Err(ModuleError::OperationError(
+            "timer service is not available".to_string(),
+        ))
+    }
+
+    async fn timer_resume(
+        &self,
+        _target: crate::module::timers::types::TimerTarget,
+    ) -> Result<(), ModuleError> {
+        Err(ModuleError::OperationError(
+            "timer service is not available".to_string(),
+        ))
+    }
+
+    async fn timer_trigger(
+        &self,
+        _target: crate::module::timers::types::TimerTarget,
+    ) -> Result<(), ModuleError> {
+        Err(ModuleError::OperationError(
+            "timer service is not available".to_string(),
+        ))
+    }
+
+    async fn timer_get(
+        &self,
+        _target: crate::module::timers::types::TimerTarget,
+    ) -> Result<crate::module::timers::types::TimerInfo, ModuleError> {
+        Err(ModuleError::OperationError(
+            "timer service is not available".to_string(),
+        ))
+    }
+
+    async fn timer_list(
+        &self,
+    ) -> Result<Vec<crate::module::timers::types::TimerInfo>, ModuleError> {
+        Err(ModuleError::OperationError(
+            "timer service is not available".to_string(),
+        ))
+    }
 
     // === Metrics and Telemetry ===
     /// Report a metric to the node
@@ -641,6 +688,66 @@ pub trait NodeAPI: Send + Sync {
 
     /// When enabled, refuse all full-block `getdata` answers (operational maintenance).
     async fn set_block_serve_maintenance_mode(&self, enabled: bool) -> Result<(), ModuleError>;
+
+    /// Replace this module's estimator names. Default keeps sibling `NodeAPI` impls compiling.
+    async fn register_fee_estimators(
+        &self,
+        _module_id: &str,
+        _specs: Vec<crate::module::ipc::protocol::FeeEstimatorSpecWire>,
+    ) -> Result<crate::module::ipc::protocol::FeeEstimatorRegistrationWire, ModuleError> {
+        Err(ModuleError::OperationError(
+            "register_fee_estimators is not implemented for this NodeAPI".to_string(),
+        ))
+    }
+
+    /// Push one external fee table. Returns the bumped generation.
+    async fn submit_fee_table(
+        &self,
+        _module_id: &str,
+        _table: crate::module::ipc::protocol::ExternalFeeTableWire,
+    ) -> Result<u64, ModuleError> {
+        Err(ModuleError::OperationError(
+            "submit_fee_table is not implemented for this NodeAPI".to_string(),
+        ))
+    }
+
+    /// Native fee columns. `view` is `combined`, `history`, or `mempool`.
+    async fn get_fee_table(
+        &self,
+        _view: &str,
+        _mode: &str,
+        _targets: &[u32],
+    ) -> Result<crate::module::ipc::protocol::NativeFeeTableWire, ModuleError> {
+        Err(ModuleError::OperationError(
+            "get_fee_table is not implemented for this NodeAPI".to_string(),
+        ))
+    }
+
+    /// GET a URL through the node broker. Returns status and body.
+    async fn http_get(
+        &self,
+        _url: &str,
+        _accept: Option<&str>,
+        _timeout_ms: u32,
+    ) -> Result<(u16, Vec<u8>), ModuleError> {
+        Err(ModuleError::OperationError(
+            "http_get is not implemented for this NodeAPI".to_string(),
+        ))
+    }
+
+    /// POST a body through the node broker. Returns status and body.
+    async fn http_post(
+        &self,
+        _url: &str,
+        _content_type: &str,
+        _body: Vec<u8>,
+        _authorization: Option<&str>,
+        _timeout_ms: u32,
+    ) -> Result<(u16, Vec<u8>), ModuleError> {
+        Err(ModuleError::OperationError(
+            "http_post is not implemented for this NodeAPI".to_string(),
+        ))
+    }
 }
 
 /// Event types that modules can subscribe to
@@ -657,22 +764,22 @@ pub enum EventType {
     ChainReorg,
 
     // === Payment Events (for Lightning module) ===
-    /// Payment request created
-    PaymentRequestCreated,
-    /// Payment settled (confirmed on-chain)
-    PaymentSettled,
-    /// Payment failed
-    PaymentFailed,
-    /// Lightning payment verified
-    PaymentVerified,
-    /// Payment route discovered
-    PaymentRouteFound,
-    /// Payment routing failed
-    PaymentRouteFailed,
-    /// Lightning channel opened
-    ChannelOpened,
-    /// Lightning channel closed
-    ChannelClosed,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedPaymentRequestCreated,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedPaymentSettled,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedPaymentFailed,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedPaymentVerified,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedPaymentRouteFound,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedPaymentRouteFailed,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedChannelOpened,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedChannelClosed,
 
     // === Mining Events (for Stratum V2 module) ===
     /// Block mined successfully
@@ -681,8 +788,8 @@ pub enum EventType {
     BlockTemplateUpdated,
     /// Mining difficulty changed
     MiningDifficultyChanged,
-    /// Mining job created
-    MiningJobCreated,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedMiningJobCreated,
 
     // === Mesh Networking Events ===
     /// Mesh packet received from network
@@ -690,28 +797,28 @@ pub enum EventType {
     // === Stratum V2 Events ===
     /// Stratum V2 message received from network
     StratumV2MessageReceived,
-    /// Mining share submitted
-    ShareSubmitted,
-    /// Merge mining reward received
-    MergeMiningReward,
-    /// Mining pool connected
-    MiningPoolConnected,
-    /// Mining pool disconnected
-    MiningPoolDisconnected,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedShareSubmitted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedMergeMiningReward,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedMiningPoolConnected,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedMiningPoolDisconnected,
 
     // === Governance Events (for Governance module) ===
-    /// Governance proposal created
-    GovernanceProposalCreated,
-    /// Vote cast on proposal
-    GovernanceProposalVoted,
-    /// Proposal merged
-    GovernanceProposalMerged,
-    /// Webhook sent
-    WebhookSent,
-    /// Webhook delivery failed
-    WebhookFailed,
-    /// Governance fork detected
-    GovernanceForkDetected,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedGovernanceProposalCreated,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedGovernanceProposalVoted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedGovernanceProposalMerged,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedWebhookSent,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedWebhookFailed,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedGovernanceForkDetected,
 
     // === Network Events (for Mesh module) ===
     /// Peer connected
@@ -726,50 +833,50 @@ pub enum EventType {
     MessageReceived,
     /// Network message sent
     MessageSent,
-    /// Broadcast operation started
-    BroadcastStarted,
-    /// Broadcast operation completed
-    BroadcastCompleted,
-    /// Route discovered
-    RouteDiscovered,
-    /// Route failed
-    RouteFailed,
-    /// Connection attempt (success/failure)
-    ConnectionAttempt,
-    /// New peer address discovered
-    AddressDiscovered,
-    /// Peer address expired
-    AddressExpired,
-    /// Network partition detected
-    NetworkPartition,
-    /// Network partition reconnected
-    NetworkReconnected,
-    /// DoS attack detected
-    DoSAttackDetected,
-    /// Rate limit exceeded
-    RateLimitExceeded,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedBroadcastStarted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedBroadcastCompleted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedRouteDiscovered,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedRouteFailed,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedConnectionAttempt,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedAddressDiscovered,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedAddressExpired,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedNetworkPartition,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedNetworkReconnected,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedDoSAttackDetected,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedRateLimitExceeded,
 
     // === Consensus Events ===
     /// Block validation started
     BlockValidationStarted,
     /// Block validation completed (success/failure)
     BlockValidationCompleted,
-    /// Script verification started
-    ScriptVerificationStarted,
-    /// Script verification completed
-    ScriptVerificationCompleted,
-    /// UTXO validation started
-    UTXOValidationStarted,
-    /// UTXO validation completed
-    UTXOValidationCompleted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedScriptVerificationStarted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedScriptVerificationCompleted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedUTXOValidationStarted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedUTXOValidationCompleted,
     /// Network difficulty adjusted
     DifficultyAdjusted,
-    /// Soft fork activated (SegWit, Taproot, CTV, etc.)
-    SoftForkActivated,
-    /// Soft fork locked in (BIP9)
-    SoftForkLockedIn,
-    /// Consensus rule violation detected
-    ConsensusRuleViolation,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedSoftForkActivated,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedSoftForkLockedIn,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedConsensusRuleViolation,
 
     // === Sync Events ===
     /// Headers sync started
@@ -800,16 +907,16 @@ pub enum EventType {
     MempoolCleared,
 
     // === Storage Events ===
-    /// Storage read operation
-    StorageRead,
-    /// Storage write operation
-    StorageWrite,
-    /// Storage query operation
-    StorageQuery,
-    /// Database backup started
-    DatabaseBackupStarted,
-    /// Database backup completed
-    DatabaseBackupCompleted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedStorageRead,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedStorageWrite,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedStorageQuery,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedDatabaseBackupStarted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedDatabaseBackupCompleted,
 
     // === Module Lifecycle Events ===
     /// Module loaded successfully
@@ -818,10 +925,10 @@ pub enum EventType {
     ModuleUnloaded,
     /// Module reloaded
     ModuleReloaded,
-    /// Module started
-    ModuleStarted,
-    /// Module stopped
-    ModuleStopped,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedModuleStarted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedModuleStopped,
     /// Module crashed
     ModuleCrashed,
     /// Module health status changed
@@ -843,10 +950,10 @@ pub enum EventType {
     NodeStartupCompleted,
 
     // === Maintenance Events ===
-    /// Maintenance operation started (modules can prepare)
-    MaintenanceStarted,
-    /// Maintenance operation completed
-    MaintenanceCompleted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedMaintenanceStarted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedMaintenanceCompleted,
     /// Data maintenance requested (unified cleanup/flush event)
     /// Modules should clean up old data and/or flush pending writes
     /// Urgency level indicates how urgent the operation is
@@ -857,48 +964,48 @@ pub enum EventType {
     // === Resource Management Events ===
     /// Disk space is low (modules should clean up data)
     DiskSpaceLow,
-    /// Resource limit warning (modules should reduce usage)
-    ResourceLimitWarning,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedResourceLimitWarning,
 
     // === Dandelion++ Events ===
-    /// Transaction entered stem phase
-    DandelionStemStarted,
-    /// Transaction advanced in stem phase
-    DandelionStemAdvanced,
-    /// Transaction transitioned to fluff phase
-    DandelionFluffed,
-    /// Stem path expired
-    DandelionStemPathExpired,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedDandelionStemStarted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedDandelionStemAdvanced,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedDandelionFluffed,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedDandelionStemPathExpired,
 
     // === Compact Blocks Events ===
-    /// Compact block received
-    CompactBlockReceived,
-    /// Block reconstruction started
-    BlockReconstructionStarted,
-    /// Block reconstruction completed
-    BlockReconstructionCompleted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedCompactBlockReceived,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedBlockReconstructionStarted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedBlockReconstructionCompleted,
 
     // === FIBRE Events ===
-    /// Block encoded for FIBRE
-    FibreBlockEncoded,
-    /// Block sent via FIBRE
-    FibreBlockSent,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedFibreBlockEncoded,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedFibreBlockSent,
     /// P2P peer gained a companion UDP endpoint (NODE_FIBRE after handshake; modules e.g. blvm-fibre)
     CompanionUdpPeerRegistered,
     /// Companion UDP peer removed (disconnect; peer had NODE_FIBRE)
     CompanionUdpPeerUnregistered,
 
     // === Package Relay Events ===
-    /// Transaction package received
-    PackageReceived,
-    /// Transaction package rejected
-    PackageRejected,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedPackageReceived,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedPackageRejected,
 
     // === UTXO Commitments Events ===
-    /// UTXO commitment received
-    UtxoCommitmentReceived,
-    /// UTXO commitment verified
-    UtxoCommitmentVerified,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedUtxoCommitmentReceived,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedUtxoCommitmentVerified,
 
     // === Ban List Sharing Events ===
     /// Ban list shared with peer
@@ -907,18 +1014,18 @@ pub enum EventType {
     BanListReceived,
 
     // === Extended module / mining events ===
-    /// Selective sync policy applied (subscribe, refresh, etc.)
-    SelectiveSyncPolicyApplied,
-    /// Mining action executed (miningos trigger_action)
-    ActionExecuted,
-    /// Module purchase completed (marketplace)
-    ModulePurchaseCompleted,
-    /// Stratum V2 miner connected
-    StratumClientConnected,
-    /// Stratum V2 miner disconnected
-    StratumClientDisconnected,
-    /// Block filtered during IBD (selective sync, prune, etc.)
-    IBDBlockFiltered,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedSelectiveSyncPolicyApplied,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedActionExecuted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedModulePurchaseCompleted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedStratumClientConnected,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedStratumClientDisconnected,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedIBDBlockFiltered,
 
     // === Module Registry Events ===
     /// Module discovered
@@ -931,6 +1038,10 @@ pub enum EventType {
     ModuleRemoved,
     /// Inbound BIP70 bytes on the node peer socket. Subscribers only.
     PeerPayment,
+    /// A module-published event. The node stamps `source_module`. Modules cannot publish any other type.
+    ModuleEvent,
+    /// First native fee table for a tip. Appended so `ModuleEvent` stays at index 118.
+    FeeTableReady,
 }
 
 /// Module system errors
@@ -1198,6 +1309,7 @@ pub struct TxBlockMetadata {
 }
 
 /// Average and median of positive mempool fee rates (sat/vB).
+/// A pool statistic, not a fee estimate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MempoolFeeRateSummary {
     /// How many positive rates were summarized.

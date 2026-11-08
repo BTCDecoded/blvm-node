@@ -719,7 +719,7 @@ impl Database for Heed3Database {
     }
 
     fn open_tree(&self, name: &str) -> Result<Box<dyn Tree>> {
-        if name.starts_with("module_") || name == "modules" {
+        if super::is_removed_module_tree(name) {
             return Err(anyhow::anyhow!(
                 "Module storage has been removed. Use blvm_sdk::module::open_module_db."
             ));

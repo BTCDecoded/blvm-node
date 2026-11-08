@@ -36,6 +36,8 @@ pub const KNOWN_TREE_NAMES: &[&str] = &[
     "vaults",
     "pools",
     "batches",
+    "module_timers",
+    "module_timer_journal",
     // Test-only tree names used by storage_tests
     "test_abc123_state",
     "test_xyz789_state",
@@ -60,3 +62,10 @@ pub const KNOWN_TREE_NAMES: &[&str] = &[
     "dynamic_tree_8",
     "dynamic_tree_9",
 ];
+
+/// Per-module stores were removed. `module_timers` is node-owned timer state.
+pub fn is_removed_module_tree(name: &str) -> bool {
+    name != "module_timers"
+        && name != "module_timer_journal"
+        && (name.starts_with("module_") || name == "modules")
+}

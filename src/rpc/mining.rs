@@ -1232,11 +1232,16 @@ impl MiningRpc {
                     "generatetoaddress: block rejected at height {connect_height}"
                 )));
             }
-            if let Some(ref mempool) = self.mempool {
-                mempool.remove_for_connected_block(&mined.transactions);
-            }
-
             let block_hash = storage.blocks().as_ref().get_block_hash(&mined);
+            if let Some(ref mempool) = self.mempool {
+                let obs = crate::node::fee_estimator::block_observation(
+                    &mined,
+                    &witnesses,
+                    connect_height,
+                    block_hash,
+                );
+                mempool.remove_for_connected_block_at(obs, &mined.transactions);
+            }
 
             out_hashes.push(Value::String(crate::storage::hashing::hash_to_rpc_hex(
                 &block_hash,
@@ -1377,7 +1382,13 @@ impl MiningRpc {
             ));
         }
         if let Some(ref mempool) = self.mempool {
-            mempool.remove_for_connected_block(&block.transactions);
+            let obs = crate::node::fee_estimator::block_observation(
+                &block,
+                &witnesses,
+                connect_height,
+                block_hash,
+            );
+            mempool.remove_for_connected_block_at(obs, &block.transactions);
         }
         if let Some(ref ep) = self.event_publisher {
             ep.publish_block_mined(&block_hash, connect_height, None)
@@ -1399,25 +1410,34 @@ impl MiningRpc {
         Ok(Value::Null)
     }
 
-    /// Estimate smart fee rate
+    /// The attached fee estimator, when the mempool has one.
+    pub fn fee_estimator(&self) -> Option<Arc<crate::node::fee_estimator::FeeEstimator>> {
+        self.mempool.as_ref().and_then(|pool| pool.fee_estimator())
+    }
+
+    /// Estimate smart fee rate.
     ///
-    /// Params: [conf_target (optional, default: 6), estimate_mode (optional, default: "conservative")]
+    /// Params: `[conf_target` (default 6), `estimate_mode` (default `"conservative"`),
+    /// `fee_rate_estimator` (default `"none"`), `verbosity` (default 0)].
+    /// Mode and estimator names are case-insensitive. `"none"` is the combined column.
     pub async fn estimate_smart_fee(&self, params: &Value) -> RpcResult<Value> {
+        use crate::node::fee_estimator::{FeeMode, FeeUnavailable};
+
         debug!("RPC: estimatesmartfee");
 
         let conf_target = crate::rpc::params::param_u64_default(params, 0, 6);
-
         let estimate_mode = crate::rpc::params::param_str(params, 1).unwrap_or("conservative");
-
-        // Validate estimate_mode
-        match estimate_mode {
-            "unset" | "economical" | "conservative" => {}
+        let mode = match estimate_mode.to_ascii_lowercase().as_str() {
+            "unset" | "conservative" => FeeMode::Conservative,
+            "economical" => FeeMode::Economical,
             _ => {
                 return Err(RpcError::invalid_params(format!(
                     "Invalid estimate_mode: {estimate_mode}. Must be 'unset', 'economical', or 'conservative'"
                 )));
             }
-        }
+        };
+        let choice = fee_rate_estimator_param(params)?;
+        let verbosity = verbosity_param(params)?;
 
         if !(1..=1008).contains(&conf_target) {
             return Err(RpcError::invalid_params(format!(
@@ -1425,66 +1445,81 @@ impl MiningRpc {
             )));
         }
 
-        let (mempool_txs, prevouts) = if let Some(ref mempool) = self.mempool {
-            let pooled = mempool.get_transactions();
-            let prevouts = self.utxos_for_prevouts(&pooled);
-            let ranked = mempool.get_prioritized_transactions(100, &prevouts);
-            (ranked, prevouts)
-        } else {
-            (Vec::new(), UtxoSet::default())
+        let Some(estimator) = self.mempool.as_ref().and_then(|pool| pool.fee_estimator()) else {
+            return Ok(fee_estimate_failure(
+                conf_target,
+                verbosity,
+                FeeUnavailable::Disabled,
+                None,
+            ));
         };
-
-        let mut fee_rates = Vec::new();
-        for tx in &mempool_txs {
-            let fee = self
-                .mempool
-                .as_ref()
-                .map(|pool| pool.calculate_transaction_fee(tx, &prevouts))
-                .unwrap_or(0);
-            let size = self.calculate_weight(tx) as usize;
-            if size > 0 && fee > 0 {
-                let vsize = (size as u64).div_ceil(4).max(1);
-                let rate = (fee as f64) / (vsize as f64) * 1000.0 / 100_000_000.0;
-                fee_rates.push(rate);
+        if let FeeRateChoice::Named(name) = &choice {
+            if !estimator.has_estimator(name) {
+                return Err(RpcError::invalid_params(format!(
+                    "Invalid fee_rate_estimator: {name}. Must be 'none', 'history', 'mempool', or a registered estimator"
+                )));
             }
         }
+        let labels = estimator.estimator_labels();
+        let selection = Some((labels.0.as_str(), labels.1.as_str(), labels.2));
 
-        if fee_rates.is_empty() {
-            return Ok(json!({
-                "errors": ["Insufficient data or no feerate found"],
-                "blocks": conf_target
-            }));
-        }
-
-        fee_rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        // One observed rate is the answer for every target. A spread picks a higher
-        // rate for a shorter target and a lower rate for a longer one.
-        let index = if fee_rates.len() == 1 {
-            0
-        } else {
-            let last = (fee_rates.len() - 1) as u64;
-            ((1008 - conf_target) * last) / 1007
-        };
-        let fee_rate = fee_rates[index as usize];
-        let adjusted_rate = match estimate_mode {
-            "economical" => {
-                let floor_sats = self
-                    .mempool
-                    .as_ref()
-                    .map(|pool| pool.min_relay_fee_sat_per_kvb())
-                    .unwrap_or(100)
-                    .max(1);
-                let floor = floor_sats as f64 / 100_000_000.0;
-                (fee_rate * 0.8).max(floor)
+        let quote = match choice {
+            FeeRateChoice::View(crate::node::fee_estimator::SourceView::Combined) => {
+                estimator
+                    .quote(conf_target as u32, mode, crate::node::fee_estimator::SourceView::Combined)
+                    .await
             }
-            "conservative" => fee_rate * 1.2,
-            _ => fee_rate,
+            FeeRateChoice::View(view) => {
+                let table = match estimator.table().await {
+                    Ok(table) => table,
+                    Err(err) => {
+                        return Ok(fee_estimate_failure(conf_target, verbosity, err, selection));
+                    }
+                };
+                table.quote(conf_target as u32, mode, view)
+            }
+            FeeRateChoice::Named(name) => estimator.quote_named(&name, conf_target as u32, mode).await,
         };
+        let table = match estimator.table().await {
+            Ok(table) => table,
+            Err(err) => return Ok(fee_estimate_failure(conf_target, verbosity, err, selection)),
+        };
+        match quote {
+            Ok(quote) => Ok(fee_estimate_success(&quote, &table, verbosity, selection)),
+            Err(err) => Ok(fee_estimate_failure(conf_target, verbosity, err, selection)),
+        }
+    }
 
-        Ok(json!({
-            "feerate": adjusted_rate,
-            "blocks": conf_target
-        }))
+    /// `native` plus every registered estimator.
+    pub fn list_fee_estimators(&self) -> RpcResult<Value> {
+        debug!("RPC: listfeeestimators");
+        let Some(estimator) = self.fee_estimator() else {
+            return Ok(json!([{
+                "name": "native",
+                "module": null,
+                "description": "built-in",
+                "resolved": true,
+                "fresh": false,
+                "last_submit_age_secs": null,
+                "active": false
+            }]));
+        };
+        let rows = estimator
+            .fee_estimator_rows()
+            .into_iter()
+            .map(|row| {
+                json!({
+                    "name": row.name,
+                    "module": row.module,
+                    "description": row.description,
+                    "resolved": row.resolved,
+                    "fresh": row.fresh,
+                    "last_submit_age_secs": row.last_submit_age_secs,
+                    "active": row.active,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(Value::Array(rows))
     }
 
     /// Prioritize a transaction in the mempool
@@ -1526,6 +1561,116 @@ impl MiningRpc {
             ))
         }
     }
+}
+
+enum FeeRateChoice {
+    View(crate::node::fee_estimator::SourceView),
+    Named(String),
+}
+
+fn fee_rate_estimator_param(params: &Value) -> RpcResult<FeeRateChoice> {
+    use crate::node::fee_estimator::SourceView;
+    match params.get(2) {
+        None | Some(Value::Null) => Ok(FeeRateChoice::View(SourceView::Combined)),
+        Some(value) => {
+            let name = value.as_str().ok_or_else(|| {
+                RpcError::invalid_params(
+                    "Invalid fee_rate_estimator. Must be 'none', 'history', 'mempool', or a registered estimator"
+                        .to_string(),
+                )
+            })?;
+            match name.to_ascii_lowercase().as_str() {
+                "none" => Ok(FeeRateChoice::View(SourceView::Combined)),
+                "history" => Ok(FeeRateChoice::View(SourceView::History)),
+                "mempool" => Ok(FeeRateChoice::View(SourceView::Mempool)),
+                other => Ok(FeeRateChoice::Named(other.to_string())),
+            }
+        }
+    }
+}
+
+fn verbosity_param(params: &Value) -> RpcResult<u64> {
+    match params.get(3) {
+        None | Some(Value::Null) => Ok(0),
+        Some(value) => {
+            let verbosity = value.as_u64().ok_or_else(|| {
+                RpcError::invalid_params("Invalid verbosity. Must be 0, 1, or 2".to_string())
+            })?;
+            if verbosity > 2 {
+                return Err(RpcError::invalid_params(format!(
+                    "Invalid verbosity {verbosity}. Must be 0, 1, or 2"
+                )));
+            }
+            Ok(verbosity)
+        }
+    }
+}
+
+fn fee_estimate_success(
+    quote: &crate::node::fee_estimator::FeeQuote,
+    table: &crate::node::fee_estimator::FeeTable,
+    verbosity: u64,
+    selection: Option<(&str, &str, bool)>,
+) -> Value {
+    use crate::node::fee_estimator::FeeSource;
+    let mut value = json!({
+        "feerate": quote.sat_per_kvb as f64 / 100_000_000.0,
+        "blocks": quote.blocks,
+    });
+    if verbosity >= 1 {
+        value["source"] = json!(match quote.source {
+            FeeSource::History => "history",
+            FeeSource::Mempool => "mempool",
+            FeeSource::Min => "min",
+            FeeSource::External => "external",
+            FeeSource::ExternalMin => "external_min",
+        });
+        value["mempool_healthy"] = json!(table.mempool_healthy);
+        if let Some((requested, active, degraded)) = selection {
+            value["requested_estimator"] = json!(requested);
+            value["active_estimator"] = json!(active);
+            value["degraded"] = json!(degraded);
+        }
+    }
+    if verbosity >= 2 {
+        value["tip_height"] = json!(table.tip_height);
+        value["tip_hash"] = json!(crate::storage::hashing::hash_to_rpc_hex(&table.tip_hash));
+        value["table_age_secs"] = json!(table.generated_at.elapsed().as_secs_f64());
+        value["health"] = json!({
+            "window": table.health_window,
+            "ratio": table.health_ratio,
+            "required_ratio": table.health_required_ratio,
+        });
+    }
+    value
+}
+
+fn fee_estimate_failure(
+    blocks: u64,
+    verbosity: u64,
+    err: crate::node::fee_estimator::FeeUnavailable,
+    selection: Option<(&str, &str, bool)>,
+) -> Value {
+    use crate::node::fee_estimator::FeeUnavailable;
+    let mut value = json!({
+        "errors": ["Insufficient data or no feerate found"],
+        "blocks": blocks,
+    });
+    if verbosity >= 1 {
+        value["reason"] = json!(match err {
+            FeeUnavailable::WarmingUp => "warming_up",
+            FeeUnavailable::MempoolUnhealthy => "mempool_unhealthy",
+            FeeUnavailable::EmptyMempool => "empty_mempool",
+            FeeUnavailable::Disabled => "disabled",
+            FeeUnavailable::ExternalStale => "external_stale",
+        });
+        if let Some((requested, active, degraded)) = selection {
+            value["requested_estimator"] = json!(requested);
+            value["active_estimator"] = json!(active);
+            value["degraded"] = json!(degraded);
+        }
+    }
+    value
 }
 
 impl Default for MiningRpc {
@@ -1743,6 +1888,72 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn listfeeestimators_and_a_named_estimator_are_one_call_views() {
+        let (_dir, _storage, mempool, mining) = regtest_mining();
+        let listed = mining.list_fee_estimators().unwrap();
+        let rows = listed.as_array().unwrap();
+        assert_eq!(rows[0]["name"], "native");
+        assert_eq!(rows[0]["active"], true);
+
+        let verbose = mining
+            .estimate_smart_fee(&serde_json::json!([1, "conservative", "none", 1]))
+            .await
+            .unwrap();
+        assert_eq!(verbose["requested_estimator"], "auto");
+        assert_eq!(verbose["active_estimator"], "native");
+        assert_eq!(verbose["degraded"], false);
+
+        let unknown = mining
+            .estimate_smart_fee(&serde_json::json!([1, "conservative", "no-such"]))
+            .await
+            .unwrap_err();
+        assert!(
+            unknown.message.contains("registered estimator"),
+            "{}",
+            unknown.message
+        );
+
+        let estimator = mempool.fee_estimator().unwrap();
+        let id = "fees_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        estimator.register_estimators(
+            id,
+            vec![crate::node::fee_estimator::FeeEstimatorSpec {
+                name: "blend".to_string(),
+                description: "blend".to_string(),
+                modes: vec![crate::node::fee_estimator::FeeMode::Conservative],
+                default_merge: crate::node::fee_estimator::ExternalMode::Replace,
+                auto_priority: None,
+            }],
+        );
+        estimator
+            .submit_fee_table(
+                id,
+                crate::node::fee_estimator::ExternalFeeTable {
+                    estimator: "blend".to_string(),
+                    tip_hash: [0u8; 32],
+                    upstream_height: 0,
+                    mode: None,
+                    quotes: vec![(1, 80_000)],
+                },
+                std::time::Instant::now(),
+            )
+            .unwrap();
+        let named = mining
+            .estimate_smart_fee(&serde_json::json!([1, "conservative", "blend", 1]))
+            .await
+            .unwrap();
+        assert_eq!(named["source"], "external");
+        assert_eq!(named["active_estimator"], "native");
+        assert!((named["feerate"].as_f64().unwrap() - 0.0008).abs() < 1e-12);
+        let again = mining.list_fee_estimators().unwrap();
+        assert!(again
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["name"] == "blend" && row["fresh"] == true && row["active"] == false));
+    }
+
     fn regtest_mining() -> (
         tempfile::TempDir,
         Arc<Storage>,
@@ -1756,6 +1967,12 @@ mod tests {
         let storage = Arc::new(Storage::new(dir.path()).unwrap());
         storage.chain().initialize(&genesis).unwrap();
         let mempool = Arc::new(MempoolManager::new());
+        let mut fees = crate::config::FeeEstimatorConfig::default();
+        fees.health_required = Some(false);
+        fees.projection_full_threshold = 0.0;
+        let estimator = Arc::new(crate::node::fee_estimator::FeeEstimator::new(fees, true));
+        estimator.mark_table_stale_for_test();
+        mempool.set_fee_estimator(Some(estimator));
         let mining = MiningRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool))
             .with_protocol_engine(protocol);
         (dir, storage, mempool, mining)
@@ -1981,11 +2198,16 @@ mod tests {
         assert!(mempool.add_transaction(tx).unwrap());
 
         let quote = mining
-            .estimate_smart_fee(&serde_json::json!([6u64, "unset"]))
+            .estimate_smart_fee(&serde_json::json!([1u64, "unset"]))
             .await
             .unwrap();
         assert!((quote["feerate"].as_f64().unwrap() - 0.00001).abs() < 1e-12);
-        assert_eq!(quote["blocks"].as_u64(), Some(6));
+        assert_eq!(quote["blocks"].as_u64(), Some(1));
+        let conservative = mining
+            .estimate_smart_fee(&serde_json::json!([1u64, "CONSERVATIVE"]))
+            .await
+            .unwrap();
+        assert!((conservative["feerate"].as_f64().unwrap() - 0.00001).abs() < 1e-12);
     }
 
     #[tokio::test]
@@ -2023,11 +2245,12 @@ mod tests {
         .unwrap();
         tree.insert(&key, &bytes).unwrap();
         mempool.set_storage(Arc::clone(&storage));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(UtxoSet::default())));
         mempool.set_policy_config(Some(policy));
         assert!(mempool.add_transaction(tx).unwrap());
 
         let quote = mining
-            .estimate_smart_fee(&serde_json::json!([6u64, "unset"]))
+            .estimate_smart_fee(&serde_json::json!([1u64, "Unset"]))
             .await
             .unwrap();
         assert!(
@@ -2044,8 +2267,7 @@ mod tests {
         let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
         policy.require_standard = false;
         policy.min_tx_fee = 0;
-        // 1 sat/vB, in satoshis per 1,000 virtual bytes. Economical mode is 80% of
-        // the observed rate, so this floor is what the quote stays on.
+        // The transaction pays 1 sat/vB, which is this relay floor.
         policy.min_relay_fee_rate = 1_000;
         let funding = OutPoint {
             hash: [4u8; 32],
@@ -2072,7 +2294,7 @@ mod tests {
         assert!(mempool.add_transaction(tx).unwrap());
 
         let quote = mining
-            .estimate_smart_fee(&serde_json::json!([6u64, "economical"]))
+            .estimate_smart_fee(&serde_json::json!([1u64, "economical"]))
             .await
             .unwrap();
         assert!((quote["feerate"].as_f64().unwrap() - 0.00001).abs() < 1e-12);
@@ -2110,7 +2332,7 @@ mod tests {
         let tx = spend(funding, 40_000);
         assert!(mempool.add_transaction(tx).unwrap());
         let quote = mining
-            .estimate_smart_fee(&serde_json::json!([6u64, "unset"]))
+            .estimate_smart_fee(&serde_json::json!([1u64, "unset"]))
             .await
             .unwrap();
         assert!(quote["feerate"].as_f64().unwrap() > 0.0, "{quote}");
@@ -2167,7 +2389,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_spread_of_rates_quotes_a_higher_fee_for_a_shorter_target() {
+    async fn the_next_block_quotes_the_higher_rate_and_a_longer_target_keeps_it() {
         use blvm_protocol::segwit::transaction_weight_from_stacks;
 
         let (_dir, storage, mempool, mining) = regtest_mining();
@@ -2176,6 +2398,8 @@ mod tests {
         policy.min_tx_fee = 0;
         policy.min_relay_fee_rate = 0;
         mempool.set_policy_config(Some(policy));
+        let coins = Arc::new(tokio::sync::Mutex::new(UtxoSet::default()));
+        mempool.set_utxo_set_arc(Arc::clone(&coins));
 
         for (byte, sats_per_vb) in [([5u8; 32], 1i64), ([6u8; 32], 10)] {
             let funding = OutPoint {
@@ -2189,18 +2413,14 @@ mod tests {
                 .div_ceil(4)
                 .max(1) as i64;
             tx.outputs[0].value = 50_000;
-            storage
-                .utxos()
-                .add_utxo(
-                    &funding,
-                    &UTXO {
-                        value: 50_000 + vsize * sats_per_vb,
-                        script_pubkey: vec![OP_1].into(),
-                        height: 0,
-                        is_coinbase: false,
-                    },
-                )
-                .unwrap();
+            let utxo = UTXO {
+                value: 50_000 + vsize * sats_per_vb,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            };
+            storage.utxos().add_utxo(&funding, &utxo).unwrap();
+            coins.lock().await.insert(funding, Arc::new(utxo));
             assert!(mempool.add_transaction(tx).unwrap());
         }
 
@@ -2212,11 +2432,184 @@ mod tests {
             .estimate_smart_fee(&serde_json::json!([1008u64, "unset"]))
             .await
             .unwrap();
-        let soon_rate = soon["feerate"].as_f64().unwrap();
-        let later_rate = later["feerate"].as_f64().unwrap();
-        assert!(soon_rate > later_rate);
-        assert!((soon_rate - 0.00010).abs() < 1e-12);
-        assert!((later_rate - 0.00001).abs() < 1e-12);
+        assert!(
+            (soon["feerate"].as_f64().unwrap() - 0.00010).abs() < 1e-12,
+            "{soon}"
+        );
+        assert!(
+            (later["feerate"].as_f64().unwrap() - soon["feerate"].as_f64().unwrap()).abs() < 1e-12,
+            "{later}"
+        );
+        assert_eq!(later["blocks"].as_u64(), Some(1008));
+    }
+
+    #[tokio::test]
+    async fn estimator_and_verbosity_select_the_column_and_the_diagnostics() {
+        use crate::node::fee_estimator::{BlockObservation, TxAdmission};
+        use blvm_protocol::segwit::transaction_weight_from_stacks;
+
+        let (_dir, storage, mempool, mining) = regtest_mining();
+        let estimator = mempool.fee_estimator().unwrap();
+        let mut tx_weights = Vec::new();
+        for index in 0..20u8 {
+            let mut txid = [8u8; 32];
+            txid[0] = index;
+            estimator.on_tx_admitted(TxAdmission {
+                txid,
+                fee_sats: 500,
+                vsize: 100,
+                admit_height: 0,
+                parents: Vec::new(),
+                from_reload: false,
+                from_package: false,
+            });
+            tx_weights.push((txid, 400));
+        }
+        estimator.on_block_connected(&BlockObservation {
+            height: 1,
+            hash: [1u8; 32],
+            weight: 8_000,
+            tx_weights,
+        });
+        for height in 2..=5 {
+            estimator.on_block_connected(&BlockObservation {
+                height,
+                hash: [height as u8; 32],
+                weight: 8_000,
+                tx_weights: Vec::new(),
+            });
+        }
+
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        mempool.set_policy_config(Some(policy));
+        let funding = OutPoint {
+            hash: [6u8; 32],
+            index: 0,
+        };
+        let mut tx = spend(funding, 50_000);
+        tx.inputs[0].script_sig = vec![OP_1];
+        let vsize = transaction_weight_from_stacks(&tx, None)
+            .unwrap()
+            .div_ceil(4)
+            .max(1) as i64;
+        tx.outputs[0].value = 50_000 - 10 * vsize;
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![OP_1].into(),
+            height: 0,
+            is_coinbase: false,
+        };
+        storage.utxos().add_utxo(&funding, &utxo).unwrap();
+        let mut set = UtxoSet::default();
+        set.insert(funding, Arc::new(utxo));
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(set)));
+        assert!(mempool.add_transaction(tx).unwrap());
+
+        let plain = mining
+            .estimate_smart_fee(&serde_json::json!([1u64, "unset"]))
+            .await
+            .unwrap();
+        assert!(plain.get("source").is_none());
+        assert!((plain["feerate"].as_f64().unwrap() - 0.00005).abs() < 1e-12);
+
+        let combined = mining
+            .estimate_smart_fee(&serde_json::json!([1u64, "unset", "none", 1]))
+            .await
+            .unwrap();
+        assert_eq!(combined["source"].as_str(), Some("min"));
+        assert_eq!(combined["mempool_healthy"].as_bool(), Some(true));
+        assert_eq!(combined["blocks"].as_u64(), Some(1));
+        assert!(combined.get("tip_height").is_none());
+
+        let history = mining
+            .estimate_smart_fee(&serde_json::json!([1u64, "CONSERVATIVE", "History", 1]))
+            .await
+            .unwrap();
+        assert_eq!(history["source"].as_str(), Some("history"));
+        assert!((history["feerate"].as_f64().unwrap() - 0.00005).abs() < 1e-12);
+        assert_eq!(history["blocks"].as_u64(), Some(2));
+
+        let mempool_view = mining
+            .estimate_smart_fee(&serde_json::json!([1u64, "economical", "MEMPOOL", 2]))
+            .await
+            .unwrap();
+        assert_eq!(mempool_view["source"].as_str(), Some("mempool"));
+        assert!((mempool_view["feerate"].as_f64().unwrap() - 0.00010).abs() < 1e-12);
+        assert_eq!(mempool_view["tip_height"].as_u64(), Some(5));
+        assert_eq!(
+            mempool_view["tip_hash"].as_str(),
+            Some("0505050505050505050505050505050505050505050505050505050505050505")
+        );
+        assert!(mempool_view["table_age_secs"].as_f64().unwrap() < 30.0);
+        assert_eq!(mempool_view["health"]["window"].as_u64(), Some(6));
+        assert!((mempool_view["health"]["ratio"].as_f64().unwrap() - 0.2).abs() < 1e-9);
+        assert!((mempool_view["health"]["required_ratio"].as_f64().unwrap() - 0.75).abs() < 1e-12);
+    }
+
+    #[tokio::test]
+    async fn a_missing_quote_names_the_reason_and_a_bad_parameter_is_rejected() {
+        let (_dir, _storage, mempool, mining) = regtest_mining();
+        let empty = mining
+            .estimate_smart_fee(&serde_json::json!([6u64, "conservative", "none", 1]))
+            .await
+            .unwrap();
+        assert!(empty.get("feerate").is_none());
+        assert_eq!(empty["blocks"].as_u64(), Some(6));
+        assert_eq!(empty["reason"].as_str(), Some("empty_mempool"));
+        assert_eq!(
+            empty["errors"][0].as_str(),
+            Some("Insufficient data or no feerate found")
+        );
+
+        let mut fees = crate::config::FeeEstimatorConfig::default();
+        fees.enabled = false;
+        fees.health_required = Some(false);
+        mempool
+            .fee_estimator()
+            .unwrap()
+            .configure(fees, true)
+            .unwrap();
+        let disabled = mining
+            .estimate_smart_fee(&serde_json::json!([6u64, "conservative", "none", 2]))
+            .await
+            .unwrap();
+        assert_eq!(disabled["reason"].as_str(), Some("disabled"));
+        assert!(disabled.get("health").is_none());
+
+        let bare = MiningRpc::new();
+        let missing = bare
+            .estimate_smart_fee(&serde_json::json!([4u64]))
+            .await
+            .unwrap();
+        assert!(missing.get("reason").is_none());
+        assert_eq!(missing["blocks"].as_u64(), Some(4));
+        let named = bare
+            .estimate_smart_fee(&serde_json::json!([4u64, "unset", "none", 1]))
+            .await
+            .unwrap();
+        assert_eq!(named["reason"].as_str(), Some("disabled"));
+
+        assert!(
+            mining
+                .estimate_smart_fee(&serde_json::json!([1u64, "unset", "median"]))
+                .await
+                .is_err()
+        );
+        assert!(
+            mining
+                .estimate_smart_fee(&serde_json::json!([1u64, "unset", "none", 3]))
+                .await
+                .is_err()
+        );
+        assert!(
+            mining
+                .estimate_smart_fee(&serde_json::json!([1u64, "unset", "none", "loud"]))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

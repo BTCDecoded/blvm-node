@@ -200,6 +200,49 @@ pub struct ModuleManifest {
     /// Contains cryptographically signed payment addresses
     #[serde(default)]
     pub payment: Option<PaymentSection>,
+
+    /// Origins the module would like the node to fetch. The operator allow-list decides.
+    #[serde(default)]
+    pub network: ManifestNetwork,
+
+    /// Module names whose data directory is renamed onto this module on first load.
+    #[serde(default)]
+    pub replaces: Vec<String>,
+
+    /// Contract names this module implements. Discovery matches these, not module ids.
+    #[serde(default)]
+    pub provides_apis: Vec<String>,
+
+    /// Contracts that must already be provided by a loaded module.
+    #[serde(default)]
+    pub requires_apis: Vec<String>,
+
+    /// Version constraint (`*`, exact, `0.1.*`, `0.*`) against this node's version.
+    /// Required when `services` or `[network].http_wants` is set.
+    #[serde(default)]
+    pub min_node_version: Option<String>,
+
+    /// Services the node may bind for this module.
+    #[serde(default)]
+    pub services: Vec<ManifestService>,
+
+    /// Informational estimator declarations. `listfeeestimators` is a later phase.
+    #[serde(default)]
+    pub fee_estimators: Vec<toml::Value>,
+}
+
+/// `[[services]]` in module.toml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestService {
+    pub name: String,
+    pub kind: String,
+}
+
+/// `[network]` in module.toml. `http_wants` is logged and not applied.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ManifestNetwork {
+    #[serde(default)]
+    pub http_wants: Vec<String>,
 }
 
 impl ModuleManifest {
@@ -230,6 +273,13 @@ impl ModuleManifest {
 
     /// Convert to ModuleMetadata
     pub fn to_metadata(&self) -> ModuleMetadata {
+        if !self.network.http_wants.is_empty() {
+            tracing::info!(
+                module = %self.name,
+                http_wants = ?self.network.http_wants,
+                "module requested http origins; the operator allow-list is what applies"
+            );
+        }
         ModuleMetadata {
             name: self.name.clone(),
             version: self.version.clone(),

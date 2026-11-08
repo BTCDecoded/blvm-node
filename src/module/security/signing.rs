@@ -42,21 +42,6 @@ impl ModuleSigner {
         self.verify_manifest(binary_content, signatures, public_keys, threshold)
     }
 
-    /// Verify a single signature against a message.
-    pub fn verify_single_signature(
-        &self,
-        message: &[u8],
-        signature_hex: &str,
-        public_key_hex: &str,
-    ) -> Result<bool, ModuleError> {
-        let hash: [u8; 32] = Sha256::digest(message).into();
-        let sig_bytes = hex::decode(signature_hex)
-            .map_err(|e| ModuleError::CryptoError(format!("Invalid signature hex: {e}")))?;
-        let pubkey_bytes = hex::decode(public_key_hex)
-            .map_err(|e| ModuleError::CryptoError(format!("Invalid pubkey hex: {e}")))?;
-        Ok(verify_one(&hash, &sig_bytes, &pubkey_bytes))
-    }
-
     /// Verify payment address signatures.
     pub fn verify_payment_addresses(
         &self,

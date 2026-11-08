@@ -23,6 +23,13 @@ fn create_test_manifest(name: &str, deps: HashMap<String, String>) -> ModuleMani
         config_schema: HashMap::new(),
         binary: None,
         downloads: HashMap::new(),
+        network: Default::default(),
+        replaces: Vec::new(),
+        provides_apis: Vec::new(),
+        requires_apis: Vec::new(),
+        min_node_version: None,
+        services: Vec::new(),
+        fee_estimators: Vec::new(),
         signatures: None,
         payment: None,
     }

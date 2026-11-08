@@ -5,6 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::module::timers::types::{
+    CreateMode, TimerAck, TimerFire, TimerId, TimerInfo, TimerSpec, TimerState, TimerTarget,
+};
+
 use crate::module::traits::{
     BlockServeDenylistSnapshot, ChainInfo, EventType, LightningInfo, MempoolSize, NetworkStats,
     PaymentState, PeerInfo, SyncStatus, TxServeDenylistSnapshot,
@@ -173,6 +177,32 @@ pub enum MessageType {
     GetMempoolFeeRateSummary,
     /// Module asks the node to advertise `NODE_FIBRE` while that module is loaded.
     SetAdvertisedServiceBits,
+    // Timer service. Appended so existing variant indices stay put.
+    TimerCreate,
+    TimerCancel,
+    TimerPause,
+    TimerResume,
+    TimerTrigger,
+    TimerGet,
+    TimerList,
+    /// Handshake that also carries the IPC layout version.
+    HandshakeV2,
+    /// Optional name filter for `EventType::ModuleEvent`. Appended so existing indices stay put.
+    SubscribeModuleEventNames,
+    /// Module asks the node to GET a URL. Appended so existing indices stay put.
+    HttpRequest,
+    /// Module writes bytes on a hosted stream. Appended so existing indices stay put.
+    StreamSend,
+    /// Module closes a hosted stream. Appended so existing indices stay put.
+    StreamClose,
+    /// Replace one module's estimator names. Appended so existing indices stay put.
+    RegisterFeeEstimators,
+    /// Push one external fee table. Appended so existing indices stay put.
+    SubmitFeeTable,
+    /// Read the native fee table. Appended so existing indices stay put.
+    GetFeeTable,
+    /// Module asks the node to POST a JSON body. Appended so existing indices stay put.
+    HttpPost,
 }
 
 /// Request message from module to node
@@ -406,6 +436,128 @@ pub enum RequestPayload {
     SetAdvertisedServiceBits {
         bits: u64,
     },
+    // Timer service. Appended so existing variant indices stay put.
+    TimerCreate {
+        spec: crate::module::timers::types::TimerSpec,
+        mode: crate::module::timers::types::CreateMode,
+    },
+    TimerCancel {
+        target: crate::module::timers::types::TimerTarget,
+    },
+    TimerPause {
+        target: crate::module::timers::types::TimerTarget,
+    },
+    TimerResume {
+        target: crate::module::timers::types::TimerTarget,
+    },
+    TimerTrigger {
+        target: crate::module::timers::types::TimerTarget,
+    },
+    TimerGet {
+        target: crate::module::timers::types::TimerTarget,
+    },
+    TimerList,
+    /// Same as [`RequestPayload::Handshake`], plus the IPC layout version.
+    HandshakeV2 {
+        module_id: String,
+        module_name: String,
+        version: String,
+        ipc_protocol: u32,
+    },
+    /// Names a subscriber wants for `EventType::ModuleEvent`. An empty list clears the filter.
+    SubscribeModuleEventNames {
+        names: Vec<String>,
+    },
+    /// GET only. The node enforces the operator allow-list.
+    HttpRequest {
+        url: String,
+        accept: Option<String>,
+        timeout_ms: u32,
+    },
+    /// Bytes from the module onto a hosted stream connection.
+    StreamSend {
+        conn_id: u64,
+        bytes: Vec<u8>,
+    },
+    /// The module closes a hosted stream connection.
+    StreamClose {
+        conn_id: u64,
+    },
+    /// Replace this module's estimator names. `module_id` comes from the session.
+    RegisterFeeEstimators {
+        specs: Vec<FeeEstimatorSpecWire>,
+    },
+    /// Push one table. `module_id` comes from the session.
+    SubmitFeeTable {
+        table: ExternalFeeTableWire,
+    },
+    /// Native columns only. `view` is `combined`, `history`, or `mempool`.
+    GetFeeTable {
+        view: String,
+        mode: String,
+        targets: Vec<u32>,
+    },
+    /// POST a body. The node enforces the same origin allow-list as `HttpRequest`.
+    HttpPost {
+        url: String,
+        content_type: String,
+        body: Vec<u8>,
+        timeout_ms: u32,
+        /// `Authorization` header value. Not logged.
+        authorization: Option<String>,
+    },
+}
+
+/// One name a module wants to publish quotes under.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeeEstimatorSpecWire {
+    pub name: String,
+    pub description: String,
+    pub modes: Vec<String>,
+    pub default_merge: String,
+    pub auto_priority: Option<u32>,
+}
+
+/// A name the node refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeeNameRejectionWire {
+    pub name: String,
+    pub error: String,
+}
+
+/// Accepted names and the typed rejection for each refused name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeeEstimatorRegistrationWire {
+    pub accepted: Vec<String>,
+    pub rejected: Vec<FeeNameRejectionWire>,
+}
+
+/// One pushed table. The session supplies the module id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalFeeTableWire {
+    pub estimator: String,
+    pub tip_hash: Hash,
+    pub upstream_height: u64,
+    pub mode: Option<String>,
+    pub quotes: Vec<(u32, u64)>,
+}
+
+/// One native quote on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeeQuoteWire {
+    pub sat_per_kvb: u64,
+    pub blocks: u32,
+    pub source: String,
+    pub estimator: String,
+}
+
+/// Native fee table for the requested targets. Missing quotes are `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeFeeTableWire {
+    pub tip_hash: Hash,
+    pub tip_height: u64,
+    pub generation: u64,
+    pub quotes: Vec<(u32, Option<FeeQuoteWire>)>,
 }
 
 /// CLI spec for module commands (JSON-serializable structure)
@@ -470,6 +622,31 @@ pub enum InvocationType {
         params: Vec<u8>,
         caller_module_id: String,
     },
+    /// Timer fire. Appended so existing variant indices stay put.
+    Timer(crate::module::timers::types::TimerFire),
+    /// Hosted HTTP request. Appended so existing variant indices stay put.
+    ServiceHttp {
+        service: String,
+        method: String,
+        path_and_query: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    },
+    /// Hosted stream accepted. Appended so existing variant indices stay put.
+    StreamOpen {
+        conn_id: u64,
+        peer: String,
+    },
+    /// Hosted stream bytes. `seq` is per connection, starting at 1.
+    StreamData {
+        conn_id: u64,
+        seq: u64,
+        bytes: Vec<u8>,
+    },
+    /// Hosted stream closed. Appended so existing variant indices stay put.
+    StreamClose {
+        conn_id: u64,
+    },
 }
 
 /// Invocation result from module to node
@@ -493,6 +670,16 @@ pub enum InvocationResultPayload {
     Rpc(serde_json::Value),
     /// Module API result: opaque bincode/bytes response
     ModuleApi(Vec<u8>),
+    /// Acknowledgement of a timer fire. Appended so existing variant indices stay put.
+    Timer(crate::module::timers::types::TimerAck),
+    /// Hosted HTTP response. Appended so existing variant indices stay put.
+    ServiceHttp {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    },
+    /// Bytes to write on a hosted stream. Appended so existing indices stay put.
+    Stream(Vec<u8>),
 }
 
 /// Response message from node to module
@@ -591,6 +778,26 @@ pub enum ResponsePayload {
     MempoolFeeRateSummary(crate::module::traits::MempoolFeeRateSummary),
     /// Ack for [`RequestPayload::SetAdvertisedServiceBits`].
     AdvertisedServiceBitsSet,
+    /// Ack for [`RequestPayload::TimerCreate`].
+    TimerCreated(crate::module::timers::types::TimerInfo),
+    /// Ack for [`RequestPayload::TimerGet`].
+    TimerInfo(crate::module::timers::types::TimerInfo),
+    /// Ack for [`RequestPayload::TimerList`].
+    TimerList(Vec<crate::module::timers::types::TimerInfo>),
+    /// Result of [`RequestPayload::HttpRequest`]. Appended so existing indices stay put.
+    HttpResponse {
+        status: u16,
+        content_type: Option<String>,
+        body: Vec<u8>,
+    },
+    /// Result of [`RequestPayload::RegisterFeeEstimators`].
+    FeeEstimatorsRegistered(FeeEstimatorRegistrationWire),
+    /// Result of [`RequestPayload::SubmitFeeTable`]. `generation` is the bumped counter.
+    FeeTableAccepted {
+        generation: u64,
+    },
+    /// Result of [`RequestPayload::GetFeeTable`].
+    NativeFeeTable(NativeFeeTableWire),
 }
 
 /// Event message from node to subscribed modules
@@ -641,43 +848,22 @@ pub enum EventPayload {
     },
 
     // === Payment Events ===
-    PaymentRequestCreated {
-        payment_id: String,
-        amount_sats: u64,
-        invoice: Option<String>,
-    },
-    PaymentSettled {
-        payment_id: String,
-        tx_hash: Hash,
-        confirmations: u32,
-    },
-    PaymentFailed {
-        payment_id: String,
-        reason: String,
-    },
-    PaymentVerified {
-        payment_id: String,
-        amount_msats: u64,
-        invoice: String,
-    },
-    PaymentRouteFound {
-        payment_id: String,
-        route_hops: usize,
-        route_cost_msats: u64,
-    },
-    PaymentRouteFailed {
-        payment_id: String,
-        reason: String,
-    },
-    ChannelOpened {
-        channel_id: String,
-        peer_pubkey: Vec<u8>,
-        capacity_sats: u64,
-    },
-    ChannelClosed {
-        channel_id: String,
-        reason: String,
-    },
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedPaymentRequestCreated,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedPaymentSettled,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedPaymentFailed,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedPaymentVerified,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedPaymentRouteFound,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedPaymentRouteFailed,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedChannelOpened,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedChannelClosed,
 
     // === Mining Events ===
     BlockMined {
@@ -695,62 +881,30 @@ pub enum EventPayload {
         new_difficulty: u32,
         height: u64,
     },
-    MiningJobCreated {
-        job_id: String,
-        prev_hash: Hash,
-        height: u64,
-    },
-    ShareSubmitted {
-        job_id: String,
-        share_hash: Hash,
-        miner_id: Option<String>,
-    },
-    MergeMiningReward {
-        secondary_chain: String,
-        reward_amount: u64,
-        block_hash: Hash,
-    },
-    MiningPoolConnected {
-        pool_url: String,
-        pool_id: Option<String>,
-    },
-    MiningPoolDisconnected {
-        pool_url: String,
-        reason: String,
-    },
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedMiningJobCreated,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedShareSubmitted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedMergeMiningReward,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedMiningPoolConnected,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedMiningPoolDisconnected,
 
     // === Governance Events ===
-    GovernanceProposalCreated {
-        proposal_id: String,
-        repository: String,
-        pr_number: u64,
-        tier: String,
-    },
-    GovernanceProposalVoted {
-        proposal_id: String,
-        voter: String,
-        vote: String, // "approve", "reject", "abstain"
-    },
-    GovernanceProposalMerged {
-        proposal_id: String,
-        repository: String,
-        pr_number: u64,
-    },
-    WebhookSent {
-        webhook_url: String,
-        event_type: String,
-        success: bool,
-    },
-    WebhookFailed {
-        webhook_url: String,
-        event_type: String,
-        error: String,
-    },
-    GovernanceForkDetected {
-        fork_id: String,
-        ruleset_version: String,
-        adoption_count: usize,
-    },
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedGovernanceProposalCreated,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedGovernanceProposalVoted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedGovernanceProposalMerged,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedWebhookSent,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedWebhookFailed,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedGovernanceForkDetected,
 
     // === Network Events ===
     PeerConnected {
@@ -785,56 +939,28 @@ pub enum EventPayload {
         message_type: String,
         message_size: usize,
     },
-    BroadcastStarted {
-        message_type: String,
-        target_peers: usize,
-    },
-    BroadcastCompleted {
-        message_type: String,
-        successful: usize,
-        failed: usize,
-    },
-    RouteDiscovered {
-        destination: Vec<u8>,    // Node ID or address
-        route_path: Vec<String>, // SocketAddrs as strings
-        route_cost: u64,
-    },
-    RouteFailed {
-        destination: Vec<u8>,
-        reason: String,
-    },
-    ConnectionAttempt {
-        peer_addr: String,
-        success: bool,
-        error: Option<String>,
-    },
-    AddressDiscovered {
-        peer_addr: String,
-        source: String, // "dns", "peer", "manual", "mesh"
-    },
-    AddressExpired {
-        peer_addr: String,
-    },
-    NetworkPartition {
-        partition_id: Vec<u8>,
-        disconnected_peers: Vec<String>,
-        partition_size: usize,
-    },
-    NetworkReconnected {
-        partition_id: Vec<u8>,
-        reconnected_peers: Vec<String>,
-    },
-    DoSAttackDetected {
-        peer_addr: String,
-        attack_type: String, // "flood", "spam", "resource_exhaustion"
-        severity: String,    // "low", "medium", "high", "critical"
-    },
-    RateLimitExceeded {
-        peer_addr: String,
-        limit_type: String, // "messages", "bytes", "connections"
-        current_rate: f64,
-        limit: f64,
-    },
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedBroadcastStarted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedBroadcastCompleted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedRouteDiscovered,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedRouteFailed,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedConnectionAttempt,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedAddressDiscovered,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedAddressExpired,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedNetworkPartition,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedNetworkReconnected,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedDoSAttackDetected,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedRateLimitExceeded,
 
     // === Consensus Events ===
     BlockValidationStarted {
@@ -848,44 +974,25 @@ pub enum EventPayload {
         validation_time_ms: u64,
         error: Option<String>,
     },
-    ScriptVerificationStarted {
-        tx_hash: Hash,
-        input_index: usize,
-    },
-    ScriptVerificationCompleted {
-        tx_hash: Hash,
-        input_index: usize,
-        success: bool,
-        verification_time_ms: u64,
-    },
-    UTXOValidationStarted {
-        block_hash: Hash,
-        height: u64,
-    },
-    UTXOValidationCompleted {
-        block_hash: Hash,
-        height: u64,
-        success: bool,
-    },
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedScriptVerificationStarted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedScriptVerificationCompleted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedUTXOValidationStarted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedUTXOValidationCompleted,
     DifficultyAdjusted {
         old_difficulty: u32,
         new_difficulty: u32,
         height: u64,
     },
-    SoftForkActivated {
-        fork_name: String, // "segwit", "taproot", "ctv", etc.
-        height: u64,
-    },
-    SoftForkLockedIn {
-        fork_name: String,
-        height: u64,
-    },
-    ConsensusRuleViolation {
-        rule_name: String,
-        block_hash: Option<Hash>,
-        tx_hash: Option<Hash>,
-        error: String,
-    },
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedSoftForkActivated,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedSoftForkLockedIn,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedConsensusRuleViolation,
 
     // === Sync Events ===
     HeadersSyncStarted {
@@ -944,28 +1051,16 @@ pub enum EventPayload {
     },
 
     // === Storage Events ===
-    StorageRead {
-        operation: String,
-        duration_ms: u64,
-    },
-    StorageWrite {
-        operation: String,
-        duration_ms: u64,
-        bytes_written: usize,
-    },
-    StorageQuery {
-        query_type: String,
-        duration_ms: u64,
-    },
-    DatabaseBackupStarted {
-        backup_path: String,
-    },
-    DatabaseBackupCompleted {
-        backup_path: String,
-        success: bool,
-        size_bytes: u64,
-        duration_seconds: u64,
-    },
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedStorageRead,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedStorageWrite,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedStorageQuery,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedDatabaseBackupStarted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedDatabaseBackupCompleted,
 
     // === Module Lifecycle Events ===
     ModuleLoaded {
@@ -981,12 +1076,10 @@ pub enum EventPayload {
         old_version: String,
         new_version: String,
     },
-    ModuleStarted {
-        module_name: String,
-    },
-    ModuleStopped {
-        module_name: String,
-    },
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedModuleStarted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedModuleStopped,
     MeshPacketReceived {
         packet_data: Vec<u8>,
         peer_addr: String, // Serialized SocketAddr as string
@@ -1037,22 +1130,10 @@ pub enum EventPayload {
     },
 
     // === Maintenance Events ===
-    MaintenanceStarted {
-        /// Maintenance type (e.g., "backup", "cleanup", "prune")
-        maintenance_type: String,
-        /// Estimated duration in seconds (if known)
-        estimated_duration_seconds: Option<u64>,
-    },
-    MaintenanceCompleted {
-        /// Maintenance type
-        maintenance_type: String,
-        /// Success status
-        success: bool,
-        /// Duration in milliseconds
-        duration_ms: u64,
-        /// Results/statistics (optional JSON string)
-        results: Option<String>,
-    },
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedMaintenanceStarted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedMaintenanceCompleted,
     DataMaintenance {
         /// Maintenance operation type: "cleanup" (delete old data), "flush" (write pending data), or "both"
         operation: String,
@@ -1085,67 +1166,32 @@ pub enum EventPayload {
         /// Disk path
         disk_path: String,
     },
-    ResourceLimitWarning {
-        /// Resource type (e.g., "memory", "cpu", "disk", "network")
-        resource_type: String,
-        /// Current usage percentage
-        usage_percent: f64,
-        /// Current usage value
-        current_usage: u64,
-        /// Limit value
-        limit: u64,
-        /// Warning threshold percentage
-        threshold_percent: f64,
-    },
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedResourceLimitWarning,
 
     // === Dandelion++ Events ===
-    DandelionStemStarted {
-        tx_hash: Hash,
-        current_peer: String,
-        next_peer: String,
-    },
-    DandelionStemAdvanced {
-        tx_hash: Hash,
-        hop_count: u8,
-        next_peer: String,
-    },
-    DandelionFluffed {
-        tx_hash: Hash,
-        stem_hops: u8,
-    },
-    DandelionStemPathExpired {
-        peer_addr: String,
-    },
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedDandelionStemStarted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedDandelionStemAdvanced,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedDandelionFluffed,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedDandelionStemPathExpired,
 
     // === Compact Blocks Events ===
-    CompactBlockReceived {
-        block_hash: Hash,
-        height: u64,
-        short_ids_count: usize,
-    },
-    BlockReconstructionStarted {
-        block_hash: Hash,
-        height: u64,
-    },
-    BlockReconstructionCompleted {
-        block_hash: Hash,
-        height: u64,
-        success: bool,
-        missing_txs: usize,
-    },
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedCompactBlockReceived,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedBlockReconstructionStarted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedBlockReconstructionCompleted,
 
     // === FIBRE Events ===
-    FibreBlockEncoded {
-        block_hash: Hash,
-        height: u64,
-        chunks: usize,
-        encoding_time_ms: u64,
-    },
-    FibreBlockSent {
-        block_hash: Hash,
-        height: u64,
-        peer_addr: String,
-    },
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedFibreBlockEncoded,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedFibreBlockSent,
 
     // === P2P companion UDP (NODE_FIBRE; e.g. blvm-fibre) ===
     CompanionUdpPeerRegistered {
@@ -1159,30 +1205,16 @@ pub enum EventPayload {
     },
 
     // === Package Relay Events ===
-    PackageReceived {
-        package_id: Vec<u8>,
-        transaction_count: usize,
-        peer_addr: String,
-    },
-    PackageRejected {
-        package_id: Vec<u8>,
-        reason: String,
-        peer_addr: String,
-    },
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedPackageReceived,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedPackageRejected,
 
     // === UTXO Commitments Events ===
-    UtxoCommitmentReceived {
-        block_hash: Hash,
-        height: u64,
-        commitment_hash: Hash,
-        peer_addr: String,
-    },
-    UtxoCommitmentVerified {
-        block_hash: Hash,
-        height: u64,
-        commitment_hash: Hash,
-        valid: bool,
-    },
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedUtxoCommitmentReceived,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedUtxoCommitmentVerified,
 
     // === Ban List Sharing Events ===
     BanListShared {
@@ -1195,34 +1227,18 @@ pub enum EventPayload {
     },
 
     // === Extended module / mining events ===
-    SelectiveSyncPolicyApplied {
-        policy_source: String, // "subscribe", "refresh", "config"
-        registry_count: usize,
-    },
-    ActionExecuted {
-        action_id: String,
-        action_type: String,
-        target: String, // miner_id or "all"
-        success: bool,
-    },
-    ModulePurchaseCompleted {
-        module_id: String,
-        payment_id: String,
-        amount_sats: u64,
-    },
-    StratumClientConnected {
-        endpoint: String,
-        protocol_version: u32,
-    },
-    StratumClientDisconnected {
-        endpoint: String,
-        reason: String,
-    },
-    IBDBlockFiltered {
-        block_hash: Hash,
-        height: u64,
-        reason: String, // "selective_sync", "prune", etc.
-    },
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedSelectiveSyncPolicyApplied,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedActionExecuted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedModulePurchaseCompleted,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedStratumClientConnected,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedStratumClientDisconnected,
+    /// F5 reserved. Nothing publishes this. The slot keeps the bincode index.
+    ReservedIBDBlockFiltered,
 
     // === Module Registry Events ===
     ModuleDiscovered {
@@ -1249,6 +1265,35 @@ pub enum EventPayload {
         payload: Vec<u8>,
         peer_addr: String,
     },
+    /// Published by a module. `source_module` is the authenticated session, not the caller's value.
+    ModuleEvent {
+        source_module: String,
+        name: String,
+        data: Vec<u8>,
+    },
+    /// First native table for a tip. One event per tip hash.
+    FeeTableReady {
+        tip_hash: Hash,
+        tip_height: u64,
+        generation: u64,
+    },
+}
+
+impl EventPayload {
+    /// Build a module event. The node replaces `source_module` with the session id.
+    pub fn module_event(name: impl Into<String>, data: Vec<u8>) -> Self {
+        Self::ModuleEvent {
+            source_module: String::new(),
+            name: name.into(),
+            data,
+        }
+    }
+
+    /// JSON body for [`EventPayload::module_event`].
+    pub fn module_event_json(name: impl Into<String>, data: &impl serde::Serialize) -> Self {
+        let bytes = serde_json::to_vec(data).unwrap_or_default();
+        Self::module_event(name, bytes)
+    }
 }
 
 /// Typed payload extraction for event handlers.

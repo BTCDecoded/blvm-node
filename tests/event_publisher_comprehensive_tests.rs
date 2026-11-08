@@ -4,7 +4,7 @@
 
 use blvm_node::module::api::events::EventManager;
 use blvm_node::node::event_publisher::EventPublisher;
-use blvm_node::{Block, Hash, Transaction};
+use blvm_node::{Block, Hash};
 use std::sync::Arc;
 
 #[test]
@@ -37,25 +37,6 @@ async fn test_event_publisher_new_block() {
 
     // Publish new block event (should not panic)
     publisher.publish_new_block(&block, &block_hash, 0).await;
-}
-
-#[tokio::test]
-async fn test_event_publisher_new_transaction() {
-    let event_manager = Arc::new(EventManager::new());
-    let publisher = EventPublisher::new(event_manager);
-
-    // Create a test transaction
-    let tx = Transaction {
-        version: 1,
-        inputs: vec![].into(),
-        outputs: vec![].into(),
-        lock_time: 0,
-    };
-
-    let tx_hash: Hash = [0u8; 32];
-
-    // Publish new transaction event (should not panic)
-    publisher.publish_new_transaction(&tx, &tx_hash, true).await;
 }
 
 #[tokio::test]

@@ -37,6 +37,9 @@ pub fn parse_permission_string(perm_str: &str) -> Option<Permission> {
         "register_module_api" | "RegisterModuleApi" => Some(Permission::RegisterModuleApi),
         "submit_block" | "SubmitBlock" => Some(Permission::SubmitBlock),
         "queue_inbound_block" | "QueueInboundBlock" => Some(Permission::QueueInboundBlock),
+        "http_client" | "HttpClient" => Some(Permission::HttpClient),
+        "host_service" | "HostService" => Some(Permission::HostService),
+        "write_fee_estimates" | "WriteFeeEstimates" => Some(Permission::WriteFeeEstimates),
         _ => None,
     }
 }
@@ -104,6 +107,12 @@ pub enum Permission {
     SubmitBlock,
     /// Queue inbound block bytes (`BlockReceived` / auxiliary transport path)
     QueueInboundBlock,
+    /// Ask the node to perform an allow-listed HTTP GET. Not `NetworkAccess`.
+    HttpClient,
+    /// Handle a listener the node binds for this module. Not `NetworkAccess`.
+    HostService,
+    /// Register a fee estimator and push its tables.
+    WriteFeeEstimates,
 }
 
 /// Set of permissions for a module
@@ -231,7 +240,7 @@ impl PermissionChecker {
         payload: &RequestPayload,
     ) -> Result<(), ModuleError> {
         let required_permission = match payload {
-            RequestPayload::Handshake { .. } => {
+            RequestPayload::Handshake { .. } | RequestPayload::HandshakeV2 { .. } => {
                 // Handshake doesn't require permissions - handled at connection level
                 return Ok(());
             }
@@ -262,6 +271,9 @@ impl PermissionChecker {
             // Additional Mempool API
             RequestPayload::CheckTransactionInMempool { .. } => Permission::ReadMempool,
             RequestPayload::GetFeeEstimate { .. } => Permission::ReadMempool,
+            RequestPayload::GetFeeTable { .. } => Permission::ReadMempool,
+            RequestPayload::RegisterFeeEstimators { .. }
+            | RequestPayload::SubmitFeeTable { .. } => Permission::WriteFeeEstimates,
             // Filesystem API
             RequestPayload::ReadFile { .. } => Permission::ReadFilesystem,
             RequestPayload::WriteFile { .. } => Permission::WriteFilesystem,
@@ -279,6 +291,13 @@ impl PermissionChecker {
             RequestPayload::RegisterTimer { .. } => Permission::ManageTimers,
             RequestPayload::CancelTimer { .. } => Permission::ManageTimers,
             RequestPayload::ScheduleTask { .. } => Permission::ManageTimers,
+            RequestPayload::TimerCreate { .. }
+            | RequestPayload::TimerCancel { .. }
+            | RequestPayload::TimerPause { .. }
+            | RequestPayload::TimerResume { .. }
+            | RequestPayload::TimerTrigger { .. }
+            | RequestPayload::TimerGet { .. }
+            | RequestPayload::TimerList => Permission::ManageTimers,
             // Metrics and Telemetry
             RequestPayload::ReportMetric { .. } => Permission::ReportMetrics,
             RequestPayload::GetModuleMetrics { .. } => Permission::ReadMetrics,
@@ -296,6 +315,7 @@ impl PermissionChecker {
             RequestPayload::IsModuleAvailable { .. } => Permission::DiscoverModules,
             // Module Event Publishing
             RequestPayload::PublishEvent { .. } => Permission::PublishEvents,
+            RequestPayload::SubscribeModuleEventNames { .. } => Permission::SubscribeEvents,
             // Module-to-Module Communication
             RequestPayload::CallModule { .. } => Permission::CallModule,
             RequestPayload::RegisterModuleApi { .. } => Permission::RegisterModuleApi,
@@ -321,6 +341,12 @@ impl PermissionChecker {
             RequestPayload::GetTxMetadata { .. } => Permission::ReadBlockchain,
             RequestPayload::GetMempoolFeeRateSummary => Permission::ReadMempool,
             RequestPayload::RegisterCliSpec { .. } => Permission::RegisterRpcEndpoint,
+            RequestPayload::HttpRequest { .. } | RequestPayload::HttpPost { .. } => {
+                Permission::HttpClient
+            }
+            RequestPayload::StreamSend { .. } | RequestPayload::StreamClose { .. } => {
+                Permission::HostService
+            }
         };
 
         if !self.check_permission(module_id, &required_permission) {
@@ -386,10 +412,7 @@ mod tests {
         checker.register_module_permissions("block-guest".to_string(), blocks);
         assert!(
             checker
-                .check_api_call(
-                    "block-guest",
-                    &RequestPayload::GetBlock { hash: [0u8; 32] }
-                )
+                .check_api_call("block-guest", &RequestPayload::GetBlock { hash: [0u8; 32] })
                 .is_ok()
         );
     }

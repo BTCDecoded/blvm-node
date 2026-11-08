@@ -129,6 +129,9 @@ impl ModuleLoader {
             );
         }
 
+        manager.check_requires_apis(&discovered.manifest).await?;
+        manager.adopt_replaced_data(&discovered.manifest)?;
+
         let metadata = discovered.manifest.to_metadata();
 
         manager
@@ -138,7 +141,13 @@ impl ModuleLoader {
                 metadata,
                 config,
             )
-            .await
+            .await?;
+        manager.record_declaration(&discovered.manifest).await;
+        if let Err(err) = manager.bind_declared_services(&discovered.manifest).await {
+            let _ = manager.unload_module(&discovered.manifest.name).await;
+            return Err(err);
+        }
+        Ok(())
     }
 
     /// If the manifest declares `[binary].hash`, ensure the on-disk file matches.

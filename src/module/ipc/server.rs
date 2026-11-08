@@ -44,11 +44,7 @@ pub trait WasmInvoker: Send + Sync {
         params: serde_json::Value,
     ) -> Result<serde_json::Value, ModuleError>;
 
-    async fn on_event(
-        &self,
-        module_name: &str,
-        event_json: &str,
-    ) -> Result<String, ModuleError>;
+    async fn on_event(&self, module_name: &str, event_json: &str) -> Result<String, ModuleError>;
 }
 
 /// IPC server that handles module connections
@@ -56,7 +52,7 @@ pub struct ModuleIpcServer {
     /// Socket/pipe path where server listens
     socket_path: PathBuf,
     /// Connection count (for fallback module IDs)
-    connection_count: std::sync::atomic::AtomicUsize,
+    connection_count: Arc<std::sync::atomic::AtomicUsize>,
     /// Event manager for publishing events
     event_manager: Option<Arc<crate::module::api::events::EventManager>>,
     /// API hub for request routing
@@ -98,6 +94,8 @@ pub struct ModuleIpcServer {
     /// In-process WASM invoker (when module has no IPC connection)
     #[cfg(feature = "wasm-modules")]
     wasm_invoker: Option<Arc<dyn WasmInvoker>>,
+    /// Timer service notified when a module connects and disconnects.
+    timer_service: Option<crate::module::timers::TimerService>,
 }
 
 /// Active connection to a module (generic over stream read half)
@@ -191,22 +189,37 @@ impl ModuleIpcHandle {
         let bytes = bincode::serialize(&ModuleMessage::Invocation(invocation))
             .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
 
-        outgoing_tx.send(bytes::Bytes::from(bytes)).map_err(|_| {
-            ModuleError::OperationError(module_error_msg::MODULE_CONNECTION_CLOSED.to_string())
-        })?;
+        if outgoing_tx.send(bytes::Bytes::from(bytes)).is_err() {
+            self.pending_invocations
+                .lock()
+                .await
+                .remove(&correlation_id);
+            return Err(ModuleError::OperationError(
+                module_error_msg::MODULE_CONNECTION_CLOSED.to_string(),
+            ));
+        }
 
-        let result = tokio::time::timeout(tokio::time::Duration::from_secs(60), rx)
-            .await
-            .map_err(|_| {
-                ModuleError::OperationError(
-                    "Module did not respond to ModuleAPI invocation within 60 seconds".to_string(),
-                )
-            })?
-            .map_err(|_| {
-                ModuleError::OperationError(
+        let result = match tokio::time::timeout(tokio::time::Duration::from_secs(60), rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => {
+                self.pending_invocations
+                    .lock()
+                    .await
+                    .remove(&correlation_id);
+                return Err(ModuleError::OperationError(
                     module_error_msg::INVOCATION_RESPONSE_CHANNEL_CLOSED.to_string(),
-                )
-            })?;
+                ));
+            }
+            Err(_) => {
+                self.pending_invocations
+                    .lock()
+                    .await
+                    .remove(&correlation_id);
+                return Err(ModuleError::OperationError(
+                    "Module did not respond to ModuleAPI invocation within 60 seconds".to_string(),
+                ));
+            }
+        };
 
         if !result.success {
             return Err(ModuleError::OperationError(
@@ -224,9 +237,161 @@ impl ModuleIpcHandle {
             )),
         }
     }
+
+    /// Deliver a timer fire and wait for `InvocationResultPayload::Timer`.
+    ///
+    /// The pending entry is removed on send failure and on timeout, so a late
+    /// result finds nothing to wake and is ignored.
+    pub async fn invoke_timer(
+        &self,
+        module_id: &str,
+        fire: crate::module::timers::types::TimerFire,
+        ack_timeout: std::time::Duration,
+    ) -> Result<crate::module::timers::types::TimerAck, ModuleError> {
+        let outgoing_tx = {
+            let by_module = self.outgoing_tx_by_module.read().await;
+            by_module.get(module_id).cloned()
+        };
+        let Some(outgoing_tx) = outgoing_tx else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::MODULE_CONNECTION_CLOSED.to_string(),
+            ));
+        };
+
+        let correlation_id = self.next_invocation_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        self.pending_invocations
+            .lock()
+            .await
+            .insert(correlation_id, tx);
+
+        let invocation = InvocationMessage {
+            correlation_id,
+            invocation_type: InvocationType::Timer(fire),
+        };
+        let bytes = bincode::serialize(&ModuleMessage::Invocation(invocation))
+            .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
+        if outgoing_tx.send(bytes::Bytes::from(bytes)).is_err() {
+            self.pending_invocations
+                .lock()
+                .await
+                .remove(&correlation_id);
+            return Err(ModuleError::OperationError(
+                module_error_msg::MODULE_CONNECTION_CLOSED.to_string(),
+            ));
+        }
+
+        let result = match tokio::time::timeout(ack_timeout, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => {
+                self.pending_invocations
+                    .lock()
+                    .await
+                    .remove(&correlation_id);
+                return Err(ModuleError::OperationError(
+                    module_error_msg::INVOCATION_RESPONSE_CHANNEL_CLOSED.to_string(),
+                ));
+            }
+            Err(_) => {
+                self.pending_invocations
+                    .lock()
+                    .await
+                    .remove(&correlation_id);
+                return Err(ModuleError::Timeout);
+            }
+        };
+        if !result.success {
+            return Err(ModuleError::OperationError(
+                result
+                    .error
+                    .unwrap_or_else(|| "timer fire failed".to_string()),
+            ));
+        }
+        match result.payload {
+            Some(InvocationResultPayload::Timer(ack)) => Ok(ack),
+            _ => Err(ModuleError::OperationError(
+                "module returned no timer acknowledgement".to_string(),
+            )),
+        }
+    }
+
+    /// Send one invocation and wait. Callers that own one connection send the
+    /// next frame only after this returns, so that connection stays ordered.
+    pub async fn invoke_hosted(
+        &self,
+        module_id: &str,
+        invocation_type: InvocationType,
+        timeout: std::time::Duration,
+    ) -> Result<InvocationResultMessage, ModuleError> {
+        let outgoing_tx = {
+            let by_module = self.outgoing_tx_by_module.read().await;
+            by_module.get(module_id).cloned()
+        };
+        let Some(outgoing_tx) = outgoing_tx else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::MODULE_CONNECTION_CLOSED.to_string(),
+            ));
+        };
+
+        let correlation_id = self.next_invocation_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        self.pending_invocations
+            .lock()
+            .await
+            .insert(correlation_id, tx);
+
+        let invocation = InvocationMessage {
+            correlation_id,
+            invocation_type,
+        };
+        let bytes = bincode::serialize(&ModuleMessage::Invocation(invocation))
+            .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
+        if outgoing_tx.send(bytes::Bytes::from(bytes)).is_err() {
+            self.pending_invocations
+                .lock()
+                .await
+                .remove(&correlation_id);
+            return Err(ModuleError::OperationError(
+                module_error_msg::MODULE_CONNECTION_CLOSED.to_string(),
+            ));
+        }
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(_)) => {
+                self.pending_invocations
+                    .lock()
+                    .await
+                    .remove(&correlation_id);
+                Err(ModuleError::OperationError(
+                    module_error_msg::INVOCATION_RESPONSE_CHANNEL_CLOSED.to_string(),
+                ))
+            }
+            Err(_) => {
+                self.pending_invocations
+                    .lock()
+                    .await
+                    .remove(&correlation_id);
+                Err(ModuleError::Timeout)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn pending_invocation_count(&self) -> usize {
+        self.pending_invocations.lock().await.len()
+    }
 }
 
 impl ModuleIpcServer {
+    /// Wake a waiting invoke, or ignore the result when the correlation is already gone.
+    pub(crate) async fn complete_pending_invocation(&self, result: InvocationResultMessage) {
+        let mut pending = self.pending_invocations.lock().await;
+        if let Some(tx) = pending.remove(&result.correlation_id) {
+            let _ = tx.send(result);
+        }
+    }
+
     /// Return a lock-free handle for cross-task invocations (avoids deadlocking on the server Mutex).
     pub fn handle(&self) -> ModuleIpcHandle {
         ModuleIpcHandle {
@@ -241,7 +406,7 @@ impl ModuleIpcServer {
     pub fn new<P: AsRef<Path>>(socket_path: P) -> Self {
         Self {
             socket_path: socket_path.as_ref().to_path_buf(),
-            connection_count: std::sync::atomic::AtomicUsize::new(0),
+            connection_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             event_manager: None,
             api_hub: None,
             rpc_channels: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -252,7 +417,17 @@ impl ModuleIpcServer {
             next_invocation_id: Arc::new(AtomicU64::new(1)),
             #[cfg(feature = "wasm-modules")]
             wasm_invoker: None,
+            timer_service: None,
         }
+    }
+
+    /// Notify this service when modules connect and disconnect.
+    pub fn with_timer_service(
+        mut self,
+        timer_service: crate::module::timers::TimerService,
+    ) -> Self {
+        self.timer_service = Some(timer_service);
+        self
     }
 
     /// Set the WASM invoker for in-process module dispatch
@@ -290,7 +465,7 @@ impl ModuleIpcServer {
         registry.insert(module_id, spec);
     }
 
-    /// Unregister CLI spec when a module is unloaded.
+    /// Drop the CLI spec stored under `module_id`.
     pub async fn unregister_cli_spec(&self, module_id: &str) {
         let mut registry = self.cli_registry.write().await;
         registry.remove(module_id);
@@ -349,22 +524,38 @@ impl ModuleIpcServer {
             let bytes = bincode::serialize(&ModuleMessage::Invocation(invocation))
                 .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
 
-            outgoing_tx.send(bytes::Bytes::from(bytes)).map_err(|_| {
-                ModuleError::OperationError(module_error_msg::MODULE_CONNECTION_CLOSED.to_string())
-            })?;
+            if outgoing_tx.send(bytes::Bytes::from(bytes)).is_err() {
+                self.pending_invocations
+                    .lock()
+                    .await
+                    .remove(&correlation_id);
+                return Err(ModuleError::OperationError(
+                    module_error_msg::MODULE_CONNECTION_CLOSED.to_string(),
+                ));
+            }
 
-            let result = tokio::time::timeout(tokio::time::Duration::from_secs(60), rx)
-                .await
-                .map_err(|_| {
-                    ModuleError::OperationError(
-                        module_error_msg::MODULE_DID_NOT_RESPOND_CLI_60S.to_string(),
-                    )
-                })?
-                .map_err(|_| {
-                    ModuleError::OperationError(
+            let result = match tokio::time::timeout(tokio::time::Duration::from_secs(60), rx).await
+            {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => {
+                    self.pending_invocations
+                        .lock()
+                        .await
+                        .remove(&correlation_id);
+                    return Err(ModuleError::OperationError(
                         module_error_msg::INVOCATION_RESPONSE_CHANNEL_CLOSED.to_string(),
-                    )
-                })?;
+                    ));
+                }
+                Err(_) => {
+                    self.pending_invocations
+                        .lock()
+                        .await
+                        .remove(&correlation_id);
+                    return Err(ModuleError::OperationError(
+                        module_error_msg::MODULE_DID_NOT_RESPOND_CLI_60S.to_string(),
+                    ));
+                }
+            };
 
             if !result.success {
                 return Err(ModuleError::Cli(
@@ -430,22 +621,38 @@ impl ModuleIpcServer {
             let bytes = bincode::serialize(&ModuleMessage::Invocation(invocation))
                 .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
 
-            outgoing_tx.send(bytes::Bytes::from(bytes)).map_err(|_| {
-                ModuleError::OperationError(module_error_msg::MODULE_CONNECTION_CLOSED.to_string())
-            })?;
+            if outgoing_tx.send(bytes::Bytes::from(bytes)).is_err() {
+                self.pending_invocations
+                    .lock()
+                    .await
+                    .remove(&correlation_id);
+                return Err(ModuleError::OperationError(
+                    module_error_msg::MODULE_CONNECTION_CLOSED.to_string(),
+                ));
+            }
 
-            let result = tokio::time::timeout(tokio::time::Duration::from_secs(60), rx)
-                .await
-                .map_err(|_| {
-                    ModuleError::OperationError(
-                        module_error_msg::MODULE_DID_NOT_RESPOND_RPC_60S.to_string(),
-                    )
-                })?
-                .map_err(|_| {
-                    ModuleError::OperationError(
+            let result = match tokio::time::timeout(tokio::time::Duration::from_secs(60), rx).await
+            {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => {
+                    self.pending_invocations
+                        .lock()
+                        .await
+                        .remove(&correlation_id);
+                    return Err(ModuleError::OperationError(
                         module_error_msg::INVOCATION_RESPONSE_CHANNEL_CLOSED.to_string(),
-                    )
-                })?;
+                    ));
+                }
+                Err(_) => {
+                    self.pending_invocations
+                        .lock()
+                        .await
+                        .remove(&correlation_id);
+                    return Err(ModuleError::OperationError(
+                        module_error_msg::MODULE_DID_NOT_RESPOND_RPC_60S.to_string(),
+                    ));
+                }
+            };
 
             if !result.success {
                 return Err(ModuleError::OperationError(
@@ -528,12 +735,18 @@ impl ModuleIpcServer {
             }
         }
         info!("Module IPC server listening on {:?}", self.socket_path);
+        let ctx = self.connection_ctx();
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     debug!("New module connection");
-                    self.handle_connection(stream, Arc::clone(&node_api))
-                        .await?;
+                    let ctx = ctx.clone();
+                    let node_api = Arc::clone(&node_api);
+                    tokio::spawn(async move {
+                        if let Err(e) = ctx.handle_connection(stream, node_api).await {
+                            error!("Module connection closed: {e}");
+                        }
+                    });
                 }
                 Err(e) => error!("Failed to accept module connection: {}", e),
             }
@@ -554,6 +767,7 @@ impl ModuleIpcServer {
             })?;
         }
         info!("Module IPC server listening on pipe {}", pipe_name);
+        let ctx = self.connection_ctx();
         loop {
             let server = ServerOptions::new()
                 .first_pipe_instance(false)
@@ -564,17 +778,78 @@ impl ModuleIpcServer {
                 .await
                 .map_err(|e| ModuleError::IpcError(format!("Failed to connect pipe: {e}")))?;
             debug!("New module connection (named pipe)");
-            self.handle_connection(server, Arc::clone(&node_api))
-                .await?;
+            let ctx = ctx.clone();
+            let node_api = Arc::clone(&node_api);
+            tokio::spawn(async move {
+                if let Err(e) = ctx.handle_connection(server, node_api).await {
+                    error!("Module connection closed: {e}");
+                }
+            });
+        }
+    }
+}
+
+/// Shared per-connection state. Each accepted module runs on its own task.
+#[derive(Clone)]
+struct ConnectionCtx {
+    connection_count: Arc<std::sync::atomic::AtomicUsize>,
+    event_manager: Option<Arc<crate::module::api::events::EventManager>>,
+    api_hub: Option<Arc<tokio::sync::Mutex<ModuleApiHub>>>,
+    rpc_channels: Arc<
+        tokio::sync::RwLock<
+            HashMap<
+                String,
+                mpsc::UnboundedSender<(
+                    u64,
+                    String,
+                    serde_json::Value,
+                    mpsc::UnboundedSender<Result<serde_json::Value, crate::rpc::errors::RpcError>>,
+                )>,
+            >,
+        >,
+    >,
+    cli_registry: Arc<tokio::sync::RwLock<HashMap<String, CliSpec>>>,
+    outgoing_tx_by_module:
+        Arc<tokio::sync::RwLock<HashMap<String, mpsc::UnboundedSender<bytes::Bytes>>>>,
+    pending_invocations:
+        Arc<tokio::sync::Mutex<HashMap<u64, oneshot::Sender<InvocationResultMessage>>>>,
+    rpc_pending: Arc<
+        tokio::sync::Mutex<
+            HashMap<
+                u64,
+                mpsc::UnboundedSender<Result<serde_json::Value, crate::rpc::errors::RpcError>>,
+            >,
+        >,
+    >,
+    timer_service: Option<crate::module::timers::TimerService>,
+}
+
+impl ModuleIpcServer {
+    fn connection_ctx(&self) -> ConnectionCtx {
+        ConnectionCtx {
+            connection_count: Arc::clone(&self.connection_count),
+            event_manager: self.event_manager.clone(),
+            api_hub: self.api_hub.clone(),
+            rpc_channels: Arc::clone(&self.rpc_channels),
+            cli_registry: Arc::clone(&self.cli_registry),
+            outgoing_tx_by_module: Arc::clone(&self.outgoing_tx_by_module),
+            pending_invocations: Arc::clone(&self.pending_invocations),
+            rpc_pending: Arc::clone(&self.rpc_pending),
+            timer_service: self.timer_service.clone(),
+        }
+    }
+}
+
+impl ConnectionCtx {
+    async fn complete_pending_invocation(&self, result: InvocationResultMessage) {
+        let mut pending = self.pending_invocations.lock().await;
+        if let Some(tx) = pending.remove(&result.correlation_id) {
+            let _ = tx.send(result);
         }
     }
 
     /// Handle a new module connection (generic over stream type)
-    async fn handle_connection<S, A>(
-        &mut self,
-        stream: S,
-        node_api: Arc<A>,
-    ) -> Result<(), ModuleError>
+    async fn handle_connection<S, A>(&self, stream: S, node_api: Arc<A>) -> Result<(), ModuleError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
         A: NodeAPI + Send + Sync,
@@ -584,25 +859,47 @@ impl ModuleIpcServer {
         let mut writer = FramedWrite::new(write_half, module_ipc_length_codec());
 
         // Wait for handshake message from module
-        let module_id = match reader.next().await {
+        let (module_id, module_name) = match reader.next().await {
             Some(Ok(bytes)) => {
                 let message: ModuleMessage = bincode::deserialize(bytes.as_ref())
                     .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
 
                 match message {
                     ModuleMessage::Request(request) => {
-                        if let RequestPayload::Handshake {
-                            module_id,
-                            module_name,
-                            version,
-                        } = request.payload
-                        {
-                            info!(
-                                "Module handshake: id={}, name={}, version={}",
-                                module_id, module_name, version
-                            );
-
-                            // Send handshake acknowledgment
+                        let accepted = match &request.payload {
+                            RequestPayload::Handshake {
+                                module_id,
+                                module_name,
+                                version,
+                            } => {
+                                info!(
+                                    "Module handshake: id={}, name={}, version={}",
+                                    module_id, module_name, version
+                                );
+                                Some((module_id.clone(), module_name.clone()))
+                            }
+                            RequestPayload::HandshakeV2 {
+                                module_id,
+                                module_name,
+                                version,
+                                ipc_protocol,
+                            } => {
+                                if *ipc_protocol
+                                    != crate::module::timers::types::IPC_PROTOCOL_VERSION
+                                {
+                                    return Err(ModuleError::IpcError(format!(
+                                        "unsupported ipc protocol version {ipc_protocol}"
+                                    )));
+                                }
+                                info!(
+                                    "Module handshake v2: id={}, name={}, version={}, ipc={}",
+                                    module_id, module_name, version, ipc_protocol
+                                );
+                                Some((module_id.clone(), module_name.clone()))
+                            }
+                            _ => None,
+                        };
+                        if let Some((module_id, module_name)) = accepted {
                             let ack = ResponseMessage {
                                 correlation_id: request.correlation_id,
                                 success: true,
@@ -611,7 +908,6 @@ impl ModuleIpcServer {
                                 }),
                                 error: None,
                             };
-
                             let ack_bytes = bincode::serialize(&ModuleMessage::Response(ack))
                                 .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
                             writer
@@ -622,14 +918,13 @@ impl ModuleIpcServer {
                                         "Failed to send handshake ack: {e}"
                                     ))
                                 })?;
-
-                            module_id
+                            (module_id, module_name)
                         } else {
-                            // No handshake - use fallback ID (backward compatibility)
                             warn!("Module did not send handshake, using fallback ID");
                             let timestamp = crate::utils::current_timestamp_nanos();
                             let count = self.connection_count.fetch_add(1, Ordering::SeqCst);
-                            format!("module_{count}_{timestamp}")
+                            let module_id = format!("module_{count}_{timestamp}");
+                            (module_id.clone(), module_id)
                         }
                     }
                     _ => {
@@ -718,13 +1013,7 @@ impl ModuleIpcServer {
             }
         });
 
-        // Initialize filesystem and storage access for this module
-        // Extract module name from module_id (format: {module_name}_{uuid})
-        let module_name = module_id
-            .split('_')
-            .next()
-            .unwrap_or(&module_id)
-            .to_string();
+        // Module name comes from the handshake. Fallback ids have no 32-hex suffix.
 
         // Get base data directory - extract from module_id or use default
         // Module ID format: {module_name}_{uuid}
@@ -761,6 +1050,9 @@ impl ModuleIpcServer {
         {
             let mut channels = self.rpc_channels.write().await;
             channels.insert(module_id.clone(), rpc_request_tx.clone());
+        }
+        if let Some(service) = &self.timer_service {
+            service.attach_module(&module_name, &module_id).await;
         }
 
         // Spawn task to forward RPC requests from IpcRpcHandler to module via Invocation
@@ -819,6 +1111,10 @@ impl ModuleIpcServer {
 
         info!("Module {} disconnected", module_id);
 
+        if let Some(service) = &self.timer_service {
+            service.detach_module(&module_name, Some(&module_id)).await;
+        }
+
         let _ = node_api.unregister_subprocess_module_api(&module_id).await;
 
         // Clean up: remove from shared maps
@@ -858,7 +1154,7 @@ impl ModuleIpcServer {
 
     /// Handle a message from a module
     async fn handle_message<R: tokio::io::AsyncRead, A: NodeAPI + Send + Sync>(
-        &mut self,
+        &self,
         bytes: &[u8],
         connection: &mut ModuleConnection<R>,
         node_api: Arc<A>,
@@ -890,6 +1186,14 @@ impl ModuleIpcServer {
                 }
 
                 // Handle SubscribeEvents specially to register with event manager
+                if let RequestPayload::SubscribeModuleEventNames { ref names } = request.payload {
+                    if let Some(event_mgr) = &self.event_manager {
+                        event_mgr
+                            .set_module_event_filter(&connection.module_id, names.clone())
+                            .await;
+                    }
+                }
+
                 if let RequestPayload::SubscribeEvents { ref event_types } = request.payload {
                     if let Some(event_mgr) = &self.event_manager {
                         if let Some(event_tx) = &connection.event_tx {
@@ -975,11 +1279,9 @@ impl ModuleIpcServer {
                         return Ok(());
                     }
                 }
-                // Fallback: pending_invocations (invoke_cli/invoke_rpc path)
-                let mut pending = self.pending_invocations.lock().await;
-                if let Some(tx) = pending.remove(&result.correlation_id) {
-                    let _ = tx.send(result);
-                }
+                // Fallback: pending_invocations (invoke_cli/invoke_rpc/invoke_timer).
+                // A late result whose correlation was already dropped is ignored.
+                self.complete_pending_invocation(result).await;
                 return Ok(());
             }
             ModuleMessage::Invocation(_) => {
@@ -1046,6 +1348,15 @@ impl ModuleIpcServer {
         module_id: &str,
     ) -> Result<ResponseMessage, ModuleError> {
         use crate::module::ipc::protocol::{RequestPayload, ResponsePayload};
+
+        struct ClearModuleId;
+        impl Drop for ClearModuleId {
+            fn drop(&mut self) {
+                crate::module::api::node_api::NodeApiImpl::clear_current_module_id();
+            }
+        }
+        crate::module::api::node_api::NodeApiImpl::set_current_module_id(module_id.to_string());
+        let _module_id_guard = ClearModuleId;
 
         match &request.payload {
             RequestPayload::Handshake { .. } => {
@@ -1214,11 +1525,16 @@ impl ModuleIpcServer {
                 ))
             }
             RequestPayload::GetFeeEstimate { target_blocks } => {
-                let fee_rate = node_api.get_fee_estimate(*target_blocks).await?;
-                Ok(ResponseMessage::success(
-                    request.correlation_id,
-                    ResponsePayload::FeeEstimate(fee_rate),
-                ))
+                match node_api.get_fee_estimate(*target_blocks).await {
+                    Ok(fee_rate) => Ok(ResponseMessage::success(
+                        request.correlation_id,
+                        ResponsePayload::FeeEstimate(fee_rate),
+                    )),
+                    Err(err) => Ok(ResponseMessage::error(
+                        request.correlation_id,
+                        err.to_string(),
+                    )),
+                }
             }
             // Filesystem API
             RequestPayload::ReadFile { path } => {
@@ -1338,31 +1654,12 @@ impl ModuleIpcServer {
                 ))
             }
             // Timers and Scheduled Tasks
-            RequestPayload::RegisterTimer {
-                interval_seconds: _,
-            } => {
-                // Note: Timer callbacks cannot be serialized over IPC
-                // For IPC-based timers, we need a different approach:
-                // The module would need to send a "timer_fire" request when the timer should fire
-                // For now, return an error indicating this needs a callback mechanism
-                Err(ModuleError::OperationError(
-                    module_error_msg::TIMER_REGISTRATION_REQUIRES_CALLBACK_IPC.to_string(),
-                ))
-            }
-            RequestPayload::CancelTimer { timer_id: _ } => {
-                // Note: Timers registered via IPC would need to be tracked differently
-                // For now, return an error
-                Err(ModuleError::OperationError(
-                    module_error_msg::TIMER_CANCELLATION_NOT_SUPPORTED_IPC.to_string(),
-                ))
-            }
-            RequestPayload::ScheduleTask { delay_seconds: _ } => {
-                // Note: Task callbacks cannot be serialized over IPC
-                // Similar to timers, this needs a different approach
-                Err(ModuleError::OperationError(
-                    module_error_msg::TASK_SCHEDULING_REQUIRES_CALLBACK_IPC.to_string(),
-                ))
-            }
+            RequestPayload::RegisterTimer { .. }
+            | RequestPayload::CancelTimer { .. }
+            | RequestPayload::ScheduleTask { .. } => Ok(ResponseMessage::error(
+                request.correlation_id,
+                crate::module::timers::types::LEGACY_TIMER_UNSUPPORTED.to_string(),
+            )),
             // Metrics and Telemetry
             RequestPayload::ReportMetric { metric } => {
                 node_api.report_metric(metric.clone()).await?;
@@ -1634,13 +1931,20 @@ impl ModuleIpcServer {
             RequestPayload::PublishEvent {
                 event_type,
                 payload,
-            } => {
-                node_api.publish_event(*event_type, payload.clone()).await?;
-                Ok(ResponseMessage::success(
+            } => match node_api.publish_event(*event_type, payload.clone()).await {
+                Ok(()) => Ok(ResponseMessage::success(
                     request.correlation_id,
                     ResponsePayload::EventPublished,
-                ))
-            }
+                )),
+                Err(err) => Ok(ResponseMessage::error(
+                    request.correlation_id,
+                    err.to_string(),
+                )),
+            },
+            RequestPayload::SubscribeModuleEventNames { .. } => Ok(ResponseMessage::success(
+                request.correlation_id,
+                ResponsePayload::SubscribeAck,
+            )),
             RequestPayload::CallModule {
                 target_module_id,
                 method,
@@ -1688,10 +1992,134 @@ impl ModuleIpcServer {
                     ResponsePayload::HealthReported,
                 ))
             }
+            RequestPayload::TimerCreate { spec, mode } => {
+                let info = node_api.timer_create(spec.clone(), *mode).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::TimerCreated(info),
+                ))
+            }
+            RequestPayload::TimerCancel { target } => {
+                node_api.timer_cancel(target.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
+                ))
+            }
+            RequestPayload::TimerPause { target } => {
+                node_api.timer_pause(target.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
+                ))
+            }
+            RequestPayload::TimerResume { target } => {
+                node_api.timer_resume(target.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
+                ))
+            }
+            RequestPayload::TimerTrigger { target } => {
+                node_api.timer_trigger(target.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::Bool(true),
+                ))
+            }
+            RequestPayload::TimerGet { target } => {
+                let info = node_api.timer_get(target.clone()).await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::TimerInfo(info),
+                ))
+            }
+            RequestPayload::RegisterFeeEstimators { specs } => {
+                match node_api
+                    .register_fee_estimators(module_id, specs.clone())
+                    .await
+                {
+                    Ok(registration) => Ok(ResponseMessage::success(
+                        request.correlation_id,
+                        ResponsePayload::FeeEstimatorsRegistered(registration),
+                    )),
+                    Err(err) => Ok(ResponseMessage::error(
+                        request.correlation_id,
+                        err.to_string(),
+                    )),
+                }
+            }
+            RequestPayload::SubmitFeeTable { table } => {
+                match node_api.submit_fee_table(module_id, table.clone()).await {
+                    Ok(generation) => Ok(ResponseMessage::success(
+                        request.correlation_id,
+                        ResponsePayload::FeeTableAccepted { generation },
+                    )),
+                    Err(err) => Ok(ResponseMessage::error(
+                        request.correlation_id,
+                        err.to_string(),
+                    )),
+                }
+            }
+            RequestPayload::GetFeeTable { view, mode, targets } => {
+                match node_api.get_fee_table(view, mode, targets).await {
+                    Ok(table) => Ok(ResponseMessage::success(
+                        request.correlation_id,
+                        ResponsePayload::NativeFeeTable(table),
+                    )),
+                    Err(err) => Ok(ResponseMessage::error(
+                        request.correlation_id,
+                        err.to_string(),
+                    )),
+                }
+            }
+            RequestPayload::TimerList => {
+                let list = node_api.timer_list().await?;
+                Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::TimerList(list),
+                ))
+            }
             _ => Ok(ResponseMessage::error(
                 request.correlation_id,
                 format!("Unimplemented request payload: {:?}", request.payload),
             )),
+        }
+    }
+}
+
+/// Delivers timer fires through the module IPC connection.
+pub struct IpcTimerTransport {
+    handle: ModuleIpcHandle,
+}
+
+impl IpcTimerTransport {
+    pub fn new(handle: ModuleIpcHandle) -> Self {
+        Self { handle }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::module::timers::service::TimerTransport for IpcTimerTransport {
+    async fn invoke(
+        &self,
+        module_id: &str,
+        fire: crate::module::timers::types::TimerFire,
+        ack_timeout: std::time::Duration,
+    ) -> Result<
+        crate::module::timers::types::TimerAck,
+        crate::module::timers::service::TransportError,
+    > {
+        use crate::module::timers::service::TransportError;
+        match self.handle.invoke_timer(module_id, fire, ack_timeout).await {
+            Ok(ack) => Ok(ack),
+            Err(ModuleError::Timeout) => Err(TransportError::Timeout),
+            Err(ModuleError::OperationError(msg))
+                if msg.contains("closed") || msg.contains("not connected") =>
+            {
+                Err(TransportError::Closed)
+            }
+            Err(err) => Err(TransportError::Failed(err.to_string())),
         }
     }
 }
@@ -1705,4 +2133,72 @@ fn path_to_pipe_name(path: &Path) -> String {
         .unwrap_or("blvm-module");
     let safe = stem.replace(|c: char| !c.is_alphanumeric(), "-");
     format!(r"\\.\pipe\blvm-{}", safe)
+}
+
+#[cfg(test)]
+mod timer_invoke_tests {
+    use super::*;
+    use crate::module::timers::types::{Clock, TimerFire, TimerId};
+    use std::time::Duration;
+
+    fn sample_fire() -> TimerFire {
+        TimerFire {
+            timer_id: TimerId([1; 16]),
+            key: None,
+            payload: Vec::new(),
+            seq: 1,
+            attempt: 0,
+            clock: Clock::Monotonic,
+            scheduled_unix_ms: 0,
+            planned_unix_ms: 0,
+            fired_unix_ms: 0,
+            lateness_ms: 0,
+            missed: 0,
+            coalesced: 0,
+            skipped_overlap: 0,
+            clock_step_ms: 0,
+            tip_height: None,
+            tip_hash: None,
+            tip_mtp: None,
+            is_last: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_removes_the_pending_invocation() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = ModuleIpcHandle {
+            outgoing_tx_by_module: Arc::new(tokio::sync::RwLock::new(HashMap::from([(
+                "fees".to_string(),
+                tx,
+            )]))),
+            pending_invocations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            next_invocation_id: Arc::new(AtomicU64::new(1)),
+            cli_registry: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        };
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let err = handle
+            .invoke_timer("fees", sample_fire(), Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ModuleError::Timeout));
+        assert_eq!(handle.pending_invocation_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn late_result_for_a_missing_correlation_is_ignored() {
+        let server = ModuleIpcServer::new("unused-timer.sock");
+        let handle = server.handle();
+        server
+            .complete_pending_invocation(InvocationResultMessage {
+                correlation_id: 99,
+                success: true,
+                payload: Some(InvocationResultPayload::Timer(
+                    crate::module::timers::types::TimerAck::Continue,
+                )),
+                error: None,
+            })
+            .await;
+        assert_eq!(handle.pending_invocation_count().await, 0);
+    }
 }

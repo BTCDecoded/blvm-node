@@ -160,6 +160,30 @@ fn test_resource_usage_exceeds_limits() {
 }
 
 #[test]
+fn test_cpu_limit_ignores_other_resources() {
+    let limits = ResourceLimits {
+        max_cpu_percent: Some(50),
+        max_memory_bytes: None,
+        max_file_descriptors: None,
+        max_child_processes: None,
+    };
+    let under = ResourceUsage {
+        cpu_percent: 49.0,
+        memory_bytes: u64::MAX,
+        file_descriptors: u32::MAX,
+        child_processes: u32::MAX,
+    };
+    assert!(!under.exceeds_limits(&limits));
+    let over = ResourceUsage {
+        cpu_percent: 50.1,
+        memory_bytes: 0,
+        file_descriptors: 0,
+        child_processes: 0,
+    };
+    assert!(over.exceeds_limits(&limits));
+}
+
+#[test]
 fn test_resource_usage_with_none_limits() {
     let limits = ResourceLimits {
         max_cpu_percent: None,

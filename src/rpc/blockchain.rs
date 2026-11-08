@@ -1593,10 +1593,12 @@ impl BlockchainRpc {
                 let utxo_increase = output_count as i64 - spent_prevouts as i64;
 
                 let total_out = u64::try_from(crate::storage::chainstate::utxo_money_total(
-                    block
-                        .transactions
-                        .iter()
-                        .flat_map(|tx| tx.outputs.iter().map(|out| out.value)),
+                    block.transactions.iter().flat_map(|tx| {
+                        tx.outputs
+                            .iter()
+                            .map(|out| out.value)
+                            .filter(|value| *value >= 0)
+                    }),
                 )?)
                 .unwrap_or(u64::MAX);
 
@@ -1607,7 +1609,11 @@ impl BlockchainRpc {
                 let total_fees = if !block.transactions.is_empty() {
                     let coinbase_outputs =
                         u64::try_from(crate::storage::chainstate::utxo_money_total(
-                            block.transactions[0].outputs.iter().map(|out| out.value),
+                            block.transactions[0]
+                                .outputs
+                                .iter()
+                                .map(|out| out.value)
+                                .filter(|value| *value >= 0),
                         )?)
                         .unwrap_or(u64::MAX);
                     coinbase_outputs.saturating_sub(subsidy)
@@ -3669,7 +3675,20 @@ mod block_stats_tests {
         let snap_dir = tempfile::TempDir::new().unwrap();
         let mut file_set = blvm_protocol::UtxoSet::default();
         file_set.insert(loaded, Arc::new(loaded_utxo));
-        let block_hash = [0x11u8; 32];
+        let snap_header = BlockHeader {
+            version: 4,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            timestamp: 1_600_000_003,
+            bits: 0,
+            nonce: 3,
+        };
+        let block_hash = blvm_consensus::block::block_header_hash(&snap_header);
+        storage
+            .blocks()
+            .store_header(&block_hash, &snap_header)
+            .unwrap();
+        storage.blocks().store_height(3, &block_hash).unwrap();
         AssumeUtxoManager::new(snap_dir.path())
             .create_snapshot(&file_set, block_hash, 3)
             .unwrap();

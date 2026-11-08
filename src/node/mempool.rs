@@ -4,6 +4,7 @@
 
 use crate::config::{MempoolPolicyConfig, RbfConfig};
 use crate::node::event_publisher::EventPublisher;
+use crate::node::fee_estimator::{BlockObservation, FeeEstimator, TxAdmission};
 use anyhow::Result;
 use blvm_protocol::mempool::{Mempool, has_conflict_with_tx, replacement_checks_with_witness};
 use blvm_protocol::segwit::Witness;
@@ -11,6 +12,7 @@ use blvm_protocol::{Block, Hash, OutPoint, Transaction, TransactionOutput, UtxoS
 use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
@@ -135,6 +137,28 @@ pub struct MempoolManager {
     ephemeral_dust_waivers: Mutex<HashSet<Hash>>,
     /// Earlier transactions in a package dry-run, with adjusted virtual size and parent ids.
     package_preview: Mutex<PackagePreview>,
+    /// Built-in fee estimator. Hooks run only after this manager has dropped its locks.
+    fee_estimator: RwLock<Option<Arc<FeeEstimator>>>,
+    /// Set for the whole of [`Self::load_from_disk`]. Restored transactions stay out of history.
+    loading_from_disk: AtomicBool,
+    /// Set while [`Self::add_package_with_witnesses`] is admitting its transactions.
+    admitting_package: AtomicBool,
+}
+
+/// Sets `flag` for the guard's lifetime, including a panic unwind.
+struct FlagHold<'a>(&'a AtomicBool);
+
+impl<'a> FlagHold<'a> {
+    fn enter(flag: &'a AtomicBool) -> Self {
+        flag.store(true, Ordering::Release);
+        Self(flag)
+    }
+}
+
+impl Drop for FlagHold<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 type SnapshotPrevoutLookup = Arc<dyn Fn(&OutPoint) -> Option<blvm_protocol::UTXO> + Send + Sync>;
@@ -924,6 +948,9 @@ impl MempoolManager {
             relay_floor_waivers: Mutex::new(HashSet::new()),
             ephemeral_dust_waivers: Mutex::new(HashSet::new()),
             package_preview: Mutex::new(PackagePreview::default()),
+            fee_estimator: RwLock::new(None),
+            loading_from_disk: AtomicBool::new(false),
+            admitting_package: AtomicBool::new(false),
         };
         #[cfg(test)]
         {
@@ -969,6 +996,9 @@ impl MempoolManager {
             relay_floor_waivers: Mutex::new(HashSet::new()),
             ephemeral_dust_waivers: Mutex::new(HashSet::new()),
             package_preview: Mutex::new(PackagePreview::default()),
+            fee_estimator: RwLock::new(None),
+            loading_from_disk: AtomicBool::new(false),
+            admitting_package: AtomicBool::new(false),
         }
     }
 
@@ -1246,7 +1276,10 @@ impl MempoolManager {
         *self
             .event_publisher
             .write()
-            .unwrap_or_else(|e| e.into_inner()) = event_publisher;
+            .unwrap_or_else(|e| e.into_inner()) = event_publisher.clone();
+        if let Some(estimator) = self.fee_estimator() {
+            estimator.set_event_publisher(event_publisher);
+        }
     }
 
     /// Set RBF configuration
@@ -1262,6 +1295,33 @@ impl MempoolManager {
             .policy_config
             .write()
             .unwrap_or_else(|e| e.into_inner()) = policy_config;
+        let floor = self.min_relay_fee_sat_per_kvb();
+        if let Some(estimator) = self.fee_estimator() {
+            estimator.set_relay_floor(floor);
+        }
+    }
+
+    /// Attach the fee estimator. `None` detaches it. The estimator holds no pointer back here.
+    pub fn set_fee_estimator(&self, estimator: Option<Arc<FeeEstimator>>) {
+        if let Some(estimator) = estimator.as_ref() {
+            let publisher = self
+                .event_publisher
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            estimator.set_event_publisher(publisher);
+        }
+        *self
+            .fee_estimator
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = estimator;
+    }
+
+    pub fn fee_estimator(&self) -> Option<Arc<FeeEstimator>> {
+        self.fee_estimator
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Lock pool for access (transactions + spent_outputs)
@@ -2724,6 +2784,7 @@ impl MempoolManager {
         };
         let mut flags = Vec::with_capacity(txs.len());
         let mut outcome = Ok(());
+        let _package = FlagHold::enter(&self.admitting_package);
         for (tx, witnesses) in txs {
             match self.add_transaction_with_witness(tx, witnesses) {
                 Ok(admitted) => flags.push(admitted),
@@ -2733,6 +2794,7 @@ impl MempoolManager {
                 }
             }
         }
+        drop(_package);
         self.relay_floor_waivers
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -3567,6 +3629,21 @@ impl MempoolManager {
             .push(tx_hash);
         self.invalidate_fee_ranking();
 
+        let from_reload = self.loading_from_disk.load(Ordering::Acquire);
+        let from_package = self.admitting_package.load(Ordering::Acquire);
+        let parents = self.dependency_hashes(&tx_hash);
+        if let Some(estimator) = self.fee_estimator() {
+            estimator.on_tx_admitted(TxAdmission {
+                txid: tx_hash,
+                fee_sats,
+                vsize: candidate_vsize,
+                admit_height: admission_height,
+                parents,
+                from_reload,
+                from_package,
+            });
+        }
+
         // Publish mempool transaction added event
         if let Some(ref event_pub) = *self
             .event_publisher
@@ -4197,6 +4274,9 @@ impl MempoolManager {
     ) {
         use blvm_protocol::transaction::is_coinbase;
 
+        if let Some(estimator) = self.fee_estimator() {
+            estimator.on_reorg();
+        }
         self.install_utxo_snapshot(utxo_set);
         for block in connected {
             self.remove_for_connected_block(&block.transactions);
@@ -4242,7 +4322,25 @@ impl MempoolManager {
     /// A transaction included in the block is removed. A different transaction
     /// that spends an output the block already spent is removed, along with its
     /// descendants. A child that spends an output the block just created stays.
+    /// No block observation is recorded. Reorgs and older tests use this path.
     pub fn remove_for_connected_block(&self, transactions: &[Transaction]) {
+        self.remove_for_connected_block_at(None, transactions);
+    }
+
+    /// Record `obs` on the fee estimator, then run [`Self::remove_for_connected_block`].
+    ///
+    /// The observation is delivered before any removal, so a transaction that was
+    /// in the pool is a confirmation rather than a failure.
+    pub fn remove_for_connected_block_at(
+        &self,
+        obs: Option<BlockObservation>,
+        transactions: &[Transaction],
+    ) {
+        if let Some(obs) = obs.as_ref() {
+            if let Some(estimator) = self.fee_estimator() {
+                estimator.on_block_connected(obs);
+            }
+        }
         use blvm_protocol::block::calculate_tx_id;
         use blvm_protocol::transaction::is_coinbase;
 
@@ -4382,6 +4480,9 @@ impl MempoolManager {
         }
 
         self.invalidate_fee_ranking();
+        if let Some(estimator) = self.fee_estimator() {
+            estimator.on_tx_removed(hash);
+        }
         true
     }
 
@@ -4442,6 +4543,9 @@ impl MempoolManager {
                     .publish_mempool_cleared(cleared_count_clone)
                     .await;
             });
+        }
+        if let Some(estimator) = self.fee_estimator() {
+            estimator.on_pool_cleared();
         }
     }
 
@@ -4585,6 +4689,7 @@ impl MempoolManager {
     /// read leaves the pool unchanged. An admission refusal rolls back the
     /// transactions this load added and returns the error.
     pub fn load_from_disk<P: AsRef<std::path::Path>>(&self, path: P) -> Result<()> {
+        let _loading = FlagHold::enter(&self.loading_from_disk);
         let bytes = std::fs::read(path)?;
         if bytes.len() >= 8 {
             let version = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
@@ -5225,6 +5330,187 @@ mod tests {
         let tx = legacy_empty_script();
         assert!(mempool.add_transaction(tx.clone()).unwrap());
         assert_eq!(mempool.admission_height(&calculate_tx_id(&tx)), 800_000);
+    }
+
+    #[test]
+    fn estimator_sees_admission_removal_and_one_block_in_order() {
+        use crate::node::fee_estimator::{FeeEstimator, HookEvent};
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+        use std::sync::Arc;
+
+        let mempool = MempoolManager::new();
+        let estimator = Arc::new(FeeEstimator::new(
+            crate::config::FeeEstimatorConfig::default(),
+            true,
+        ));
+        estimator.enable_hook_trace();
+        mempool.set_fee_estimator(Some(Arc::clone(&estimator)));
+        mempool.set_chain_tip(2, 0);
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(funded(
+            vec![OP_1],
+            50_000,
+        ))));
+
+        let confirmed = legacy_empty_script();
+        let confirmed_id = calculate_tx_id(&confirmed);
+        assert!(mempool.add_transaction(confirmed.clone()).unwrap());
+
+        mempool.remove_for_connected_block_at(
+            Some(crate::node::fee_estimator::BlockObservation {
+                height: 1,
+                hash: [1u8; 32],
+                weight: 1_000,
+                tx_weights: vec![(confirmed_id, 400)],
+            }),
+            &[confirmed],
+        );
+        mempool.remove_for_connected_block_at(
+            Some(crate::node::fee_estimator::BlockObservation {
+                height: 1,
+                hash: [1u8; 32],
+                weight: 1_000,
+                tx_weights: Vec::new(),
+            }),
+            &[],
+        );
+
+        let mut evicted = legacy_empty_script();
+        evicted.inputs[0].prevout.hash = [4u8; 32];
+        let evicted_id = calculate_tx_id(&evicted);
+        let mut coins = funded(vec![OP_1], 50_000);
+        coins.insert(
+            evicted.inputs[0].prevout,
+            Arc::new(blvm_protocol::UTXO {
+                value: 50_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 1,
+                is_coinbase: false,
+            }),
+        );
+        mempool.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(coins)));
+        assert!(mempool.add_transaction(evicted).unwrap());
+        assert!(mempool.remove_transaction(&evicted_id));
+        mempool.clear();
+
+        let events = estimator.hook_events();
+        let block_at = events
+            .iter()
+            .position(|event| matches!(event, HookEvent::Block { height: 1 }))
+            .expect("one block observation");
+        let confirmed_removed = events
+            .iter()
+            .position(|event| matches!(event, HookEvent::Removed { txid } if *txid == confirmed_id))
+            .expect("confirmed transaction removed");
+        assert!(block_at < confirmed_removed);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, HookEvent::Block { .. }))
+                .count(),
+            1
+        );
+        let evicted_admitted = events
+            .iter()
+            .rposition(|event| {
+                matches!(
+                    event,
+                    HookEvent::Admitted {
+                        txid,
+                        from_reload: false,
+                        from_package: false,
+                    } if *txid == evicted_id
+                )
+            })
+            .expect("evicted admission");
+        let evicted_removed = events
+            .iter()
+            .rposition(|event| matches!(event, HookEvent::Removed { txid } if *txid == evicted_id))
+            .expect("evicted removal");
+        assert!(evicted_admitted < evicted_removed);
+        assert!(
+            events[evicted_admitted + 1..evicted_removed]
+                .iter()
+                .all(|event| !matches!(event, HookEvent::Block { .. }))
+        );
+        assert!(matches!(events.last(), Some(HookEvent::Cleared)));
+        assert_eq!(estimator.hook_counts().blocks, 1);
+        assert_eq!(estimator.hook_counts().ignored_blocks, 1);
+    }
+
+    #[test]
+    fn reload_and_package_admissions_are_flagged() {
+        use crate::node::fee_estimator::{FeeEstimator, HookEvent};
+        use blvm_protocol::block::calculate_tx_id;
+        use blvm_protocol::opcodes::OP_1;
+        use std::sync::Arc;
+
+        let mut tx = legacy_empty_script();
+        tx.inputs[0].prevout.hash = [8u8; 32];
+        let txid = calculate_tx_id(&tx);
+        let coins = {
+            let mut set = blvm_protocol::UtxoSet::default();
+            set.insert(
+                tx.inputs[0].prevout,
+                Arc::new(blvm_protocol::UTXO {
+                    value: 50_000,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 1,
+                    is_coinbase: false,
+                }),
+            );
+            set
+        };
+
+        let source = MempoolManager::new();
+        source.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(coins.clone())));
+        assert!(source.add_transaction(tx.clone()).unwrap());
+        let dir = std::env::temp_dir().join(format!(
+            "blvm-fee-estimator-{}-{}",
+            std::process::id(),
+            txid[0]
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("mempool.dat");
+        source.save_to_disk(&path).unwrap();
+
+        let loaded = MempoolManager::new();
+        let estimator = Arc::new(FeeEstimator::new(
+            crate::config::FeeEstimatorConfig::default(),
+            true,
+        ));
+        estimator.enable_hook_trace();
+        loaded.set_fee_estimator(Some(Arc::clone(&estimator)));
+        loaded.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(coins.clone())));
+        loaded.load_from_disk(&path).unwrap();
+        assert!(matches!(
+            estimator.hook_events().last(),
+            Some(HookEvent::Admitted {
+                txid: id,
+                from_reload: true,
+                from_package: false,
+            }) if *id == txid
+        ));
+
+        let packaged = MempoolManager::new();
+        let package_estimator = Arc::new(FeeEstimator::new(
+            crate::config::FeeEstimatorConfig::default(),
+            true,
+        ));
+        package_estimator.enable_hook_trace();
+        packaged.set_fee_estimator(Some(package_estimator.clone()));
+        packaged.set_utxo_set_arc(Arc::new(tokio::sync::Mutex::new(coins)));
+        assert!(packaged.add_package(vec![tx]).unwrap());
+        assert!(matches!(
+            package_estimator.hook_events().last(),
+            Some(HookEvent::Admitted {
+                txid: id,
+                from_reload: false,
+                from_package: true,
+            }) if *id == txid
+        ));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

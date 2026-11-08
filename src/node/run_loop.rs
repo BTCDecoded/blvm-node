@@ -145,9 +145,29 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                             .get_tip_hash_and_height()
                             .unwrap_or(([0u8; 32], current_height));
 
-                        if let Ok(Some(block)) = blocks_arc.get_block(&block_hash) {
+                        let connected = match crate::node::block_processor::parse_block_from_wire(
+                            &block_data,
+                        ) {
+                            Ok((block, witnesses)) => {
+                                let obs = crate::node::fee_estimator::block_observation(
+                                    &block, &witnesses, tip_height, block_hash,
+                                );
+                                Some((block, obs))
+                            }
+                            Err(err) => {
+                                warn!(
+                                    "wire block parse failed after connect at height {tip_height}: {err}"
+                                );
+                                blocks_arc
+                                    .get_block(&block_hash)
+                                    .ok()
+                                    .flatten()
+                                    .map(|block| (block, None))
+                            }
+                        };
+                        if let Some((block, obs)) = connected {
                             node.mempool_manager
-                                .remove_for_connected_block(&block.transactions);
+                                .remove_for_connected_block_at(obs, &block.transactions);
                             node.network
                                 .announce_connected_block(block_hash, block.header.clone())
                                 .await;
@@ -158,6 +178,12 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                                     .and_then(|s| s.event_publisher.as_ref())
                                 {
                                     ep.publish_mining_difficulty_changed(
+                                        prev_tip_header_bits as u32,
+                                        block.header.bits as u32,
+                                        tip_height,
+                                    )
+                                    .await;
+                                    ep.publish_difficulty_adjusted(
                                         prev_tip_header_bits as u32,
                                         block.header.bits as u32,
                                         tip_height,
@@ -197,8 +223,18 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                                 .as_ref()
                                 .and_then(|s| s.event_publisher.as_ref())
                             {
+                                let mtp = node
+                                    .storage
+                                    .blocks()
+                                    .headers_before_height_for_mtp(tip_height)
+                                    .ok()
+                                    .filter(|headers| !headers.is_empty())
+                                    .map(|headers| {
+                                        blvm_protocol::bip113::get_median_time_past(&headers)
+                                    })
+                                    .unwrap_or(block.header.timestamp);
                                 event_publisher
-                                    .publish_new_block(&block, &block_hash, tip_height)
+                                    .publish_new_block_at(&block, &block_hash, tip_height, mtp)
                                     .await;
                             }
 
