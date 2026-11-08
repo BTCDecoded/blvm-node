@@ -103,8 +103,7 @@ mod core_drop_in {
         let source = core_copy.path().to_path_buf();
         BitcoinCoreStorage::ensure_not_locked(&source).expect("fixture copy must not be locked");
 
-        let dest_root = TempDir::new().unwrap();
-        let dest = dest_root.path().join("blvm");
+        let dest = source.join("blvm");
 
         migrate_core_data(MigrateCoreArgs {
             source: source.clone(),
@@ -183,8 +182,7 @@ mod core_drop_in {
         let source = core_copy.path().to_path_buf();
         BitcoinCoreStorage::ensure_not_locked(&source).expect("fixture copy must not be locked");
 
-        let dest_root = TempDir::new().unwrap();
-        let dest = dest_root.path().join("blvm");
+        let dest = source.join("blvm");
 
         migrate_core_data(MigrateCoreArgs {
             source: source.clone(),
@@ -248,8 +246,7 @@ mod core_drop_in {
         let source = core_copy.path().to_path_buf();
         BitcoinCoreStorage::ensure_not_locked(&source).expect("fixture copy must not be locked");
 
-        let dest_root = TempDir::new().unwrap();
-        let dest = dest_root.path().join("blvm");
+        let dest = source.join("blvm");
         let args = MigrateCoreArgs {
             source: source.clone(),
             destination: dest.clone(),
@@ -576,8 +573,8 @@ mod core_drop_in {
         let source = core_copy.path().to_path_buf();
         BitcoinCoreStorage::ensure_not_locked(&source).ok()?;
 
+        let dest = source.join("blvm");
         let dest_root = TempDir::new().ok()?;
-        let dest = dest_root.path().join("blvm");
         migrate_core_data(MigrateCoreArgs {
             source,
             destination: dest.clone(),
