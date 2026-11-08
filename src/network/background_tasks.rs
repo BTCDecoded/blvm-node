@@ -188,6 +188,7 @@ impl NetworkManager {
         let min_duration = cfg.min_ban_duration_to_share;
         let ban_list = Arc::clone(self.ban_list());
         let peer_manager = Arc::clone(self.peer_manager_mutex());
+        let event_publisher = Arc::clone(self.event_publisher());
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval));
             loop {
@@ -196,6 +197,7 @@ impl NetworkManager {
                     ban_list.as_ref(),
                     peer_manager.as_ref(),
                     min_duration,
+                    &event_publisher,
                 )
                 .await;
             }

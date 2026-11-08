@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 /// Publish a network event if an event publisher is configured. Logs at debug on failure.
-async fn publish_network_event_if_configured(
+pub(crate) async fn publish_network_event_if_configured(
     event_publisher: &Arc<
         tokio::sync::Mutex<Option<Arc<crate::node::event_publisher::EventPublisher>>>,
     >,

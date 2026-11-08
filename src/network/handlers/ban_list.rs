@@ -208,6 +208,17 @@ impl NetworkManager {
         }
 
         debug!("Merged {} ban entries from {}", merged_count, peer_addr);
+        let event = crate::module::ipc::protocol::EventPayload::BanListReceived {
+            peer_addr: peer_addr.to_string(),
+            ban_count: msg.ban_entries.len(),
+        };
+        crate::network::network_message_dispatch::publish_network_event_if_configured(
+            self.event_publisher(),
+            crate::module::traits::EventType::BanListReceived,
+            event,
+            "Failed to publish BanListReceived",
+        )
+        .await;
         Ok(())
     }
 }
@@ -217,6 +228,9 @@ pub(crate) async fn broadcast_ban_list(
     ban_list: &tokio::sync::RwLock<std::collections::HashMap<SocketAddr, u64>>,
     peer_manager: &tokio::sync::Mutex<crate::network::peer_manager::PeerManager>,
     min_duration: u64,
+    event_publisher: &std::sync::Arc<
+        tokio::sync::Mutex<Option<std::sync::Arc<crate::node::event_publisher::EventPublisher>>>,
+    >,
 ) {
     use crate::network::transport::TransportAddr;
 
@@ -259,6 +273,7 @@ pub(crate) async fn broadcast_ban_list(
         }
         ban_entries
     };
+    let ban_count = entries.len();
     let response = BanListMessage {
         is_full: true,
         ban_list_hash: calculate_ban_list_hash(&entries),
@@ -281,6 +296,17 @@ pub(crate) async fn broadcast_ban_list(
         };
         if let Some(sender) = sender {
             let _ = sender.send(wire.clone());
+            if let Some(ep) = event_publisher.lock().await.as_ref() {
+                let _ = ep
+                    .publish_event(
+                        crate::module::traits::EventType::BanListShared,
+                        crate::module::ipc::protocol::EventPayload::BanListShared {
+                            peer_addr: addr.to_string(),
+                            ban_count,
+                        },
+                    )
+                    .await;
+            }
         }
     }
 }

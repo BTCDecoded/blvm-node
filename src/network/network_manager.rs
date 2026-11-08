@@ -3070,6 +3070,7 @@ impl NetworkManager {
                             self.ban_list().as_ref(),
                             self.peer_manager_mutex().as_ref(),
                             cfg.min_ban_duration_to_share,
+                            self.event_publisher(),
                         )
                         .await;
                     }
