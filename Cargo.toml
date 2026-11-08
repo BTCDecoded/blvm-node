@@ -39,7 +39,7 @@ blvm-consensus = { version = ">=0.1, <1", optional = true }
 blvm-muhash = { version = ">=0.1, <1" }
 
 # Storage engines (heed3, redb, sled, rocksdb) are dependencies of blvm-storage-fence.
-blvm-storage-fence = { path = "crates/blvm-storage-fence", default-features = false }
+blvm-storage-fence = { version = "0.1.0", path = "crates/blvm-storage-fence", default-features = false }
 # Pure-Rust LevelDB reader: used when Bitcoin Core chainstate has .ldb (true LevelDB) files
 # that RocksDB cannot open. Gated behind the rocksdb feature (migration requires rocksdb dest).
 rusty-leveldb = { version = "4", optional = true }

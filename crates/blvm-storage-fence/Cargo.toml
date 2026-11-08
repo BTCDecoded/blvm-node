@@ -3,8 +3,9 @@ name = "blvm-storage-fence"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-publish = false
+repository = "https://github.com/BTCDecoded/blvm-node"
 description = "The only crate that depends on heed3, redb, sled, and rocksdb."
+rust-version = "1.85"
 
 [dependencies]
 sled = { version = "=0.34.7", optional = true }
