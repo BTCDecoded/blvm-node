@@ -2811,9 +2811,7 @@ impl ParallelIBDConfig {
             .ok()
             .and_then(|s| s.parse().ok())
             .map(|n: usize| n.clamp(1, 512))
-            .or_else(|| {
-                ibd_config.map(|c| c.max_blocks_in_transit_per_peer.clamp(1, 512))
-            })
+            .or_else(|| ibd_config.map(|c| c.max_blocks_in_transit_per_peer.clamp(1, 512)))
             .unwrap_or(128);
         info!(
             "IBD: max_blocks_in_transit_per_peer={} (env>toml>128)",
@@ -9133,9 +9131,8 @@ impl ParallelIBD {
                             let standalone_tree = standalone_db.open_tree("ibd_utxos");
                             let standalone_non_empty = match &standalone_tree {
                                 Ok(tree) => {
-                                    let empty = tree
-                                        .is_empty()
-                                        .context("standalone ibd_utxos is_empty")?;
+                                    let empty =
+                                        tree.is_empty().context("standalone ibd_utxos is_empty")?;
                                     !empty
                                 }
                                 Err(_) => false,

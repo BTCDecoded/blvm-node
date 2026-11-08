@@ -105,9 +105,8 @@ pub(crate) fn load_keys_from_disk(
             let mut result = FxHashMap::with_capacity_and_hasher(keys.len(), Default::default());
             for (key, opt_bytes) in keys.iter().zip(slices) {
                 if let Some(bytes) = opt_bytes {
-                    let archived = crate::storage::rkyv_codec::access_utxo(bytes).map_err(|err| {
-                        anyhow::anyhow!("damaged UTXO row: {err}")
-                    })?;
+                    let archived = crate::storage::rkyv_codec::access_utxo(bytes)
+                        .map_err(|err| anyhow::anyhow!("damaged UTXO row: {err}"))?;
                     result.insert(
                         *key,
                         crate::storage::rkyv_codec::utxo_from_archived(archived),

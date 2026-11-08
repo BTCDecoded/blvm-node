@@ -873,7 +873,7 @@ mod reconstruct_tests {
 
 #[cfg(test)]
 mod prune_undo_tests {
-    use super::{body_is_prunable, incremental_prune_target, PruningManager};
+    use super::{PruningManager, body_is_prunable, incremental_prune_target};
     use crate::config::{PruningConfig, PruningMode};
     use crate::storage::blockstore::BlockStore;
     use crate::storage::database::{create_database, default_backend};
@@ -896,11 +896,10 @@ mod prune_undo_tests {
             ..PruningConfig::default()
         };
         let manager = PruningManager::new(config, blockstore);
-        let short = manager.prune_to_height(1000 - 144, 1000, false).unwrap_err();
-        assert!(
-            short.to_string().contains("would leave 144"),
-            "{short}"
-        );
+        let short = manager
+            .prune_to_height(1000 - 144, 1000, false)
+            .unwrap_err();
+        assert!(short.to_string().contains("would leave 144"), "{short}");
         manager.prune_to_height(712, 1000, false).unwrap();
     }
 

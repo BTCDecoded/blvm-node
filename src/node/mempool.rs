@@ -2048,8 +2048,12 @@ impl MempoolManager {
         let bandwidth = rate_sat_per_kvb
             .saturating_mul(new_tx_size as u128)
             .div_ceil(1000);
-        let min_bump = rbf_config.min_fee_bump_satoshis as i128;
-        let required = (bandwidth as i128).max(min_bump);
+        // Standard mode is Core: the incremental relay fee is the whole bump.
+        // The flat `min_fee_bump_satoshis` floor is the conservative and aggressive knob.
+        let required = match rbf_config.mode {
+            crate::config::RbfMode::Standard => bandwidth as i128,
+            _ => (bandwidth as i128).max(rbf_config.min_fee_bump_satoshis as i128),
+        };
         if (new_fee as i128) < existing_fee as i128 + required {
             warn!(
                 "RBF replacement rejected: absolute fee bump insufficient (required: {} sat, got: {} sat) for tx {}",
@@ -11083,9 +11087,11 @@ mod tests {
         use blvm_protocol::block::calculate_tx_id;
         use blvm_protocol::opcodes::OP_1;
         let mut policy = open_policy();
-        policy.max_mempool_txs = 1;
+        // Insert stops at the transaction cap. Admit the package, then tighten
+        // the cap so eviction has to remove the parent and its child together.
+        policy.max_mempool_txs = 2;
         let mempool = MempoolManager::new();
-        mempool.set_policy_config(Some(policy));
+        mempool.set_policy_config(Some(policy.clone()));
         mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
             vec![OP_1],
             200_000,
@@ -11102,6 +11108,8 @@ mod tests {
         child.outputs[0].value = 100_000;
         child.outputs[0].script_pubkey = vec![0x51, 0x61, 0x61, 0x61, 0x61];
         assert!(mempool.add_transaction(child.clone()).unwrap());
+        policy.max_mempool_txs = 1;
+        mempool.set_policy_config(Some(policy));
         mempool.process_once().await.unwrap();
         assert!(mempool.get_transaction(&calculate_tx_id(&parent)).is_none());
         assert!(mempool.get_transaction(&calculate_tx_id(&child)).is_none());

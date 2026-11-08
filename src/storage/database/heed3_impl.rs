@@ -609,6 +609,7 @@ fn map_size_mb_default(dbcache_mb: usize, data_dir: Option<&std::path::Path>) ->
 ///   mid-IBD (live 2026-07-14: HARD=1 + map=64 GiB + data.mdb=64 GiB → CATCH_UP restart
 ///   from stale `synced_tip`).
 /// - `BLVM_HEED3_MDB_MIN_HEADROOM_MB` — min free map when HARD=1 (default **32768** = 32 GiB).
+///
 /// An explicit map is the requested size. A larger on-disk file raises it to
 /// that file's size. The 128 GiB headroom stays on the auto-tune path.
 fn explicit_map_size_mb(map_size_mb: usize, data_dir: Option<&std::path::Path>) -> usize {
