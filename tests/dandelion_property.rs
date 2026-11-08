@@ -49,7 +49,9 @@ proptest! {
         d.set_stem_timeout(Duration::from_millis(timeout_ms));
         let tx = [42u8; 32];
         let _ = d.start_stem_phase(tx, "a".into(), &vec!["a".into(), "b".into()]);
-        clock.advance(Duration::from_millis(timeout_ms + 1));
+        // The stem deadline is drawn from [timeout, timeout + timeout/2).
+        // Waiting only timeout+1 is still inside that window when the draw is high.
+        clock.advance(Duration::from_millis(timeout_ms + timeout_ms / 2));
         d.set_clock(clock.clone());
         prop_assert!(d.should_fluff(&tx));
     }
