@@ -182,8 +182,7 @@ impl BitcoinCoreStorage {
         };
         if Self::process_alive(pid) {
             anyhow::bail!(
-                "Bitcoin Core appears to be running (pid {pid}, {:?}). Stop bitcoind before migrating or starting BLVM against this datadir.",
-                pid_file
+                "Bitcoin Core appears to be running (pid {pid}, {pid_file:?}). Stop bitcoind before migrating or starting BLVM against this datadir."
             );
         }
         Ok(())

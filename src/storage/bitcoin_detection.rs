@@ -228,10 +228,9 @@ impl BitcoinCoreDetection {
 
         Self::detect_network(data_dir).ok_or_else(|| {
             anyhow::anyhow!(
-                "Cannot determine network from directory '{}': it is not a standard \
+                "Cannot determine network from directory '{dir_name}': it is not a standard \
                  Bitcoin Core network folder (.bitcoin, bitcoind, testnet3, testnet4, \
-                 signet, regtest).",
-                dir_name
+                 signet, regtest)."
             )
         })
     }
@@ -243,11 +242,10 @@ impl BitcoinCoreDetection {
 
     fn custom_signet_error(dir_name: &str) -> anyhow::Error {
         anyhow::anyhow!(
-            "Custom signet directory detected: '{}'. Its block files use a \
+            "Custom signet directory detected: '{dir_name}'. Its block files use a \
              challenge-specific network magic, so BLVM cannot read them as the standard \
              signet. Core block reuse does not support custom signets; set \
-             storage.reuse_core_block_files = false to run without reusing Core's block files.",
-            dir_name
+             storage.reuse_core_block_files = false to run without reusing Core's block files."
         )
     }
 
@@ -297,12 +295,7 @@ impl BitcoinCoreDetection {
                 None => chosen = Some((label, network)),
                 Some((first_label, first)) if first != network => {
                     return Err(anyhow::anyhow!(
-                        "Network mismatch for Core datadir {:?}: {} says {} but {} says {}",
-                        core_dir,
-                        first_label,
-                        first,
-                        label,
-                        network
+                        "Network mismatch for Core datadir {core_dir:?}: {first_label} says {first} but {label} says {network}"
                     ));
                 }
                 Some(_) => {}
@@ -311,10 +304,9 @@ impl BitcoinCoreDetection {
 
         chosen.map(|(_, network)| network).ok_or_else(|| {
             anyhow::anyhow!(
-                "Cannot determine network for Core datadir {:?}: the migration marker \
+                "Cannot determine network for Core datadir {core_dir:?}: the migration marker \
                  records none, the folder name is not a standard Core network folder, \
-                 and no node network was supplied.",
-                core_dir
+                 and no node network was supplied."
             )
         })
     }
@@ -345,10 +337,7 @@ impl BitcoinCoreDetection {
 
         let manifest = chainstate.join(manifest_name);
         if !manifest.exists() {
-            return Err(anyhow::anyhow!(
-                "MANIFEST file not found: {}",
-                manifest_name
-            ));
+            return Err(anyhow::anyhow!("MANIFEST file not found: {manifest_name}"));
         }
 
         Ok(())

@@ -134,7 +134,7 @@ impl Transport for IrohTransport {
                 let mut key_bytes = [0u8; 32];
                 key_bytes.copy_from_slice(&key[..32]);
                 PublicKey::from_bytes(&key_bytes)
-                    .map_err(|e| anyhow::anyhow!("Invalid Iroh public key: {}", e))?
+                    .map_err(|e| anyhow::anyhow!("Invalid Iroh public key: {e}"))?
             }
             _ => {
                 return Err(anyhow::anyhow!(
@@ -250,9 +250,7 @@ impl IrohConnection {
 
         if len > max_message_length {
             return Err(anyhow::anyhow!(
-                "Message too large: {} bytes (max: {} bytes)",
-                len,
-                max_message_length
+                "Message too large: {len} bytes (max: {max_message_length} bytes)"
             ));
         }
 
@@ -321,7 +319,7 @@ impl TransportConnection for IrohConnection {
             Ok(stream) => stream,
             Err(e) => {
                 self.connected = false;
-                return Err(anyhow::anyhow!("Failed to accept stream: {}", e));
+                return Err(anyhow::anyhow!("Failed to accept stream: {e}"));
             }
         };
 

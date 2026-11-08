@@ -60,13 +60,13 @@ pub async fn handle_get_utxo_set(
     // Build Merkle tree from UTXO set
     #[cfg(feature = "utxo-commitments")]
     let mut utxo_tree = UtxoMerkleTree::new()
-        .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {e:?}"))?;
 
     #[cfg(feature = "utxo-commitments")]
     for (outpoint, utxo) in &utxo_set {
         utxo_tree
             .insert(*outpoint, utxo.as_ref().clone())
-            .map_err(|e| anyhow::anyhow!("Failed to insert UTXO into tree: {:?}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to insert UTXO into tree: {e:?}"))?;
     }
 
     // Generate commitment
@@ -131,7 +131,7 @@ pub async fn handle_get_filtered_block(
                 hex::encode(message.block_hash)
             ),
         )
-        .map_err(|e| anyhow::anyhow!("Failed to get block from storage: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to get block from storage: {e}"))?;
         let height = storage
             .blocks()
             .get_height_by_hash(&message.block_hash)?
@@ -208,7 +208,7 @@ pub async fn handle_get_filtered_block(
     // Build UTXO tree from filtered transactions to generate commitment
     #[cfg(feature = "utxo-commitments")]
     let mut utxo_tree = UtxoMerkleTree::new()
-        .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {e:?}"))?;
 
     #[cfg(feature = "utxo-commitments")]
     // Add outputs from filtered transactions
@@ -318,12 +318,12 @@ pub async fn handle_get_utxo_proof(
 
     // Build Merkle tree from UTXO set
     let mut utxo_tree = UtxoMerkleTree::new()
-        .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {e:?}"))?;
 
     for (outpoint, utxo) in &utxo_set {
         utxo_tree
             .insert(*outpoint, utxo.as_ref().clone())
-            .map_err(|e| anyhow::anyhow!("Failed to insert UTXO into tree: {:?}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to insert UTXO into tree: {e:?}"))?;
     }
 
     // Create OutPoint from message
@@ -341,11 +341,11 @@ pub async fn handle_get_utxo_proof(
     // Generate proof
     let proof = utxo_tree
         .generate_proof(&outpoint)
-        .map_err(|e| anyhow::anyhow!("Failed to generate proof: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to generate proof: {e:?}"))?;
 
     // Serialize proof to bytes (use custom format to avoid serde version conflicts)
     let proof_bytes = UtxoMerkleTree::serialize_proof_for_wire(proof)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize proof: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to serialize proof: {e:?}"))?;
 
     Ok(crate::network::protocol::UTXOProofMessage {
         request_id: message.request_id,

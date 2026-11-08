@@ -24,13 +24,12 @@ impl NetworkManager {
             Ok(true) => {}
             Ok(false) => {
                 return Err(anyhow::anyhow!(
-                    "Package relay bandwidth limit exceeded for peer {}",
-                    peer_addr
+                    "Package relay bandwidth limit exceeded for peer {peer_addr}"
                 ));
             }
             Err(e) => {
                 warn!("Bandwidth check error for package relay: {}", e);
-                return Err(anyhow::anyhow!("Bandwidth check failed: {}", e));
+                return Err(anyhow::anyhow!("Bandwidth check failed: {e}"));
             }
         }
 

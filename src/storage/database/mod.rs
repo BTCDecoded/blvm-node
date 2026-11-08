@@ -569,7 +569,7 @@ pub fn try_create_module_kv_database_with_preference<P: AsRef<Path>>(
         }
 
         Err(last_err
-            .unwrap_or_else(|| anyhow::anyhow!("Failed to open module KV store at {:?}", db_path)))
+            .unwrap_or_else(|| anyhow::anyhow!("Failed to open module KV store at {db_path:?}")))
     }
 }
 

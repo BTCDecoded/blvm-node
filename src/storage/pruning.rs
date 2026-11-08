@@ -290,9 +290,7 @@ impl PruningManager {
         // Validate prune height
         if prune_to_height >= current_height {
             return Err(anyhow!(
-                "Cannot prune to height >= current height ({} >= {})",
-                prune_to_height,
-                current_height
+                "Cannot prune to height >= current height ({prune_to_height} >= {current_height})"
             ));
         }
 
@@ -687,12 +685,12 @@ impl PruningManager {
 
         // Build Merkle tree from UTXO set
         let mut utxo_tree = UtxoMerkleTree::new()
-            .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {:?}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {e:?}"))?;
 
         for (outpoint, utxo) in &utxo_set {
             utxo_tree
                 .insert(*outpoint, utxo.as_ref().clone())
-                .map_err(|e| anyhow::anyhow!("Failed to insert UTXO: {:?}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to insert UTXO: {e:?}"))?;
         }
 
         // Generate commitment
@@ -735,12 +733,12 @@ impl PruningManager {
 
         // Build Merkle tree from current UTXO set
         let mut utxo_tree = UtxoMerkleTree::new()
-            .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {:?}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create UTXO Merkle tree: {e:?}"))?;
 
         for (outpoint, utxo) in utxo_set {
             utxo_tree
                 .insert(*outpoint, utxo.as_ref().clone())
-                .map_err(|e| anyhow::anyhow!("Failed to insert UTXO: {:?}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to insert UTXO: {e:?}"))?;
         }
 
         // Generate commitment

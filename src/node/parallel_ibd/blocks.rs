@@ -99,8 +99,7 @@ pub(crate) fn validate_and_store_block(
         Ok(())
     } else {
         Err(anyhow::anyhow!(
-            "Block validation failed at height {}",
-            height
+            "Block validation failed at height {height}"
         ))
     }
 }

@@ -813,8 +813,8 @@ impl MiningEngine {
                 consensus.mine_block(template_clone, max_attempts_per_thread)
             })
             .await
-            .map_err(|e| anyhow::anyhow!("Mining task panicked: {}", e))?
-            .map_err(|e| anyhow::anyhow!("Mining failed: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Mining task panicked: {e}"))?
+            .map_err(|e| anyhow::anyhow!("Mining failed: {e}"))?;
 
             self.handle_mining_result(mined_block, result)
         }
@@ -875,7 +875,7 @@ impl MiningEngine {
             // Wait for task completion
             handle
                 .await
-                .map_err(|e| anyhow::anyhow!("Mining task panicked: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Mining task panicked: {e}"))?;
 
             // Get result
             match rx.await {
@@ -1080,17 +1080,17 @@ impl MiningCoordinator {
                 if let Some(tip_header) = storage
                     .chain()
                     .get_tip_header()
-                    .map_err(|e| anyhow::anyhow!("Failed to get tip header: {}", e))?
+                    .map_err(|e| anyhow::anyhow!("Failed to get tip header: {e}"))?
                 {
                     let tip_hash = storage
                         .chain()
                         .get_tip_hash()
-                        .map_err(|e| anyhow::anyhow!("Failed to get tip hash: {}", e))?
+                        .map_err(|e| anyhow::anyhow!("Failed to get tip hash: {e}"))?
                         .unwrap_or([0u8; 32]);
                     let chain_height = storage
                         .chain()
                         .get_height()
-                        .map_err(|e| anyhow::anyhow!("Failed to get chain height: {}", e))?
+                        .map_err(|e| anyhow::anyhow!("Failed to get chain height: {e}"))?
                         .unwrap_or(0);
                     (
                         tip_hash,
@@ -1129,7 +1129,7 @@ impl MiningCoordinator {
                 None => storage
                     .utxos()
                     .get_all_utxos()
-                    .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {}", e))?,
+                    .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {e}"))?,
             }
         } else {
             blvm_protocol::UtxoSet::default()
@@ -1168,7 +1168,7 @@ impl MiningCoordinator {
         append_witness_commitment_from_nested(&mut coinbase, &mut all_transactions, Some(&nested))
             .map_err(|e| anyhow::anyhow!("Failed to append witness commitment: {e}"))?;
         let merkle_root = calculate_merkle_root(&all_transactions)
-            .map_err(|e| anyhow::anyhow!("Failed to calculate merkle root: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to calculate merkle root: {e}"))?;
 
         let clock = current_timestamp();
         let mintime = self.template_min_time(height, clock);
@@ -1346,11 +1346,7 @@ impl MiningCoordinator {
 
         // 3. Coinbase value = subsidy + fees
         let coinbase_value = subsidy.checked_add(total_fees).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Coinbase value overflow: subsidy {} + fees {}",
-                subsidy,
-                total_fees
-            )
+            anyhow::anyhow!("Coinbase value overflow: subsidy {subsidy} + fees {total_fees}")
         })?;
 
         debug!(

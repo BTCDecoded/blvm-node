@@ -453,10 +453,7 @@ async fn abort_on_outer_deadline(
         }
     }
     Err(anyhow::anyhow!(
-        "Chunk {}-{}: outer deadline {}s",
-        start_height,
-        end_height,
-        outer_secs
+        "Chunk {start_height}-{end_height}: outer deadline {outer_secs}s"
     ))
 }
 

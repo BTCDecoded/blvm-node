@@ -149,5 +149,5 @@ pub fn process_protocol_message(
         utxo_set,
         height,
     )
-    .map_err(|e| anyhow::anyhow!("Network message processing error: {}", e))
+    .map_err(|e| anyhow::anyhow!("Network message processing error: {e}"))
 }

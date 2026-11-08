@@ -1063,7 +1063,7 @@ impl ProtocolParser {
                 "Invalid magic number 0x{:08x}, expected 0x{:08x}. Header hex: {}",
                 magic, expected_magic, header_hex
             );
-            return Err(anyhow::anyhow!("Invalid magic number 0x{:08x}", magic));
+            return Err(anyhow::anyhow!("Invalid magic number 0x{magic:08x}"));
         }
 
         let command = String::from_utf8_lossy(&data[4..16])
@@ -1074,7 +1074,7 @@ impl ProtocolParser {
 
         // Validate command string
         if !ALLOWED_COMMANDS.contains(&command.as_str()) {
-            return Err(anyhow::anyhow!("Unknown command: {}", command));
+            return Err(anyhow::anyhow!("Unknown command: {command}"));
         }
 
         let payload_length = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
@@ -1132,7 +1132,7 @@ impl ProtocolParser {
             cmd::PING => {
                 // Use proper Bitcoin wire format (8-byte nonce)
                 let wire_msg = blvm_protocol::wire::deserialize_ping(payload)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize ping: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize ping: {e}"))?;
                 Ok(ProtocolMessage::Ping(PingMessage {
                     nonce: wire_msg.nonce,
                 }))
@@ -1140,7 +1140,7 @@ impl ProtocolParser {
             cmd::PONG => {
                 // Use proper Bitcoin wire format (8-byte nonce)
                 let wire_msg = blvm_protocol::wire::deserialize_pong(payload)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize pong: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize pong: {e}"))?;
                 Ok(ProtocolMessage::Pong(PongMessage {
                     nonce: wire_msg.nonce,
                 }))
@@ -1148,7 +1148,7 @@ impl ProtocolParser {
             cmd::GETHEADERS => {
                 // Use proper Bitcoin wire format deserialization
                 let wire_msg = blvm_protocol::wire::deserialize_getheaders(payload)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize getheaders: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize getheaders: {e}"))?;
                 Ok(ProtocolMessage::GetHeaders(GetHeadersMessage {
                     version: wire_msg.version as i32,
                     block_locator_hashes: wire_msg.block_locator_hashes,
@@ -1158,7 +1158,7 @@ impl ProtocolParser {
             cmd::HEADERS => {
                 // Use proper Bitcoin wire format deserialization
                 let wire_msg = deserialize_headers(payload)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize headers: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize headers: {e}"))?;
                 Ok(ProtocolMessage::Headers(HeadersMessage {
                     headers: wire_msg.headers,
                 }))
@@ -1168,27 +1168,27 @@ impl ProtocolParser {
                 // Use consensus wire format (Bitcoin block + witness structure)
                 let (block, witnesses) =
                     blvm_protocol::serialization::deserialize_block_with_witnesses(payload)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize block: {}", e))?;
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize block: {e}"))?;
                 Ok(ProtocolMessage::Block(BlockMessage { block, witnesses }))
             }
             cmd::GETDATA => {
                 let msg = deserialize_getdata(payload)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize getdata: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize getdata: {e}"))?;
                 Ok(ProtocolMessage::GetData(msg))
             }
             cmd::INV => {
                 let msg = deserialize_inv(payload)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize inv: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize inv: {e}"))?;
                 Ok(ProtocolMessage::Inv(msg))
             }
             cmd::NOTFOUND => {
                 let msg = deserialize_notfound(payload)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize notfound: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize notfound: {e}"))?;
                 Ok(ProtocolMessage::NotFound(msg))
             }
             cmd::TX => {
                 let (transaction, witnesses) = deserialize_tx_with_witness(payload)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize tx: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize tx: {e}"))?;
                 Ok(ProtocolMessage::Tx(TxMessage {
                     transaction,
                     witnesses,
@@ -1205,7 +1205,7 @@ impl ProtocolParser {
             // Compact Block Relay (BIP152)
             cmd::SENDCMPCT => {
                 let sc = blvm_protocol::wire::deserialize_sendcmpct(payload)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize sendcmpct: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize sendcmpct: {e}"))?;
                 Ok(ProtocolMessage::SendCmpct(SendCmpctMessage {
                     prefer_cmpct: sc.prefer_cmpct,
                     version: sc.version,
@@ -1213,14 +1213,14 @@ impl ProtocolParser {
             }
             cmd::CMPCTBLOCK => {
                 let wire = deserialize_cmpctblock(payload)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize cmpctblock: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize cmpctblock: {e}"))?;
                 Ok(ProtocolMessage::CmpctBlock(CompactBlockMessage {
                     compact_block: blvm_protocol::bip152::CompactBlock::from(&wire),
                 }))
             }
             cmd::GETBLOCKTXN => {
                 let wire = deserialize_getblocktxn(payload)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize getblocktxn: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize getblocktxn: {e}"))?;
                 Ok(ProtocolMessage::GetBlockTxn(GetBlockTxnMessage {
                     block_hash: wire.block_hash,
                     indices: wire.indices,
@@ -1228,7 +1228,7 @@ impl ProtocolParser {
             }
             cmd::BLOCKTXN => {
                 let wire = deserialize_blocktxn(payload)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize blocktxn: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize blocktxn: {e}"))?;
                 Ok(ProtocolMessage::BlockTxn(BlockTxnMessage {
                     block_hash: wire.block_hash,
                     transactions: wire.transactions,
@@ -1297,7 +1297,7 @@ impl ProtocolParser {
             cmd::GETADDR => Ok(ProtocolMessage::GetAddr),
             cmd::ADDR => {
                 let wire_msg = deserialize_addr(payload)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize addr: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize addr: {e}"))?;
                 Ok(ProtocolMessage::Addr(AddrMessage {
                     addresses: wire_msg
                         .addresses
@@ -1348,7 +1348,7 @@ impl ProtocolParser {
             cmd::REQSKT => Ok(ProtocolMessage::ReqSkt(bincode::deserialize(payload)?)),
             #[cfg(feature = "erlay")]
             cmd::SKETCH => Ok(ProtocolMessage::Sketch(bincode::deserialize(payload)?)),
-            _ => Err(anyhow::anyhow!("Unknown command: {}", command)),
+            _ => Err(anyhow::anyhow!("Unknown command: {command}")),
         }
     }
 
@@ -1453,7 +1453,7 @@ impl ProtocolParser {
                 };
                 (
                     cmd::GETHEADERS,
-                    serialize_getheaders(&wire_msg).map_err(|e| anyhow::anyhow!("{}", e))?,
+                    serialize_getheaders(&wire_msg).map_err(|e| anyhow::anyhow!("{e}"))?,
                 )
             }
             ProtocolMessage::Headers(msg) => {
@@ -1464,7 +1464,7 @@ impl ProtocolParser {
                 (
                     cmd::HEADERS,
                     blvm_protocol::wire::serialize_headers(&wire_msg)
-                        .map_err(|e| anyhow::anyhow!("{}", e))?,
+                        .map_err(|e| anyhow::anyhow!("{e}"))?,
                 )
             }
             ProtocolMessage::GetBlocks(msg) => (cmd::GETBLOCKS, encode_getblocks(msg)?),
@@ -1479,15 +1479,15 @@ impl ProtocolParser {
             }
             ProtocolMessage::GetData(msg) => (
                 cmd::GETDATA,
-                serialize_getdata(msg).map_err(|e| anyhow::anyhow!("{}", e))?,
+                serialize_getdata(msg).map_err(|e| anyhow::anyhow!("{e}"))?,
             ),
             ProtocolMessage::Inv(msg) => (
                 cmd::INV,
-                serialize_inv(msg).map_err(|e| anyhow::anyhow!("{}", e))?,
+                serialize_inv(msg).map_err(|e| anyhow::anyhow!("{e}"))?,
             ),
             ProtocolMessage::NotFound(msg) => (
                 cmd::NOTFOUND,
-                serialize_notfound(msg).map_err(|e| anyhow::anyhow!("{}", e))?,
+                serialize_notfound(msg).map_err(|e| anyhow::anyhow!("{e}"))?,
             ),
             ProtocolMessage::Tx(msg) => (
                 cmd::TX,
@@ -1510,7 +1510,7 @@ impl ProtocolParser {
             ProtocolMessage::CmpctBlock(msg) => {
                 let wire =
                     blvm_protocol::network::CmpctBlockMessage::try_from(msg.compact_block.clone())
-                        .map_err(|e| anyhow::anyhow!("CmpctBlock conversion error: {}", e))?;
+                        .map_err(|e| anyhow::anyhow!("CmpctBlock conversion error: {e}"))?;
                 (
                     cmd::CMPCTBLOCK,
                     serialize_cmpctblock(&wire).map_err(|e| anyhow::anyhow!("{e}"))?,

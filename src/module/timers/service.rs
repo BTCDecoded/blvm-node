@@ -2747,7 +2747,7 @@ impl Actor {
             return;
         }
         let last = timer.chain.as_ref().and_then(|sched| sched.last_height);
-        if !last.is_some_and(|fired| height <= fired) {
+        if last.is_none_or(|fired| height > fired) {
             return;
         }
         let Some(timer) = self.timers.get_mut(&id) else {

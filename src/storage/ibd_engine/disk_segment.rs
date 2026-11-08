@@ -756,7 +756,7 @@ impl DiskSegment {
         file_io::read_at(&file, &mut hdr, 0)?;
         let magic = u64::from_le_bytes(hdr[0..8].try_into().unwrap());
         if magic != DISK_SEG_MAGIC {
-            anyhow::bail!("bad segment magic in {:?}: {magic:#x}", path);
+            anyhow::bail!("bad segment magic in {path:?}: {magic:#x}");
         }
         let entry_count = u32::from_le_bytes(hdr[8..12].try_into().unwrap()) as usize;
         let min_height = i32::from_le_bytes(hdr[12..16].try_into().unwrap());
@@ -1296,9 +1296,7 @@ impl DiskSegment {
                                         match (first, last) {
                                             (Some(f), Some(l)) => Ok((f, l)),
                                             _ => anyhow::bail!(
-                                                "DiskSegment probe: empty page {}..{}",
-                                                a,
-                                                b
+                                                "DiskSegment probe: empty page {a}..{b}"
                                             ),
                                         }
                                     })?;

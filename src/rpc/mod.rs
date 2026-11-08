@@ -538,10 +538,9 @@ impl RpcManager {
         if let Some(rest_api_addr) = self.rest_api_addr {
             if self.public_bind_without_auth(rest_api_addr) {
                 return Err(anyhow::anyhow!(
-                    "REST API server would bind to public address {} without authentication. \
+                    "REST API server would bind to public address {rest_api_addr} without authentication. \
                      Configure rpc.auth (add tokens) or call .allow_unauthenticated_rpc(true) \
-                     to explicitly opt out of this safety check.",
-                    rest_api_addr
+                     to explicitly opt out of this safety check."
                 ));
             }
         }

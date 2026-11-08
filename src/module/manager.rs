@@ -452,7 +452,7 @@ impl ModuleManager {
                 .bind(&manifest.name, requests, handler)
                 .await
                 .map_err(ModuleError::OperationError)?;
-            return Ok(());
+            Ok(())
         }
         #[cfg(not(unix))]
         {

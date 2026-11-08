@@ -108,7 +108,7 @@ impl BlockFilterService {
             output_scripts,
             previous_outpoint_scripts,
         )
-        .map_err(|e| anyhow!("Failed to build filter: {}", e))?;
+        .map_err(|e| anyhow!("Failed to build filter: {e}"))?;
 
         // Cache filter
         self.filters

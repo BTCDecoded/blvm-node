@@ -27,13 +27,12 @@ impl NetworkManager {
             Ok(true) => {}
             Ok(false) => {
                 return Err(anyhow::anyhow!(
-                    "UTXO set bandwidth limit exceeded for peer {}",
-                    peer_addr
+                    "UTXO set bandwidth limit exceeded for peer {peer_addr}"
                 ));
             }
             Err(e) => {
                 warn!("Bandwidth check error for UTXO set: {}", e);
-                return Err(anyhow::anyhow!("Bandwidth check failed: {}", e));
+                return Err(anyhow::anyhow!("Bandwidth check failed: {e}"));
             }
         }
 
@@ -75,13 +74,12 @@ impl NetworkManager {
             Ok(true) => {}
             Ok(false) => {
                 return Err(anyhow::anyhow!(
-                    "Filtered block bandwidth limit exceeded for peer {}",
-                    peer_addr
+                    "Filtered block bandwidth limit exceeded for peer {peer_addr}"
                 ));
             }
             Err(e) => {
                 warn!("Bandwidth check error for filtered blocks: {}", e);
-                return Err(anyhow::anyhow!("Bandwidth check failed: {}", e));
+                return Err(anyhow::anyhow!("Bandwidth check failed: {e}"));
             }
         }
 
@@ -104,7 +102,7 @@ impl NetworkManager {
                 "Replay protection: Rejected duplicate GetFilteredBlock request from {}: {}",
                 peer_addr, e
             );
-            return Err(anyhow::anyhow!("Replay protection: {}", e));
+            return Err(anyhow::anyhow!("Replay protection: {e}"));
         }
 
         let storage = self.storage().as_ref().map(Arc::clone);

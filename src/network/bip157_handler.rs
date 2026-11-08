@@ -169,7 +169,7 @@ pub fn generate_cfilter_response(
     filter_service: &BlockFilterService,
 ) -> Result<ProtocolMessage> {
     if filter_type != 0 {
-        return Err(anyhow!("Unsupported filter type: {}", filter_type));
+        return Err(anyhow!("Unsupported filter type: {filter_type}"));
     }
 
     let filter = filter_service

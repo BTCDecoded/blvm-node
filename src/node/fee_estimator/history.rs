@@ -163,7 +163,7 @@ impl TxConfirmStats {
         if blocks_to_confirm < 1 {
             return;
         }
-        let periods = (blocks_to_confirm + self.scale - 1) / self.scale;
+        let periods = blocks_to_confirm.div_ceil(self.scale);
         let mut period = periods;
         while period <= self.max_periods as u64 {
             self.conf_avg[(period - 1) as usize][bucket] += 1.0;
@@ -230,7 +230,7 @@ impl TxConfirmStats {
         if conf_target == 0 || self.scale == 0 || self.tx_ct_avg.is_empty() {
             return -1.0;
         }
-        let period_target = (conf_target + self.scale - 1) / self.scale;
+        let period_target = conf_target.div_ceil(self.scale);
         if period_target == 0 || period_target > self.max_periods as u64 {
             return -1.0;
         }

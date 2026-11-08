@@ -19,7 +19,7 @@ use std::sync::Arc;
 // CRITICAL FIX: witnesses is now Vec<Vec<Witness>> (one Vec per transaction, each containing one Witness per input)
 pub fn parse_block_from_wire(data: &[u8]) -> Result<(Block, Vec<Vec<Witness>>)> {
     let (block, witnesses) = deserialize_block_with_witnesses(data)
-        .map_err(|e| anyhow::anyhow!("Failed to parse block from wire format: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse block from wire format: {e}"))?;
 
     // Do not compare against serialize_block_with_witnesses length: that re-encode is not
     // byte-identical to the P2P block payload for segwit mainnet blocks (lossy round-trip).

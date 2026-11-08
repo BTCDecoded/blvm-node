@@ -208,7 +208,7 @@ pub async fn handle_get_module(
 
     // Serialize manifest to TOML
     let manifest_toml = toml::to_string(&entry.manifest)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize manifest: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to serialize manifest: {e}"))?;
 
     Ok(ModuleMessage {
         request_id, // Echo request_id for matching
@@ -247,14 +247,14 @@ pub async fn handle_get_module_by_hash(
     let manifest_data = {
         let cas = cas_arc.read().await;
         cas.get(&message.hash)
-            .map_err(|e| anyhow::anyhow!("Failed to get module manifest from CAS: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to get module manifest from CAS: {e}"))?
     };
 
     // Parse manifest
     let manifest_str = String::from_utf8(manifest_data.clone())
-        .map_err(|e| anyhow::anyhow!("Failed to decode manifest: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to decode manifest: {e}"))?;
     let manifest: ModuleManifest = toml::from_str(&manifest_str)
-        .map_err(|e| anyhow::anyhow!("Failed to parse manifest: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse manifest: {e}"))?;
 
     // Get binary if requested
     let binary = if message.include_binary {
@@ -265,7 +265,7 @@ pub async fn handle_get_module_by_hash(
                 if hash_str.len() == 64 {
                     // Hex-encoded SHA256 (64 hex chars = 32 bytes)
                     let hash_bytes = hex::decode(hash_str)
-                        .map_err(|e| anyhow::anyhow!("Invalid binary hash hex: {}", e))?;
+                        .map_err(|e| anyhow::anyhow!("Invalid binary hash hex: {e}"))?;
                     if hash_bytes.len() == 32 {
                         let mut hash_array = [0u8; 32];
                         hash_array.copy_from_slice(&hash_bytes);

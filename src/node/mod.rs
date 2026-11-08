@@ -1497,7 +1497,7 @@ impl Node {
                 manager
                     .start(&socket_path, node_api)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to start module manager: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to start module manager: {e}"))?;
             }
 
             info!("Module manager started");
@@ -2731,7 +2731,7 @@ impl Node {
                 .await
                 .shutdown()
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to shutdown module manager: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to shutdown module manager: {e}"))?;
         }
 
         // Network manager doesn't need explicit stopping - it's managed by dropping

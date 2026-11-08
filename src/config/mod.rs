@@ -1261,10 +1261,10 @@ impl NodeConfig {
 
         let mut config: NodeConfig = if is_toml {
             toml::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {}", e))?
+                .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {e}"))?
         } else {
             serde_json::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {}", e))?
+                .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {e}"))?
         };
         config.expand_paths();
         Ok(config)
@@ -1282,7 +1282,7 @@ impl NodeConfig {
     pub fn from_toml_file(path: &std::path::Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let mut config: NodeConfig = toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {e}"))?;
         config.expand_paths();
         Ok(config)
     }
@@ -1297,7 +1297,7 @@ impl NodeConfig {
     /// Save configuration to TOML file
     pub fn to_toml_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
         let content = toml::to_string_pretty(self)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize TOML config: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to serialize TOML config: {e}"))?;
         std::fs::write(path, content)?;
         Ok(())
     }

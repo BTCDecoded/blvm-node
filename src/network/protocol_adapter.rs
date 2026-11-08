@@ -280,7 +280,7 @@ impl ProtocolAdapter {
     fn serialize_internal_bincode_format(msg: &ConsensusNetworkMessage) -> Result<Vec<u8>> {
         let protocol_msg = Self::consensus_to_protocol_message(msg)?;
         bincode::serialize(&protocol_msg)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize internal transport message: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to serialize internal transport message: {e}"))
     }
 
     #[cfg(any(feature = "iroh", feature = "quinn"))]
@@ -288,7 +288,7 @@ impl ProtocolAdapter {
     fn deserialize_internal_bincode_format(data: &[u8]) -> Result<ConsensusNetworkMessage> {
         let protocol_msg: crate::network::protocol::ProtocolMessage = bincode::deserialize(data)
             .map_err(|e| {
-                anyhow::anyhow!("Failed to deserialize internal transport message: {}", e)
+                anyhow::anyhow!("Failed to deserialize internal transport message: {e}")
             })?;
         Self::protocol_to_consensus_message(&protocol_msg)
     }

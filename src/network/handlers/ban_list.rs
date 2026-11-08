@@ -124,7 +124,7 @@ impl NetworkManager {
                 "Replay protection: Invalid timestamp in BanList from {}: {}",
                 peer_addr, e
             );
-            return Err(anyhow::anyhow!("Replay protection: {}", e));
+            return Err(anyhow::anyhow!("Replay protection: {e}"));
         }
 
         if msg.is_full && !verify_ban_list_hash(&msg.ban_entries, &msg.ban_list_hash) {

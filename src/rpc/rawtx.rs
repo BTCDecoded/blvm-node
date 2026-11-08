@@ -2238,7 +2238,7 @@ pub(crate) fn script_pubkey_desc(script: &[u8]) -> String {
         ),
         "multisig" => bare_multisig(script)
             .map(|(required, keys)| {
-                let keys: Vec<String> = keys.iter().map(|key| hex::encode(key)).collect();
+                let keys: Vec<String> = keys.iter().map(hex::encode).collect();
                 format!("multi({required},{})", keys.join(","))
             })
             .unwrap_or_else(|| format!("raw({})", hex::encode(script))),
@@ -2319,7 +2319,7 @@ fn push_len(script: &[u8]) -> Option<usize> {
     let op = *script.first()?;
     if op <= 75 {
         let len = op as usize;
-        (script.len() >= 1 + len).then_some(1 + len)
+        (script.len() > len).then_some(1 + len)
     } else if (0x51..=0x60).contains(&op) || op == 0x00 {
         Some(1)
     } else if op == 0x4c {

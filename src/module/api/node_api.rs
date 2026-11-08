@@ -1158,7 +1158,7 @@ impl NodeAPI for NodeApiImpl {
             .await
         {
             Ok(quote) => {
-                let sat_per_vb = (u128::from(quote.sat_per_kvb) + 999) / 1000;
+                let sat_per_vb = u128::from(quote.sat_per_kvb).div_ceil(1000);
                 Ok(u64::try_from(sat_per_vb).unwrap_or(u64::MAX).max(1))
             }
             Err(crate::node::fee_estimator::FeeUnavailable::ExternalStale) => Err(

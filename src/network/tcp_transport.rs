@@ -109,8 +109,8 @@ impl TcpTransport {
 
         let stream = timeout(Duration::from_secs(timeout_secs), TcpStream::connect(addr))
             .await
-            .map_err(|_| anyhow::anyhow!("Connection timeout ({}s) to {}", timeout_secs, addr))?
-            .map_err(|e| anyhow::anyhow!("Connection failed to {}: {}", addr, e))?;
+            .map_err(|_| anyhow::anyhow!("Connection timeout ({timeout_secs}s) to {addr}"))?
+            .map_err(|e| anyhow::anyhow!("Connection failed to {addr}: {e}"))?;
 
         Ok(stream)
     }
@@ -132,7 +132,7 @@ impl TcpListener {
             }
             Err(e) => {
                 error!("Failed to accept TCP connection: {}", e);
-                Err(anyhow::anyhow!("Failed to accept connection: {}", e))
+                Err(anyhow::anyhow!("Failed to accept connection: {e}"))
             }
         }
     }
@@ -158,7 +158,7 @@ impl TransportListener for TcpListener {
             }
             Err(e) => {
                 error!("Failed to accept TCP connection: {}", e);
-                Err(anyhow::anyhow!("Failed to accept connection: {}", e))
+                Err(anyhow::anyhow!("Failed to accept connection: {e}"))
             }
         }
     }
@@ -166,7 +166,7 @@ impl TransportListener for TcpListener {
     fn local_addr(&self) -> Result<SocketAddr> {
         self.listener
             .local_addr()
-            .map_err(|e| anyhow::anyhow!("Failed to get local addr: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to get local addr: {e}"))
     }
 }
 
@@ -247,7 +247,7 @@ impl TransportConnection for TcpConnection {
                     self.connected.store(false, Ordering::Relaxed);
                     return Ok(Vec::new()); // Graceful close
                 }
-                return Err(anyhow::anyhow!("Failed to read header: {}", e));
+                return Err(anyhow::anyhow!("Failed to read header: {e}"));
             }
         }
 
@@ -270,9 +270,7 @@ impl TransportConnection for TcpConnection {
         let max_payload = self.max_message_length.saturating_sub(24);
         if payload_len > max_payload {
             return Err(anyhow::anyhow!(
-                "Message payload too large: {} bytes (max: {} bytes)",
-                payload_len,
-                max_payload
+                "Message payload too large: {payload_len} bytes (max: {max_payload} bytes)"
             ));
         }
 

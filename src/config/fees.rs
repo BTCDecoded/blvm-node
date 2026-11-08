@@ -257,12 +257,10 @@ pub(crate) fn estimator_name_ok(name: &str) -> bool {
     if !first.is_ascii_digit() && !first.is_ascii_lowercase() {
         return false;
     }
-    let mut extra = 0usize;
-    for ch in chars {
+    for (extra, ch) in chars.enumerate() {
         if extra == 31 || !(ch.is_ascii_digit() || ch.is_ascii_lowercase() || ch == '-') {
             return false;
         }
-        extra += 1;
     }
     true
 }

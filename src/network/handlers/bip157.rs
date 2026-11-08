@@ -31,13 +31,12 @@ impl NetworkManager {
             Ok(true) => {}
             Ok(false) => {
                 return Err(anyhow::anyhow!(
-                    "Filter service bandwidth limit exceeded for peer {}",
-                    peer_addr
+                    "Filter service bandwidth limit exceeded for peer {peer_addr}"
                 ));
             }
             Err(e) => {
                 warn!("Bandwidth check error for filter service: {}", e);
-                return Err(anyhow::anyhow!("Bandwidth check failed: {}", e));
+                return Err(anyhow::anyhow!("Bandwidth check failed: {e}"));
             }
         }
 
@@ -79,8 +78,7 @@ impl NetworkManager {
                         peer_addr,
                     )));
                 return Err(anyhow::anyhow!(
-                    "Filter service CPU time limit exceeded: {}ms",
-                    cpu_time_ms
+                    "Filter service CPU time limit exceeded: {cpu_time_ms}ms"
                 ));
             } else {
                 warn!(

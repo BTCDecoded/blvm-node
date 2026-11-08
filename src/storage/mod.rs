@@ -169,9 +169,7 @@ impl Storage {
                         Self::with_backend(data_dir, fallback_backend)
                     } else {
                         Err(anyhow::anyhow!(
-                            "Failed to initialize {:?} backend: {}. No fallback available.",
-                            default,
-                            e
+                            "Failed to initialize {default:?} backend: {e}. No fallback available."
                         ))
                     }
                 }

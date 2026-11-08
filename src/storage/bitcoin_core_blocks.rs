@@ -158,8 +158,7 @@ impl BitcoinCoreBlockReader {
     ) -> Result<Self> {
         if !blocks_dir.exists() {
             return Err(anyhow::anyhow!(
-                "Blocks directory does not exist: {:?}",
-                blocks_dir
+                "Blocks directory does not exist: {blocks_dir:?}"
             ));
         }
 
@@ -283,17 +282,13 @@ impl BitcoinCoreBlockReader {
 
             if block_size > 32 * 1024 * 1024 {
                 return Err(anyhow::anyhow!(
-                    "Block size too large: {} bytes at offset {}",
-                    block_size,
-                    block_start
+                    "Block size too large: {block_size} bytes at offset {block_start}"
                 ));
             }
 
             if block_size < 80 {
                 return Err(anyhow::anyhow!(
-                    "Block size {} too small for an 80-byte header at offset {}",
-                    block_size,
-                    block_start
+                    "Block size {block_size} too small for an 80-byte header at offset {block_start}"
                 ));
             }
 
@@ -367,7 +362,7 @@ impl BitcoinCoreBlockReader {
             .context("Failed to read index cache")?;
 
         let cache: BlockIndexCache = bincode::deserialize(&data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize index cache: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize index cache: {e}"))?;
 
         // Verify cache is for the correct network and blocks directory
         let network_str = match self.network {
@@ -429,7 +424,7 @@ impl BitcoinCoreBlockReader {
         };
 
         let data = bincode::serialize(&cache)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize index cache: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to serialize index cache: {e}"))?;
 
         let mut file = File::create(cache_path)
             .with_context(|| format!("Failed to create index cache: {cache_path:?}"))?;
@@ -446,7 +441,7 @@ impl BitcoinCoreBlockReader {
             return Ok(None);
         };
         let (block, _witnesses) = deserialize_block_with_witnesses(&block_data)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize block: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize block: {e}"))?;
         Ok(Some(block))
     }
 
@@ -529,9 +524,7 @@ pub fn read_block_at_file_pos(
     }
     if header[0..4] != magic[..] {
         return Err(anyhow::anyhow!(
-            "Magic mismatch at {:?} offset {} (nDataPos={n_data_pos})",
-            file_path,
-            header_offset
+            "Magic mismatch at {file_path:?} offset {header_offset} (nDataPos={n_data_pos})"
         ));
     }
 

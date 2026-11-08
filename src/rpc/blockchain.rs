@@ -773,8 +773,7 @@ impl BlockchainRpc {
         // Graceful degradation: return error if storage unavailable or block not found
         // (Don't return fake data - that's misleading)
         Err(anyhow::anyhow!(
-            "{} or storage unavailable",
-            BLOCK_NOT_FOUND_MSG
+            "{BLOCK_NOT_FOUND_MSG} or storage unavailable"
         ))
     }
 
@@ -1145,7 +1144,7 @@ impl BlockchainRpc {
                     // Load the current tip UTXO set
                     let mut utxo_set = storage
                         .load_chain_utxo_set()
-                        .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {}", e))?;
+                        .map_err(|e| anyhow::anyhow!("Failed to get UTXO set: {e}"))?;
 
                     // Rewind UTXO set from tip down to start_height using undo logs.
                     // Apply disconnect semantics matching blvm_consensus::reorganization::disconnect_block:
@@ -1801,9 +1800,7 @@ impl BlockchainRpc {
 
             if height >= tip_height {
                 return Err(anyhow::anyhow!(
-                    "Cannot prune to height >= tip height ({} >= {})",
-                    height,
-                    tip_height
+                    "Cannot prune to height >= tip height ({height} >= {tip_height})"
                 ));
             }
 
@@ -2002,7 +1999,7 @@ impl BlockchainRpc {
             .ok_or_else(|| anyhow::anyhow!(BLOCK_HASH_PARAM_REQUIRED_MSG))?;
 
         let hash =
-            decode_hash32(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
+            decode_hash32(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {e}"))?;
 
         if let Some(ref storage) = self.storage {
             self.disconnect_invalid_block(storage, &hash)?;
@@ -2044,7 +2041,7 @@ impl BlockchainRpc {
             .ok_or_else(|| anyhow::anyhow!(BLOCK_HASH_PARAM_REQUIRED_MSG))?;
 
         let hash =
-            decode_hash32(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
+            decode_hash32(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {e}"))?;
 
         if let Some(ref storage) = self.storage {
             storage.chain().reconsider(&hash)?;
@@ -2064,9 +2061,7 @@ impl BlockchainRpc {
         debug!("RPC: waitfornewblock");
 
         let timeout_secs = param_u64(params, 0);
-        let storage = self
-            .require_storage()
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let storage = self.require_storage().map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let initial_tip = storage.chain().get_tip_hash()?;
         let initial_tip_clone = initial_tip;
@@ -2128,15 +2123,13 @@ impl BlockchainRpc {
         debug!("RPC: waitforblock");
 
         let blockhash =
-            param_str_required(params, 0, "waitforblock").map_err(|e| anyhow::anyhow!("{}", e))?;
+            param_str_required(params, 0, "waitforblock").map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let timeout_secs = param_u64(params, 1);
         let hash =
-            decode_hash32(&blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
+            decode_hash32(&blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {e}"))?;
 
-        let storage = self
-            .require_storage()
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let storage = self.require_storage().map_err(|e| anyhow::anyhow!("{e}"))?;
 
         if timeout_secs.is_none() {
             if let Ok(Some(_block)) = storage.blocks().get_block(&hash) {
@@ -2182,9 +2175,7 @@ impl BlockchainRpc {
 
         let timeout_secs = param_u64(params, 1);
 
-        let storage = self
-            .require_storage()
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let storage = self.require_storage().map_err(|e| anyhow::anyhow!("{e}"))?;
 
         if timeout_secs.is_none() {
             let tip_height = storage.chain().get_height()?.unwrap_or(0);
@@ -2198,9 +2189,7 @@ impl BlockchainRpc {
                 return Err(BlockNotFoundError::new(format!("at height {height}")).into());
             }
             return Err(anyhow::anyhow!(
-                "Block at height {} not yet available (tip: {})",
-                height,
-                tip_height
+                "Block at height {height} not yet available (tip: {tip_height})"
             ));
         }
 
@@ -2223,9 +2212,7 @@ impl BlockchainRpc {
 
         let tip_height = storage.chain().get_height()?.unwrap_or(0);
         Err(anyhow::anyhow!(
-            "Block at height {} not yet available (tip: {})",
-            height,
-            tip_height
+            "Block at height {height} not yet available (tip: {tip_height})"
         ))
     }
 
@@ -2247,7 +2234,7 @@ impl BlockchainRpc {
         }
 
         let hash =
-            decode_hash32(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {}", e))?;
+            decode_hash32(blockhash).map_err(|e| anyhow::anyhow!("Invalid block hash: {e}"))?;
 
         if let Some(ref storage) = self.storage {
             let Some(outputs) = storage
@@ -2278,7 +2265,7 @@ impl BlockchainRpc {
                         "header": hex::encode(header),
                     }))
                 }
-                Err(e) => Err(anyhow::anyhow!("Failed to build filter: {}", e)),
+                Err(e) => Err(anyhow::anyhow!("Failed to build filter: {e}")),
             }
         } else {
             // Graceful degradation: return informative error instead of failing silently

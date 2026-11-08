@@ -2691,10 +2691,8 @@ fn download_list_restricts(preferred: &[String], connected: &[String]) -> bool {
         .count();
     if matches == 0 {
         false
-    } else if matches < 2 && connected.len() >= 2 {
-        false
     } else {
-        true
+        !(matches < 2 && connected.len() >= 2)
     }
 }
 
@@ -3316,10 +3314,7 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
                         .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap()),
                 );
                 Err(anyhow::anyhow!(
-                    "Chunk {}-{}: outer deadline {}s",
-                    start,
-                    end,
-                    outer_secs
+                    "Chunk {start}-{end}: outer deadline {outer_secs}s"
                 ))
             }
         };
@@ -5418,7 +5413,7 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
         }
         Err(panic) => {
             ibd_pipeline_shutdown();
-            return Err(anyhow::anyhow!("Validation thread panicked: {:?}", panic));
+            return Err(anyhow::anyhow!("Validation thread panicked: {panic:?}"));
         }
     }
     let validated_through = validation_height.load(Ordering::Relaxed);
@@ -5426,9 +5421,7 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     if validated_through < effective_end_final {
         ibd_pipeline_shutdown();
         return Err(anyhow::anyhow!(
-            "Parallel IBD ended early: validated through height {} but need {}",
-            validated_through,
-            effective_end_final
+            "Parallel IBD ended early: validated through height {validated_through} but need {effective_end_final}"
         ));
     }
     if let Some(h) = progress_handle {
@@ -5469,11 +5462,8 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     let durable_tip = storage.chain().get_height().ok().flatten().unwrap_or(0);
     if durable_tip < effective_end_final {
         return Err(anyhow::anyhow!(
-            "Parallel IBD durable tip lag: chain_tip={} validated={} need={} \
-                 (refuse Phase 3 / export_h advance past block tip)",
-            durable_tip,
-            validated_through,
-            effective_end_final
+            "Parallel IBD durable tip lag: chain_tip={durable_tip} validated={validated_through} need={effective_end_final} \
+                 (refuse Phase 3 / export_h advance past block tip)"
         ));
     }
 
@@ -8505,8 +8495,7 @@ impl ParallelIBD {
         // mode with no headers (which causes OOM from unbounded block requests).
         if actual_synced_height == 0 && target_height > 1000 {
             return Err(anyhow::anyhow!(
-                "Header sync returned height 0 against target {}; all peers failed",
-                target_height
+                "Header sync returned height 0 against target {target_height}; all peers failed"
             ));
         }
         if !header_result.may_assign {
@@ -9778,7 +9767,7 @@ impl ParallelIBD {
                     .get(&peer_id)
                     .map(|r| Arc::clone(&*r))
                     .ok_or_else(|| {
-                        anyhow::anyhow!("Peer {} not found in peer_semaphores", peer_id)
+                        anyhow::anyhow!("Peer {peer_id} not found in peer_semaphores")
                     })?;
                 let ctx = IbdWorkerCtx {
                     peer_id: peer_id.clone(),
@@ -10335,7 +10324,7 @@ impl ParallelIBD {
                 let hash = blockstore.get_block_hash(block);
                 let mtp = recent_headers
                     .filter(|headers| !headers.is_empty())
-                    .map(|headers| blvm_protocol::bip113::get_median_time_past(headers))
+                    .map(blvm_protocol::bip113::get_median_time_past)
                     .unwrap_or(block.header.timestamp);
                 crate::module::timers::dispatch_chain(
                     crate::module::timers::ChainEvent::Connected { height, hash, mtp },
@@ -10343,9 +10332,7 @@ impl ParallelIBD {
                 Ok((tx_ids, utxo_delta, undo_log))
             }
             ValidationResult::Invalid(reason) => Err(anyhow::anyhow!(
-                "Block validation failed at height {}: {}",
-                height,
-                reason
+                "Block validation failed at height {height}: {reason}"
             )),
         }
     }
@@ -10801,7 +10788,7 @@ impl ParallelIBD {
                             if block_has_witness_data(witnesses) {
                                 v[i] =
                                     Some(bincode::serialize(witnesses.as_ref()).map_err(|e| {
-                                        anyhow::anyhow!("Failed to serialize witnesses: {}", e)
+                                        anyhow::anyhow!("Failed to serialize witnesses: {e}")
                                     })?);
                             }
                         }
@@ -10826,7 +10813,7 @@ impl ParallelIBD {
                         n_tx: chunk[i].0.transactions.len() as u32,
                     };
                     bincode::serialize(&metadata)
-                        .map_err(|e| anyhow::anyhow!("Block metadata serialization failed: {}", e))
+                        .map_err(|e| anyhow::anyhow!("Block metadata serialization failed: {e}"))
                 })
                 .collect::<Result<Vec<_>>>()?;
 

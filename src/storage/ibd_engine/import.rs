@@ -85,8 +85,7 @@ fn seed_count_must_be_healthy(
 ) -> Result<()> {
     if total == 0 && checkpoint_height > 0 {
         anyhow::bail!(
-            "checkpoint tree empty at height {} — export incomplete or wrong slot",
-            checkpoint_height
+            "checkpoint tree empty at height {checkpoint_height} — export incomplete or wrong slot"
         );
     }
     if let Some(expected) = expected_count {
@@ -97,12 +96,8 @@ fn seed_count_must_be_healthy(
             const MAX_EXPORT_META_SLACK: u64 = 16;
             if delta > MAX_EXPORT_META_SLACK {
                 anyhow::bail!(
-                    "IBD engine seed: imported {} UTXOs but chain_info expected {} \
-                     at height {} (Δ={}) — checkpoint incomplete/poisoned (refusing seed)",
-                    total,
-                    expected,
-                    checkpoint_height,
-                    delta
+                    "IBD engine seed: imported {total} UTXOs but chain_info expected {expected} \
+                     at height {checkpoint_height} (Δ={delta}) — checkpoint incomplete/poisoned (refusing seed)"
                 );
             }
             warn!(
@@ -118,11 +113,8 @@ fn seed_count_must_be_healthy(
         last_accepted,
     ) {
         anyhow::bail!(
-            "IBD engine seed: imported {} UTXOs at height {} fails \
-             monotonicity (last_accepted={}) — checkpoint poisoned (refusing seed)",
-            total,
-            checkpoint_height,
-            last_accepted
+            "IBD engine seed: imported {total} UTXOs at height {checkpoint_height} fails \
+             monotonicity (last_accepted={last_accepted}) — checkpoint poisoned (refusing seed)"
         );
     }
     Ok(())

@@ -49,7 +49,7 @@ pub struct TimerId(pub [u8; 16]);
 
 impl std::fmt::Debug for TimerId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TimerId({})", self)
+        write!(f, "TimerId({self})")
     }
 }
 

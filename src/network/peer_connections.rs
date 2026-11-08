@@ -746,8 +746,7 @@ impl NetworkManager {
                 let is_loopback = v6.is_loopback();
                 if !is_link_local && !is_loopback && !has_global_ipv6() {
                     return Err(anyhow::anyhow!(
-                        "Skipping IPv6 peer {} — no global IPv6 routing on this host",
-                        addr
+                        "Skipping IPv6 peer {addr} — no global IPv6 routing on this host"
                     ));
                 }
             }
@@ -763,8 +762,7 @@ impl NetworkManager {
                 ip
             );
             return Err(anyhow::anyhow!(
-                "Connection rate limit exceeded for IP {}",
-                ip
+                "Connection rate limit exceeded for IP {ip}"
             ));
         }
 

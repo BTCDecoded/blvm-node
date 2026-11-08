@@ -14,7 +14,7 @@ pub async fn get_address_balance(blockchain: &BlockchainRpc, address: &str) -> R
     let balance = blockchain
         .getaddressbalance(&params)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to get address balance: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to get address balance: {e}"))?;
     Ok(balance)
 }
 
@@ -24,7 +24,7 @@ pub async fn get_address_transactions(blockchain: &BlockchainRpc, address: &str)
     let txids = blockchain
         .getaddresstxids(&params)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to get address transactions: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to get address transactions: {e}"))?;
     Ok(txids)
 }
 

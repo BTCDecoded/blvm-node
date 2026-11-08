@@ -26,13 +26,12 @@ impl NetworkManager {
             Ok(true) => {}
             Ok(false) => {
                 return Err(anyhow::anyhow!(
-                    "Module serving bandwidth limit exceeded for peer {}",
-                    peer_addr
+                    "Module serving bandwidth limit exceeded for peer {peer_addr}"
                 ));
             }
             Err(e) => {
                 warn!("Bandwidth check error for module serving: {}", e);
-                return Err(anyhow::anyhow!("Bandwidth check failed: {}", e));
+                return Err(anyhow::anyhow!("Bandwidth check failed: {e}"));
             }
         }
 
@@ -49,7 +48,7 @@ impl NetworkManager {
                 "Replay protection: Rejected duplicate GetModule request from {}: {}",
                 peer_addr, e
             );
-            return Err(anyhow::anyhow!("Replay protection: {}", e));
+            return Err(anyhow::anyhow!("Replay protection: {e}"));
         }
 
         let registry = self.module_registry().lock().await.as_ref().map(Arc::clone);

@@ -193,7 +193,7 @@ pub(crate) async fn download_chunk(
     } else {
         peer_id
             .parse::<SocketAddr>()
-            .map_err(|_| anyhow::anyhow!("Invalid peer address: {}", peer_id))?
+            .map_err(|_| anyhow::anyhow!("Invalid peer address: {peer_id}"))?
     };
 
     if let Some(assigner) = tip_enter.as_ref() {
@@ -326,8 +326,7 @@ pub(crate) async fn download_chunk(
                     height
                 );
                 return Err(anyhow::anyhow!(
-                    "Block hash not found for height {} - headers must be downloaded first",
-                    height
+                    "Block hash not found for height {height} - headers must be downloaded first"
                 ));
             }
             effective_end = height.saturating_sub(1);
@@ -348,9 +347,7 @@ pub(crate) async fn download_chunk(
 
     if block_hashes.is_empty() {
         return Err(anyhow::anyhow!(
-            "No block hashes found for heights {} to {}",
-            start_height,
-            end_height
+            "No block hashes found for heights {start_height} to {end_height}"
         ));
     }
 
@@ -1005,10 +1002,7 @@ pub(crate) async fn download_chunk(
                     start_height, end_height, next_to_send, need
                 );
                 return Err(anyhow::anyhow!(
-                    "leftover-force: abort leftover stripe {}-{} for GetData {}",
-                    start_height,
-                    end_height,
-                    need
+                    "leftover-force: abort leftover stripe {start_height}-{end_height} for GetData {need}"
                 ));
             }
         }
@@ -1169,11 +1163,7 @@ pub(crate) async fn download_chunk(
                 )
                 .await;
                 return Err(anyhow::anyhow!(
-                    "tip-gap timeout cap: gap {} waited {}s in chunk {}-{}",
-                    next_to_send,
-                    waited,
-                    start_height,
-                    end_height
+                    "tip-gap timeout cap: gap {next_to_send} waited {waited}s in chunk {start_height}-{end_height}"
                 ));
             }
         }
@@ -1392,8 +1382,7 @@ pub(crate) async fn download_chunk(
                                     }
                                 }
                                 return Err(anyhow::anyhow!(
-                                    "Coordinator stall: aborting chunk {}-{} for retry",
-                                    start_height, end_height
+                                    "Coordinator stall: aborting chunk {start_height}-{end_height} for retry"
                                 ));
                             }
                         }
@@ -1415,8 +1404,7 @@ pub(crate) async fn download_chunk(
                             }
                         }
                         return Err(anyhow::anyhow!(
-                            "tip-enter walk-in: aborting chunk {}-{} for tip owner reassign",
-                            start_height, end_height
+                            "tip-enter walk-in: aborting chunk {start_height}-{end_height} for tip owner reassign"
                         ));
                     }
                     _ = wait_blacklist_abort(&tip_enter, peer_id) => {
@@ -1439,8 +1427,7 @@ pub(crate) async fn download_chunk(
                             }
                         }
                         return Err(anyhow::anyhow!(
-                            "tip-SLA blacklist: aborting chunk {}-{} for peer rotate",
-                            start_height, end_height
+                            "tip-SLA blacklist: aborting chunk {start_height}-{end_height} for peer rotate"
                         ));
                     }
                     _ = tokio::time::sleep(first_block_wait) => {
@@ -1624,8 +1611,7 @@ pub(crate) async fn download_chunk(
                                 }
                             }
                             return Err(anyhow::anyhow!(
-                                "Coordinator stall at gap height {} - chunk {}-{} needs retry",
-                                stall_h, start_height, end_height
+                                "Coordinator stall at gap height {stall_h} - chunk {start_height}-{end_height} needs retry"
                             ));
                         }
                     }
@@ -1647,8 +1633,7 @@ pub(crate) async fn download_chunk(
                         }
                     }
                     return Err(anyhow::anyhow!(
-                        "tip-enter walk-in: aborting chunk {}-{} for tip owner reassign",
-                        start_height, end_height
+                        "tip-enter walk-in: aborting chunk {start_height}-{end_height} for tip owner reassign"
                     ));
                 }
                 _ = wait_blacklist_abort(&tip_enter, peer_id) => {
@@ -1671,8 +1656,7 @@ pub(crate) async fn download_chunk(
                         }
                     }
                     return Err(anyhow::anyhow!(
-                        "tip-SLA blacklist: aborting chunk {}-{} for peer rotate",
-                        start_height, end_height
+                        "tip-SLA blacklist: aborting chunk {start_height}-{end_height} for peer rotate"
                     ));
                 }
                 _ = deadline_poll.tick() => {
@@ -1701,8 +1685,7 @@ pub(crate) async fn download_chunk(
                         }
                     }
                     return Err(anyhow::anyhow!(
-                        "Chunk hard deadline {}-{}: stuck at height {} after {}s",
-                        start_height, end_height, next_to_send, chunk_deadline_secs
+                        "Chunk hard deadline {start_height}-{end_height}: stuck at height {next_to_send} after {chunk_deadline_secs}s"
                     ));
                 }
                 _ = wait_cooperative_outer(outer_deadline) => {
@@ -1759,8 +1742,7 @@ pub(crate) async fn download_chunk(
                         }
                     }
                     return Err(anyhow::anyhow!(
-                        "tip-SLA blacklist: aborting chunk {}-{} for peer rotate",
-                        start_height, end_height
+                        "tip-SLA blacklist: aborting chunk {start_height}-{end_height} for peer rotate"
                     ));
                 }
                 _ = deadline_poll.tick() => {
@@ -1787,8 +1769,7 @@ pub(crate) async fn download_chunk(
                         }
                     }
                     return Err(anyhow::anyhow!(
-                        "Chunk hard deadline {}-{}: no stall_rx, stuck at height {} after {}s",
-                        start_height, end_height, next_to_send, chunk_deadline_secs
+                        "Chunk hard deadline {start_height}-{end_height}: no stall_rx, stuck at height {next_to_send} after {chunk_deadline_secs}s"
                     ));
                 }
                 _ = wait_cooperative_outer(outer_deadline) => {
@@ -2050,8 +2031,7 @@ pub(crate) async fn download_chunk(
                         }
                     }
                     return Err(anyhow::anyhow!(
-                        "Block hash mismatch at height {} - chunk needs retry",
-                        height
+                        "Block hash mismatch at height {height} - chunk needs retry"
                     ));
                 }
                 progress.record_progress(received_hash);
@@ -2148,15 +2128,11 @@ pub(crate) async fn download_chunk(
                         .await;
                         if height == next_to_send {
                             return Err(anyhow::anyhow!(
-                                "empty-witness at gap height {} after {} hits - chunk needs retry",
-                                height,
-                                empty_witness_hits
+                                "empty-witness at gap height {height} after {empty_witness_hits} hits - chunk needs retry"
                             ));
                         }
                         return Err(anyhow::anyhow!(
-                            "empty-witness at height {} after {} hits - chunk needs retry",
-                            height,
-                            empty_witness_hits
+                            "empty-witness at height {height} after {empty_witness_hits} hits - chunk needs retry"
                         ));
                     }
                     // Rate-limit spam: first 3 hits + every 8th thereafter.
@@ -2445,8 +2421,7 @@ pub(crate) async fn download_chunk(
                     }
                 }
                 return Err(anyhow::anyhow!(
-                    "Block channel closed for height {} - chunk needs retry",
-                    height
+                    "Block channel closed for height {height} - chunk needs retry"
                 ));
             }
             Err(timed_out_rx) => {
@@ -2738,9 +2713,7 @@ pub(crate) async fn download_chunk(
                         need, next_to_send, start_height, end_height
                     );
                     return Err(anyhow::anyhow!(
-                        "leftover-force: abort cheese dump {} so GetData can own tip {}",
-                        next_to_send,
-                        need
+                        "leftover-force: abort cheese dump {next_to_send} so GetData can own tip {need}"
                     ));
                 }
             }
@@ -2764,9 +2737,7 @@ pub(crate) async fn download_chunk(
                             need, next_to_send
                         );
                         return Err(anyhow::anyhow!(
-                            "leftover-force: abort cheese send {} so GetData can own tip {}",
-                            next_to_send,
-                            need
+                            "leftover-force: abort cheese send {next_to_send} so GetData can own tip {need}"
                         ));
                     }
                 }
@@ -2777,8 +2748,7 @@ pub(crate) async fn download_chunk(
                         next_to_send
                     );
                     return Err(anyhow::anyhow!(
-                        "leftover-force: abort reserve wait at {}",
-                        next_to_send
+                        "leftover-force: abort reserve wait at {next_to_send}"
                     ));
                 }
                 let t0 = std::time::Instant::now();
@@ -2800,8 +2770,7 @@ pub(crate) async fn download_chunk(
                             next_to_send
                         );
                         return Err(anyhow::anyhow!(
-                            "leftover-force: abort blocked send at {}",
-                            next_to_send
+                            "leftover-force: abort blocked send at {next_to_send}"
                         ));
                     }
                 };
@@ -2883,9 +2852,7 @@ pub(crate) async fn download_chunk(
                     need, next_to_send, start_height, end_height
                 );
                 return Err(anyhow::anyhow!(
-                    "leftover-force: abort cheese dump {} so GetData can own tip {}",
-                    next_to_send,
-                    need
+                    "leftover-force: abort cheese dump {next_to_send} so GetData can own tip {need}"
                 ));
             }
         }
@@ -2897,8 +2864,7 @@ pub(crate) async fn download_chunk(
                     next_to_send
                 );
                 return Err(anyhow::anyhow!(
-                    "leftover-force: abort reserve wait at {}",
-                    next_to_send
+                    "leftover-force: abort reserve wait at {next_to_send}"
                 ));
             }
             let t0 = std::time::Instant::now();
@@ -2945,11 +2911,7 @@ pub(crate) async fn download_chunk(
         .await;
         received_drain_all(&mut received);
         return Err(anyhow::anyhow!(
-            "Incomplete chunk {}-{}: stuck before height {} ({} heights still buffered) — chunk needs retry",
-            start_height,
-            end_height,
-            next_to_send,
-            still
+            "Incomplete chunk {start_height}-{end_height}: stuck before height {next_to_send} ({still} heights still buffered) — chunk needs retry"
         ));
     }
     // Success path: no leftovers expected; free counter if any remain.

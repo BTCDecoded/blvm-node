@@ -895,7 +895,7 @@ impl NetworkManager {
                 .send(NetworkMessage::PeerDisconnected(TransportAddr::Tcp(
                     peer_addr,
                 )));
-            Err(anyhow::anyhow!("{}", violation_msg))
+            Err(anyhow::anyhow!("{violation_msg}"))
         } else {
             warn!(
                 "Peer {} has manual/NoBan permission, not disconnecting for {}",
@@ -2178,12 +2178,12 @@ impl NetworkManager {
             let pm = self.peer_manager.lock().await;
             if let Some(peer) = pm.get_peer(&addr) {
                 if !peer.is_connected() {
-                    return Err(anyhow::anyhow!("Peer {:?} is disconnected", addr));
+                    return Err(anyhow::anyhow!("Peer {addr:?} is disconnected"));
                 }
                 peer.send_tx.clone()
             } else {
                 // Peer doesn't exist - return error so caller knows to try another peer
-                return Err(anyhow::anyhow!("Peer {:?} not found", addr));
+                return Err(anyhow::anyhow!("Peer {addr:?} not found"));
             }
         };
 
@@ -2255,7 +2255,7 @@ impl NetworkManager {
         // Send message without holding the lock (unbounded channel, so send won't block)
         sender
             .send(message)
-            .map_err(|e| anyhow::anyhow!("Failed to send message to peer: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to send message to peer: {e}"))?;
 
         // Publish MessageSent event for module subscribers
         if let Some(ref ep) = *self.event_publisher.lock().await {

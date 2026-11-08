@@ -301,7 +301,7 @@ pub fn core_utxo_key_to_outpoint_key(core_key: &[u8]) -> Result<Vec<u8>> {
         .copied()
         .ok_or_else(|| anyhow::anyhow!("Empty coin key"))?;
     if prefix != b'C' && prefix != b'c' {
-        return Err(anyhow::anyhow!("Not a coin key: prefix {}", prefix));
+        return Err(anyhow::anyhow!("Not a coin key: prefix {prefix}"));
     }
     if prefix == b'c' && core_key.len() < 34 {
         return Err(anyhow::anyhow!("pre-0.15 coin key is not imported"));
@@ -409,7 +409,7 @@ fn decompress_script_pubkey(data: &[u8], offset: usize) -> Result<(Vec<u8>, usiz
 
     let script_len = (n_size - SPECIAL_SCRIPTS) as usize;
     if script_len > 10_000 {
-        return Err(anyhow::anyhow!("Script length {} too large", script_len));
+        return Err(anyhow::anyhow!("Script length {script_len} too large"));
     }
     if pos + script_len > data.len() {
         return Err(anyhow::anyhow!("Insufficient data for script body"));
@@ -474,7 +474,7 @@ fn decompress_script(n_size: u32, compressed: &[u8]) -> Result<Vec<u8>> {
             script.push(0xac);
             Ok(script)
         }
-        _ => Err(anyhow::anyhow!("Unknown special script type {}", n_size)),
+        _ => Err(anyhow::anyhow!("Unknown special script type {n_size}")),
     }
 }
 

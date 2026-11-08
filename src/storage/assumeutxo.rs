@@ -525,9 +525,7 @@ impl AssumeUtxoManager {
         let version = u32::from_le_bytes(buf4);
         if version != SNAPSHOT_VERSION {
             return Err(anyhow::anyhow!(
-                "Unsupported snapshot version: {} (expected {})",
-                version,
-                SNAPSHOT_VERSION
+                "Unsupported snapshot version: {version} (expected {SNAPSHOT_VERSION})"
             ));
         }
 
@@ -586,7 +584,7 @@ impl AssumeUtxoManager {
     pub fn load_snapshot(&mut self, height: u64) -> Result<(UtxoSet, SnapshotMetadata)> {
         let path = self.snapshot_path(height);
         if !path.exists() {
-            return Err(anyhow::anyhow!("No snapshot found for height {}", height));
+            return Err(anyhow::anyhow!("No snapshot found for height {height}"));
         }
 
         info!("Loading UTXO snapshot from height {}", height);

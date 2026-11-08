@@ -194,9 +194,8 @@ impl RpcAuthConfig {
         }
 
         if let Some(ref token_file) = self.token_file {
-            let content = std::fs::read_to_string(token_file).map_err(|e| {
-                anyhow::anyhow!("Failed to read token file {:?}: {}", token_file, e)
-            })?;
+            let content = std::fs::read_to_string(token_file)
+                .map_err(|e| anyhow::anyhow!("Failed to read token file {token_file:?}: {e}"))?;
             let tokens: Vec<String> = content
                 .lines()
                 .map(|s| s.trim().to_string())

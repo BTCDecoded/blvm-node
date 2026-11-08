@@ -1263,7 +1263,7 @@ fn join_utxo_flush_handle_mul_sub_mh(
             Ok(())
         }
         Ok(Err(e)) => Err(e),
-        Err(e) => Err(anyhow::anyhow!("UTXO flush panicked: {:?}", e)),
+        Err(e) => Err(anyhow::anyhow!("UTXO flush panicked: {e:?}")),
     }
 }
 
@@ -1274,7 +1274,7 @@ fn join_utxo_flush_handle_collect_sub_mh(
     match handle.join() {
         Ok(Ok(sub_mh)) => Ok(sub_mh),
         Ok(Err(e)) => Err(e),
-        Err(e) => Err(anyhow::anyhow!("UTXO flush panicked: {:?}", e)),
+        Err(e) => Err(anyhow::anyhow!("UTXO flush panicked: {e:?}")),
     }
 }
 
@@ -2648,8 +2648,7 @@ fn drain_ibd_pending_blocks_before_shutdown(
             Ok(Err(e)) => return Err(e),
             Err(e) => {
                 return Err(anyhow::anyhow!(
-                    "Block storage flush thread panicked at IBD completion: {:?}",
-                    e
+                    "Block storage flush thread panicked at IBD completion: {e:?}"
                 ));
             }
         }

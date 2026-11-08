@@ -530,7 +530,7 @@ impl CachedUtxoStore {
                         self.inner.value_codec(),
                         &utxo,
                     )
-                    .map_err(|e| anyhow::anyhow!("Failed to serialize UTXO: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to serialize UTXO: {e}"))?;
                     batch.put(&key, &value);
                 }
                 None => {

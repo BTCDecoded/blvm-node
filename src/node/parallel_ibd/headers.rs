@@ -351,7 +351,7 @@ pub(crate) async fn download_header_range(
         };
 
         let wire_msg = ProtocolParser::serialize_message(&ProtocolMessage::GetHeaders(get_headers))
-            .map_err(|e| anyhow::anyhow!("Failed to serialize GetHeaders: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to serialize GetHeaders: {e}"))?;
 
         let headers_rx = network.register_headers_request(current_peer);
 
@@ -369,10 +369,7 @@ pub(crate) async fn download_header_range(
                     consecutive_failures = 0;
                 } else {
                     return Err(anyhow::anyhow!(
-                        "No peers for range {}-{}: {}",
-                        start_height,
-                        end_height,
-                        e
+                        "No peers for range {start_height}-{end_height}: {e}"
                     ));
                 }
             }
@@ -392,8 +389,7 @@ pub(crate) async fn download_header_range(
                     consecutive_failures += 1;
                     if consecutive_failures >= MAX_FAILURES {
                         return Err(anyhow::anyhow!(
-                            "Headers from {} do not connect to the locator",
-                            current_peer
+                            "Headers from {current_peer} do not connect to the locator"
                         ));
                     }
                     continue;
@@ -404,14 +400,12 @@ pub(crate) async fn download_header_range(
                         Ok(true) => {}
                         Ok(false) => {
                             return Err(anyhow::anyhow!(
-                                "Header at height {} failed PoW — refusing to skip (would corrupt height index)",
-                                current_height
+                                "Header at height {current_height} failed PoW — refusing to skip (would corrupt height index)"
                             ));
                         }
                         Err(e) => {
                             return Err(anyhow::anyhow!(
-                                "Header at height {} PoW check error: {e}",
-                                current_height
+                                "Header at height {current_height} PoW check error: {e}"
                             ));
                         }
                     }
@@ -448,7 +442,7 @@ pub(crate) async fn download_header_range(
             Err(_) => {
                 consecutive_failures += 1;
                 if consecutive_failures >= MAX_FAILURES {
-                    return Err(anyhow::anyhow!("Timeout waiting for headers from {}", peer));
+                    return Err(anyhow::anyhow!("Timeout waiting for headers from {peer}"));
                 }
             }
         }
@@ -548,8 +542,7 @@ pub(crate) async fn download_headers(
             return Ok(HeaderSyncResult::at_height(tip));
         }
         return Err(anyhow::anyhow!(
-            "No peers and no stored headers from {} (synthetic WAN / ALLOW_ZERO_PEERS)",
-            start_height
+            "No peers and no stored headers from {start_height} (synthetic WAN / ALLOW_ZERO_PEERS)"
         ));
     }
 
@@ -617,10 +610,8 @@ pub(crate) async fn download_headers(
             .ok_or_else(|| anyhow::anyhow!("header sync: invalid start_height"))?;
         last_hash = blockstore.get_hash_by_height(parent_h)?.ok_or_else(|| {
             anyhow::anyhow!(
-                "Cannot resume header sync at height {}: missing parent hash at height {}. \
-                     Sync from genesis or repair height_index (data may be inconsistent).",
-                start_height,
-                parent_h
+                "Cannot resume header sync at height {start_height}: missing parent hash at height {parent_h}. \
+                     Sync from genesis or repair height_index (data may be inconsistent)."
             )
         })?;
         current_height = start_height;
@@ -864,9 +855,7 @@ pub(crate) async fn download_headers(
                         consecutive_failures += 1;
                         if consecutive_failures >= headers_max_failures {
                             return Err(anyhow::anyhow!(
-                                "Header at height {} does not meet required work ({} peers failed)",
-                                current_height,
-                                consecutive_failures
+                                "Header at height {current_height} does not meet required work ({consecutive_failures} peers failed)"
                             ));
                         }
                         break;

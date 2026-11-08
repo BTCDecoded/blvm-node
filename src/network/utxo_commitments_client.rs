@@ -800,7 +800,7 @@ impl UtxoCommitmentsClient {
             };
 
             let peer_addr = peer_addr_opt
-                .ok_or_else(|| anyhow::anyhow!("Invalid peer ID: {}", peer_id))?
+                .ok_or_else(|| anyhow::anyhow!("Invalid peer ID: {peer_id}"))?
                 .0;
 
             // Register pending request
@@ -820,7 +820,7 @@ impl UtxoCommitmentsClient {
 
             // Serialize and send
             let wire_format = serialize_get_utxo_proof(&get_proof_msg)
-                .map_err(|e| anyhow::anyhow!("Failed to serialize GetUTXOProof: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to serialize GetUTXOProof: {e}"))?;
 
             {
                 let network = network_manager.read().await;
@@ -828,7 +828,7 @@ impl UtxoCommitmentsClient {
                     .send_to_peer(peer_addr, wire_format)
                     .await
                     .map_err(|e| {
-                        anyhow::anyhow!("Failed to send GetUTXOProof to peer {}: {}", peer_addr, e)
+                        anyhow::anyhow!("Failed to send GetUTXOProof to peer {peer_addr}: {e}")
                     })?;
             }
 
@@ -845,7 +845,7 @@ impl UtxoCommitmentsClient {
                     match result {
                         Ok(response_data) => {
                             let proof_msg = deserialize_utxo_proof(&response_data)
-                                .map_err(|e| anyhow::anyhow!("Failed to parse UTXOProof response: {}", e))?;
+                                .map_err(|e| anyhow::anyhow!("Failed to parse UTXOProof response: {e}"))?;
 
                             // Reconstruct UTXO; proof bytes passed through for caller to deserialize
                             let utxo = blvm_protocol::types::UTXO {
@@ -870,7 +870,7 @@ impl UtxoCommitmentsClient {
                         let mut pending = pending_requests_arc.lock().await;
                         pending.remove(&request_id);
                     }
-                    Err(anyhow::anyhow!("Request timeout: no response received within {} seconds", timeout_seconds))
+                    Err(anyhow::anyhow!("Request timeout: no response received within {timeout_seconds} seconds"))
                 }
             }
         })

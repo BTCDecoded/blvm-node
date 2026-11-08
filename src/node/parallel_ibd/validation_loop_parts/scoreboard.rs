@@ -893,9 +893,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         let _ = vres_tx.send(ValidateResult {
                             height: job_h,
                             result: Err(anyhow::anyhow!(
-                                "IBD engine append: height {} below next expected {}",
-                                job_h,
-                                expected
+                                "IBD engine append: height {job_h} below next expected {expected}"
                             )),
                             undo_log: blvm_consensus::reorganization::BlockUndoLog::new(),
                             bip30_post: job.bip30_index,
@@ -2421,10 +2419,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                     &retire_err,
                                 ) {
                                     Ok(()) => Err(anyhow::anyhow!(
-                                        "IBD download stalled: no block at height {} after ~{}s \
-                                         (coordinator/workers may have exited early)",
-                                        next_validation_height,
-                                        stall_secs
+                                        "IBD download stalled: no block at height {next_validation_height} after ~{stall_secs}s \
+                                         (coordinator/workers may have exited early)"
                                     )),
                                     Err(e) => Err(e),
                                 };
@@ -2819,8 +2815,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             if job_send.is_err() {
                 return match retire_thread_shutdown(&mut _retire_dispatcher, &retire_err) {
                     Ok(()) => Err(anyhow::anyhow!(
-                        "IBD validate/append pipeline stopped (failed to send job at height {})",
-                        h
+                        "IBD validate/append pipeline stopped (failed to send job at height {h})"
                     )),
                     Err(e) => Err(e),
                 };
@@ -2886,8 +2881,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             if retire_err.lock().is_some() {
                 return match retire_thread_shutdown(&mut _retire_dispatcher, &retire_err) {
                     Ok(()) => Err(anyhow::anyhow!(
-                        "IBD retire thread failed while waiting for staged drain (staged_remaining={})",
-                        staged_remaining
+                        "IBD retire thread failed while waiting for staged drain (staged_remaining={staged_remaining})"
                     )),
                     Err(e) => Err(e),
                 };
@@ -2957,10 +2951,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     if valres_wait_start.elapsed() >= VALRES_STUCK_LIMIT {
                         return match retire_thread_shutdown(&mut _retire_dispatcher, &retire_err) {
                             Ok(()) => Err(anyhow::anyhow!(
-                                "IBD validation stuck: no result for h={} after {}s — \
+                                "IBD validation stuck: no result for h={next_process_h} after {stuck_secs}s — \
                                  worker may have panicked or block was never delivered to feeder",
-                                next_process_h,
-                                stuck_secs,
                             )),
                             Err(e) => Err(e),
                         };
@@ -2969,8 +2961,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                     return match retire_thread_shutdown(&mut _retire_dispatcher, &retire_err) {
                         Ok(()) => Err(anyhow::anyhow!(
-                            "IBD validate workers disconnected at height {}",
-                            next_process_h
+                            "IBD validate workers disconnected at height {next_process_h}"
                         )),
                         Err(e) => Err(e),
                     };
@@ -3218,8 +3209,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     {
                         return match retire_thread_shutdown(&mut _retire_dispatcher, &retire_err) {
                             Ok(()) => Err(anyhow::anyhow!(
-                                "IBD retire thread stopped (failed to send retire work at height {})",
-                                next_height
+                                "IBD retire thread stopped (failed to send retire work at height {next_height})"
                             )),
                             Err(e) => Err(e),
                         };
@@ -3590,8 +3580,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                         &retire_err,
                                     ) {
                                         Ok(()) => Err(anyhow::anyhow!(
-                                            "Block storage flush thread panicked: {:?}",
-                                            e
+                                            "Block storage flush thread panicked: {e:?}"
                                         )),
                                         Err(e2) => Err(e2),
                                     };
@@ -3655,8 +3644,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                             &retire_err,
                                         ) {
                                             Ok(()) => Err(anyhow::anyhow!(
-                                                "Block storage flush thread panicked: {:?}",
-                                                e
+                                                "Block storage flush thread panicked: {e:?}"
                                             )),
                                             Err(e2) => Err(e2),
                                         };
@@ -4310,8 +4298,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             Ok(Err(e)) => return Err(e),
             Err(e) => {
                 return Err(anyhow::anyhow!(
-                    "Block storage flush thread panicked: {:?}",
-                    e
+                    "Block storage flush thread panicked: {e:?}"
                 ));
             }
         }

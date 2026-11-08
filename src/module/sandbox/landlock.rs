@@ -268,8 +268,8 @@ fn install_unix_only_sockets() -> io::Result<()> {
         const LD: u16 = 0x20;
         const JEQ: u16 = 0x15;
         const RET: u16 = 0x06;
-        const ALLOW: u32 = libc::SECCOMP_RET_ALLOW as u32;
-        const DENY: u32 = (libc::SECCOMP_RET_ERRNO as u32) | (libc::EPERM as u32);
+        const ALLOW: u32 = libc::SECCOMP_RET_ALLOW;
+        const DENY: u32 = libc::SECCOMP_RET_ERRNO | (libc::EPERM as u32);
         // arch, nr, then domain. Non-socket syscalls are allowed. socket() is
         // allowed only for AF_UNIX, which is what the module IPC uses.
         let filter = [
@@ -472,11 +472,15 @@ mod tests {
 
     #[test]
     fn child_reads_its_data_dir_and_cannot_read_outside_or_connect_tcp() {
-        let root = std::env::temp_dir().join(format!(
-            "blvm-landlock-{}-{}",
-            std::process::id(),
-            std::process::id()
-        ));
+        // AF_UNIX paths must be shorter than SUN_LEN (108). CI points TMPDIR at the
+        // work directory, and that path plus sock/node.sock does not fit.
+        let name = format!("blvm-ll-{}", std::process::id());
+        let under_tmp = std::env::temp_dir().join(&name);
+        let root = if under_tmp.join("sock/node.sock").as_os_str().len() < 108 {
+            under_tmp
+        } else {
+            PathBuf::from("/tmp").join(name)
+        };
         let _ = std::fs::remove_dir_all(&root);
         let data = root.join("data");
         let socket_dir = root.join("sock");
