@@ -314,10 +314,7 @@ impl ModuleManager {
     }
 
     /// The node's fee estimator. Unload and crash drop that module's names.
-    pub fn set_fee_estimator(
-        &mut self,
-        estimator: Arc<crate::node::fee_estimator::FeeEstimator>,
-    ) {
+    pub fn set_fee_estimator(&mut self, estimator: Arc<crate::node::fee_estimator::FeeEstimator>) {
         self.fee_estimator = Some(estimator);
     }
 
@@ -441,7 +438,9 @@ impl ModuleManager {
             };
             let module_id = {
                 let modules = self.modules.lock().await;
-                modules.get(&manifest.name).map(|module| module.module_id.clone())
+                modules
+                    .get(&manifest.name)
+                    .map(|module| module.module_id.clone())
             };
             let Some(module_id) = module_id else {
                 return Err(ModuleError::OperationError(
@@ -505,9 +504,9 @@ impl ModuleManager {
                 name: svc.name.clone(),
                 kind,
                 listen,
-                max_connections: cfg.max_connections.unwrap_or(
-                    crate::module::services::DEFAULT_MAX_CONNECTIONS,
-                ),
+                max_connections: cfg
+                    .max_connections
+                    .unwrap_or(crate::module::services::DEFAULT_MAX_CONNECTIONS),
                 tls_cert: cfg.tls_cert.clone(),
             });
         }

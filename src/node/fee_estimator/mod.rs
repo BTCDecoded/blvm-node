@@ -19,8 +19,8 @@ mod types;
 pub use types::{
     BlockObservation, EstimatorSelection, ExternalFeeTable, ExternalMode, FeeEstimatorRegistration,
     FeeEstimatorRow, FeeEstimatorSpec, FeeMode, FeeNameError, FeeQuote, FeeSource, FeeTable,
-    FeeUnavailable, HistoryResult, NativeFeeRead, SourceView, SubmitFeeTableError, TxAdmission,
-    MAX_EXTERNAL_QUOTES,
+    FeeUnavailable, HistoryResult, MAX_EXTERNAL_QUOTES, NativeFeeRead, SourceView,
+    SubmitFeeTableError, TxAdmission,
 };
 
 use crate::config::FeeEstimatorConfig;
@@ -429,13 +429,7 @@ impl FeeEstimator {
             )
         };
         self.external.submit(
-            module_id,
-            table,
-            tip_hash,
-            tip_height,
-            max_lag,
-            max_rate,
-            now,
+            module_id, table, tip_hash, tip_height, max_lag, max_rate, now,
         )?;
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.wake_recompute();
@@ -1149,7 +1143,12 @@ fn install_table(
             return None;
         }
         *last = Some(table.tip_hash);
-        Some((publisher, table.tip_hash, table.tip_height, table.generation))
+        Some((
+            publisher,
+            table.tip_hash,
+            table.tip_height,
+            table.generation,
+        ))
     });
     *slot.write().unwrap_or_else(|err| err.into_inner()) = Arc::new(table);
     if let Some((publisher, tip_hash, tip_height, generation)) = announce {
@@ -1482,7 +1481,10 @@ mod tests {
         let crate::module::ipc::protocol::ModuleMessage::Event(event) = message else {
             panic!("expected an event");
         };
-        assert_eq!(event.event_type, crate::module::traits::EventType::FeeTableReady);
+        assert_eq!(
+            event.event_type,
+            crate::module::traits::EventType::FeeTableReady
+        );
         est.mark_table_stale_for_test();
         let _ = est
             .quote(1, FeeMode::Conservative, SourceView::Combined)
@@ -1545,10 +1547,12 @@ mod tests {
             .unwrap();
         assert_eq!(native.sat_per_kvb, 50_000);
         assert_eq!(native.estimator, "native");
-        assert!(denied
-            .fee_estimator_rows()
-            .iter()
-            .any(|row| row.name == "blend" && !row.active && row.fresh));
+        assert!(
+            denied
+                .fee_estimator_rows()
+                .iter()
+                .any(|row| row.name == "blend" && !row.active && row.fresh)
+        );
 
         let mut allowed_cfg = open_cfg();
         allowed_cfg.allow_auto_override = vec![id.to_string()];
@@ -1576,22 +1580,21 @@ mod tests {
         assert_eq!(lowered.sat_per_kvb, 100);
         assert_eq!(lowered.source, FeeSource::ExternalMin);
         assert_eq!(lowered.estimator, "blend");
-        assert!(allowed
-            .fee_estimator_rows()
-            .iter()
-            .any(|row| row.name == "native" && !row.active));
+        assert!(
+            allowed
+                .fee_estimator_rows()
+                .iter()
+                .any(|row| row.name == "native" && !row.active)
+        );
 
         let mut replace_cfg = open_cfg();
         replace_cfg.estimator = "blend".to_string();
-        replace_cfg
-            .external
-            .by_name
-            .insert(
-                "blend".to_string(),
-                crate::config::ExternalEstimatorOverride {
-                    mode: Some("replace".to_string()),
-                },
-            );
+        replace_cfg.external.by_name.insert(
+            "blend".to_string(),
+            crate::config::ExternalEstimatorOverride {
+                mode: Some("replace".to_string()),
+            },
+        );
         let replace = FeeEstimator::new(replace_cfg, true);
         replace.on_tx_admitted(admission(5_000, 100));
         replace.on_block_connected(&tip);

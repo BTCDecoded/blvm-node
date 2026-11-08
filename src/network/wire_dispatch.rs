@@ -1566,7 +1566,7 @@ mod plan_wire_locks {
         assert!(node.incoming.try_recv().is_err());
         let block = Block {
             header: BlockHeader {
-                version: 1,
+                version: 4,
                 prev_block_hash: [0u8; 32],
                 merkle_root: [5u8; 32],
                 timestamp: 1_700_000_011,
@@ -1607,7 +1607,7 @@ mod plan_wire_locks {
         for nonce in 0..17u64 {
             let block = Block {
                 header: BlockHeader {
-                    version: 1,
+                    version: 4,
                     prev_block_hash: [0u8; 32],
                     merkle_root: [5u8; 32],
                     timestamp: 1_700_000_011,
@@ -1656,7 +1656,7 @@ mod plan_wire_locks {
 
         let requested = Block {
             header: BlockHeader {
-                version: 1,
+                version: 4,
                 prev_block_hash: [1u8; 32],
                 merkle_root: [9u8; 32],
                 timestamp: 1_700_000_099,
@@ -1677,7 +1677,7 @@ mod plan_wire_locks {
         for nonce in 0..16u64 {
             let block = Block {
                 header: BlockHeader {
-                    version: 1,
+                    version: 4,
                     prev_block_hash: [2u8; 32],
                     merkle_root: [6u8; 32],
                     timestamp: 1_700_000_200,
@@ -2066,7 +2066,7 @@ mod plan_wire_locks {
     async fn unsolicited_header_on_the_tip_extends_the_header_chain() {
         let node = wired().await;
         let genesis = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [0u8; 32],
             merkle_root: [2u8; 32],
             timestamp: 1_500_000_000,
@@ -2078,7 +2078,7 @@ mod plan_wire_locks {
         node.storage.blocks().store_header(&tip, &genesis).unwrap();
         node.storage.blocks().store_height(0, &tip).unwrap();
         let child = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: tip,
             merkle_root: [3u8; 32],
             timestamp: 1_500_000_001,
@@ -2120,7 +2120,7 @@ mod plan_wire_locks {
         );
         let block = Block {
             header: BlockHeader {
-                version: 1,
+                version: 4,
                 prev_block_hash: [0u8; 32],
                 merkle_root: [4u8; 32],
                 timestamp: 1_700_000_010,
@@ -2160,7 +2160,7 @@ mod plan_wire_locks {
         let mut node = wired().await;
         let block = Block {
             header: BlockHeader {
-                version: 1,
+                version: 4,
                 prev_block_hash: [0u8; 32],
                 merkle_root: [5u8; 32],
                 timestamp: 1_700_000_011,
@@ -2213,7 +2213,7 @@ mod plan_wire_locks {
         use crate::network::protocol::GetBlocksMessage;
         let mut node = wired().await;
         let header_zero = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [0u8; 32],
             merkle_root: [6u8; 32],
             timestamp: 1_700_000_012,
@@ -2221,7 +2221,7 @@ mod plan_wire_locks {
             nonce: 5,
         };
         let header_one = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [0x11; 32],
             merkle_root: [7u8; 32],
             timestamp: 1_700_000_013,
@@ -2288,7 +2288,7 @@ mod plan_wire_locks {
         use crate::network::protocol::GetBlocksMessage;
         let mut node = wired().await;
         let header = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [0u8; 32],
             merkle_root: [7u8; 32],
             timestamp: 1_700_000_013,
@@ -2316,7 +2316,7 @@ mod plan_wire_locks {
         let parsed = ProtocolMessage::GetBlocks(GetBlocksMessage {
             version: 70016,
             block_locator_hashes: vec![],
-            hash_stop: [0u8; 32],
+            hash_stop: hash,
         });
         node.manager
             .dispatch_protocol_message(node.peer, &parsed, Vec::new())
@@ -2342,7 +2342,7 @@ mod plan_wire_locks {
         use crate::network::protocol::HeadersMessage;
         let mut node = wired().await;
         let header = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [0u8; 32],
             merkle_root: [8u8; 32],
             timestamp: 1_700_000_014,
@@ -2450,7 +2450,7 @@ mod plan_wire_locks {
 
         let mut node = wired().await;
         let genesis = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [0u8; 32],
             merkle_root: [1u8; 32],
             timestamp: 1_700_000_000,
@@ -2459,7 +2459,7 @@ mod plan_wire_locks {
         };
         let genesis_hash = blvm_consensus::block::block_header_hash(&genesis);
         let next = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: genesis_hash,
             merkle_root: [2u8; 32],
             timestamp: 1_700_000_001,
@@ -2508,7 +2508,10 @@ mod plan_wire_locks {
             let bytes = node.incoming.recv().await.unwrap();
             match ProtocolParser::parse_message(&bytes).unwrap() {
                 ProtocolMessage::Headers(HeadersMessage { headers }) => {
-                    assert_eq!(headers.first(), Some(&genesis));
+                    assert!(
+                        headers.is_empty(),
+                        "an empty locator with a zero hash_stop returns no headers"
+                    );
                 }
                 other => panic!("expected headers, got {other:?}"),
             }
@@ -2522,7 +2525,7 @@ mod plan_wire_locks {
         let node = wired().await;
         let tip_hash = [4u8; 32];
         let tip = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [0u8; 32],
             merkle_root: [1u8; 32],
             timestamp: 1_700_000_000,
@@ -2538,7 +2541,7 @@ mod plan_wire_locks {
         let mut prev_hash = [0u8; 32];
         for height in 0..5u64 {
             let header = BlockHeader {
-                version: 1,
+                version: 4,
                 prev_block_hash: prev_hash,
                 merkle_root: [height as u8; 32],
                 timestamp: 1_700_000_000 - (5 - height) * 600,
@@ -2552,7 +2555,7 @@ mod plan_wire_locks {
         indexed.push((tip_hash, tip.clone(), 5));
         node.storage.blocks().store_headers_batch(&indexed).unwrap();
         let bad = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: tip_hash,
             merkle_root: [8u8; 32],
             timestamp: 1_700_000_010,
@@ -2573,7 +2576,7 @@ mod plan_wire_locks {
         );
 
         let mut good = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: tip_hash,
             merkle_root: [9u8; 32],
             timestamp: 1_700_000_011,
@@ -2628,7 +2631,7 @@ mod plan_wire_locks {
 
     fn header() -> BlockHeader {
         BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [0u8; 32],
             merkle_root: [1u8; 32],
             timestamp: 1_700_000_000,
@@ -2817,7 +2820,7 @@ mod plan_wire_locks {
         let mut indexed = Vec::new();
         for height in 0u64..=6 {
             let header = BlockHeader {
-                version: 1,
+                version: 4,
                 prev_block_hash: prev,
                 merkle_root: [height as u8; 32],
                 timestamp: 1_700_000_000 + height,
@@ -2841,7 +2844,7 @@ mod plan_wire_locks {
                 node.peer,
                 &ProtocolMessage::GetBlocks(GetBlocksMessage {
                     version: 70015,
-                    block_locator_hashes: Vec::new(),
+                    block_locator_hashes: vec![indexed[0].0],
                     hash_stop: [0u8; 32],
                 }),
                 Vec::new(),

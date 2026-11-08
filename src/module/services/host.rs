@@ -18,8 +18,8 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -32,7 +32,7 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::info;
 
@@ -83,9 +83,18 @@ pub struct ServiceHttpResponse {
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
-    Open { conn_id: u64, peer: String },
-    Data { conn_id: u64, seq: u64, bytes: Vec<u8> },
-    Close { conn_id: u64 },
+    Open {
+        conn_id: u64,
+        peer: String,
+    },
+    Data {
+        conn_id: u64,
+        seq: u64,
+        bytes: Vec<u8>,
+    },
+    Close {
+        conn_id: u64,
+    },
 }
 
 #[async_trait]
@@ -146,11 +155,10 @@ impl ServiceHost {
         if services.is_empty() {
             return Ok(Vec::new());
         }
-        if services.iter().any(|svc| {
-            svc.tls_cert
-                .as_deref()
-                .is_some_and(|cert| !cert.is_empty())
-        }) {
+        if services
+            .iter()
+            .any(|svc| svc.tls_cert.as_deref().is_some_and(|cert| !cert.is_empty()))
+        {
             return Err(
                 "tls_cert is set; refusing to serve the hosted service in plaintext".to_string(),
             );
@@ -675,8 +683,7 @@ mod tests {
         let pending_reply = Arc::clone(&pending);
         let reply = tokio::spawn(async move {
             while let Some(bytes) = rx.recv().await {
-                let Ok(ModuleMessage::Invocation(invocation)) = bincode::deserialize(&bytes)
-                else {
+                let Ok(ModuleMessage::Invocation(invocation)) = bincode::deserialize(&bytes) else {
                     continue;
                 };
                 let payload = match invocation.invocation_type {

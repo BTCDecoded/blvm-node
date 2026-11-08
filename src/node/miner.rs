@@ -1422,7 +1422,12 @@ impl MiningCoordinator {
             .chain()
             .get_tip_hash_and_height()
             .map_err(|e| anyhow::anyhow!("Failed to get chain tip: {e}"))?;
-        let old_bits = storage.chain().get_tip_header().ok().flatten().map(|header| header.bits);
+        let old_bits = storage
+            .chain()
+            .get_tip_header()
+            .ok()
+            .flatten()
+            .map(|header| header.bits);
         let connect_height = tip_height + 1;
 
         let mut utxo = match storage.open_engine_resume_snapshot()? {

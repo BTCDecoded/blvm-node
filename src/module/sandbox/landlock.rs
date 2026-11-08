@@ -273,24 +273,54 @@ fn install_unix_only_sockets() -> io::Result<()> {
         // arch, nr, then domain. Non-socket syscalls are allowed. socket() is
         // allowed only for AF_UNIX, which is what the module IPC uses.
         let filter = [
-            libc::sock_filter { code: LD, jt: 0, jf: 0, k: 4 },
-            libc::sock_filter { code: JEQ, jt: 0, jf: 5, k: AUDIT_ARCH },
-            libc::sock_filter { code: LD, jt: 0, jf: 0, k: 0 },
+            libc::sock_filter {
+                code: LD,
+                jt: 0,
+                jf: 0,
+                k: 4,
+            },
+            libc::sock_filter {
+                code: JEQ,
+                jt: 0,
+                jf: 5,
+                k: AUDIT_ARCH,
+            },
+            libc::sock_filter {
+                code: LD,
+                jt: 0,
+                jf: 0,
+                k: 0,
+            },
             libc::sock_filter {
                 code: JEQ,
                 jt: 0,
                 jf: 2,
                 k: libc::SYS_socket as u32,
             },
-            libc::sock_filter { code: LD, jt: 0, jf: 0, k: 16 },
+            libc::sock_filter {
+                code: LD,
+                jt: 0,
+                jf: 0,
+                k: 16,
+            },
             libc::sock_filter {
                 code: JEQ,
                 jt: 0,
                 jf: 1,
                 k: libc::AF_UNIX as u32,
             },
-            libc::sock_filter { code: RET, jt: 0, jf: 0, k: ALLOW },
-            libc::sock_filter { code: RET, jt: 0, jf: 0, k: DENY },
+            libc::sock_filter {
+                code: RET,
+                jt: 0,
+                jf: 0,
+                k: ALLOW,
+            },
+            libc::sock_filter {
+                code: RET,
+                jt: 0,
+                jf: 0,
+                k: DENY,
+            },
         ];
         let mut prog = libc::sock_fprog {
             len: filter.len() as libc::c_ushort,
@@ -549,10 +579,7 @@ mod tests {
             ruleset.arm_std(&mut unix);
             let out = unix.output().expect("spawn python unix");
             let err = String::from_utf8_lossy(&out.stderr);
-            assert!(
-                out.status.success(),
-                "AF_UNIX connect failed: {err}"
-            );
+            assert!(out.status.success(), "AF_UNIX connect failed: {err}");
         }
         drop(listener);
         let _ = std::fs::remove_dir_all(&root);

@@ -87,15 +87,17 @@ fn registration_to_wire(
     let mut rejected: Vec<_> = registration
         .rejected
         .into_iter()
-        .map(|(name, err)| crate::module::ipc::protocol::FeeNameRejectionWire {
-            name,
-            error: name_error_code(err).to_string(),
-        })
+        .map(
+            |(name, err)| crate::module::ipc::protocol::FeeNameRejectionWire {
+                name,
+                error: name_error_code(err).to_string(),
+            },
+        )
         .collect();
     rejected.extend(
-        early
-            .into_iter()
-            .map(|(name, error)| crate::module::ipc::protocol::FeeNameRejectionWire { name, error }),
+        early.into_iter().map(
+            |(name, error)| crate::module::ipc::protocol::FeeNameRejectionWire { name, error },
+        ),
     );
     crate::module::ipc::protocol::FeeEstimatorRegistrationWire {
         accepted: registration.accepted,
@@ -139,12 +141,14 @@ fn attached_estimator(
     let mempool = api.mempool_manager.as_ref().ok_or_else(|| {
         ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
     })?;
-    mempool.fee_estimator().ok_or_else(|| {
-        ModuleError::OperationError("fee estimator is not attached".to_string())
-    })
+    mempool
+        .fee_estimator()
+        .ok_or_else(|| ModuleError::OperationError("fee estimator is not attached".to_string()))
 }
 
-fn fee_quote_to_wire(quote: crate::node::fee_estimator::FeeQuote) -> crate::module::ipc::protocol::FeeQuoteWire {
+fn fee_quote_to_wire(
+    quote: crate::node::fee_estimator::FeeQuote,
+) -> crate::module::ipc::protocol::FeeQuoteWire {
     let source = match quote.source {
         crate::node::fee_estimator::FeeSource::History => "history",
         crate::node::fee_estimator::FeeSource::Mempool => "mempool",
@@ -1157,11 +1161,9 @@ impl NodeAPI for NodeApiImpl {
                 let sat_per_vb = (u128::from(quote.sat_per_kvb) + 999) / 1000;
                 Ok(u64::try_from(sat_per_vb).unwrap_or(u64::MAX).max(1))
             }
-            Err(crate::node::fee_estimator::FeeUnavailable::ExternalStale) => {
-                Err(ModuleError::OperationError(
-                    "external fee estimator is stale".to_string(),
-                ))
-            }
+            Err(crate::node::fee_estimator::FeeUnavailable::ExternalStale) => Err(
+                ModuleError::OperationError("external fee estimator is stale".to_string()),
+            ),
             Err(_) => Err(ModuleError::OperationError(no_estimate.to_string())),
         }
     }

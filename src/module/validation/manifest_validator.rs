@@ -194,10 +194,7 @@ impl ManifestValidator {
 
     /// `[[services]]` and `http_wants` require `min_node_version`, checked with
     /// `matches_version_constraint` against this crate's version.
-    fn validate_hosted_declarations(
-        &self,
-        manifest: &ModuleManifest,
-    ) -> Result<(), Vec<String>> {
+    fn validate_hosted_declarations(&self, manifest: &ModuleManifest) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
         let declares_host =
             !manifest.services.is_empty() || !manifest.network.http_wants.is_empty();

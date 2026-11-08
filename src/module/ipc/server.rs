@@ -2061,18 +2061,20 @@ impl ConnectionCtx {
                     )),
                 }
             }
-            RequestPayload::GetFeeTable { view, mode, targets } => {
-                match node_api.get_fee_table(view, mode, targets).await {
-                    Ok(table) => Ok(ResponseMessage::success(
-                        request.correlation_id,
-                        ResponsePayload::NativeFeeTable(table),
-                    )),
-                    Err(err) => Ok(ResponseMessage::error(
-                        request.correlation_id,
-                        err.to_string(),
-                    )),
-                }
-            }
+            RequestPayload::GetFeeTable {
+                view,
+                mode,
+                targets,
+            } => match node_api.get_fee_table(view, mode, targets).await {
+                Ok(table) => Ok(ResponseMessage::success(
+                    request.correlation_id,
+                    ResponsePayload::NativeFeeTable(table),
+                )),
+                Err(err) => Ok(ResponseMessage::error(
+                    request.correlation_id,
+                    err.to_string(),
+                )),
+            },
             RequestPayload::TimerList => {
                 let list = node_api.timer_list().await?;
                 Ok(ResponseMessage::success(

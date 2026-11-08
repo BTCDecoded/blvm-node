@@ -236,9 +236,7 @@ impl<C: Clock> DandelionRelay<C> {
             // Jitter: draw deadline from [stem_timeout, stem_timeout * 1.5).
             // The 50% window spreads the fluff signal across time, defeating
             // timing-based origin inference against a known fixed deadline.
-            let jitter_ms = self
-                .rng
-                .gen_range(0..self.stem_timeout.as_millis() / 2) as u64;
+            let jitter_ms = self.rng.gen_range(0..self.stem_timeout.as_millis() / 2) as u64;
             let stem_deadline = self.stem_timeout + Duration::from_millis(jitter_ms);
 
             let stem_state = StemState {

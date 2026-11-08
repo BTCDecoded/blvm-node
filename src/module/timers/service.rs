@@ -3966,7 +3966,11 @@ mod tests {
         tokio::time::advance(Duration::from_millis(1)).await;
         settle().await;
         let queued = next_fire(&mut rx).await;
-        assert!(queued.fire.skipped_overlap >= 1, "{}", queued.fire.skipped_overlap);
+        assert!(
+            queued.fire.skipped_overlap >= 1,
+            "{}",
+            queued.fire.skipped_overlap
+        );
         queued.reply.send(Ok(TimerAck::Stop)).unwrap();
         settle().await;
 
@@ -3987,7 +3991,11 @@ mod tests {
         tokio::time::advance(Duration::from_millis(1)).await;
         settle().await;
         let coalesced = next_fire(&mut rx).await;
-        assert!(coalesced.fire.coalesced >= 1, "{}", coalesced.fire.coalesced);
+        assert!(
+            coalesced.fire.coalesced >= 1,
+            "{}",
+            coalesced.fire.coalesced
+        );
         coalesced.reply.send(Ok(TimerAck::Stop)).unwrap();
         settle().await;
 

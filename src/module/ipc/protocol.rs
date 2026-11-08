@@ -633,10 +633,7 @@ pub enum InvocationType {
         body: Vec<u8>,
     },
     /// Hosted stream accepted. Appended so existing variant indices stay put.
-    StreamOpen {
-        conn_id: u64,
-        peer: String,
-    },
+    StreamOpen { conn_id: u64, peer: String },
     /// Hosted stream bytes. `seq` is per connection, starting at 1.
     StreamData {
         conn_id: u64,
@@ -644,9 +641,7 @@ pub enum InvocationType {
         bytes: Vec<u8>,
     },
     /// Hosted stream closed. Appended so existing variant indices stay put.
-    StreamClose {
-        conn_id: u64,
-    },
+    StreamClose { conn_id: u64 },
 }
 
 /// Invocation result from module to node

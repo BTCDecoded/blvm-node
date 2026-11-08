@@ -131,7 +131,10 @@ async fn http_and_echo_stream_close_on_unload() {
     };
     stream.write_all(b"ping").await.unwrap();
     let echoed = read_until(&mut stream, b"ping").await;
-    assert!(echoed.windows(4).any(|w| w == b"ping"), "echo was {echoed:?}");
+    assert!(
+        echoed.windows(4).any(|w| w == b"ping"),
+        "echo was {echoed:?}"
+    );
     let seqs = echo.seqs.lock().unwrap().clone();
     assert!(!seqs.is_empty());
     assert_eq!(seqs[0], 1);

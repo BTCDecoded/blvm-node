@@ -922,16 +922,12 @@ mod tests {
         assert!(loaded.is_ok(), "{loaded:?}");
 
         let duplicated = snapshot_bytes(&entry, 2, hash);
-        assert!(
-            AssumeUtxoManager::read_snapshot_from_reader(&mut duplicated.as_slice()).is_err()
-        );
+        assert!(AssumeUtxoManager::read_snapshot_from_reader(&mut duplicated.as_slice()).is_err());
 
         let mut wrong = hash;
         wrong[0] ^= 0xff;
         let mismatched = snapshot_bytes(&entry, 1, wrong);
-        assert!(
-            AssumeUtxoManager::read_snapshot_from_reader(&mut mismatched.as_slice()).is_err()
-        );
+        assert!(AssumeUtxoManager::read_snapshot_from_reader(&mut mismatched.as_slice()).is_err());
     }
 
     fn snapshot_bytes(entry: &[u8], count: u64, utxo_hash: [u8; 32]) -> Vec<u8> {

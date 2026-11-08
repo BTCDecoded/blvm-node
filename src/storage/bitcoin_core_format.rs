@@ -465,9 +465,8 @@ fn decompress_script(n_size: u32, compressed: &[u8]) -> Result<Vec<u8>> {
             let mut compressed_key = [0u8; 33];
             compressed_key[0] = (n_size - 2) as u8;
             compressed_key[1..].copy_from_slice(compressed);
-            let point = blvm_secp256k1::ecdsa::ge_from_compressed(&compressed_key).ok_or_else(
-                || anyhow::anyhow!("uncompressed pubkey does not decompress"),
-            )?;
+            let point = blvm_secp256k1::ecdsa::ge_from_compressed(&compressed_key)
+                .ok_or_else(|| anyhow::anyhow!("uncompressed pubkey does not decompress"))?;
             let full = blvm_secp256k1::ecdsa::ge_to_uncompressed(&point);
             let mut script = Vec::with_capacity(67);
             script.push(65);
@@ -598,9 +597,9 @@ mod tests {
     #[test]
     fn special_script_4_is_uncompressed_p2pk() {
         let mut x = [0u8; 32];
-        x.copy_from_slice(
-            &hex_decode("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"),
-        );
+        x.copy_from_slice(&hex_decode(
+            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        ));
         let script = decompress_script(4, &x).unwrap();
         assert_eq!(script.len(), 67);
         assert_eq!(script[0], 65);

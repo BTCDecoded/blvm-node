@@ -56,4 +56,3 @@ async fn test_publish_multiple_blocks() {
             .await;
     }
 }
-

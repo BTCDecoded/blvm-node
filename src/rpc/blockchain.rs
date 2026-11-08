@@ -1076,9 +1076,8 @@ impl BlockchainRpc {
         storage
             .chain()
             .force_set_ibd_utxo_watermark(metadata.block_height)?;
-        let total_amount = crate::storage::chainstate::utxo_money_total(
-            utxo_set.values().map(|utxo| utxo.value),
-        )?;
+        let total_amount =
+            crate::storage::chainstate::utxo_money_total(utxo_set.values().map(|utxo| utxo.value))?;
         let stats = crate::storage::chainstate::UTXOStats {
             height: metadata.block_height,
             txouts: utxo_set.len() as u64,
@@ -2756,10 +2755,7 @@ mod txoutset_tests {
             .get_txoutset_info()
             .await
             .unwrap_err();
-        assert!(
-            err.to_string().contains("outside the money range"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("outside the money range"), "{err}");
     }
 
     #[tokio::test]

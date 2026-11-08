@@ -844,10 +844,7 @@ impl ModuleApiHub {
                             err.origin,
                             err.status,
                         );
-                        return Ok(ResponseMessage::error(
-                            request.correlation_id,
-                            err.message,
-                        ));
+                        return Ok(ResponseMessage::error(request.correlation_id, err.message));
                     }
                 }
             }
@@ -888,10 +885,7 @@ impl ModuleApiHub {
                             err.origin,
                             err.status,
                         );
-                        return Ok(ResponseMessage::error(
-                            request.correlation_id,
-                            err.message,
-                        ));
+                        return Ok(ResponseMessage::error(request.correlation_id, err.message));
                     }
                 }
             }
@@ -953,17 +947,19 @@ impl ModuleApiHub {
                     }
                 }
             }
-            RequestPayload::GetFeeTable { view, mode, targets } => {
-                match self.node_api.get_fee_table(view, mode, targets).await {
-                    Ok(table) => ResponsePayload::NativeFeeTable(table),
-                    Err(err) => {
-                        return Ok(ResponseMessage::error(
-                            request.correlation_id,
-                            err.to_string(),
-                        ));
-                    }
+            RequestPayload::GetFeeTable {
+                view,
+                mode,
+                targets,
+            } => match self.node_api.get_fee_table(view, mode, targets).await {
+                Ok(table) => ResponsePayload::NativeFeeTable(table),
+                Err(err) => {
+                    return Ok(ResponseMessage::error(
+                        request.correlation_id,
+                        err.to_string(),
+                    ));
                 }
-            }
+            },
             RequestPayload::StreamClose { conn_id } => {
                 let name = crate::module::module_name_from_id(module_id);
                 match self.service_host.close(name, *conn_id).await {
@@ -1001,7 +997,13 @@ impl ModuleApiHub {
         };
 
         // Log audit entry (use operation ID from earlier)
-        self.log_audit(module_id.to_string(), operation_id.to_string(), true, None, None);
+        self.log_audit(
+            module_id.to_string(),
+            operation_id.to_string(),
+            true,
+            None,
+            None,
+        );
 
         Ok(ResponseMessage::success(request.correlation_id, response))
     }

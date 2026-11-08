@@ -8,15 +8,17 @@ mod stub_node_api;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use blvm_node::config::NodeConfig;
 use blvm_node::module::api::hub::ModuleApiHub;
 use blvm_node::module::http::HttpPolicy;
-use blvm_node::module::ipc::protocol::{MessageType, RequestMessage, RequestPayload, ResponsePayload};
+use blvm_node::module::ipc::protocol::{
+    MessageType, RequestMessage, RequestPayload, ResponsePayload,
+};
 use blvm_node::module::registry::manifest::ModuleManifest;
 use blvm_node::module::security::permissions::{Permission, PermissionSet};
 use stub_node_api::MockNodeAPI;
@@ -128,10 +130,7 @@ async fn unlisted_origin_redirect_and_private_address_are_refused() {
     let mut hub = hub_for("fees-mod", vec![origin.clone()]);
 
     let unlisted = hub
-        .handle_request(
-            "fees-mod",
-            http_request("https://not-listed.example/fees"),
-        )
+        .handle_request("fees-mod", http_request("https://not-listed.example/fees"))
         .await
         .unwrap();
     assert!(!unlisted.success);

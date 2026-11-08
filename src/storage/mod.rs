@@ -32,6 +32,8 @@ pub mod ibd_engine;
 pub mod ibd_utxo_muhash;
 #[cfg(feature = "production")]
 pub mod ibd_utxo_store;
+#[cfg(test)]
+mod pass_fix_tests;
 pub mod pruning;
 #[cfg(feature = "heed3")]
 pub mod rkyv_codec;
@@ -39,8 +41,6 @@ pub mod serialization_cache;
 pub mod txindex;
 pub mod utxo_value_codec;
 pub mod utxostore;
-#[cfg(test)]
-mod pass_fix_tests;
 #[cfg(any(
     feature = "block-compression",
     feature = "utxo-compression",

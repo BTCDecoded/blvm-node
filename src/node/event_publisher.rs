@@ -88,7 +88,6 @@ impl EventPublisher {
         }
     }
 
-
     /// Publish block disconnected event (chain reorg)
     pub async fn publish_block_disconnected(&self, hash: &Hash, height: u64) {
         self.note_disconnected(*hash, height);
@@ -434,17 +433,6 @@ impl EventPublisher {
         }
     }
 
-
-
-
-
-
-
-
-
-
-
-
     // === Mempool Events ===
 
     /// Publish mempool threshold exceeded event
@@ -520,10 +508,6 @@ impl EventPublisher {
         }
     }
 
-
-
-
-
     /// Publish difficulty adjusted event
     pub async fn publish_difficulty_adjusted(
         &self,
@@ -545,9 +529,6 @@ impl EventPublisher {
             warn!("Failed to publish DifficultyAdjusted event: {}", e);
         }
     }
-
-
-
 
     // === Sync Events ===
 
@@ -698,16 +679,7 @@ impl EventPublisher {
         }
     }
 
-
-
-
-
-
     // === Extended module / mining events ===
-
-
-
-
 
     /// Generic event publishing method (for any event type)
     /// Publish configuration loaded/changed event

@@ -173,11 +173,7 @@ mod tests {
         let map = body["fee_by_block_target"].as_object().unwrap();
         assert_eq!(map.len(), targets.len());
         for target in targets {
-            assert_eq!(
-                map[&target.to_string()].as_u64(),
-                Some(10_000),
-                "{map:?}"
-            );
+            assert_eq!(map[&target.to_string()].as_u64(), Some(10_000), "{map:?}");
         }
     }
 }

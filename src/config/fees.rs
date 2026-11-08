@@ -215,10 +215,7 @@ impl FeeEstimatorConfig {
             );
         }
         if self.fallback != "native" && self.fallback != "none" {
-            anyhow::bail!(
-                "fallback must be native or none, got {}",
-                self.fallback
-            );
+            anyhow::bail!("fallback must be native or none, got {}", self.fallback);
         }
         if !(10..=3600).contains(&self.external.ttl_secs) {
             anyhow::bail!(

@@ -607,11 +607,7 @@ impl BlockStore {
         ];
         let remove_bytes = height.saturating_sub(12).to_be_bytes();
         if height > 11 {
-            ops.push((
-                self.recent_headers.as_ref(),
-                remove_bytes.as_slice(),
-                None,
-            ));
+            ops.push((self.recent_headers.as_ref(), remove_bytes.as_slice(), None));
         }
         crate::storage::database::commit_keyed(&ops)
     }

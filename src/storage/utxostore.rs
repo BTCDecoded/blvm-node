@@ -339,9 +339,8 @@ impl UtxoStore {
             let utxo_data = value;
 
             let utxo: UTXO = self.deserialize_utxo_data(&utxo_data)?;
-            total = total.saturating_add(crate::storage::chainstate::utxo_money_total([
-                utxo.value,
-            ])?);
+            total =
+                total.saturating_add(crate::storage::chainstate::utxo_money_total([utxo.value])?);
         }
 
         Ok(u64::try_from(total).unwrap_or(u64::MAX))
@@ -609,10 +608,7 @@ mod tests {
             .unwrap();
         assert_eq!(utxos.utxo_count().unwrap(), 2);
         let err = utxos.total_value().unwrap_err();
-        assert!(
-            err.to_string().contains("outside the money range"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("outside the money range"), "{err}");
     }
 
     #[test]

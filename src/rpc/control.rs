@@ -569,9 +569,10 @@ impl ControlRpc {
             })?,
         };
         let limit = usize::try_from(limit).unwrap_or(usize::MAX).min(1000);
-        let mgr = self.module_manager.as_ref().ok_or_else(|| {
-            RpcError::internal_error("Module system not available".to_string())
-        })?;
+        let mgr = self
+            .module_manager
+            .as_ref()
+            .ok_or_else(|| RpcError::internal_error("Module system not available".to_string()))?;
         let manager = mgr.lock().await;
         let Some(hub) = manager.api_hub_arc() else {
             return Ok(json!([]));

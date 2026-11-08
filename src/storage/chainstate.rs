@@ -1470,10 +1470,7 @@ mod tests {
         let err = chain
             .update_utxo_stats_cache(&block_hash, 1, &set, 1)
             .unwrap_err();
-        assert!(
-            err.to_string().contains("outside the money range"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("outside the money range"), "{err}");
         assert!(chain.get_utxo_stats(&block_hash).unwrap().is_none());
     }
 

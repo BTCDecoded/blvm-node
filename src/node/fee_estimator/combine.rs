@@ -5,8 +5,8 @@
 
 use super::projection::{ProjTx, percentile_rate, project_blocks};
 use super::types::{
-    native_quote, ExternalMode, FeeMode, FeeQuote, FeeSource, FeeTable, HistoryResult,
-    MAX_FEE_TARGET, quote_blocks,
+    ExternalMode, FeeMode, FeeQuote, FeeSource, FeeTable, HistoryResult, MAX_FEE_TARGET,
+    native_quote, quote_blocks,
 };
 use crate::config::FeeEstimatorConfig;
 use crate::node::miner::TEMPLATE_RESERVE_WEIGHT;
@@ -95,8 +95,8 @@ pub(crate) fn build_fee_table(input: MempoolSnapshot) -> FeeTable {
         }
     }
 
-        let external_name = input.external.as_ref().map(|merge| merge.name.clone());
-        for mode in 0..2 {
+    let external_name = input.external.as_ref().map(|merge| merge.name.clone());
+    for mode in 0..2 {
         let mut running: Option<RawQuote> = None;
         for target in 1..=MAX_FEE_TARGET {
             let index = (target - 1) as usize;
@@ -590,9 +590,11 @@ mod tests {
             .unwrap();
         assert_eq!(at_three.sat_per_kvb, 3_000);
         assert_eq!(at_three.source, FeeSource::External);
-        assert!(replaced
-            .quote(1, FeeMode::Economical, SourceView::Combined)
-            .is_err());
+        assert!(
+            replaced
+                .quote(1, FeeMode::Economical, SourceView::Combined)
+                .is_err()
+        );
         let under_floor = {
             let mut cfg = cfg_open();
             cfg.mempool_enabled = false;
@@ -624,9 +626,11 @@ mod tests {
             quotes: vec![(1, 5_000)],
         });
         let hole_table = build_fee_table(hole);
-        assert!(hole_table
-            .quote(1, FeeMode::Conservative, SourceView::Combined)
-            .is_err());
+        assert!(
+            hole_table
+                .quote(1, FeeMode::Conservative, SourceView::Combined)
+                .is_err()
+        );
     }
 
     proptest::proptest! {

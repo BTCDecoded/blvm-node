@@ -1671,10 +1671,7 @@ impl ProtocolParser {
     ///
     /// Computes double SHA256 of payload and returns first 4 bytes.
     /// Orange Paper 10.1.1: CalculateChecksum, |result| = 4
-    #[cfg_attr(
-        feature = "spec-lock",
-        spec_locked("10.1.1", "CalculateChecksum")
-    )]
+    #[cfg_attr(feature = "spec-lock", spec_locked("10.1.1", "CalculateChecksum"))]
     #[cfg_attr(
         feature = "spec-lock",
         blvm_spec_lock::ensures(result.len() == 4)
@@ -2055,6 +2052,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(network_magic)]
     fn filter_lock_getcfilters_and_cfilter_use_wire_bytes() {
         use super::{CfilterMessage, GetCfiltersMessage, ProtocolMessage, ProtocolParser};
         use std::sync::Arc;
@@ -2133,6 +2131,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(network_magic)]
     fn a_testnet4_seed_version_and_verack_parse() {
         let version = hex_frame(
             "1c163f2876657273696f6e00000000006c000000c7f7a7a181110100090c0000000000009defe26a00000000000000000000000000000000000000000000ffff6c040dbf9096090c000000000000000000000000000000000000000000000000a6960f924d5ce593162f5361746f7368693a33322e312e30284077697a292f3f69020001",

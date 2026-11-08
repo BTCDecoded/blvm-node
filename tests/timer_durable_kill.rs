@@ -13,8 +13,8 @@ use std::time::Duration;
 use blvm_node::module::timers::persist::{self, MODULE_TIMERS_TREE};
 use blvm_node::module::timers::service::{ChannelTimerTransport, TimerService};
 use blvm_node::module::timers::types::{
-    monotonic_interval, CreateMode, First, Pacing, Persist, TimerAck, TimerConfig, TimerState,
-    TimerTarget,
+    CreateMode, First, Pacing, Persist, TimerAck, TimerConfig, TimerState, TimerTarget,
+    monotonic_interval,
 };
 use blvm_node::storage::Storage;
 

@@ -3,8 +3,8 @@
 //! Handles spawning module processes as separate executables with process isolation.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::process::{Child, Command};
 use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};

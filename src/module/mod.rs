@@ -25,8 +25,8 @@ pub fn module_name_from_id(module_id: &str) -> &str {
     module_id
 }
 pub mod encryption;
-pub mod http;
 pub mod github_release_install;
+pub mod http;
 pub mod integration;
 pub mod inter_module;
 pub mod ipc;

@@ -46,7 +46,9 @@ fn main() -> anyhow::Result<()> {
     println!("To start the node with this config (operator binary is `blvm`, not `blvm-node`):");
     println!("  blvm --config {config_path} --network testnet --rpc-addr 127.0.0.1:18332");
     println!();
-    println!("Electrum is the blvm-index module, reached through a node listener, not this RPC port.");
+    println!(
+        "Electrum is the blvm-index module, reached through a node listener, not this RPC port."
+    );
     println!("Set [services.electrum] module = \"blvm-index\" and listen = \"127.0.0.1:50001\".");
     println!("The node RPC port speaks Bitcoin Core JSON-RPC.");
 

@@ -2,7 +2,7 @@
 pub mod host;
 
 pub use host::{
-    BindRequest, HostedModule, IpcHostedModule, ServiceHost, ServiceHttpRequest,
-    ServiceHttpResponse, ServiceKind, StreamEvent, DEFAULT_MAX_CONNECTIONS,
-    SERVICE_INVOCATION_TIMEOUT,
+    BindRequest, DEFAULT_MAX_CONNECTIONS, HostedModule, IpcHostedModule,
+    SERVICE_INVOCATION_TIMEOUT, ServiceHost, ServiceHttpRequest, ServiceHttpResponse, ServiceKind,
+    StreamEvent,
 };

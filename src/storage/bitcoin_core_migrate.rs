@@ -5,9 +5,9 @@
 use super::assumeutxo::AssumeUtxoManager;
 use super::bitcoin_core_blocks::{BitcoinCoreBlockReader, read_block_at_file_pos};
 use super::bitcoin_core_format::{
-    BLOCK_HAVE_DATA, core_utxo_key_to_outpoint_key, get_key_prefix, parse_best_block_value,
-    legacy_outpoint_key, parse_block_index_key, parse_coin, parse_core_coin,
-    parse_disk_block_index, BitcoinCoreCoin,
+    BLOCK_HAVE_DATA, BitcoinCoreCoin, core_utxo_key_to_outpoint_key, get_key_prefix,
+    legacy_outpoint_key, parse_best_block_value, parse_block_index_key, parse_coin,
+    parse_core_coin, parse_disk_block_index,
 };
 use super::bitcoin_core_obfuscation::CoreDbObfuscation;
 use super::bitcoin_core_storage::BitcoinCoreStorage;

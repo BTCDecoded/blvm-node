@@ -9,9 +9,9 @@
 use crate::config::{PruningConfig, PruningMode};
 use crate::network::filter_service::BlockFilterService;
 use crate::storage::blockstore::BlockStore;
-use crate::storage::txindex::TxIndex;
 #[cfg(feature = "utxo-commitments")]
 use crate::storage::commitment_store::CommitmentStore;
+use crate::storage::txindex::TxIndex;
 #[cfg(feature = "utxo-commitments")]
 use crate::storage::utxostore::UtxoStore;
 use anyhow::{Result, anyhow};

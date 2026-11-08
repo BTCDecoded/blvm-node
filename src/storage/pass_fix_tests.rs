@@ -1,3 +1,4 @@
+use super::Storage;
 use super::blockstore::BlockStore;
 use super::chainstate::{ChainState, utxo_money_total};
 use super::database::{DatabaseBackend, create_database};
@@ -5,7 +6,6 @@ use super::hashing::double_sha256;
 use super::pruning::PruningManager;
 use super::txindex::TxIndex;
 use super::utxostore::UtxoStore;
-use super::Storage;
 use crate::config::{PruningConfig, PruningMode};
 use blvm_consensus::reorganization::BlockUndoLog;
 use blvm_protocol::constants::MAX_MONEY;
@@ -70,10 +70,7 @@ fn store_body(store: &BlockStore, block: &Block, height: u64) {
 
 #[test]
 fn money_total_rejects_a_value_outside_the_range() {
-    assert_eq!(
-        utxo_money_total([MAX_MONEY]).unwrap(),
-        MAX_MONEY as u128
-    );
+    assert_eq!(utxo_money_total([MAX_MONEY]).unwrap(), MAX_MONEY as u128);
     assert!(utxo_money_total([MAX_MONEY + 1]).is_err());
     assert!(utxo_money_total([-1]).is_err());
 }
@@ -112,9 +109,7 @@ fn wire_body_is_indexed_by_hash() {
     let block = sample_block(7);
     let hash = header_hash(&block.header);
     let wire = blvm_protocol::serialization::serialize_transaction(&block.transactions[0]);
-    store
-        .store_block_wire_bytes(&block, 7, &wire)
-        .unwrap();
+    store.store_block_wire_bytes(&block, 7, &wire).unwrap();
     assert!(store.has_block_body(&hash).unwrap());
     assert_eq!(store.get_height_by_hash(&hash).unwrap(), Some(7));
     assert!(store.get_block(&hash).is_err());
@@ -138,9 +133,7 @@ fn indexed_size_matches_the_wire_length() {
     let block = sample_block(4);
     let tx = &block.transactions[0];
     let wire = blvm_protocol::serialization::serialize_transaction(tx).len() as u32;
-    index
-        .index_transaction(tx, &[5; 32], 1, 0)
-        .unwrap();
+    index.index_transaction(tx, &[5; 32], 1, 0).unwrap();
     let txid = blvm_protocol::block::calculate_tx_id(tx);
     let meta = index.get_metadata(&txid).unwrap().unwrap();
     assert_eq!(meta.size, wire);
@@ -340,10 +333,7 @@ fn fdatasync_total(mode: &str) -> i32 {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let text = format!("{stdout}{stderr}");
-    assert!(
-        output.status.success(),
-        "sync child {mode} failed\n{text}"
-    );
+    assert!(output.status.success(), "sync child {mode} failed\n{text}");
     assert!(
         text.contains("update_tip_syncs_once"),
         "sync child {mode} did not run the test\n{text}"

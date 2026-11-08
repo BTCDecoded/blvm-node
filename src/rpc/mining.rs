@@ -1466,7 +1466,11 @@ impl MiningRpc {
         let quote = match choice {
             FeeRateChoice::View(crate::node::fee_estimator::SourceView::Combined) => {
                 estimator
-                    .quote(conf_target as u32, mode, crate::node::fee_estimator::SourceView::Combined)
+                    .quote(
+                        conf_target as u32,
+                        mode,
+                        crate::node::fee_estimator::SourceView::Combined,
+                    )
                     .await
             }
             FeeRateChoice::View(view) => {
@@ -1478,7 +1482,9 @@ impl MiningRpc {
                 };
                 table.quote(conf_target as u32, mode, view)
             }
-            FeeRateChoice::Named(name) => estimator.quote_named(&name, conf_target as u32, mode).await,
+            FeeRateChoice::Named(name) => {
+                estimator.quote_named(&name, conf_target as u32, mode).await
+            }
         };
         let table = match estimator.table().await {
             Ok(table) => table,
@@ -1947,11 +1953,15 @@ mod tests {
         assert_eq!(named["active_estimator"], "native");
         assert!((named["feerate"].as_f64().unwrap() - 0.0008).abs() < 1e-12);
         let again = mining.list_fee_estimators().unwrap();
-        assert!(again
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|row| row["name"] == "blend" && row["fresh"] == true && row["active"] == false));
+        assert!(
+            again
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["name"] == "blend"
+                    && row["fresh"] == true
+                    && row["active"] == false)
+        );
     }
 
     fn regtest_mining() -> (

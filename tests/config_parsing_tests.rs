@@ -29,10 +29,7 @@ fn test_module_config_default() {
         Some("0.1.*")
     );
     assert_eq!(
-        config
-            .enabled_modules
-            .get("blvm-index")
-            .map(String::as_str),
+        config.enabled_modules.get("blvm-index").map(String::as_str),
         Some("0.1.*")
     );
     assert!(config.enabled_modules.get("blvm-wallet-index").is_none());

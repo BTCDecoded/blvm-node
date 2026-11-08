@@ -1713,11 +1713,8 @@ pub(crate) fn test_reset_tip_stage() {
 mod tests {
     use super::*;
 
-    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static L: OnceLock<Mutex<()>> = OnceLock::new();
-        L.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+    fn test_lock() -> crate::ibd_test_lock::Guard {
+        test_tip_atomics_lock()
     }
 
     fn reset_tracker() {
@@ -1793,6 +1790,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(ibd)]
     fn tip_crawl_supply_healthy_requires_past_body_and_fast_gd_or_stream() {
         // Share lock with index Land E demote test (same process-global atomics).
         let _lock = test_tip_atomics_lock();
@@ -1827,11 +1825,13 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(ibd)]
     fn mousetrap_pipe_frontier_ignores_uncovered_gap() {
+        let _ibd = test_tip_atomics_lock();
         let _lock = test_lock();
         reset_tracker();
         let tip = 304_664u64;
+        HEIGHT.store(tip, Ordering::Relaxed);
         // GetData only tip..tip+7 (grown=8); no stamps at tip+8+.
         for h in tip..tip + 8 {
             mark_getdata(h);
@@ -1846,8 +1846,9 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(ibd)]
     fn mousetrap_pipe_frontier_empty_when_tip_uncovered() {
+        let _ibd = test_tip_atomics_lock();
         let _lock = test_lock();
         reset_tracker();
         let tip = 100u64;

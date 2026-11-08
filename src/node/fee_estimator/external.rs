@@ -3,8 +3,8 @@
 
 use super::types::{
     EstimatorSelection, ExternalFeeTable, ExternalMode, FeeEstimatorRegistration, FeeEstimatorSpec,
-    FeeMode, FeeNameError, SubmitFeeTableError, MAX_ESTIMATOR_DESCRIPTION_BYTES,
-    MAX_EXTERNAL_QUOTES, MAX_FEE_TARGET,
+    FeeMode, FeeNameError, MAX_ESTIMATOR_DESCRIPTION_BYTES, MAX_EXTERNAL_QUOTES, MAX_FEE_TARGET,
+    SubmitFeeTableError,
 };
 use crate::config::fees::estimator_name_ok;
 use blvm_protocol::Hash;
@@ -168,8 +168,12 @@ impl ExternalRegistry {
     /// Unload or crash. Names and tables owned by this session go away.
     pub fn drop_module(&self, module_id: &str) {
         let mut state = self.inner.write().unwrap_or_else(|err| err.into_inner());
-        state.specs.retain(|_, record| record.module_id != module_id);
-        state.tables.retain(|_, stored| stored.module_id != module_id);
+        state
+            .specs
+            .retain(|_, record| record.module_id != module_id);
+        state
+            .tables
+            .retain(|_, stored| stored.module_id != module_id);
         state.last_accept.remove(module_id);
     }
 
@@ -228,7 +232,8 @@ impl ExternalRegistry {
                     stored.table.tip_hash == tip_hash
                         && now.saturating_duration_since(stored.at) < ttl
                 });
-                let age_secs = stored.map(|stored| now.saturating_duration_since(stored.at).as_secs());
+                let age_secs =
+                    stored.map(|stored| now.saturating_duration_since(stored.at).as_secs());
                 RegisteredEstimator {
                     name: name.clone(),
                     module_id: record.module_id.clone(),
@@ -244,7 +249,10 @@ impl ExternalRegistry {
 
     pub fn default_merge(&self, name: &str) -> Option<ExternalMode> {
         let state = self.inner.read().unwrap_or_else(|err| err.into_inner());
-        state.specs.get(name).map(|record| record.spec.default_merge)
+        state
+            .specs
+            .get(name)
+            .map(|record| record.spec.default_merge)
     }
 
     /// Design 20.2. Does not read or merge quotes into the native table.
@@ -272,7 +280,8 @@ impl ExternalRegistry {
                 });
             }
             let allowed_claim = state.specs.values().any(|record| {
-                record.spec.auto_priority.is_some() && allow.iter().any(|id| id == &record.module_id)
+                record.spec.auto_priority.is_some()
+                    && allow.iter().any(|id| id == &record.module_id)
             });
             if !allowed_claim {
                 return Ok(native_selection(requested, false, false));
@@ -485,17 +494,25 @@ mod tests {
         let reg = ExternalRegistry::new();
         let first = reg.register(
             "fees_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            vec![spec("blend", Some(1)), spec("native", None), spec("Bad", None)],
+            vec![
+                spec("blend", Some(1)),
+                spec("native", None),
+                spec("Bad", None),
+            ],
         );
         assert_eq!(first.accepted, vec!["blend".to_string()]);
-        assert!(first
-            .rejected
-            .iter()
-            .any(|(name, err)| name == "native" && *err == FeeNameError::Reserved));
-        assert!(first
-            .rejected
-            .iter()
-            .any(|(name, err)| name == "Bad" && *err == FeeNameError::BadFormat));
+        assert!(
+            first
+                .rejected
+                .iter()
+                .any(|(name, err)| name == "native" && *err == FeeNameError::Reserved)
+        );
+        assert!(
+            first
+                .rejected
+                .iter()
+                .any(|(name, err)| name == "Bad" && *err == FeeNameError::BadFormat)
+        );
 
         let second = reg.register(
             "other_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -538,8 +555,16 @@ mod tests {
         );
 
         assert_eq!(
-            reg.submit(id, table("blend", [1u8; 32], 10), tip, 10, 1, 10_000_000, now)
-                .unwrap_err(),
+            reg.submit(
+                id,
+                table("blend", [1u8; 32], 10),
+                tip,
+                10,
+                1,
+                10_000_000,
+                now
+            )
+            .unwrap_err(),
             SubmitFeeTableError::StaleTip
         );
         assert_eq!(
@@ -583,17 +608,19 @@ mod tests {
         let now = Instant::now();
         reg.submit(id, table("blend", tip, 3), tip, 3, 1, 10_000_000, now)
             .unwrap();
-        assert!(reg
-            .fresh_table("blend", tip, Duration::from_secs(120), now)
-            .is_some());
-        assert!(reg
-            .fresh_table(
+        assert!(
+            reg.fresh_table("blend", tip, Duration::from_secs(120), now)
+                .is_some()
+        );
+        assert!(
+            reg.fresh_table(
                 "blend",
                 tip,
                 Duration::from_secs(120),
                 now + Duration::from_secs(120)
             )
-            .is_none());
+            .is_none()
+        );
         let fallen = reg
             .select(
                 "blend",
@@ -609,9 +636,10 @@ mod tests {
 
         let next = [5u8; 32];
         reg.note_tip(next);
-        assert!(reg
-            .fresh_table("blend", tip, Duration::from_secs(120), now)
-            .is_none());
+        assert!(
+            reg.fresh_table("blend", tip, Duration::from_secs(120), now)
+                .is_none()
+        );
         reg.submit(
             id,
             table("blend", next, 4),
@@ -623,9 +651,10 @@ mod tests {
         )
         .unwrap();
         reg.clear_tables();
-        assert!(reg
-            .fresh_table("blend", next, Duration::from_secs(120), now)
-            .is_none());
+        assert!(
+            reg.fresh_table("blend", next, Duration::from_secs(120), now)
+                .is_none()
+        );
         assert!(reg.owns(id, "blend"));
         reg.drop_module(id);
         assert!(!reg.owns(id, "blend"));
@@ -642,32 +671,27 @@ mod tests {
         let now = Instant::now();
         reg.submit(low, table("low-est", tip, 1), tip, 1, 1, 10_000_000, now)
             .unwrap();
-        reg.submit(
-            high,
-            table("high-est", tip, 1),
-            tip,
-            1,
-            1,
-            10_000_000,
-            now,
-        )
-        .unwrap();
-        let ttl = Duration::from_secs(120);
-        let denied = reg
-            .select("auto", true, &[], tip, ttl, now)
+        reg.submit(high, table("high-est", tip, 1), tip, 1, 1, 10_000_000, now)
             .unwrap();
+        let ttl = Duration::from_secs(120);
+        let denied = reg.select("auto", true, &[], tip, ttl, now).unwrap();
         assert_eq!(denied.active, "native");
         assert!(!denied.degraded);
 
         let picked = reg
-            .select("auto", true, &[high.to_string(), low.to_string()], tip, ttl, now)
+            .select(
+                "auto",
+                true,
+                &[high.to_string(), low.to_string()],
+                tip,
+                ttl,
+                now,
+            )
             .unwrap();
         assert_eq!(picked.active, "high-est");
         assert!(!picked.degraded);
 
-        let missing = reg
-            .select("blend", true, &[], tip, ttl, now)
-            .unwrap();
+        let missing = reg.select("blend", true, &[], tip, ttl, now).unwrap();
         assert!(missing.degraded);
         assert!(missing.unresolved);
         assert_eq!(missing.active, "native");
@@ -686,7 +710,10 @@ mod tests {
         assert_eq!(rejected.rejected[0].1, FeeNameError::DescriptionTooLong);
         let mut ok = spec("blend", None);
         ok.description = "x".repeat(MAX_ESTIMATOR_DESCRIPTION_BYTES);
-        assert_eq!(reg.register(id, vec![ok]).accepted, vec!["blend".to_string()]);
+        assert_eq!(
+            reg.register(id, vec![ok]).accepted,
+            vec!["blend".to_string()]
+        );
 
         let tip = [2u8; 32];
         let now = Instant::now();

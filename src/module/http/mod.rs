@@ -97,11 +97,7 @@ impl HttpBroker {
             return list.clone();
         }
         let name = module_name_from_id(module_id);
-        self.policy
-            .allow
-            .get(name)
-            .cloned()
-            .unwrap_or_default()
+        self.policy.allow.get(name).cloned().unwrap_or_default()
     }
 
     /// Reserve one of the 10/s and 4-in-flight slots. Call [`Self::end`] after the request.
@@ -172,7 +168,11 @@ impl HttpBroker {
         {
             let _ = (content_type, timeout_ms, origin, authorization);
             return Err(HttpBrokerError::new(
-                Some(parse_origin(url).map(|item| item.display()).unwrap_or_default()),
+                Some(
+                    parse_origin(url)
+                        .map(|item| item.display())
+                        .unwrap_or_default(),
+                ),
                 "http broker requires the module-http feature",
             ));
         }
@@ -223,13 +223,18 @@ impl HttpBroker {
             {
                 let _ = (accept, timeout_ms, redirects, origin);
                 return Err(HttpBrokerError::new(
-                    Some(parse_origin(&current).map(|o| o.display()).unwrap_or_default()),
+                    Some(
+                        parse_origin(&current)
+                            .map(|o| o.display())
+                            .unwrap_or_default(),
+                    ),
                     "http broker requires the module-http feature",
                 ));
             }
             #[cfg(feature = "module-http")]
             {
-                let response = send_get(&self.policy, &current, &origin, accept, timeout_ms).await?;
+                let response =
+                    send_get(&self.policy, &current, &origin, accept, timeout_ms).await?;
                 if is_redirect(response.status) {
                     if redirects >= MAX_REDIRECTS {
                         return Err(HttpBrokerError::new(
@@ -243,9 +248,8 @@ impl HttpBroker {
                             "redirect had no Location",
                         ));
                     };
-                    current = resolve_redirect(&current, &location).map_err(|message| {
-                        HttpBrokerError::new(Some(origin.display()), message)
-                    })?;
+                    current = resolve_redirect(&current, &location)
+                        .map_err(|message| HttpBrokerError::new(Some(origin.display()), message))?;
                     redirects += 1;
                     continue;
                 }
@@ -485,7 +489,10 @@ async fn send_get(
         request = request.header(reqwest::header::ACCEPT, accept);
     }
     let response = request.send().await.map_err(|err| {
-        HttpBrokerError::new(Some(origin.display()), format!("http request failed: {err}"))
+        HttpBrokerError::new(
+            Some(origin.display()),
+            format!("http request failed: {err}"),
+        )
     })?;
     let status = response.status().as_u16();
     let content_type = response
@@ -508,9 +515,11 @@ async fn send_get(
     }
     let mut body = Vec::new();
     let mut stream = response;
-    while let Some(chunk) = stream.chunk().await.map_err(|err| {
-        HttpBrokerError::new(Some(origin.display()), format!("http body: {err}"))
-    })? {
+    while let Some(chunk) = stream
+        .chunk()
+        .await
+        .map_err(|err| HttpBrokerError::new(Some(origin.display()), format!("http body: {err}")))?
+    {
         if body.len().saturating_add(chunk.len()) > BODY_CAP_BYTES {
             return Err(HttpBrokerError::new(
                 Some(origin.display()),
@@ -560,11 +569,12 @@ async fn send_post(
     if let Some(authorization) = authorization {
         request = request.header(reqwest::header::AUTHORIZATION, authorization);
     }
-    let response = request.send()
-        .await
-        .map_err(|err| {
-            HttpBrokerError::new(Some(origin.display()), format!("http request failed: {err}"))
-        })?;
+    let response = request.send().await.map_err(|err| {
+        HttpBrokerError::new(
+            Some(origin.display()),
+            format!("http request failed: {err}"),
+        )
+    })?;
     let status = response.status().as_u16();
     let content_type = response
         .headers()
@@ -573,9 +583,11 @@ async fn send_post(
         .map(str::to_string);
     let mut response_body = Vec::new();
     let mut stream = response;
-    while let Some(chunk) = stream.chunk().await.map_err(|err| {
-        HttpBrokerError::new(Some(origin.display()), format!("http body: {err}"))
-    })? {
+    while let Some(chunk) = stream
+        .chunk()
+        .await
+        .map_err(|err| HttpBrokerError::new(Some(origin.display()), format!("http body: {err}")))?
+    {
         if response_body.len().saturating_add(chunk.len()) > BODY_CAP_BYTES {
             return Err(HttpBrokerError::new(
                 Some(origin.display()),
@@ -600,15 +612,11 @@ async fn resolve_connect_address(origin: &HttpOrigin) -> Result<IpAddr, HttpBrok
     let mut addrs = tokio::net::lookup_host((origin.host.as_str(), origin.port))
         .await
         .map_err(|err| {
-            HttpBrokerError::new(
-                Some(origin.display()),
-                format!("dns lookup failed: {err}"),
-            )
+            HttpBrokerError::new(Some(origin.display()), format!("dns lookup failed: {err}"))
         })?;
-    addrs
-        .next()
-        .map(|addr| addr.ip())
-        .ok_or_else(|| HttpBrokerError::new(Some(origin.display()), "dns lookup returned no address"))
+    addrs.next().map(|addr| addr.ip()).ok_or_else(|| {
+        HttpBrokerError::new(Some(origin.display()), "dns lookup returned no address")
+    })
 }
 
 #[cfg(test)]
@@ -630,7 +638,10 @@ mod tests {
         let allow = ["http://127.0.0.1:9"];
         let private = check_url("http://10.1.2.3/secret", &allow.map(|s| s.to_string()));
         assert!(private.unwrap_err().message.contains("private address"));
-        let public = check_url("https://not-listed.example/x", &allow.map(|s| s.to_string()));
+        let public = check_url(
+            "https://not-listed.example/x",
+            &allow.map(|s| s.to_string()),
+        );
         assert!(public.unwrap_err().message.contains("not allowed"));
     }
 

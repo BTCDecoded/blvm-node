@@ -557,11 +557,7 @@ impl NetworkManager {
                 consensus_network,
             )
             .unwrap_or(false);
-            if !version_ok
-                || header.timestamp == 0
-                || header.prev_block_hash != prev
-                || !meets
-            {
+            if !version_ok || header.timestamp == 0 || header.prev_block_hash != prev || !meets {
                 break;
             }
             height = next_height;
@@ -974,7 +970,7 @@ mod tests {
             // Regtest walks minimum-difficulty bits back to the period start. The tip
             // alone does not answer that lookup. The height-0 row is not the tip's prev.
             let root = BlockHeader {
-                version: 1,
+                version: 4,
                 prev_block_hash: [0u8; 32],
                 merkle_root: [4u8; 32],
                 timestamp: tip_header.timestamp.saturating_sub(1),
@@ -1011,7 +1007,7 @@ mod tests {
         let storage = Arc::new(Storage::new(temp.path()).unwrap());
         let tip_hash = [9u8; 32];
         let tip_header = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [0u8; 32],
             merkle_root: [1u8; 32],
             timestamp: 1_700_000_000,
@@ -1021,7 +1017,7 @@ mod tests {
         connect_tip(&storage, &tip_hash, &tip_header, 1);
 
         let header_one = with_proof(BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: tip_hash,
             merkle_root: [2u8; 32],
             timestamp: 1_700_000_001,
@@ -1030,7 +1026,7 @@ mod tests {
         });
         let hash_one = blvm_consensus::block::block_header_hash(&header_one);
         let header_two = with_proof(BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: hash_one,
             merkle_root: [3u8; 32],
             timestamp: 1_700_000_002,
@@ -1136,7 +1132,7 @@ mod tests {
         let storage = Arc::new(Storage::new(temp.path()).unwrap());
         let tip_hash = [9u8; 32];
         let tip_header = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [0u8; 32],
             merkle_root: [1u8; 32],
             timestamp: 1_700_000_000,
@@ -1145,7 +1141,7 @@ mod tests {
         };
         connect_tip(&storage, &tip_hash, &tip_header, 1);
         let linking = with_proof(BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: tip_hash,
             merkle_root: [2u8; 32],
             timestamp: 1_700_000_001,
@@ -1153,7 +1149,7 @@ mod tests {
             nonce: 0,
         });
         let unlinked = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [0u8; 32],
             merkle_root: [3u8; 32],
             timestamp: 1_700_000_002,
@@ -1206,7 +1202,7 @@ mod tests {
         let storage = Arc::new(Storage::new(temp.path()).unwrap());
         let tip_hash = [9u8; 32];
         let tip_header = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [0u8; 32],
             merkle_root: [1u8; 32],
             timestamp: 1_700_000_000,
@@ -1215,7 +1211,7 @@ mod tests {
         };
         connect_tip(&storage, &tip_hash, &tip_header, 1);
         let unlinked = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [1u8; 32],
             merkle_root: [3u8; 32],
             timestamp: 1_700_000_002,
@@ -1266,7 +1262,7 @@ mod tests {
         let storage = Arc::new(Storage::new(temp.path()).unwrap());
         let tip_hash = [9u8; 32];
         let tip_header = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [0u8; 32],
             merkle_root: [1u8; 32],
             timestamp: 1_700_000_000,
@@ -1318,7 +1314,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let storage = Arc::new(Storage::new(temp.path()).unwrap());
         let parent = with_proof(BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [0u8; 32],
             merkle_root: [4u8; 32],
             timestamp: 1_700_000_000,
@@ -1333,7 +1329,7 @@ mod tests {
         storage.blocks().store_height(0, &parent_hash).unwrap();
         let tip_hash = [9u8; 32];
         let tip_header = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: parent_hash,
             merkle_root: [1u8; 32],
             timestamp: 1_700_000_001,
@@ -1343,7 +1339,7 @@ mod tests {
         connect_tip(&storage, &tip_hash, &tip_header, 1);
         storage.blocks().store_height(1, &tip_hash).unwrap();
         let sibling = with_proof(BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: parent_hash,
             merkle_root: [8u8; 32],
             timestamp: 1_700_000_002,
@@ -1427,7 +1423,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let storage = Arc::new(Storage::new(temp.path()).unwrap());
         let parent = with_proof(BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [0u8; 32],
             merkle_root: [4u8; 32],
             timestamp: 1_700_000_000,
@@ -1441,7 +1437,7 @@ mod tests {
             .unwrap();
         storage.blocks().store_height(0, &parent_hash).unwrap();
         let tip_header = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: parent_hash,
             merkle_root: [1u8; 32],
             timestamp: 1_700_000_001,
@@ -1456,7 +1452,7 @@ mod tests {
             .store_header(&tip_hash, &tip_header)
             .unwrap();
         let sibling = with_proof(BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: parent_hash,
             merkle_root: [8u8; 32],
             timestamp: 1_700_000_002,
@@ -1465,7 +1461,7 @@ mod tests {
         });
         let sibling_hash = blvm_consensus::block::block_header_hash(&sibling);
         let child = with_proof(BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: sibling_hash,
             merkle_root: [9u8; 32],
             timestamp: 1_700_000_003,
@@ -1570,7 +1566,7 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let storage = Arc::new(Storage::new(temp.path()).unwrap());
         let parent = with_proof(BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [0u8; 32],
             merkle_root: [4u8; 32],
             timestamp: 1_700_000_000,
@@ -1584,7 +1580,7 @@ mod tests {
             .unwrap();
         storage.blocks().store_height(0, &parent_hash).unwrap();
         let tip_header = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: parent_hash,
             merkle_root: [1u8; 32],
             timestamp: 1_700_000_001,
@@ -1599,7 +1595,7 @@ mod tests {
             .store_header(&tip_hash, &tip_header)
             .unwrap();
         let side = with_proof(BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: parent_hash,
             merkle_root: [8u8; 32],
             timestamp: 1_700_000_002,
@@ -1610,7 +1606,7 @@ mod tests {
         storage.blocks().store_header(&side_hash, &side).unwrap();
         storage.blocks().store_hash_height(1, &side_hash).unwrap();
         let child = with_proof(BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: side_hash,
             merkle_root: [9u8; 32],
             timestamp: 1_700_000_003,
@@ -1690,7 +1686,7 @@ mod tests {
         let storage = Arc::new(Storage::new(temp.path()).unwrap());
         let tip_hash = [9u8; 32];
         let tip_header = BlockHeader {
-            version: 1,
+            version: 4,
             prev_block_hash: [0u8; 32],
             merkle_root: [1u8; 32],
             timestamp: 1_700_000_000,
@@ -1730,7 +1726,7 @@ mod tests {
                         saw_headers = true;
                         let unrelated = vec![
                             BlockHeader {
-                                version: 1,
+                                version: 4,
                                 prev_block_hash: [1u8; 32],
                                 merkle_root: [2u8; 32],
                                 timestamp: 1_700_000_003,
@@ -1738,7 +1734,7 @@ mod tests {
                                 nonce: 1,
                             },
                             BlockHeader {
-                                version: 1,
+                                version: 4,
                                 prev_block_hash: [3u8; 32],
                                 merkle_root: [4u8; 32],
                                 timestamp: 1_700_000_004,

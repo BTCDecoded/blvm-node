@@ -1271,6 +1271,7 @@ fn w78_feeder_len_alone_is_not_in_pipeline() {
 #[serial_test::serial(ibd)]
 #[test]
 fn w79_export_gate_steady_state_ok_and_stall_defers() {
+    let _tip = tip_stage::test_tip_atomics_lock();
     // Live genesis→250k: gap_missing+feeder=0 forever under W75 → zero exports.
     // Single test: shared atomics race if split across threads.
     let prev_kill = std::env::var_os("BLVM_PROC_ANON_KILL_MB");
@@ -1312,6 +1313,7 @@ fn w79_export_gate_steady_state_ok_and_stall_defers() {
 #[serial_test::serial(ibd)]
 #[test]
 fn w174_export_gate_defers_on_severe_tip_holes() {
+    let _tip = tip_stage::test_tip_atomics_lock();
     let prev_kill = std::env::var_os("BLVM_PROC_ANON_KILL_MB");
     unsafe {
         std::env::set_var("BLVM_PROC_ANON_KILL_MB", "999999999");
@@ -1348,6 +1350,7 @@ fn w174_export_gate_defers_on_severe_tip_holes() {
 #[serial_test::serial(ibd)]
 #[test]
 fn w176_export_gate_defers_when_tip_already_awaiting() {
+    let _tip = tip_stage::test_tip_atomics_lock();
     let prev_kill = std::env::var_os("BLVM_PROC_ANON_KILL_MB");
     unsafe {
         std::env::set_var("BLVM_PROC_ANON_KILL_MB", "999999999");
@@ -1381,6 +1384,7 @@ fn w176_export_gate_defers_when_tip_already_awaiting() {
 #[serial_test::serial(ibd)]
 #[test]
 fn w177_export_gate_defers_during_local_body_ahead() {
+    let _tip = tip_stage::test_tip_atomics_lock();
     let prev_kill = std::env::var_os("BLVM_PROC_ANON_KILL_MB");
     unsafe {
         std::env::set_var("BLVM_PROC_ANON_KILL_MB", "999999999");
