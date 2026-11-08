@@ -184,7 +184,17 @@ async fn test_loadtxoutset_rpc() {
     };
     utxo_set.insert(outpoint, std::sync::Arc::new(utxo));
 
-    let block_hash = [0xde; 32];
+    // loadtxoutset moves the tip onto the snapshot block, so that header has to
+    // already be stored and its hash has to be the snapshot's block hash.
+    let header = blvm_protocol::BlockHeader {
+        version: 1,
+        prev_block_hash: [0; 32],
+        merkle_root: [0; 32],
+        timestamp: 1_234_567_890,
+        bits: 0x207fffff,
+        nonce: 0,
+    };
+    let block_hash = blvm_consensus::block::block_header_hash(&header);
     manager.create_snapshot(&utxo_set, block_hash, 200).unwrap();
 
     let snapshot_path = dir.path().join("utxo_snapshot_200.dat");
@@ -192,11 +202,15 @@ async fn test_loadtxoutset_rpc() {
 
     let store_dir = tempdir().unwrap();
     let storage = std::sync::Arc::new(blvm_node::storage::Storage::new(store_dir.path()).unwrap());
+    storage.blocks().store_header(&block_hash, &header).unwrap();
     let rpc = BlockchainRpc::with_dependencies(storage);
     let params = json!([path_str]);
     let result = rpc.load_txout_set(&params).await.unwrap();
 
-    assert_eq!(result["base_blockhash"], hex::encode(block_hash));
+    assert_eq!(
+        result["base_blockhash"],
+        blvm_node::storage::hashing::hash_to_rpc_hex(&block_hash)
+    );
     assert_eq!(result["height"], 200);
     assert_eq!(result["txout_count"], 1);
     assert!(result.get("utxo_hash").is_some());
