@@ -2279,15 +2279,22 @@ impl ModuleManager {
         let toml_bytes = fetch(module_toml_url.clone()).await?;
         let toml_str = std::str::from_utf8(&toml_bytes)
             .map_err(|e| ModuleError::op_err("module.toml is not valid UTF-8", e))?;
-        let manifest: ModuleManifest = toml::from_str(toml_str)
+        let mut manifest: ModuleManifest = toml::from_str(toml_str)
             .map_err(|e| ModuleError::op_err("Failed to parse module.toml", e))?;
 
         if let Some(ref version) = pinned_version {
-            if manifest.version != *version {
-                return Err(ModuleError::OperationError(format!(
-                    "Bootstrap: module.toml version {} does not match resolved release {} for constraint '{}'",
-                    manifest.version, version, version_constraint
-                )));
+            let installed = crate::module::github_release_install::manifest_version_for_release(
+                &manifest.version,
+                Some(version),
+            );
+            if installed != manifest.version {
+                // The tag is cut before module.toml is bumped. The release
+                // assets and sha256sums.txt are still this version.
+                warn!(
+                    "Bootstrap: release {version} of '{name}' has module.toml version {}; installing {version}",
+                    manifest.version
+                );
+                manifest.version = installed;
             }
             if !crate::module::version_constraint::matches_version_constraint(
                 &manifest.version,
@@ -2364,6 +2371,10 @@ impl ModuleManager {
         // Merge `[binary]` (hash + size) into the manifest so load-time checks can use it offline.
         let mut root: toml::Table = toml::from_str(toml_str)
             .map_err(|e| ModuleError::op_err("Failed to parse module.toml for install merge", e))?;
+        root.insert(
+            "version".into(),
+            toml::Value::String(manifest.version.clone()),
+        );
         let size_i64 = i64::try_from(binary_bytes.len()).map_err(|_| {
             ModuleError::OperationError("Module binary size does not fit i64".to_string())
         })?;

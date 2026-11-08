@@ -12,6 +12,20 @@ pub fn release_tag(version: &str) -> String {
     format!("v{}", version.trim())
 }
 
+/// Version of the artifact a constraint resolved to.
+///
+/// Module release jobs tag `v{version}` from the commit whose `module.toml`
+/// still names the previous version, then push the bump onto the default
+/// branch with `[skip ci]`. The tag file therefore lags the release. The
+/// GitHub release version is the artifact; checksums on that tag are what
+/// bootstrap verifies. An unpinned fetch keeps the manifest version.
+pub fn manifest_version_for_release(toml_version: &str, release_version: Option<&str>) -> String {
+    match release_version.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(release) if toml_version != release => release.to_string(),
+        _ => toml_version.to_string(),
+    }
+}
+
 /// Release artifact base name for the node platform key (e.g. `x86_64-linux`).
 pub fn artifact_name(module_name: &str, platform: &str) -> Result<String, ModuleError> {
     let suffix = match platform {
@@ -354,6 +368,24 @@ mod tests {
     #[test]
     fn release_tag_strips_no_extra_v() {
         assert_eq!(release_tag("0.1.2"), "v0.1.2");
+    }
+
+    #[test]
+    fn lagged_tag_manifest_installs_as_the_release() {
+        // v0.1.11's module.toml still says 0.1.10; main says 0.1.11.
+        assert_eq!(
+            manifest_version_for_release("0.1.10", Some("0.1.11")),
+            "0.1.11"
+        );
+    }
+
+    #[test]
+    fn matching_manifest_keeps_its_version() {
+        assert_eq!(
+            manifest_version_for_release("0.1.11", Some("0.1.11")),
+            "0.1.11"
+        );
+        assert_eq!(manifest_version_for_release("0.1.11", None), "0.1.11");
     }
 
     #[test]
