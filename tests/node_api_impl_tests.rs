@@ -629,12 +629,23 @@ async fn test_node_api_publish_event_with_manager() {
     let (_dir, storage) = storage_with_chain();
     let mut api = NodeApiImpl::new(storage);
     api.set_event_manager(Arc::new(EventManager::new()), "cov-mod".into());
+    let denied = api
+        .publish_event(
+            EventType::NewBlock,
+            EventPayload::NewBlock {
+                block_hash: [0x99; 32],
+                height: 100,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        denied.to_string().contains("ModuleEvent"),
+        "a module must not publish a chain event: {denied}"
+    );
     api.publish_event(
-        EventType::NewBlock,
-        EventPayload::NewBlock {
-            block_hash: [0x99; 32],
-            height: 100,
-        },
+        EventType::ModuleEvent,
+        EventPayload::module_event("cov", vec![1, 2, 3]),
     )
     .await
     .unwrap();
