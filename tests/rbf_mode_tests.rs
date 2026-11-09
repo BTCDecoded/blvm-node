@@ -207,7 +207,8 @@ fn test_rbf_absolute_fee_bump() {
 fn configured_fee_bump_refuses_one_hundred_satoshis() {
     let mempool = MempoolManager::new();
     admit_bare_op1(&mempool);
-    let mut rbf_config = RbfConfig::with_mode(RbfMode::Standard);
+    // Standard follows Core and ignores this floor. Conservative is the mode that applies it.
+    let mut rbf_config = RbfConfig::with_mode(RbfMode::Conservative);
     rbf_config.min_fee_rate_multiplier = 1.0;
     rbf_config.min_fee_bump_satoshis = 50_000;
     mempool.set_rbf_config(Some(rbf_config));
