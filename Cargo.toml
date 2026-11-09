@@ -246,9 +246,6 @@ libc = ["dep:libc"]
 rayon = ["dep:rayon"]
 # Production optimizations (parallel block validation, etc.)
 production = ["blvm-protocol/production", "dep:blvm-consensus", "rayon", "jemalloc"]
-# Force CUDA at compile (fails if nvcc missing). Default builds already
-# auto-link GPU when nvcc is found; runtime falls back to CPU if no device.
-secp-gpu = ["blvm-consensus/secp-gpu"]
 # Profiling: IBD_PROFILE, PERF, BATCH logs. NOT for production.
 profile = ["blvm-protocol/profile", "dep:blvm-consensus"]
 # Lab / rematch only: synthetic WAN harness + destructive IBD examples.
