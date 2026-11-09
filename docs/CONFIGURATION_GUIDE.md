@@ -39,7 +39,7 @@ mode = "standard"  # disabled, conservative, standard, aggressive
 min_fee_rate_multiplier = 1.1
 min_fee_bump_satoshis = 1000
 min_confirmations = 0
-allow_package_replacements = false
+allow_package_replacements = true
 max_replacements_per_tx = 10
 cooldown_seconds = 60
 ```

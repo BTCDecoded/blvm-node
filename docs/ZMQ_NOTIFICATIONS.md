@@ -261,7 +261,7 @@ If you see "Address already in use" errors:
 
 ## Compatibility
 
-BLLVM node's ZMQ notifications are compatible with standard Bitcoin node ZMQ interfaces. Applications that work with standard Bitcoin ZMQ subscribers should work with BLLVM node without modification.
+The `sequence` body is 33 bytes, `0x01` for a mempool entry and `0x02` for a removal. It is not Bitcoin Core's topic, body, and 4-byte count, and it is not the `C`/`D`/`R`/`A` frame. The socket is not authenticated. A Core subscriber does not work unchanged.
 
 ## Future Enhancements
 
