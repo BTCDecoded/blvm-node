@@ -6,7 +6,7 @@
 //! live here. Cron and the audit journal are later phases.
 //! Durable timers are written to the `module_timers` tree and reloaded on start.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -349,7 +349,10 @@ struct Live {
     dispatched: u32,
     next_seq: u64,
     in_flight: u32,
-    in_flight_seq: Option<u64>,
+    /// Sequences whose acknowledgement is still outstanding.
+    outstanding: HashSet<u64>,
+    /// Retry deadlines, oldest first. Each entry is also in `outstanding`.
+    retry_seqs: VecDeque<u64>,
     consecutive_failures: u32,
     fires_ok: u64,
     fires_failed: u64,
@@ -1078,7 +1081,8 @@ impl Actor {
             dispatched: 0,
             next_seq: 1,
             in_flight: 0,
-            in_flight_seq: None,
+            outstanding: HashSet::new(),
+            retry_seqs: VecDeque::new(),
             consecutive_failures: 0,
             fires_ok: 0,
             fires_failed: 0,
@@ -1401,12 +1405,12 @@ impl Actor {
 
     fn fire_retry(&mut self, id: TimerId, now: Instant) {
         let (seq, attempt) = {
-            let Some(timer) = self.timers.get(&id) else {
+            let Some(timer) = self.timers.get_mut(&id) else {
                 return;
             };
-            let seq = timer
-                .in_flight_seq
-                .unwrap_or(timer.next_seq.saturating_sub(1).max(1));
+            let Some(seq) = timer.retry_seqs.pop_front() else {
+                return;
+            };
             let attempt = timer.consecutive_failures.saturating_add(1).max(2);
             (seq, attempt)
         };
@@ -1963,13 +1967,15 @@ impl Actor {
                 seq
             } else {
                 timer
-                    .in_flight_seq
+                    .retry_seqs
+                    .back()
+                    .copied()
                     .unwrap_or(timer.next_seq.saturating_sub(1).max(1))
             };
             let skipped = std::mem::take(&mut timer.skipped_overlap_pending);
             let missed = missed.saturating_add(std::mem::take(&mut timer.missed_pending));
             timer.in_flight = timer.in_flight.saturating_add(1);
-            timer.in_flight_seq = Some(seq);
+            timer.outstanding.insert(seq);
             (seq, (skipped, missed))
         };
         *self.inflight.entry(owner).or_insert(0) += 1;
@@ -2103,16 +2109,14 @@ impl Actor {
         let Some(timer) = self.timers.get(&event.id) else {
             return;
         };
-        if timer.in_flight_seq != Some(event.seq) {
+        if !timer.outstanding.contains(&event.seq) {
             debug!(timer = %event.id, seq = event.seq, "late timer acknowledgement ignored");
             return;
         }
         let owner = timer.owner.clone();
         if let Some(timer) = self.timers.get_mut(&event.id) {
+            timer.outstanding.remove(&event.seq);
             timer.in_flight = timer.in_flight.saturating_sub(1);
-            if timer.in_flight == 0 {
-                timer.in_flight_seq = None;
-            }
         }
         if let Some(count) = self.inflight.get_mut(&owner) {
             *count = count.saturating_sub(1);
@@ -2269,7 +2273,8 @@ impl Actor {
                 if attempt <= max {
                     let when = Instant::now() + backoff_delay(&backoff, attempt);
                     timer.in_flight = timer.in_flight.saturating_add(1);
-                    timer.in_flight_seq = Some(seq);
+                    timer.outstanding.insert(seq);
+                    timer.retry_seqs.push_back(seq);
                     Step::Retry {
                         when,
                         owner: timer.owner.clone(),
@@ -3139,7 +3144,8 @@ impl Actor {
                 dispatched,
                 next_seq: saved.seq.saturating_add(1),
                 in_flight: 0,
-                in_flight_seq: None,
+                outstanding: HashSet::new(),
+                retry_seqs: VecDeque::new(),
                 consecutive_failures: 0,
                 fires_ok: saved.seq,
                 fires_failed: 0,
@@ -4016,6 +4022,60 @@ mod tests {
         first.reply.send(Ok(TimerAck::Continue)).unwrap();
         second.reply.send(Ok(TimerAck::Stop)).unwrap();
         settle().await;
+    }
+
+    /// The older of two open fires has to free its slot. The newer acknowledgement
+    /// is the control that the following period is actually due.
+    #[tokio::test(start_paused = true)]
+    async fn allow_overlap_frees_a_slot_when_either_open_fire_acks() {
+        async fn fires_again(ack_older: bool) -> (u64, u64, bool) {
+            let mut config = small_config();
+            config.max_in_flight_per_module = 64;
+            config.max_fires_per_sec_per_module = 10_000;
+            let (service, mut rx) = test_service(config);
+            service.attach_module("fees", "fees").await;
+            settle().await;
+            let mut spec = monotonic_interval(Duration::from_millis(100), Pacing::FixedRate);
+            spec.overlap = Overlap::Allow { max_concurrent: 2 };
+            spec.key = Some(format!("allow-{ack_older}"));
+            service
+                .create("fees", spec, CreateMode::CreateOnly)
+                .await
+                .unwrap();
+            let first = next_fire(&mut rx).await;
+            tokio::time::advance(Duration::from_millis(100)).await;
+            settle().await;
+            let second = next_fire(&mut rx).await;
+            tokio::time::advance(Duration::from_millis(100)).await;
+            settle().await;
+            assert!(rx.try_recv().is_err());
+            let older = first.fire.seq;
+            let newer = second.fire.seq;
+            if ack_older {
+                first.reply.send(Ok(TimerAck::Continue)).unwrap();
+            } else {
+                second.reply.send(Ok(TimerAck::Continue)).unwrap();
+            }
+            let mut arrived = false;
+            for _ in 0..5 {
+                tokio::time::advance(Duration::from_millis(100)).await;
+                settle().await;
+                if rx.try_recv().is_ok() {
+                    arrived = true;
+                    break;
+                }
+            }
+            (older, newer, arrived)
+        }
+
+        let older_ack = fires_again(true).await;
+        let newer_ack = fires_again(false).await;
+        assert!(
+            older_ack.0 < older_ack.1 && newer_ack.0 < newer_ack.1,
+            "sequences older={older_ack:?} newer={newer_ack:?}"
+        );
+        assert!(older_ack.2, "older ack did not free a slot: {older_ack:?}");
+        assert!(newer_ack.2, "newer ack did not free a slot: {newer_ack:?}");
     }
 
     #[tokio::test(start_paused = true)]
