@@ -490,6 +490,20 @@ impl HistoryTracker {
         self.long.remove_tx(seen.height, best, seen.bucket, false);
     }
 
+    /// Leave the unconfirmed bins without incrementing `failAvg`.
+    ///
+    /// A reorg takes the transaction out of the pool. That is not a confirmation
+    /// and it is not a failure.
+    pub(crate) fn drop_without_failure(&mut self, txid: &Hash, best_seen: Option<u64>) {
+        let Some(seen) = self.seen.remove(txid) else {
+            return;
+        };
+        let best = best_seen.unwrap_or(0);
+        self.short.remove_tx(seen.height, best, seen.bucket, true);
+        self.medium.remove_tx(seen.height, best, seen.bucket, true);
+        self.long.remove_tx(seen.height, best, seen.bucket, true);
+    }
+
     /// Drop every unconfirmed entry without incrementing `failAvg`.
     ///
     /// `in_block` is set so `TxConfirmStats::removeTx` skips the failure arm.
@@ -699,13 +713,18 @@ impl HistoryTracker {
     }
 
     #[cfg(test)]
-    fn short_fail_count(&self) -> f64 {
+    pub(crate) fn short_fail_count(&self) -> f64 {
         self.short.fail_avg.iter().flatten().sum()
     }
 
     #[cfg(test)]
-    fn medium_fail_count(&self) -> f64 {
+    pub(crate) fn medium_fail_count(&self) -> f64 {
         self.medium.fail_avg.iter().flatten().sum()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn long_fail_count(&self) -> f64 {
+        self.long.fail_avg.iter().flatten().sum()
     }
 
     /// `TxConfirmStats::confAvg[period][bucket]` on the short horizon.

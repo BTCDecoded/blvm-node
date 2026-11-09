@@ -233,6 +233,44 @@ fn a_reorg_leaves_confirmation_history_unchanged() {
     assert!(mempool.get_transaction(&calculate_tx_id(&stays)).is_none());
 }
 
+/// `set_chain_tip(1)` stores the next height, so admission is height 0. An empty
+/// observation at height 2 ages the transaction by 2 blocks, which reaches the
+/// short scale (1) and the medium scale (2). A reorg must not record that as a
+/// failure. The same age removed with an observation is a confirmation.
+#[test]
+fn a_reorg_does_not_fail_an_aged_transaction_that_the_new_chain_confirms() {
+    let aged = spend([4u8; 32]);
+    let (mempool, estimator) = wired(&[aged.clone()]);
+    assert!(mempool.add_transaction(aged.clone()).unwrap());
+    mempool.remove_for_connected_block_at(Some(observation(2, [0u8; 32])), &[]);
+    assert_eq!(estimator.hook_counts().failed, 0);
+    assert_eq!(estimator.history_short_fail_count(), 0.0);
+    assert_eq!(estimator.history_medium_fail_count(), 0.0);
+
+    mempool.apply_reorg(&[], &[], &[block_with(vec![aged])], &fund(&[]));
+    assert_eq!(estimator.hook_counts().failed, 0);
+    assert_eq!(estimator.hook_counts().confirmed, 0);
+    assert_eq!(estimator.hook_counts().blocks, 1);
+    assert_eq!(estimator.history_short_fail_count(), 0.0);
+    assert_eq!(estimator.history_medium_fail_count(), 0.0);
+    assert_eq!(estimator.history_long_fail_count(), 0.0);
+
+    let confirmed = spend([5u8; 32]);
+    let (mempool, estimator) = wired(&[confirmed.clone()]);
+    assert!(mempool.add_transaction(confirmed.clone()).unwrap());
+    mempool.remove_for_connected_block_at(Some(observation(2, [0u8; 32])), &[]);
+    let before_short = estimator.history_short_fail_count();
+    let before_medium = estimator.history_medium_fail_count();
+    mempool.remove_for_connected_block_at(
+        Some(observation(3, calculate_tx_id(&confirmed))),
+        &[confirmed],
+    );
+    assert_eq!(estimator.hook_counts().failed, 0);
+    assert_eq!(estimator.hook_counts().confirmed, 1);
+    assert_eq!(estimator.history_short_fail_count(), before_short);
+    assert_eq!(estimator.history_medium_fail_count(), before_medium);
+}
+
 #[tokio::test]
 async fn table_after_a_connected_block_is_not_older_than_that_block() {
     let tx = spend([1u8; 32]);

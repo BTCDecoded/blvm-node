@@ -4297,7 +4297,7 @@ impl MempoolManager {
         }
         self.install_utxo_snapshot(utxo_set);
         for block in connected {
-            self.remove_for_connected_block(&block.transactions);
+            self.remove_for_reorg_block(&block.transactions);
         }
         for (block_index, block) in disconnected.iter().enumerate() {
             let block_witnesses = disconnected_witnesses.get(block_index);
@@ -4340,9 +4340,15 @@ impl MempoolManager {
     /// A transaction included in the block is removed. A different transaction
     /// that spends an output the block already spent is removed, along with its
     /// descendants. A child that spends an output the block just created stays.
-    /// No block observation is recorded. Reorgs and older tests use this path.
+    /// No block observation is recorded. A removal here is an unconfirmed failure.
+    /// A reorg uses its own removal path so it does not write fee history.
     pub fn remove_for_connected_block(&self, transactions: &[Transaction]) {
-        self.remove_for_connected_block_at(None, transactions);
+        self.remove_connected(None, transactions, true);
+    }
+
+    /// Remove a reorg's connected block without a fee-history failure or confirmation.
+    fn remove_for_reorg_block(&self, transactions: &[Transaction]) {
+        self.remove_connected(None, transactions, false);
     }
 
     /// Record `obs` on the fee estimator, then run [`Self::remove_for_connected_block`].
@@ -4353,6 +4359,15 @@ impl MempoolManager {
         &self,
         obs: Option<BlockObservation>,
         transactions: &[Transaction],
+    ) {
+        self.remove_connected(obs, transactions, true);
+    }
+
+    fn remove_connected(
+        &self,
+        obs: Option<BlockObservation>,
+        transactions: &[Transaction],
+        record_failures: bool,
     ) {
         if let Some(obs) = obs.as_ref() {
             if let Some(estimator) = self.fee_estimator() {
@@ -4384,6 +4399,13 @@ impl MempoolManager {
         let conflicts: Vec<Hash> = remove_ids.difference(&confirmed).copied().collect();
         for id in conflicts {
             remove_ids.extend(self.replacement_package(&id));
+        }
+        if !record_failures {
+            if let Some(estimator) = self.fee_estimator() {
+                for id in &remove_ids {
+                    estimator.forget_without_failure(id);
+                }
+            }
         }
         for id in &remove_ids {
             self.remove_transaction(id);

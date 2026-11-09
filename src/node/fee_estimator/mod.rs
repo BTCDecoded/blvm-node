@@ -244,6 +244,33 @@ impl FeeEstimator {
             .short_tx_count()
     }
 
+    #[cfg(test)]
+    pub(crate) fn history_short_fail_count(&self) -> f64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .history
+            .short_fail_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn history_medium_fail_count(&self) -> f64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .history
+            .medium_fail_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn history_long_fail_count(&self) -> f64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .history
+            .long_fail_count()
+    }
+
     pub(crate) fn hook_counts(&self) -> HookCounts {
         self.inner
             .lock()
@@ -401,6 +428,21 @@ impl FeeEstimator {
     /// Drop every external table. Registrations stay. Called from `apply_reorg`.
     pub fn on_reorg(&self) {
         self.external.clear_tables();
+    }
+
+    /// Untrack one transaction without a confirmation and without a failure.
+    ///
+    /// `apply_reorg` calls this before the mempool removal. The removal hook
+    /// then finds nothing tracked, so the reorg does not move fee history.
+    pub fn forget_without_failure(&self, txid: &Hash) {
+        let mut inner = self.inner.lock().unwrap_or_else(|err| err.into_inner());
+        let Some(tx) = inner.tracked.remove(txid) else {
+            return;
+        };
+        if tx.history_eligible {
+            let best_seen = inner.best_seen_height;
+            inner.history.drop_without_failure(txid, best_seen);
+        }
     }
 
     pub fn register_estimators(
