@@ -60,6 +60,10 @@ pub struct StemState {
     next_peer: Option<String>,
     /// When stem phase started
     stem_start: Instant,
+    /// Per-transaction timeout deadline (base + jitter).
+    /// Drawn from [stem_timeout, stem_timeout * 1.5) at stem start to prevent
+    /// timing-based origin inference from a fixed global deadline.
+    stem_deadline: Duration,
     /// Number of hops so far
     hops: u8,
     /// Original source (for metrics only, not used in routing)
@@ -229,10 +233,19 @@ impl<C: Clock> DandelionRelay<C> {
         };
 
         if let Some(next) = next_peer.as_ref() {
+            // Jitter: draw deadline from [stem_timeout, stem_timeout * 1.5).
+            // The 50% window spreads the fluff signal across time, defeating
+            // timing-based origin inference against a known fixed deadline.
+            let jitter_ms = self
+                .rng
+                .gen_range(0..self.stem_timeout.as_millis() / 2) as u64;
+            let stem_deadline = self.stem_timeout + Duration::from_millis(jitter_ms);
+
             let stem_state = StemState {
                 current_peer: current_peer.clone(),
                 next_peer: Some(next.clone()),
                 stem_start: self.clock.now(),
+                stem_deadline,
                 hops: 0,
                 source_peer: Some(current_peer.clone()),
             };
@@ -254,8 +267,8 @@ impl<C: Clock> DandelionRelay<C> {
     #[cfg_attr(feature = "spec-lock", spec_locked("10.6"))]
     pub fn should_fluff(&mut self, tx_hash: &Hash) -> bool {
         if let Some(state) = self.stem_txs.get(tx_hash) {
-            // Check timeout
-            if self.clock.now().duration_since(state.stem_start) >= self.stem_timeout {
+            // Check per-transaction jittered deadline (not the global stem_timeout).
+            if self.clock.now().duration_since(state.stem_start) >= state.stem_deadline {
                 debug!("Dandelion stem timeout for tx {}", hex::encode(tx_hash));
                 return true;
             }
@@ -341,9 +354,11 @@ impl<C: Clock> DandelionRelay<C> {
         // Clean expired stem paths
         self.stem_paths.retain(|_, path| path.expiry > now);
 
-        // Clean expired stem transactions (should have fluffed)
+        // Clean expired stem transactions (should have fluffed).
+        // Use stem_deadline * 2 as the eviction window so jittered deadlines
+        // don't cause premature cleanup.
         self.stem_txs.retain(|_, state| {
-            self.clock.now().duration_since(state.stem_start) < self.stem_timeout * 2
+            self.clock.now().duration_since(state.stem_start) < state.stem_deadline * 2
         });
     }
 
@@ -422,15 +437,18 @@ mod tests {
         let mut d: DandelionRelay<TestClock> =
             DandelionRelay::with_rng_and_clock(rng, clock.clone());
 
-        // Make timeout very short
+        // Make timeout very short so the test completes quickly.
+        // Advance by 2x the base to exceed even the maximum jittered deadline
+        // (base + 50%), ensuring should_fluff returns true regardless of which
+        // jitter value was drawn.
         d.stem_timeout = Duration::from_millis(50);
 
         let tx = [2u8; 32];
         let _ = d.start_stem_phase(tx, "p2".into(), &peers());
         assert_eq!(d.get_phase(&tx), Some(DandelionPhase::Stem));
 
-        // Advance clock past timeout
-        clock.advance(Duration::from_millis(60));
+        // Advance clock past the maximum possible jittered deadline (50ms * 1.5 = 75ms).
+        clock.advance(Duration::from_millis(100));
         d.clock = clock.clone();
         assert!(d.should_fluff(&tx));
     }
