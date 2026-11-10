@@ -1,0 +1,2153 @@
+//! Bitcoin protocol message handling
+//!
+//! Implements Bitcoin P2P protocol message serialization and deserialization.
+
+#[cfg(feature = "spec-lock")]
+use blvm_spec_lock::spec_locked;
+
+use crate::network::transport::TransportType;
+use anyhow::Result;
+use blvm_protocol::segwit::Witness;
+use blvm_protocol::wire::{
+    deserialize_addr, deserialize_blocktxn, deserialize_cmpctblock, deserialize_getblocktxn,
+    deserialize_getdata, deserialize_headers, deserialize_inv, deserialize_notfound,
+    deserialize_ping, deserialize_pong, deserialize_tx_with_witness, serialize_addr,
+    serialize_blocktxn, serialize_cmpctblock, serialize_getblocktxn, serialize_getdata,
+    serialize_getheaders, serialize_inv, serialize_notfound, serialize_ping, serialize_pong,
+    serialize_tx_with_witness,
+};
+use blvm_protocol::{Block, BlockHeader, Hash, Transaction};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+pub use blvm_protocol::network::{AddrV2Message, RejectMessage};
+
+/// Bitcoin protocol constants
+pub const BITCOIN_MAGIC_MAINNET: [u8; 4] = [0xf9, 0xbe, 0xb4, 0xd9];
+pub const BITCOIN_MAGIC_TESTNET: [u8; 4] = [0x0b, 0x11, 0x09, 0x07];
+pub const BITCOIN_MAGIC_REGTEST: [u8; 4] = [0xfa, 0xbf, 0xb5, 0xda];
+pub const BITCOIN_MAGIC_TESTNET4: [u8; 4] = [0x1c, 0x16, 0x3f, 0x28];
+/// Default public signet: first 4 bytes of SHA256d(Core's default signet challenge).
+pub const BITCOIN_MAGIC_SIGNET: [u8; 4] = [0x0a, 0x03, 0xcf, 0x40];
+
+/// Active network magic (LE u32). Set once at node startup via `ProtocolParser::set_network_magic`.
+/// Defaults to mainnet magic so that unit tests that do not call `set_network_magic` still work.
+pub(crate) static ACTIVE_MAGIC: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(u32::from_le_bytes(BITCOIN_MAGIC_MAINNET));
+
+pub use blvm_protocol::p2p_framing::{MAX_PROTOCOL_MESSAGE_LENGTH, MAX_PROTOCOL_PAYLOAD};
+
+/// A configured message ceiling cannot rise above [`MAX_PROTOCOL_MESSAGE_LENGTH`].
+/// Smaller values are kept. The 24-byte header is included in this ceiling.
+#[inline]
+pub fn clamp_protocol_message_length(max_message_length: usize) -> usize {
+    max_message_length.min(MAX_PROTOCOL_MESSAGE_LENGTH)
+}
+
+/// Maximum addresses in an addr message (MAX_ADDR_TO_SEND)
+pub const MAX_ADDR_TO_SEND: usize = 1000;
+
+/// Maximum inventory items in inv/getdata messages (MAX_INV_SZ)
+pub const MAX_INV_SZ: usize = 50000;
+
+/// Maximum headers in a headers message (MAX_HEADERS_RESULTS)
+pub const MAX_HEADERS_RESULTS: usize = 2000;
+
+/// Locator hashes in one `getheaders` or `getblocks` (MAX_LOCATOR_SZ).
+pub const MAX_LOCATOR_SZ: usize = 101;
+
+/// Bytes in a version user agent (MAX_SUBVERSION_LENGTH).
+pub const MAX_SUBVERSION_LENGTH: usize = 256;
+
+/// True when the 4-byte magic matches the magic set at startup.
+pub(crate) fn wire_header_magic_ok(header: &[u8]) -> bool {
+    if header.len() < 4 {
+        return false;
+    }
+    let magic = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+    magic == ACTIVE_MAGIC.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// True when bytes 20..24 of the header are the double-SHA256 checksum of `payload`.
+pub(crate) fn wire_checksum_ok(header: &[u8], payload: &[u8]) -> bool {
+    if header.len() < 24 {
+        return false;
+    }
+    ProtocolParser::calculate_checksum(payload) == header[20..24]
+}
+
+/// Service flags (bitfield in Version.services)
+#[cfg(feature = "dandelion")]
+pub const NODE_DANDELION: u64 = 1 << 24;
+pub const NODE_PACKAGE_RELAY: u64 = 1 << 25;
+pub const NODE_FIBRE: u64 = 1 << 26;
+/// UTXO Commitments support (GetUTXOSet, UTXOSet, GetFilteredBlock, FilteredBlock)
+#[cfg(feature = "utxo-commitments")]
+pub const NODE_UTXO_COMMITMENTS: u64 = 1 << 27;
+/// Ban List Sharing support (GetBanList, BanList)
+pub const NODE_BAN_LIST_SHARING: u64 = 1 << 28;
+/// Governance-related P2P capability (proposal/webhook integration; advertised via Version.services)
+pub const NODE_GOVERNANCE: u64 = 1 << 29;
+/// Erlay (BIP330) transaction relay support
+#[cfg(feature = "erlay")]
+pub const NODE_ERLAY: u64 = 1 << 30;
+
+/// Wire command strings (single source for parse + serialize). Use these in both
+/// [ProtocolParser::parse_message] and [ProtocolParser::serialize_message].
+pub mod cmd {
+    pub const ADDR: &str = "addr";
+    pub const BANLIST: &str = "banlist";
+    pub const BLOCK: &str = "block";
+    pub const BLOCKTXN: &str = "blocktxn";
+    pub const CFCHECKPT: &str = "cfcheckpt";
+    pub const CFHEADERS: &str = "cfheaders";
+    pub const CFILTER: &str = "cfilter";
+    pub const CMPCTBLOCK: &str = "cmpctblock";
+    pub const FEEFILTER: &str = "feefilter";
+    pub const FILTEREDBLOCK: &str = "filteredblock";
+    pub const GETADDR: &str = "getaddr";
+    pub const GETBANLIST: &str = "getbanlist";
+    pub const GETBLOCKTXN: &str = "getblocktxn";
+    pub const GETCFCHECKPT: &str = "getcfcheckpt";
+    pub const GETCFHEADERS: &str = "getcfheaders";
+    pub const GETCFILTERS: &str = "getcfilters";
+    pub const GETDATA: &str = "getdata";
+    pub const GETFILTEREDBLOCK: &str = "getfilteredblock";
+    pub const GETHEADERS: &str = "getheaders";
+    pub const GETMODULE: &str = "getmodule";
+    pub const GETMODULEBYHASH: &str = "getmodulebyhash";
+    pub const GETMODULELIST: &str = "getmodulelist";
+    pub const GETPAYMENTREQUEST: &str = "getpaymentrequest";
+    pub const GETUTXOPROOF: &str = "getutxoproof";
+    pub const GETUTXOSET: &str = "getutxoset";
+    pub const GETBLOCKS: &str = "getblocks";
+    pub const HEADERS: &str = "headers";
+    pub const INV: &str = "inv";
+    pub const MESH: &str = "mesh";
+    pub const MODULE: &str = "module";
+    pub const MODULEBYHASH: &str = "modulebyhash";
+    pub const MODULEINV: &str = "moduleinv";
+    pub const MODULELIST: &str = "modulelist";
+    pub const NOTFOUND: &str = "notfound";
+    pub const PAYMENT: &str = "payment";
+    pub const PAYMENTACK: &str = "paymentack";
+    pub const PAYMENTPROOF: &str = "paymentproof";
+    pub const PAYMENTREQUEST: &str = "paymentrequest";
+    pub const PING: &str = "ping";
+    pub const PKGTXN: &str = "pkgtxn";
+    pub const PKGTXNREJECT: &str = "pkgtxnreject";
+    pub const PONG: &str = "pong";
+    pub const REQRECON: &str = "reqrecon";
+    pub const REQSKT: &str = "reqskt";
+    pub const SENDCMPCT: &str = "sendcmpct";
+    pub const SENDPKGTXN: &str = "sendpkgtxn";
+    pub const SENDTXRCNCL: &str = "sendtxrcncl";
+    pub const SETTLEMENTNOTIFICATION: &str = "settlementnotification";
+    pub const SKETCH: &str = "sketch";
+    pub const TX: &str = "tx";
+    pub const UTXOPROOF: &str = "utxoproof";
+    pub const UTXOSET: &str = "utxoset";
+    pub const VERACK: &str = "verack";
+    pub const VERSION: &str = "version";
+    pub const SENDHEADERS: &str = "sendheaders";
+    pub use blvm_protocol::p2p_commands::cmd::WTXIDRELAY;
+    pub use blvm_protocol::p2p_commands::cmd::{ANCPKGINFO, GETPKGTXNS, PKGTXNS, SENDPACKAGES};
+    pub const REJECT: &str = "reject";
+    pub const MEMPOOL: &str = "mempool";
+    pub const ADDRV2: &str = "addrv2";
+}
+
+/// Allowed Bitcoin protocol commands
+pub const ALLOWED_COMMANDS: &[&str] = &[
+    cmd::VERSION,
+    cmd::VERACK,
+    cmd::PING,
+    cmd::PONG,
+    cmd::GETHEADERS,
+    cmd::HEADERS,
+    cmd::GETBLOCKS,
+    cmd::BLOCK,
+    cmd::GETDATA,
+    cmd::INV,
+    cmd::TX,
+    cmd::NOTFOUND,
+    cmd::GETADDR,
+    cmd::ADDR,
+    cmd::ADDRV2,
+    cmd::SENDHEADERS,
+    cmd::WTXIDRELAY,
+    cmd::SENDPACKAGES,
+    cmd::ANCPKGINFO,
+    cmd::GETPKGTXNS,
+    cmd::PKGTXNS,
+    cmd::MEMPOOL,
+    cmd::REJECT,
+    cmd::FEEFILTER,
+    cmd::SENDCMPCT,
+    cmd::CMPCTBLOCK,
+    cmd::GETBLOCKTXN,
+    cmd::BLOCKTXN,
+    // UTXO commitment protocol extensions
+    cmd::GETUTXOSET,
+    cmd::UTXOSET,
+    cmd::GETFILTEREDBLOCK,
+    cmd::FILTEREDBLOCK,
+    // Block Filtering (BIP157)
+    cmd::GETCFILTERS,
+    cmd::CFILTER,
+    cmd::GETCFHEADERS,
+    cmd::CFHEADERS,
+    cmd::GETCFCHECKPT,
+    cmd::CFCHECKPT,
+    // Payment Protocol (BIP70) - P2P variant
+    cmd::GETPAYMENTREQUEST,
+    cmd::PAYMENTREQUEST,
+    cmd::PAYMENT,
+    cmd::PAYMENTACK,
+    // Package Relay (BIP 331)
+    cmd::SENDPKGTXN,
+    cmd::PKGTXN,
+    cmd::PKGTXNREJECT,
+    // Ban List Sharing
+    cmd::GETBANLIST,
+    cmd::BANLIST,
+    // Module Registry
+    cmd::GETMODULE,
+    cmd::MODULE,
+    cmd::GETMODULEBYHASH,
+    cmd::MODULEBYHASH,
+    cmd::MODULEINV,
+    cmd::GETMODULELIST,
+    cmd::MODULELIST,
+    // Mesh networking
+    cmd::MESH,
+    // Erlay (BIP330) transaction relay
+    #[cfg(feature = "erlay")]
+    cmd::SENDTXRCNCL,
+    #[cfg(feature = "erlay")]
+    cmd::REQRECON,
+    #[cfg(feature = "erlay")]
+    cmd::REQSKT,
+    #[cfg(feature = "erlay")]
+    cmd::SKETCH,
+];
+
+/// Bitcoin protocol message types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ProtocolMessage {
+    Version(VersionMessage),
+    Verack,
+    Ping(PingMessage),
+    Pong(PongMessage),
+    GetHeaders(GetHeadersMessage),
+    Headers(HeadersMessage),
+    GetBlocks(GetBlocksMessage),
+    Block(BlockMessage),
+    GetData(GetDataMessage),
+    Inv(InvMessage),
+    NotFound(NotFoundMessage),
+    Tx(TxMessage),
+    /// BIP133 FeeFilter - peer's minimum fee rate for tx relay (we accept, no response)
+    FeeFilter(FeeFilterMessage),
+    // Compact Block Relay (BIP152)
+    SendCmpct(SendCmpctMessage),
+    CmpctBlock(CompactBlockMessage),
+    GetBlockTxn(GetBlockTxnMessage),
+    BlockTxn(BlockTxnMessage),
+    // UTXO commitment protocol extensions
+    GetUTXOSet(GetUTXOSetMessage),
+    UTXOSet(UTXOSetMessage),
+    GetUTXOProof(GetUTXOProofMessage),
+    UTXOProof(UTXOProofMessage),
+    GetFilteredBlock(GetFilteredBlockMessage),
+    FilteredBlock(FilteredBlockMessage),
+    // Block Filtering (BIP157)
+    GetCfilters(GetCfiltersMessage),
+    Cfilter(CfilterMessage),
+    GetCfheaders(GetCfheadersMessage),
+    Cfheaders(CfheadersMessage),
+    GetCfcheckpt(GetCfcheckptMessage),
+    Cfcheckpt(CfcheckptMessage),
+    // Payment Protocol (BIP70) - P2P variant
+    GetPaymentRequest(GetPaymentRequestMessage),
+    PaymentRequest(PaymentRequestMessage),
+    Payment(PaymentMessage),
+    PaymentACK(PaymentACKMessage),
+    // CTV Payment Proof messages (for instant proof)
+    #[cfg(feature = "ctv")]
+    PaymentProof(PaymentProofMessage),
+    SettlementNotification(SettlementNotificationMessage),
+    // Package Relay (BIP 331)
+    SendPkgTxn(SendPkgTxnMessage),
+    PkgTxn(PkgTxnMessage),
+    PkgTxnReject(PkgTxnRejectMessage),
+    SendPackages(u64),
+    AncPkgInfo(Vec<Hash>),
+    GetPkgTxns(Vec<Hash>),
+    PkgTxns(Vec<Vec<u8>>),
+    // Ban List Sharing
+    GetBanList(GetBanListMessage),
+    BanList(BanListMessage),
+    // Mesh networking packets (payment-gated routing)
+    MeshPacket(Vec<u8>), // Serialized mesh packet (handled by mesh module)
+    // Address relay
+    GetAddr,
+    Addr(AddrMessage),
+    AddrV2(AddrV2Message),
+    SendHeaders,
+    WtxidRelay,
+    Reject(RejectMessage),
+    MemPool,
+    // Module Registry
+    GetModule(GetModuleMessage),
+    Module(ModuleMessage),
+    GetModuleByHash(GetModuleByHashMessage),
+    ModuleByHash(ModuleByHashMessage),
+    ModuleInv(ModuleInvMessage),
+    GetModuleList(GetModuleListMessage),
+    ModuleList(ModuleListMessage),
+}
+
+/// Version message
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionMessage {
+    pub version: i32,
+    pub services: u64,
+    pub timestamp: i64,
+    pub addr_recv: NetworkAddress,
+    pub addr_from: NetworkAddress,
+    pub nonce: u64,
+    pub user_agent: String,
+    pub start_height: i32,
+    pub relay: bool,
+}
+
+impl VersionMessage {
+    /// Check if peer supports UTXO commitments
+    #[cfg(feature = "utxo-commitments")]
+    pub fn supports_utxo_commitments(&self) -> bool {
+        (self.services & NODE_UTXO_COMMITMENTS) != 0
+    }
+
+    /// Check if peer supports ban list sharing
+    pub fn supports_ban_list_sharing(&self) -> bool {
+        (self.services & NODE_BAN_LIST_SHARING) != 0
+    }
+
+    /// Check if peer supports BIP157 compact block filters
+    pub fn supports_compact_filters(&self) -> bool {
+        use blvm_protocol::bip157::NODE_COMPACT_FILTERS;
+        (self.services & NODE_COMPACT_FILTERS) != 0
+    }
+
+    /// Check if peer supports package relay (BIP331)
+    pub fn supports_package_relay(&self) -> bool {
+        (self.services & NODE_PACKAGE_RELAY) != 0
+    }
+
+    /// Check if peer supports FIBRE
+    pub fn supports_fibre(&self) -> bool {
+        (self.services & NODE_FIBRE) != 0
+    }
+
+    #[cfg(feature = "dandelion")]
+    /// Check if peer supports Dandelion
+    pub fn supports_dandelion(&self) -> bool {
+        (self.services & NODE_DANDELION) != 0
+    }
+}
+
+/// Network address
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NetworkAddress {
+    pub services: u64,
+    pub ip: [u8; 16],
+    pub port: u16,
+    /// Advertised unix time from the addr message.
+    pub time: u32,
+}
+
+/// Ping message
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PingMessage {
+    pub nonce: u64,
+}
+
+/// Pong message
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PongMessage {
+    pub nonce: u64,
+}
+
+/// Get headers message
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetHeadersMessage {
+    pub version: i32,
+    pub block_locator_hashes: Vec<Hash>,
+    pub hash_stop: Hash,
+}
+
+/// Headers message
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeadersMessage {
+    pub headers: Vec<BlockHeader>,
+}
+
+/// Get blocks message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetBlocksMessage {
+    pub version: i32,
+    pub block_locator_hashes: Vec<Hash>,
+    pub hash_stop: Hash,
+}
+
+/// Block message
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockMessage {
+    pub block: Block,
+    /// Witness data: Vec<Vec<Witness>> - one Vec<Witness> per transaction, one Witness per input
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub witnesses: Vec<Vec<Witness>>,
+}
+
+// Re-export inventory types from blvm-protocol (single source of truth)
+pub use blvm_protocol::network::{GetDataMessage, InvMessage, InventoryVector, NotFoundMessage};
+
+/// Transaction message
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TxMessage {
+    pub transaction: Transaction,
+    /// One witness stack per input. Empty when the wire encoding has no witness flag.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub witnesses: Vec<Witness>,
+}
+
+/// FeeFilter message (BIP133) - peer advertises minimum feerate for tx relay
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeeFilterMessage {
+    pub feerate: u64,
+}
+
+// Compact Block Relay (BIP152) messages
+use crate::network::compact_blocks::CompactBlock;
+
+/// SendCmpct message - Negotiate compact block relay support
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendCmpctMessage {
+    /// Compact block version (1 or 2)
+    pub version: u64,
+    /// Whether to prefer compact blocks (1) or regular blocks (0)
+    pub prefer_cmpct: u8,
+}
+
+impl SendCmpctMessage {
+    /// Create SendCmpct message with recommended version for transport
+    pub fn for_transport(transport: TransportType, prefer_cmpct: bool) -> Self {
+        use crate::network::compact_blocks::recommended_compact_block_version;
+
+        Self {
+            version: recommended_compact_block_version(transport),
+            prefer_cmpct: if prefer_cmpct { 1 } else { 0 },
+        }
+    }
+
+    /// Check if peer also supports BIP157 filters (based on version message services)
+    pub fn supports_filters(&self, peer_services: u64) -> bool {
+        use blvm_protocol::bip157::NODE_COMPACT_FILTERS;
+        (peer_services & NODE_COMPACT_FILTERS) != 0
+    }
+}
+
+/// CompactBlock message - Compact block data
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactBlockMessage {
+    pub compact_block: CompactBlock,
+}
+
+/// GetBlockTxn message - Request missing transactions from compact block
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetBlockTxnMessage {
+    /// Block hash for the compact block
+    pub block_hash: Hash,
+    /// Indices of transactions to request (0-indexed)
+    pub indices: Vec<u16>,
+}
+
+/// BlockTxn message - Response with requested transactions
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockTxnMessage {
+    /// Block hash for the compact block
+    pub block_hash: Hash,
+    /// Requested transactions in order
+    pub transactions: Vec<Transaction>,
+    /// Witness stacks, one per transaction, when the wire message carried them.
+    pub witnesses: Option<Vec<Vec<blvm_protocol::segwit::Witness>>>,
+}
+
+/// GetUTXOSet message - Request UTXO set at specific height
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetUTXOSetMessage {
+    /// Block height for which to request UTXO set
+    pub height: u64,
+    /// Block hash at requested height (for verification)
+    pub block_hash: Hash,
+}
+
+/// UTXOSet message - Response with UTXO set commitment
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UTXOSetMessage {
+    /// Request ID (echo from GetUTXOSet for matching)
+    pub request_id: u64,
+    /// UTXO commitment (Merkle root, supply, count, etc.)
+    pub commitment: UTXOCommitment,
+    /// UTXO set size hint (for chunking)
+    pub utxo_count: u64,
+    /// Indicates if this is a complete set or partial chunk
+    pub is_complete: bool,
+    /// Chunk identifier if partial
+    pub chunk_id: Option<u32>,
+}
+
+/// UTXO commitment structure (matches blvm-consensus definition)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UTXOCommitment {
+    pub merkle_root: Hash,
+    pub total_supply: u64,
+    pub utxo_count: u64,
+    pub block_height: u64,
+    pub block_hash: Hash,
+}
+
+/// GetUTXOProof message - Request Merkle proof for a specific UTXO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetUTXOProofMessage {
+    /// Request ID for async request-response matching
+    pub request_id: u64,
+    /// OutPoint to request proof for (transaction hash + output index)
+    pub tx_hash: Hash,
+    pub output_index: u32,
+    /// Block height/hash for which to request proof (must match commitment)
+    pub block_height: u64,
+    pub block_hash: Hash,
+}
+
+/// UTXOProof message - Response with Merkle proof for a UTXO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UTXOProofMessage {
+    /// Request ID (echo from GetUTXOProof for matching)
+    pub request_id: u64,
+    /// The transaction hash this proof is for
+    pub tx_hash: Hash,
+    /// The output index this proof is for
+    pub output_index: u32,
+    /// The UTXO data (for verification)
+    pub value: i64,
+    pub script_pubkey: Vec<u8>,
+    pub height: u64,
+    pub is_coinbase: bool,
+    /// The Merkle proof (serialized as bytes)
+    pub proof: Vec<u8>,
+}
+
+/// GetFilteredBlock message - Request filtered block (spam-filtered)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetFilteredBlockMessage {
+    /// Request ID for async request-response matching
+    pub request_id: u64,
+    /// Block hash to request
+    pub block_hash: Hash,
+    /// Filter preferences (what spam types to filter)
+    pub filter_preferences: FilterPreferences,
+    /// Request BIP158 compact block filter in response (optional)
+    ///
+    /// When true, the response FilteredBlockMessage will include
+    /// bip158_filter field with the compact block filter.
+    /// This allows clients to get both spam filtering and light client
+    /// discovery filters in a single request.
+    pub include_bip158_filter: bool,
+}
+
+/// FilterPreferences - Configure spam filtering
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilterPreferences {
+    /// Filter Ordinals/Inscriptions
+    pub filter_ordinals: bool,
+    /// Filter dust outputs (default: < 546 satoshis)
+    pub filter_dust: bool,
+    /// Filter BRC-20 patterns
+    pub filter_brc20: bool,
+    /// Minimum output value to include (satoshis)
+    pub min_output_value: u64,
+}
+
+/// FilteredBlock message - Response with filtered transactions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilteredBlockMessage {
+    /// Request ID (echo from GetFilteredBlock for matching)
+    pub request_id: u64,
+    /// Block header
+    pub header: BlockHeader,
+    /// UTXO commitment for this block
+    pub commitment: UTXOCommitment,
+    /// Filtered transactions (only non-spam)
+    pub transactions: Vec<Transaction>,
+    /// Transaction indices in original block (for verification)
+    pub transaction_indices: Vec<u32>,
+    /// Summary of filtered spam
+    pub spam_summary: SpamSummary,
+    /// Optional BIP158 compact block filter (if requested and available)
+    ///
+    /// This allows clients to get both spam-filtered transactions (UTXO commitments)
+    /// and BIP158 filters (light client discovery) in a single response.
+    /// When present, clients can use the filter for efficient transaction matching
+    /// while still receiving the commitment data for verification.
+    pub bip158_filter: Option<Bip158FilterData>,
+}
+
+/// BIP158 filter data (embedded in FilteredBlock message)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Bip158FilterData {
+    /// Filter type (0 = Basic)
+    pub filter_type: u8,
+    /// Compact block filter data
+    pub filter_data: Vec<u8>,
+    /// Number of elements in filter
+    pub num_elements: u32,
+}
+
+// Block Filtering (BIP157) messages
+
+/// getcfilters message - Request filters for block range
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetCfiltersMessage {
+    /// Filter type (0 = Basic)
+    pub filter_type: u8,
+    /// Start block height
+    pub start_height: u32,
+    /// Stop block hash
+    pub stop_hash: Hash,
+}
+
+/// cfilter message - Compact block filter response
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CfilterMessage {
+    /// Filter type (0 = Basic)
+    pub filter_type: u8,
+    /// Block hash
+    pub block_hash: Hash,
+    /// Compact block filter data. Outbound filters share the cached bytes.
+    pub filter_data: Arc<Vec<u8>>,
+    /// Number of elements in filter
+    pub num_elements: u32,
+}
+
+/// getcfheaders message - Request filter headers
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetCfheadersMessage {
+    /// Filter type (0 = Basic)
+    pub filter_type: u8,
+    /// Start block height
+    pub start_height: u32,
+    /// Stop block hash
+    pub stop_hash: Hash,
+}
+
+/// cfheaders message - Filter headers response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CfheadersMessage {
+    /// Filter type (0 = Basic)
+    pub filter_type: u8,
+    /// Stop block hash
+    pub stop_hash: Hash,
+    /// Previous filter header
+    pub prev_header: FilterHeaderData,
+    /// Filter headers (one per block in range)
+    pub filter_headers: Vec<Hash>,
+}
+
+/// Filter header data (for serialization)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilterHeaderData {
+    /// Filter hash
+    pub filter_hash: Hash,
+    /// Previous filter header hash
+    pub prev_header_hash: Hash,
+}
+
+/// getcfcheckpt message - Request filter checkpoints
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetCfcheckptMessage {
+    /// Filter type (0 = Basic)
+    pub filter_type: u8,
+    /// Stop block hash
+    pub stop_hash: Hash,
+}
+
+/// cfcheckpt message - Filter checkpoint response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CfcheckptMessage {
+    /// Filter type (0 = Basic)
+    pub filter_type: u8,
+    /// Stop block hash
+    pub stop_hash: Hash,
+    /// Filter header hashes at checkpoint intervals
+    pub filter_header_hashes: Vec<Hash>,
+}
+
+// Payment Protocol (BIP70) - P2P variant messages
+
+/// getpaymentrequest message - Request payment details from merchant
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetPaymentRequestMessage {
+    /// Merchant's Bitcoin public key (compressed, 33 bytes)
+    #[serde(with = "serde_bytes")]
+    pub merchant_pubkey: Vec<u8>,
+    /// Unique payment identifier (32-byte hash)
+    #[serde(with = "serde_bytes")]
+    pub payment_id: Vec<u8>,
+    /// Network identifier ("main", "test", "regtest")
+    pub network: String,
+}
+
+/// paymentrequest message - Merchant payment request response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentRequestMessage {
+    /// Payment request details (from bip70 module)
+    pub payment_request: blvm_protocol::payment::PaymentRequest,
+    /// Signature over payment_request by merchant's Bitcoin key
+    #[serde(with = "serde_bytes")]
+    pub merchant_signature: Vec<u8>,
+    /// Merchant's public key (compressed, 33 bytes)
+    #[serde(with = "serde_bytes")]
+    pub merchant_pubkey: Vec<u8>,
+    /// Payment ID (echo from GetPaymentRequest)
+    #[serde(with = "serde_bytes")]
+    pub payment_id: Vec<u8>,
+    /// Optional CTV covenant proof (for instant proof)
+    #[cfg(feature = "ctv")]
+    #[serde(default)]
+    pub covenant_proof: Option<Vec<u8>>,
+}
+
+/// payment message - Customer payment transaction(s)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentMessage {
+    /// Payment details (from payment protocol module)
+    pub payment: blvm_protocol::payment::Payment,
+    /// Payment ID (echo from PaymentRequest)
+    #[serde(with = "serde_bytes")]
+    pub payment_id: Vec<u8>,
+    /// Optional customer signature (for authenticated payments)
+    #[serde(with = "serde_bytes")]
+    pub customer_signature: Option<Vec<u8>>,
+}
+
+/// paymentack message - Merchant payment confirmation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentACKMessage {
+    /// Payment acknowledgment (from payment protocol module)
+    pub payment_ack: blvm_protocol::payment::PaymentACK,
+    /// Payment ID (echo from Payment)
+    #[serde(with = "serde_bytes")]
+    pub payment_id: Vec<u8>,
+    /// Merchant signature confirming receipt
+    #[serde(with = "serde_bytes")]
+    pub merchant_signature: Vec<u8>,
+}
+
+// CTV Payment Proof messages (for instant proof, not instant settlement)
+
+/// paymentproof message - CTV covenant proof for payment commitment
+#[cfg(feature = "ctv")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentProofMessage {
+    /// Request ID for async request-response matching
+    pub request_id: u64,
+    /// Payment request ID this proof commits to
+    pub payment_request_id: String,
+    /// Serialized CTV covenant proof. The payment module owns the proof type.
+    pub covenant_proof: Vec<u8>,
+    /// Optional serialized transaction template.
+    pub transaction_template: Option<Vec<u8>>,
+}
+
+/// settlementnotification message - Settlement status update
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettlementNotificationMessage {
+    /// Payment request ID
+    pub payment_request_id: String,
+    /// Transaction hash (if in mempool or confirmed)
+    pub transaction_hash: Option<Hash>,
+    /// Confirmation count (0 = in mempool, >0 = confirmed)
+    pub confirmation_count: u32,
+    /// Block hash (if confirmed)
+    pub block_hash: Option<Hash>,
+    /// Settlement status
+    pub status: String, // "mempool", "confirmed", "failed"
+}
+
+// Package Relay (BIP 331) messages
+
+/// sendpkgtxn message - Request to send package of transactions
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendPkgTxnMessage {
+    /// Package ID (combined hash of all transactions)
+    #[serde(with = "serde_bytes")]
+    pub package_id: Vec<u8>,
+    /// Transaction hashes in package (ordered: parents first)
+    pub tx_hashes: Vec<Hash>,
+}
+
+/// pkgtxn message - Package of transactions
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PkgTxnMessage {
+    /// Package ID (echo from SendPkgTxn)
+    #[serde(with = "serde_bytes")]
+    pub package_id: Vec<u8>,
+    /// Transactions in package (ordered: parents first)
+    /// Using Vec<u8> for serialized transactions (matches BIP 331 spec)
+    pub transactions: Vec<Vec<u8>>,
+}
+
+/// pkgtxnreject message - Package rejection
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PkgTxnRejectMessage {
+    /// Package ID that was rejected
+    #[serde(with = "serde_bytes")]
+    pub package_id: Vec<u8>,
+    /// Rejection reason code
+    pub reason: u8,
+    /// Optional rejection reason text
+    pub reason_text: Option<String>,
+}
+
+// Module Registry messages
+
+/// getmodule message - Request module by name
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetModuleMessage {
+    /// Request ID for async request-response matching
+    pub request_id: u64,
+    /// Module name
+    pub name: String,
+    /// Optional version (if not specified, get latest)
+    pub version: Option<String>,
+    /// Optional payment ID (required if module requires payment)
+    /// This is the payment_id from a completed PaymentACK
+    pub payment_id: Option<String>,
+}
+
+/// module message - Module response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleMessage {
+    /// Request ID (echo from GetModule for matching)
+    pub request_id: u64,
+    /// Module name
+    pub name: String,
+    /// Module version
+    pub version: String,
+    /// Module hash (content-addressable identifier)
+    pub hash: Hash,
+    /// Manifest hash
+    pub manifest_hash: Hash,
+    /// Binary hash
+    pub binary_hash: Hash,
+    /// Manifest content (TOML)
+    pub manifest: Vec<u8>,
+    /// Binary content (optional - may be fetched separately via getmodulebyhash)
+    pub binary: Option<Vec<u8>>,
+}
+
+/// getmodulebyhash message - Request module by hash (content-addressable)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetModuleByHashMessage {
+    /// Request ID for async request-response matching
+    pub request_id: u64,
+    /// Module hash
+    pub hash: Hash,
+    /// Request binary (if false, only manifest is returned)
+    pub include_binary: bool,
+}
+
+/// modulebyhash message - Module response by hash
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleByHashMessage {
+    /// Request ID (echo from GetModuleByHash for matching)
+    pub request_id: u64,
+    /// Module hash (echo from request)
+    pub hash: Hash,
+    /// Manifest content
+    pub manifest: Vec<u8>,
+    /// Binary content (if requested)
+    pub binary: Option<Vec<u8>>,
+}
+
+/// moduleinv message - Module inventory (announce available modules)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleInvMessage {
+    /// List of available modules
+    pub modules: Vec<ModuleInventoryItem>,
+}
+
+/// Module inventory item
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleInventoryItem {
+    /// Module name
+    pub name: String,
+    /// Module version
+    pub version: String,
+    /// Module hash
+    pub hash: Hash,
+}
+
+/// getmodulelist message - Request list of available modules
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetModuleListMessage {
+    /// Optional filter by name prefix
+    pub name_prefix: Option<String>,
+    /// Maximum number of modules to return
+    pub max_count: Option<u32>,
+}
+
+/// modulelist message - List of available modules
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleListMessage {
+    /// List of available modules
+    pub modules: Vec<ModuleInventoryItem>,
+}
+
+// Erlay (BIP330) transaction relay messages
+
+/// sendtxrcncl message - Announce Erlay support and negotiate parameters
+#[cfg(feature = "erlay")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendTxRcnclMessage {
+    /// Erlay version (currently 1)
+    pub version: u16,
+    /// Initial reconciliation salt (for privacy)
+    #[serde(with = "serde_bytes")]
+    pub salt: [u8; 16],
+    /// Minimum field size in bits (32 or 64)
+    pub min_field_size: u8,
+    /// Maximum field size in bits (32 or 64)
+    pub max_field_size: u8,
+}
+
+/// reqrecon message - Request reconciliation
+#[cfg(feature = "erlay")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReqReconMessage {
+    /// Reconciliation salt (for privacy)
+    #[serde(with = "serde_bytes")]
+    pub salt: [u8; 16],
+    /// Local transaction set size
+    pub local_set_size: u32,
+    /// Field size in bits (32 or 64)
+    pub field_size: u8,
+}
+
+/// reqskt message - Request sketch
+#[cfg(feature = "erlay")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReqSktMessage {
+    /// Reconciliation salt (echo from ReqRecon)
+    #[serde(with = "serde_bytes")]
+    pub salt: [u8; 16],
+    /// Remote transaction set size
+    pub remote_set_size: u32,
+    /// Field size in bits (32 or 64)
+    pub field_size: u8,
+}
+
+/// sketch message - Send reconciliation sketch
+#[cfg(feature = "erlay")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SketchMessage {
+    /// Reconciliation salt (echo from ReqRecon)
+    #[serde(with = "serde_bytes")]
+    pub salt: [u8; 16],
+    /// Reconciliation sketch (minisketch serialized data)
+    #[serde(with = "serde_bytes")]
+    pub sketch: Vec<u8>,
+    /// Field size in bits (32 or 64)
+    pub field_size: u8,
+}
+
+/// SpamSummary - Summary of filtered spam transactions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpamSummary {
+    /// Number of transactions filtered
+    pub filtered_count: u32,
+    /// Total size of filtered transactions (bytes)
+    pub filtered_size: u64,
+    /// Breakdown by spam type
+    pub by_type: SpamBreakdown,
+}
+
+/// SpamBreakdown - Breakdown of spam by category
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpamBreakdown {
+    pub ordinals: u32,
+    pub inscriptions: u32,
+    pub dust: u32,
+    pub brc20: u32,
+}
+
+/// Bitcoin protocol message parser
+pub struct ProtocolParser;
+
+impl ProtocolParser {
+    /// Set the network magic used for all subsequent `parse_message` / `serialize_message` calls.
+    ///
+    /// Call this once at node startup with `network_params.magic_bytes` from the active
+    /// `BitcoinProtocolEngine`. The default (mainnet) is preserved when not called so that
+    /// unit tests that do not configure a network continue to work.
+    pub fn set_network_magic(magic_bytes: [u8; 4]) {
+        ACTIVE_MAGIC.store(
+            u32::from_le_bytes(magic_bytes),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// DNS seed name + default P2P port for the magic set at startup.
+    pub fn dns_seed_network() -> (&'static str, u16) {
+        let magic = ACTIVE_MAGIC
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .to_le_bytes();
+        Self::dns_seed_network_for(magic)
+    }
+
+    /// DNS seed name + default P2P port for the given network magic.
+    pub(crate) fn dns_seed_network_for(magic: [u8; 4]) -> (&'static str, u16) {
+        if magic == BITCOIN_MAGIC_TESTNET {
+            ("testnet", 18333)
+        } else if magic == BITCOIN_MAGIC_TESTNET4 {
+            ("testnet4", 48333)
+        } else if magic == BITCOIN_MAGIC_SIGNET {
+            ("signet", 38333)
+        } else if magic == BITCOIN_MAGIC_REGTEST {
+            ("regtest", 18444)
+        } else {
+            ("mainnet", 8333)
+        }
+    }
+
+    /// Parse a raw message into a protocol message
+    /// Orange Paper 10.1.1: ParseMessage, size bounds, checksum rejection
+    #[cfg_attr(feature = "spec-lock", spec_locked("10.1.1"))]
+    pub fn parse_message(data: &[u8]) -> Result<ProtocolMessage> {
+        use tracing::{debug, warn};
+
+        // Validate message size
+        if data.len() < 24 {
+            return Err(anyhow::anyhow!("Message too short: {} bytes", data.len()));
+        }
+
+        if data.len() > MAX_PROTOCOL_MESSAGE_LENGTH {
+            return Err(anyhow::anyhow!("Message too large"));
+        }
+
+        // Parse message header
+        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        let expected_magic = ACTIVE_MAGIC.load(std::sync::atomic::Ordering::Relaxed);
+        debug!(
+            "Parsing message: magic=0x{:08x}, total_len={}",
+            magic,
+            data.len()
+        );
+
+        if magic != expected_magic {
+            // Log first 24 bytes as hex for debugging
+            let header_hex: String = data.iter().take(24).map(|b| format!("{b:02x}")).collect();
+            warn!(
+                "Invalid magic number 0x{:08x}, expected 0x{:08x}. Header hex: {}",
+                magic, expected_magic, header_hex
+            );
+            return Err(anyhow::anyhow!("Invalid magic number 0x{:08x}", magic));
+        }
+
+        let command = String::from_utf8_lossy(&data[4..16])
+            .trim_end_matches('\0')
+            .to_string();
+
+        debug!("Message command: '{}', data_len={}", command, data.len());
+
+        // Validate command string
+        if !ALLOWED_COMMANDS.contains(&command.as_str()) {
+            return Err(anyhow::anyhow!("Unknown command: {}", command));
+        }
+
+        let payload_length = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
+        let checksum = &data[20..24];
+
+        // Validate payload length
+        if payload_length as usize > MAX_PROTOCOL_PAYLOAD {
+            return Err(anyhow::anyhow!("Payload too large"));
+        }
+
+        if data.len() < 24 + payload_length as usize {
+            return Err(anyhow::anyhow!("Incomplete message"));
+        }
+
+        let payload = &data[24..24 + payload_length as usize];
+
+        // Verify checksum using Bitcoin double SHA256
+        let calculated_checksum = Self::calculate_checksum(payload);
+        if calculated_checksum != checksum {
+            return Err(anyhow::anyhow!("Invalid checksum"));
+        }
+
+        // Parse payload based on command
+        match command.as_str() {
+            cmd::VERSION => {
+                // Use proper Bitcoin wire format deserialization for version messages
+                use blvm_protocol::wire::deserialize_version;
+
+                let version_msg = deserialize_version(payload)?;
+
+                // Convert to node's ProtocolMessage format
+                Ok(ProtocolMessage::Version(VersionMessage {
+                    version: version_msg.version,
+                    services: version_msg.services,
+                    timestamp: version_msg.timestamp,
+                    addr_recv: NetworkAddress {
+                        time: 0,
+                        services: version_msg.addr_recv.services,
+                        ip: version_msg.addr_recv.ip,
+                        port: version_msg.addr_recv.port,
+                    },
+                    addr_from: NetworkAddress {
+                        time: 0,
+                        services: version_msg.addr_from.services,
+                        ip: version_msg.addr_from.ip,
+                        port: version_msg.addr_from.port,
+                    },
+                    nonce: version_msg.nonce,
+                    user_agent: version_msg.user_agent,
+                    start_height: version_msg.start_height,
+                    relay: version_msg.relay,
+                }))
+            }
+            cmd::VERACK => Ok(ProtocolMessage::Verack),
+            cmd::PING => {
+                // Use proper Bitcoin wire format (8-byte nonce)
+                let wire_msg = blvm_protocol::wire::deserialize_ping(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize ping: {}", e))?;
+                Ok(ProtocolMessage::Ping(PingMessage {
+                    nonce: wire_msg.nonce,
+                }))
+            }
+            cmd::PONG => {
+                // Use proper Bitcoin wire format (8-byte nonce)
+                let wire_msg = blvm_protocol::wire::deserialize_pong(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize pong: {}", e))?;
+                Ok(ProtocolMessage::Pong(PongMessage {
+                    nonce: wire_msg.nonce,
+                }))
+            }
+            cmd::GETHEADERS => {
+                // Use proper Bitcoin wire format deserialization
+                let wire_msg = blvm_protocol::wire::deserialize_getheaders(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize getheaders: {}", e))?;
+                Ok(ProtocolMessage::GetHeaders(GetHeadersMessage {
+                    version: wire_msg.version as i32,
+                    block_locator_hashes: wire_msg.block_locator_hashes,
+                    hash_stop: wire_msg.hash_stop,
+                }))
+            }
+            cmd::HEADERS => {
+                // Use proper Bitcoin wire format deserialization
+                let wire_msg = deserialize_headers(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize headers: {}", e))?;
+                Ok(ProtocolMessage::Headers(HeadersMessage {
+                    headers: wire_msg.headers,
+                }))
+            }
+            cmd::GETBLOCKS => Ok(ProtocolMessage::GetBlocks(decode_getblocks(payload)?)),
+            cmd::BLOCK => {
+                // Use consensus wire format (Bitcoin block + witness structure)
+                let (block, witnesses) =
+                    blvm_protocol::serialization::deserialize_block_with_witnesses(payload)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize block: {}", e))?;
+                Ok(ProtocolMessage::Block(BlockMessage { block, witnesses }))
+            }
+            cmd::GETDATA => {
+                let msg = deserialize_getdata(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize getdata: {}", e))?;
+                Ok(ProtocolMessage::GetData(msg))
+            }
+            cmd::INV => {
+                let msg = deserialize_inv(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize inv: {}", e))?;
+                Ok(ProtocolMessage::Inv(msg))
+            }
+            cmd::NOTFOUND => {
+                let msg = deserialize_notfound(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize notfound: {}", e))?;
+                Ok(ProtocolMessage::NotFound(msg))
+            }
+            cmd::TX => {
+                let (transaction, witnesses) = deserialize_tx_with_witness(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize tx: {}", e))?;
+                Ok(ProtocolMessage::Tx(TxMessage {
+                    transaction,
+                    witnesses,
+                }))
+            }
+            cmd::FEEFILTER => {
+                // BIP133: 8-byte feerate (satoshis per KB) in little-endian
+                if payload.len() < 8 {
+                    return Err(anyhow::anyhow!("FeeFilter message too short"));
+                }
+                let feerate = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+                Ok(ProtocolMessage::FeeFilter(FeeFilterMessage { feerate }))
+            }
+            // Compact Block Relay (BIP152)
+            cmd::SENDCMPCT => {
+                let sc = blvm_protocol::wire::deserialize_sendcmpct(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize sendcmpct: {}", e))?;
+                Ok(ProtocolMessage::SendCmpct(SendCmpctMessage {
+                    prefer_cmpct: sc.prefer_cmpct,
+                    version: sc.version,
+                }))
+            }
+            cmd::CMPCTBLOCK => {
+                let wire = deserialize_cmpctblock(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize cmpctblock: {}", e))?;
+                Ok(ProtocolMessage::CmpctBlock(CompactBlockMessage {
+                    compact_block: blvm_protocol::bip152::CompactBlock::from(&wire),
+                }))
+            }
+            cmd::GETBLOCKTXN => {
+                let wire = deserialize_getblocktxn(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize getblocktxn: {}", e))?;
+                Ok(ProtocolMessage::GetBlockTxn(GetBlockTxnMessage {
+                    block_hash: wire.block_hash,
+                    indices: wire.indices,
+                }))
+            }
+            cmd::BLOCKTXN => {
+                let wire = deserialize_blocktxn(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize blocktxn: {}", e))?;
+                Ok(ProtocolMessage::BlockTxn(BlockTxnMessage {
+                    block_hash: wire.block_hash,
+                    transactions: wire.transactions,
+                    witnesses: wire.witnesses,
+                }))
+            }
+            // UTXO commitment protocol extensions
+            cmd::GETUTXOSET => Ok(ProtocolMessage::GetUTXOSet(bincode::deserialize(payload)?)),
+            cmd::UTXOSET => Ok(ProtocolMessage::UTXOSet(bincode::deserialize(payload)?)),
+            cmd::GETUTXOPROOF => Ok(ProtocolMessage::GetUTXOProof(bincode::deserialize(
+                payload,
+            )?)),
+            cmd::UTXOPROOF => Ok(ProtocolMessage::UTXOProof(bincode::deserialize(payload)?)),
+            cmd::GETFILTEREDBLOCK => Ok(ProtocolMessage::GetFilteredBlock(bincode::deserialize(
+                payload,
+            )?)),
+            cmd::FILTEREDBLOCK => Ok(ProtocolMessage::FilteredBlock(bincode::deserialize(
+                payload,
+            )?)),
+            // Block Filtering (BIP157)
+            cmd::GETCFILTERS => Ok(ProtocolMessage::GetCfilters(decode_filter_request(
+                payload,
+            )?)),
+            cmd::CFILTER => Ok(ProtocolMessage::Cfilter(decode_cfilter(payload)?)),
+            cmd::GETCFHEADERS => {
+                let req = decode_filter_request(payload)?;
+                Ok(ProtocolMessage::GetCfheaders(GetCfheadersMessage {
+                    filter_type: req.filter_type,
+                    start_height: req.start_height,
+                    stop_hash: req.stop_hash,
+                }))
+            }
+            cmd::CFHEADERS => Ok(ProtocolMessage::Cfheaders(decode_cfheaders(payload)?)),
+            cmd::GETCFCHECKPT => Ok(ProtocolMessage::GetCfcheckpt(decode_getcfcheckpt(payload)?)),
+            cmd::CFCHECKPT => Ok(ProtocolMessage::Cfcheckpt(decode_cfcheckpt(payload)?)),
+            // Payment Protocol (BIP70) - P2P variant
+            cmd::GETPAYMENTREQUEST => Ok(ProtocolMessage::GetPaymentRequest(bincode::deserialize(
+                payload,
+            )?)),
+            cmd::PAYMENTREQUEST => Ok(ProtocolMessage::PaymentRequest(bincode::deserialize(
+                payload,
+            )?)),
+            cmd::PAYMENT => Ok(ProtocolMessage::Payment(bincode::deserialize(payload)?)),
+            cmd::PAYMENTACK => Ok(ProtocolMessage::PaymentACK(bincode::deserialize(payload)?)),
+            // Package Relay (BIP 331)
+            cmd::SENDPKGTXN => Ok(ProtocolMessage::SendPkgTxn(bincode::deserialize(payload)?)),
+            cmd::PKGTXN => Ok(ProtocolMessage::PkgTxn(bincode::deserialize(payload)?)),
+            cmd::PKGTXNREJECT => Ok(ProtocolMessage::PkgTxnReject(bincode::deserialize(
+                payload,
+            )?)),
+            cmd::SENDPACKAGES => Ok(ProtocolMessage::SendPackages(
+                crate::network::package_messages::decode_sendpackages(payload)?,
+            )),
+            cmd::ANCPKGINFO => Ok(ProtocolMessage::AncPkgInfo(
+                crate::network::package_messages::decode_ancpkginfo(payload)?,
+            )),
+            cmd::GETPKGTXNS => Ok(ProtocolMessage::GetPkgTxns(
+                crate::network::package_messages::decode_wtxid_list(payload)?,
+            )),
+            cmd::PKGTXNS => Ok(ProtocolMessage::PkgTxns(
+                crate::network::package_messages::decode_pkgtxns(payload)?,
+            )),
+            // Ban List Sharing
+            cmd::GETBANLIST => Ok(ProtocolMessage::GetBanList(bincode::deserialize(payload)?)),
+            cmd::BANLIST => Ok(ProtocolMessage::BanList(bincode::deserialize(payload)?)),
+            cmd::GETADDR => Ok(ProtocolMessage::GetAddr),
+            cmd::ADDR => {
+                let wire_msg = deserialize_addr(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize addr: {}", e))?;
+                Ok(ProtocolMessage::Addr(AddrMessage {
+                    addresses: wire_msg
+                        .addresses
+                        .into_iter()
+                        .map(|a| NetworkAddress {
+                            services: a.services,
+                            ip: a.ip,
+                            port: a.port,
+                            time: a.time,
+                        })
+                        .collect(),
+                }))
+            }
+            cmd::ADDRV2 => {
+                let msg = blvm_protocol::wire::deserialize_addrv2(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize addrv2: {e}"))?;
+                Ok(ProtocolMessage::AddrV2(msg))
+            }
+            cmd::SENDHEADERS => Ok(ProtocolMessage::SendHeaders),
+            cmd::WTXIDRELAY if payload.is_empty() => Ok(ProtocolMessage::WtxidRelay),
+            cmd::MEMPOOL => Ok(ProtocolMessage::MemPool),
+            cmd::REJECT => {
+                let msg = blvm_protocol::wire::deserialize_reject(payload)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize reject: {e}"))?;
+                Ok(ProtocolMessage::Reject(msg))
+            }
+            // Module Registry
+            cmd::GETMODULE => Ok(ProtocolMessage::GetModule(bincode::deserialize(payload)?)),
+            cmd::MODULE => Ok(ProtocolMessage::Module(bincode::deserialize(payload)?)),
+            cmd::GETMODULEBYHASH => Ok(ProtocolMessage::GetModuleByHash(bincode::deserialize(
+                payload,
+            )?)),
+            cmd::MODULEBYHASH => Ok(ProtocolMessage::ModuleByHash(bincode::deserialize(
+                payload,
+            )?)),
+            cmd::MODULEINV => Ok(ProtocolMessage::ModuleInv(bincode::deserialize(payload)?)),
+            cmd::GETMODULELIST => Ok(ProtocolMessage::GetModuleList(bincode::deserialize(
+                payload,
+            )?)),
+            cmd::MODULELIST => Ok(ProtocolMessage::ModuleList(bincode::deserialize(payload)?)),
+            // Mesh networking packets
+            cmd::MESH => Ok(ProtocolMessage::MeshPacket(payload.to_vec())),
+            #[cfg(feature = "erlay")]
+            cmd::SENDTXRCNCL => Ok(ProtocolMessage::SendTxRcncl(bincode::deserialize(payload)?)),
+            #[cfg(feature = "erlay")]
+            cmd::REQRECON => Ok(ProtocolMessage::ReqRecon(bincode::deserialize(payload)?)),
+            #[cfg(feature = "erlay")]
+            cmd::REQSKT => Ok(ProtocolMessage::ReqSkt(bincode::deserialize(payload)?)),
+            #[cfg(feature = "erlay")]
+            cmd::SKETCH => Ok(ProtocolMessage::Sketch(bincode::deserialize(payload)?)),
+            _ => Err(anyhow::anyhow!("Unknown command: {}", command)),
+        }
+    }
+
+    /// Serialize a protocol message to bytes
+    /// Frame an already-encoded P2P payload as a full TCP message (magic+cmd+len+checksum+payload).
+    /// Mode T W5 path: LMDB stores the `block` payload bytes — skip deserialize/re-serialize.
+    pub fn serialize_command_payload(command: &str, payload: &[u8]) -> Result<Vec<u8>> {
+        if command.len() > 12 {
+            return Err(anyhow::anyhow!("command too long: {command}"));
+        }
+        let mut message = Vec::with_capacity(24 + payload.len());
+        let active_magic = ACTIVE_MAGIC.load(std::sync::atomic::Ordering::Relaxed);
+        message.extend_from_slice(&active_magic.to_le_bytes());
+        let mut command_bytes = [0u8; 12];
+        command_bytes[..command.len()].copy_from_slice(command.as_bytes());
+        message.extend_from_slice(&command_bytes);
+        message.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        let checksum = Self::calculate_checksum(payload);
+        message.extend_from_slice(&checksum);
+        message.extend_from_slice(payload);
+        Ok(message)
+    }
+
+    pub fn serialize_message(message: &ProtocolMessage) -> Result<Vec<u8>> {
+        let (command, payload) = match message {
+            ProtocolMessage::Version(msg) => {
+                // Use proper Bitcoin wire format for version messages
+                // Convert to blvm-protocol format and use its wire serialization
+                use blvm_protocol::network::{NetworkAddress, VersionMessage};
+                use blvm_protocol::wire::serialize_version;
+
+                let version_msg = VersionMessage {
+                    version: msg.version,
+                    services: msg.services,
+                    timestamp: msg.timestamp,
+                    addr_recv: NetworkAddress {
+                        time: 0,
+                        services: msg.addr_recv.services,
+                        ip: msg.addr_recv.ip,
+                        port: msg.addr_recv.port,
+                    },
+                    addr_from: NetworkAddress {
+                        time: 0,
+                        services: msg.addr_from.services,
+                        ip: msg.addr_from.ip,
+                        port: msg.addr_from.port,
+                    },
+                    nonce: msg.nonce,
+                    user_agent: msg.user_agent.clone(),
+                    start_height: msg.start_height,
+                    relay: msg.relay,
+                };
+
+                // Serialize payload using proper Bitcoin wire format
+                // This uses the serialize_version function from blvm-protocol wire.rs
+                // which implements the exact Bitcoin protocol format
+                let payload = serialize_version(&version_msg)?;
+                let magic = ACTIVE_MAGIC
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .to_le_bytes();
+                tracing::debug!(
+                    "outbound version magic={:02x}{:02x}{:02x}{:02x} payload={} services={} height={} ua={}",
+                    magic[0],
+                    magic[1],
+                    magic[2],
+                    magic[3],
+                    payload.len(),
+                    version_msg.services,
+                    version_msg.start_height,
+                    version_msg.user_agent
+                );
+                (cmd::VERSION, payload)
+            }
+            ProtocolMessage::Verack => (cmd::VERACK, vec![]),
+            ProtocolMessage::SendHeaders => (cmd::SENDHEADERS, vec![]),
+            ProtocolMessage::WtxidRelay => (cmd::WTXIDRELAY, vec![]),
+            ProtocolMessage::MemPool => (cmd::MEMPOOL, vec![]),
+            ProtocolMessage::Reject(msg) => (
+                cmd::REJECT,
+                blvm_protocol::wire::serialize_reject(msg).map_err(|e| anyhow::anyhow!("{e}"))?,
+            ),
+            ProtocolMessage::Ping(msg) => {
+                let wire = blvm_protocol::network::PingMessage { nonce: msg.nonce };
+                (
+                    cmd::PING,
+                    serialize_ping(&wire).map_err(|e| anyhow::anyhow!("{e}"))?,
+                )
+            }
+            ProtocolMessage::Pong(msg) => {
+                let wire = blvm_protocol::network::PongMessage { nonce: msg.nonce };
+                (
+                    cmd::PONG,
+                    serialize_pong(&wire).map_err(|e| anyhow::anyhow!("{e}"))?,
+                )
+            }
+            ProtocolMessage::GetHeaders(msg) => {
+                // Use proper Bitcoin wire format for getheaders
+                let wire_msg = blvm_protocol::network::GetHeadersMessage {
+                    version: msg.version as u32,
+                    block_locator_hashes: msg.block_locator_hashes.clone(),
+                    hash_stop: msg.hash_stop,
+                };
+                (
+                    cmd::GETHEADERS,
+                    serialize_getheaders(&wire_msg).map_err(|e| anyhow::anyhow!("{}", e))?,
+                )
+            }
+            ProtocolMessage::Headers(msg) => {
+                // Use proper Bitcoin wire format for headers
+                let wire_msg = blvm_protocol::network::HeadersMessage {
+                    headers: msg.headers.clone(),
+                };
+                (
+                    cmd::HEADERS,
+                    blvm_protocol::wire::serialize_headers(&wire_msg)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?,
+                )
+            }
+            ProtocolMessage::GetBlocks(msg) => (cmd::GETBLOCKS, encode_getblocks(msg)?),
+            ProtocolMessage::Block(msg) => {
+                // Must match `parse_message` cmd::BLOCK: consensus block+witness wire bytes, not bincode.
+                let payload = blvm_protocol::serialization::serialize_block_with_witnesses(
+                    &msg.block,
+                    &msg.witnesses,
+                    true,
+                );
+                (cmd::BLOCK, payload)
+            }
+            ProtocolMessage::GetData(msg) => (
+                cmd::GETDATA,
+                serialize_getdata(msg).map_err(|e| anyhow::anyhow!("{}", e))?,
+            ),
+            ProtocolMessage::Inv(msg) => (
+                cmd::INV,
+                serialize_inv(msg).map_err(|e| anyhow::anyhow!("{}", e))?,
+            ),
+            ProtocolMessage::NotFound(msg) => (
+                cmd::NOTFOUND,
+                serialize_notfound(msg).map_err(|e| anyhow::anyhow!("{}", e))?,
+            ),
+            ProtocolMessage::Tx(msg) => (
+                cmd::TX,
+                serialize_tx_with_witness(&msg.transaction, &msg.witnesses)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?,
+            ),
+            ProtocolMessage::FeeFilter(msg) => (cmd::FEEFILTER, msg.feerate.to_le_bytes().to_vec()),
+            // Compact Block Relay (BIP152)
+            ProtocolMessage::SendCmpct(msg) => {
+                let wire = blvm_protocol::network::SendCmpctMessage {
+                    prefer_cmpct: msg.prefer_cmpct,
+                    version: msg.version,
+                };
+                (
+                    cmd::SENDCMPCT,
+                    blvm_protocol::wire::serialize_sendcmpct(&wire)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?,
+                )
+            }
+            ProtocolMessage::CmpctBlock(msg) => {
+                let wire =
+                    blvm_protocol::network::CmpctBlockMessage::try_from(msg.compact_block.clone())
+                        .map_err(|e| anyhow::anyhow!("CmpctBlock conversion error: {}", e))?;
+                (
+                    cmd::CMPCTBLOCK,
+                    serialize_cmpctblock(&wire).map_err(|e| anyhow::anyhow!("{e}"))?,
+                )
+            }
+            ProtocolMessage::GetBlockTxn(msg) => {
+                let wire = blvm_protocol::network::GetBlockTxnMessage {
+                    block_hash: msg.block_hash,
+                    indices: msg.indices.clone(),
+                };
+                (
+                    cmd::GETBLOCKTXN,
+                    serialize_getblocktxn(&wire).map_err(|e| anyhow::anyhow!("{e}"))?,
+                )
+            }
+            ProtocolMessage::BlockTxn(msg) => {
+                let wire = blvm_protocol::network::BlockTxnMessage {
+                    block_hash: msg.block_hash,
+                    transactions: msg.transactions.clone(),
+                    witnesses: msg.witnesses.clone(),
+                };
+                (
+                    cmd::BLOCKTXN,
+                    serialize_blocktxn(&wire).map_err(|e| anyhow::anyhow!("{e}"))?,
+                )
+            }
+            // UTXO commitment protocol extensions
+            ProtocolMessage::GetUTXOSet(msg) => (cmd::GETUTXOSET, bincode::serialize(msg)?),
+            ProtocolMessage::UTXOSet(msg) => (cmd::UTXOSET, bincode::serialize(msg)?),
+            ProtocolMessage::GetUTXOProof(msg) => (cmd::GETUTXOPROOF, bincode::serialize(msg)?),
+            ProtocolMessage::UTXOProof(msg) => (cmd::UTXOPROOF, bincode::serialize(msg)?),
+            ProtocolMessage::GetFilteredBlock(msg) => {
+                (cmd::GETFILTEREDBLOCK, bincode::serialize(msg)?)
+            }
+            ProtocolMessage::FilteredBlock(msg) => (cmd::FILTEREDBLOCK, bincode::serialize(msg)?),
+            // Block Filtering (BIP157)
+            ProtocolMessage::GetCfilters(msg) => (cmd::GETCFILTERS, encode_filter_request(msg)),
+            ProtocolMessage::Cfilter(msg) => return Ok(frame_cfilter(msg)),
+            ProtocolMessage::GetCfheaders(msg) => (
+                cmd::GETCFHEADERS,
+                encode_filter_request(&GetCfiltersMessage {
+                    filter_type: msg.filter_type,
+                    start_height: msg.start_height,
+                    stop_hash: msg.stop_hash,
+                }),
+            ),
+            ProtocolMessage::Cfheaders(msg) => (cmd::CFHEADERS, encode_cfheaders(msg)?),
+            ProtocolMessage::GetCfcheckpt(msg) => (cmd::GETCFCHECKPT, encode_getcfcheckpt(msg)),
+            ProtocolMessage::Cfcheckpt(msg) => (cmd::CFCHECKPT, encode_cfcheckpt(msg)?),
+            // Payment Protocol (BIP70) - P2P variant
+            ProtocolMessage::GetPaymentRequest(msg) => {
+                (cmd::GETPAYMENTREQUEST, bincode::serialize(msg)?)
+            }
+            ProtocolMessage::PaymentRequest(msg) => (cmd::PAYMENTREQUEST, bincode::serialize(msg)?),
+            ProtocolMessage::Payment(msg) => (cmd::PAYMENT, bincode::serialize(msg)?),
+            ProtocolMessage::PaymentACK(msg) => (cmd::PAYMENTACK, bincode::serialize(msg)?),
+            // CTV Payment Proof messages
+            #[cfg(feature = "ctv")]
+            ProtocolMessage::PaymentProof(msg) => (cmd::PAYMENTPROOF, bincode::serialize(msg)?),
+            ProtocolMessage::SettlementNotification(msg) => {
+                (cmd::SETTLEMENTNOTIFICATION, bincode::serialize(msg)?)
+            }
+            // Package Relay (BIP 331)
+            ProtocolMessage::SendPkgTxn(msg) => (cmd::SENDPKGTXN, bincode::serialize(msg)?),
+            ProtocolMessage::PkgTxn(msg) => (cmd::PKGTXN, bincode::serialize(msg)?),
+            ProtocolMessage::PkgTxnReject(msg) => (cmd::PKGTXNREJECT, bincode::serialize(msg)?),
+            ProtocolMessage::SendPackages(version) => (
+                cmd::SENDPACKAGES,
+                crate::network::package_messages::encode_sendpackages(*version).to_vec(),
+            ),
+            ProtocolMessage::AncPkgInfo(wtxids) => (
+                cmd::ANCPKGINFO,
+                crate::network::package_messages::encode_ancpkginfo(wtxids)?,
+            ),
+            ProtocolMessage::GetPkgTxns(wtxids) => (
+                cmd::GETPKGTXNS,
+                crate::network::package_messages::encode_wtxid_list(wtxids)?,
+            ),
+            ProtocolMessage::PkgTxns(transactions) => (
+                cmd::PKGTXNS,
+                crate::network::package_messages::encode_pkgtxns(transactions)?,
+            ),
+            // Ban List Sharing
+            ProtocolMessage::GetBanList(msg) => (cmd::GETBANLIST, bincode::serialize(msg)?),
+            ProtocolMessage::BanList(msg) => (cmd::BANLIST, bincode::serialize(msg)?),
+            // Address relay
+            ProtocolMessage::GetAddr => (cmd::GETADDR, vec![]),
+            ProtocolMessage::Addr(msg) => {
+                let wire = blvm_protocol::network::AddrMessage {
+                    addresses: msg
+                        .addresses
+                        .iter()
+                        .map(|a| blvm_protocol::network::NetworkAddress {
+                            services: a.services,
+                            ip: a.ip,
+                            port: a.port,
+                            time: a.time,
+                        })
+                        .collect(),
+                };
+                (
+                    cmd::ADDR,
+                    serialize_addr(&wire).map_err(|e| anyhow::anyhow!("{e}"))?,
+                )
+            }
+            ProtocolMessage::AddrV2(msg) => (
+                cmd::ADDRV2,
+                blvm_protocol::wire::serialize_addrv2(msg).map_err(|e| anyhow::anyhow!("{e}"))?,
+            ),
+            // Module Registry
+            ProtocolMessage::GetModule(msg) => (cmd::GETMODULE, bincode::serialize(msg)?),
+            ProtocolMessage::Module(msg) => (cmd::MODULE, bincode::serialize(msg)?),
+            ProtocolMessage::GetModuleByHash(msg) => {
+                (cmd::GETMODULEBYHASH, bincode::serialize(msg)?)
+            }
+            ProtocolMessage::ModuleByHash(msg) => (cmd::MODULEBYHASH, bincode::serialize(msg)?),
+            ProtocolMessage::ModuleInv(msg) => (cmd::MODULEINV, bincode::serialize(msg)?),
+            ProtocolMessage::GetModuleList(msg) => (cmd::GETMODULELIST, bincode::serialize(msg)?),
+            ProtocolMessage::ModuleList(msg) => (cmd::MODULELIST, bincode::serialize(msg)?),
+            ProtocolMessage::MeshPacket(_) => {
+                return Err(anyhow::anyhow!("MeshPacket handled separately"));
+            }
+            #[cfg(feature = "erlay")]
+            ProtocolMessage::SendTxRcncl(msg) => (cmd::SENDTXRCNCL, bincode::serialize(msg)?),
+            #[cfg(feature = "erlay")]
+            ProtocolMessage::ReqRecon(msg) => (cmd::REQRECON, bincode::serialize(msg)?),
+            #[cfg(feature = "erlay")]
+            ProtocolMessage::ReqSkt(msg) => (cmd::REQSKT, bincode::serialize(msg)?),
+            #[cfg(feature = "erlay")]
+            ProtocolMessage::Sketch(msg) => (cmd::SKETCH, bincode::serialize(msg)?),
+        };
+
+        let mut message = Vec::new();
+
+        // Magic number — use the active network magic set at startup
+        let active_magic = ACTIVE_MAGIC.load(std::sync::atomic::Ordering::Relaxed);
+        message.extend_from_slice(&active_magic.to_le_bytes());
+
+        // Command (12 bytes, null-padded)
+        let mut command_bytes = [0u8; 12];
+        command_bytes[..command.len()].copy_from_slice(command.as_bytes());
+        message.extend_from_slice(&command_bytes);
+
+        // Payload length
+        message.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+
+        // Checksum
+        let checksum = Self::calculate_checksum(&payload);
+        message.extend_from_slice(&checksum);
+
+        // Payload
+        message.extend_from_slice(&payload);
+
+        Ok(message)
+    }
+
+    /// Calculate message checksum
+    ///
+    /// Computes double SHA256 of payload and returns first 4 bytes.
+    /// Orange Paper 10.1.1: CalculateChecksum, |result| = 4
+    #[cfg_attr(
+        feature = "spec-lock",
+        spec_locked("10.1.1", "CalculateChecksum")
+    )]
+    #[cfg_attr(
+        feature = "spec-lock",
+        blvm_spec_lock::ensures(result.len() == 4)
+    )]
+    pub fn calculate_checksum(payload: &[u8]) -> [u8; 4] {
+        use sha2::{Digest, Sha256};
+
+        let hash1 = Sha256::digest(payload);
+        let hash2 = Sha256::digest(hash1);
+
+        let mut checksum = [0u8; 4];
+        checksum.copy_from_slice(&hash2[..4]);
+        checksum
+    }
+}
+
+// Ban List Sharing messages
+
+/// GetBanList message - Request peer's ban list (or hashed version)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetBanListMessage {
+    /// Request full ban list (true) or just hash (false)
+    pub request_full: bool,
+    /// Minimum ban duration to include (seconds, 0 = all)
+    pub min_ban_duration: u64,
+}
+
+/// BanList message - Response with ban list or hash
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BanListMessage {
+    /// If false, only ban_list_hash is valid
+    pub is_full: bool,
+    /// Hash of full ban list (SHA256 of sorted entries)
+    pub ban_list_hash: Hash,
+    /// Full ban list entries (only if is_full = true)
+    pub ban_entries: Vec<BanEntry>,
+    /// Timestamp when ban list was generated
+    pub timestamp: u64,
+}
+
+/// Single ban entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BanEntry {
+    /// Banned peer address
+    pub addr: NetworkAddress,
+    /// Unix timestamp when ban expires (u64::MAX = permanent)
+    pub unban_timestamp: u64,
+    /// Reason for ban (optional)
+    pub reason: Option<String>,
+}
+
+// Address relay messages
+
+/// Addr message - Contains peer addresses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddrMessage {
+    /// List of network addresses
+    pub addresses: Vec<NetworkAddress>,
+}
+
+fn read_hash(cursor: &mut std::io::Cursor<&[u8]>) -> anyhow::Result<Hash> {
+    let mut hash = [0u8; 32];
+    std::io::Read::read_exact(cursor, &mut hash)?;
+    Ok(hash)
+}
+
+fn decode_filter_request(payload: &[u8]) -> anyhow::Result<GetCfiltersMessage> {
+    if payload.len() < 37 {
+        anyhow::bail!("filter request too short");
+    }
+    let mut stop_hash = [0u8; 32];
+    stop_hash.copy_from_slice(&payload[5..37]);
+    Ok(GetCfiltersMessage {
+        filter_type: payload[0],
+        start_height: u32::from_le_bytes(payload[1..5].try_into().unwrap()),
+        stop_hash,
+    })
+}
+
+fn encode_filter_request(msg: &GetCfiltersMessage) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(37);
+    buf.push(msg.filter_type);
+    buf.extend_from_slice(&msg.start_height.to_le_bytes());
+    buf.extend_from_slice(&msg.stop_hash);
+    buf
+}
+
+fn decode_cfilter(payload: &[u8]) -> anyhow::Result<CfilterMessage> {
+    if payload.len() < 34 {
+        anyhow::bail!("cfilter too short");
+    }
+    let mut block_hash = [0u8; 32];
+    block_hash.copy_from_slice(&payload[1..33]);
+    let mut cursor = std::io::Cursor::new(&payload[33..]);
+    let len = blvm_protocol::varint::read_varint(&mut cursor).map_err(|e| anyhow::anyhow!("{e}"))?
+        as usize;
+    let start = 33 + cursor.position() as usize;
+    if payload.len() < start + len {
+        anyhow::bail!("cfilter truncated");
+    }
+    Ok(CfilterMessage {
+        filter_type: payload[0],
+        block_hash,
+        filter_data: Arc::new(payload[start..start + len].to_vec()),
+        num_elements: 0,
+    })
+}
+
+/// One framed `cfilter`. The filter bytes are copied into the frame once.
+fn frame_cfilter(msg: &CfilterMessage) -> Vec<u8> {
+    let (varint, varint_len) = cfilter_len_varint(msg.filter_data.len() as u64);
+    let payload_len = 1 + 32 + varint_len + msg.filter_data.len();
+    let checksum = cfilter_checksum(
+        msg.filter_type,
+        &msg.block_hash,
+        &varint[..varint_len],
+        msg.filter_data.as_slice(),
+    );
+
+    let mut message = Vec::with_capacity(24 + payload_len);
+    let active_magic = ACTIVE_MAGIC.load(std::sync::atomic::Ordering::Relaxed);
+    message.extend_from_slice(&active_magic.to_le_bytes());
+    let mut command_bytes = [0u8; 12];
+    let command = cmd::CFILTER;
+    command_bytes[..command.len()].copy_from_slice(command.as_bytes());
+    message.extend_from_slice(&command_bytes);
+    message.extend_from_slice(&(payload_len as u32).to_le_bytes());
+    message.extend_from_slice(&checksum);
+    message.push(msg.filter_type);
+    message.extend_from_slice(&msg.block_hash);
+    message.extend_from_slice(&varint[..varint_len]);
+    message.extend_from_slice(msg.filter_data.as_slice());
+    message
+}
+
+fn cfilter_len_varint(len: u64) -> ([u8; 9], usize) {
+    let mut buf = [0u8; 9];
+    let n = match len {
+        0..=0xfc => {
+            buf[0] = len as u8;
+            1
+        }
+        0xfd..=0xffff => {
+            buf[0] = 0xfd;
+            buf[1..3].copy_from_slice(&(len as u16).to_le_bytes());
+            3
+        }
+        0x10000..=0xffff_ffff => {
+            buf[0] = 0xfe;
+            buf[1..5].copy_from_slice(&(len as u32).to_le_bytes());
+            5
+        }
+        _ => {
+            buf[0] = 0xff;
+            buf[1..9].copy_from_slice(&len.to_le_bytes());
+            9
+        }
+    };
+    (buf, n)
+}
+
+fn cfilter_checksum(
+    filter_type: u8,
+    block_hash: &[u8; 32],
+    varint: &[u8],
+    filter: &[u8],
+) -> [u8; 4] {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update([filter_type]);
+    hasher.update(block_hash);
+    hasher.update(varint);
+    hasher.update(filter);
+    let second = Sha256::digest(hasher.finalize());
+    let mut checksum = [0u8; 4];
+    checksum.copy_from_slice(&second[..4]);
+    checksum
+}
+
+fn decode_cfheaders(payload: &[u8]) -> anyhow::Result<CfheadersMessage> {
+    if payload.len() < 66 {
+        anyhow::bail!("cfheaders too short");
+    }
+    let mut stop_hash = [0u8; 32];
+    stop_hash.copy_from_slice(&payload[1..33]);
+    let mut filter_hash = [0u8; 32];
+    filter_hash.copy_from_slice(&payload[33..65]);
+    let mut cursor = std::io::Cursor::new(&payload[65..]);
+    let count = blvm_protocol::varint::read_varint(&mut cursor)
+        .map_err(|e| anyhow::anyhow!("{e}"))? as usize;
+    if count > 2000 {
+        anyhow::bail!("cfheaders count {count}");
+    }
+    let base = 65 + cursor.position() as usize;
+    if payload.len() < base + count * 32 {
+        anyhow::bail!("cfheaders truncated");
+    }
+    let mut filter_headers = Vec::with_capacity(count);
+    for index in 0..count {
+        let off = base + index * 32;
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&payload[off..off + 32]);
+        filter_headers.push(hash);
+    }
+    Ok(CfheadersMessage {
+        filter_type: payload[0],
+        stop_hash,
+        prev_header: FilterHeaderData {
+            filter_hash,
+            prev_header_hash: [0u8; 32],
+        },
+        filter_headers,
+    })
+}
+
+fn encode_cfheaders(msg: &CfheadersMessage) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    buf.push(msg.filter_type);
+    buf.extend_from_slice(&msg.stop_hash);
+    buf.extend_from_slice(&msg.prev_header.filter_hash);
+    blvm_protocol::varint::write_varint(&mut buf, msg.filter_headers.len() as u64)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    for hash in &msg.filter_headers {
+        buf.extend_from_slice(hash);
+    }
+    Ok(buf)
+}
+
+fn decode_getcfcheckpt(payload: &[u8]) -> anyhow::Result<GetCfcheckptMessage> {
+    if payload.len() < 33 {
+        anyhow::bail!("getcfcheckpt too short");
+    }
+    let mut stop_hash = [0u8; 32];
+    stop_hash.copy_from_slice(&payload[1..33]);
+    Ok(GetCfcheckptMessage {
+        filter_type: payload[0],
+        stop_hash,
+    })
+}
+
+fn encode_getcfcheckpt(msg: &GetCfcheckptMessage) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(33);
+    buf.push(msg.filter_type);
+    buf.extend_from_slice(&msg.stop_hash);
+    buf
+}
+
+fn decode_cfcheckpt(payload: &[u8]) -> anyhow::Result<CfcheckptMessage> {
+    if payload.len() < 34 {
+        anyhow::bail!("cfcheckpt too short");
+    }
+    let mut stop_hash = [0u8; 32];
+    stop_hash.copy_from_slice(&payload[1..33]);
+    let mut cursor = std::io::Cursor::new(&payload[33..]);
+    let count = blvm_protocol::varint::read_varint(&mut cursor)
+        .map_err(|e| anyhow::anyhow!("{e}"))? as usize;
+    if count > 2000 {
+        anyhow::bail!("cfcheckpt count {count}");
+    }
+    let base = 33 + cursor.position() as usize;
+    if payload.len() < base + count * 32 {
+        anyhow::bail!("cfcheckpt truncated");
+    }
+    let mut filter_header_hashes = Vec::with_capacity(count);
+    for index in 0..count {
+        let off = base + index * 32;
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&payload[off..off + 32]);
+        filter_header_hashes.push(hash);
+    }
+    Ok(CfcheckptMessage {
+        filter_type: payload[0],
+        stop_hash,
+        filter_header_hashes,
+    })
+}
+
+fn encode_cfcheckpt(msg: &CfcheckptMessage) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    buf.push(msg.filter_type);
+    buf.extend_from_slice(&msg.stop_hash);
+    blvm_protocol::varint::write_varint(&mut buf, msg.filter_header_hashes.len() as u64)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    for hash in &msg.filter_header_hashes {
+        buf.extend_from_slice(hash);
+    }
+    Ok(buf)
+}
+
+fn decode_getblocks(payload: &[u8]) -> anyhow::Result<GetBlocksMessage> {
+    let mut cursor = std::io::Cursor::new(payload);
+    let mut version_bytes = [0u8; 4];
+    std::io::Read::read_exact(&mut cursor, &mut version_bytes)?;
+    let version = i32::from_le_bytes(version_bytes);
+    let hash_count = blvm_protocol::varint::read_varint(&mut cursor)
+        .map_err(|e| anyhow::anyhow!("{e}"))? as usize;
+    if hash_count > 2000 {
+        anyhow::bail!("getblocks locator count {hash_count}");
+    }
+    let mut block_locator_hashes = Vec::with_capacity(hash_count);
+    for _ in 0..hash_count {
+        block_locator_hashes.push(read_hash(&mut cursor)?);
+    }
+    Ok(GetBlocksMessage {
+        version,
+        block_locator_hashes,
+        hash_stop: read_hash(&mut cursor)?,
+    })
+}
+
+fn encode_getblocks(msg: &GetBlocksMessage) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&msg.version.to_le_bytes());
+    blvm_protocol::varint::write_varint(&mut buf, msg.block_locator_hashes.len() as u64)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    for hash in &msg.block_locator_hashes {
+        buf.extend_from_slice(hash);
+    }
+    buf.extend_from_slice(&msg.hash_stop);
+    Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProtocolMessage, ProtocolParser, TxMessage};
+    use blvm_protocol::{
+        OutPoint, Transaction, TransactionInput, TransactionOutput, tx_inputs, tx_outputs,
+    };
+
+    fn one_input_tx() -> Transaction {
+        Transaction {
+            version: 2,
+            inputs: tx_inputs![TransactionInput {
+                prevout: OutPoint {
+                    hash: [4u8; 32],
+                    index: 0,
+                },
+                script_sig: Vec::new(),
+                sequence: 0xfffffffe,
+            }],
+            outputs: tx_outputs![TransactionOutput {
+                value: 1000,
+                script_pubkey: Vec::new(),
+            }],
+            lock_time: 0,
+        }
+    }
+
+    #[test]
+    fn tx_message_keeps_witness_stacks() {
+        let witnesses = vec![vec![vec![1u8, 2, 3]]];
+        let message = ProtocolMessage::Tx(TxMessage {
+            transaction: one_input_tx(),
+            witnesses: witnesses.clone(),
+        });
+        let bytes = ProtocolParser::serialize_message(&message).unwrap();
+        match ProtocolParser::parse_message(&bytes).unwrap() {
+            ProtocolMessage::Tx(parsed) => {
+                assert_eq!(parsed.witnesses, witnesses);
+                assert_eq!(parsed.transaction.inputs.len(), 1);
+            }
+            other => panic!("expected a tx message, got {other:?}"),
+        }
+
+        let legacy = ProtocolMessage::Tx(TxMessage {
+            transaction: one_input_tx(),
+            witnesses: vec![Vec::new()],
+        });
+        let legacy_bytes = ProtocolParser::serialize_message(&legacy).unwrap();
+        match ProtocolParser::parse_message(&legacy_bytes).unwrap() {
+            ProtocolMessage::Tx(parsed) => {
+                assert_eq!(parsed.witnesses.len(), 1);
+                assert!(parsed.witnesses.iter().all(|stack| stack.is_empty()));
+            }
+            other => panic!("expected a tx message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_lock_getcfilters_and_cfilter_use_wire_bytes() {
+        use super::{CfilterMessage, GetCfiltersMessage, ProtocolMessage, ProtocolParser};
+        use std::sync::Arc;
+
+        let stop = [0xab; 32];
+        let request = GetCfiltersMessage {
+            filter_type: 0,
+            start_height: 0x0102_0304,
+            stop_hash: stop,
+        };
+        let framed =
+            ProtocolParser::serialize_message(&ProtocolMessage::GetCfilters(request)).unwrap();
+        let payload = &framed[24..];
+        assert_eq!(payload.len(), 37);
+        match ProtocolParser::parse_message(&framed).unwrap() {
+            ProtocolMessage::GetCfilters(parsed) => {
+                assert_eq!(parsed.filter_type, 0);
+                assert_eq!(parsed.start_height, 0x0102_0304);
+                assert_eq!(parsed.stop_hash, stop);
+            }
+            other => panic!("expected getcfilters, got {other:?}"),
+        }
+
+        let reply = CfilterMessage {
+            filter_type: 0,
+            block_hash: stop,
+            filter_data: Arc::new(vec![0x09, 0x08, 0x07]),
+            num_elements: 3,
+        };
+        let framed = ProtocolParser::serialize_message(&ProtocolMessage::Cfilter(reply)).unwrap();
+        let payload = &framed[24..];
+        assert_eq!(payload.len(), 37, "no trailing element count");
+        assert_eq!(payload[0], 0);
+        assert_eq!(&payload[1..33], &stop);
+        assert_eq!(payload[33], 3);
+        assert_eq!(&payload[34..], &[0x09, 0x08, 0x07]);
+        match ProtocolParser::parse_message(&framed).unwrap() {
+            ProtocolMessage::Cfilter(parsed) => {
+                assert_eq!(parsed.filter_data.as_slice(), &[0x09, 0x08, 0x07]);
+                assert_eq!(parsed.block_hash, stop);
+            }
+            other => panic!("expected cfilter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn getblocks_lock_69_byte_request_decodes() {
+        let mut payload = vec![0x80, 0x11, 0x01, 0x00, 0x01];
+        payload.extend(std::iter::repeat(0x11).take(32));
+        payload.extend(std::iter::repeat(0x22).take(32));
+        assert_eq!(payload.len(), 69);
+        let msg = super::decode_getblocks(&payload).unwrap();
+        assert_eq!(msg.version, 70016);
+        assert_eq!(msg.block_locator_hashes, vec![[0x11; 32]]);
+        assert_eq!(msg.hash_stop, [0x22; 32]);
+    }
+
+    #[test]
+    fn signet_magic_matches_protocol_and_maps_to_signet_seeds() {
+        use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+
+        assert_eq!(super::BITCOIN_MAGIC_SIGNET, [0x0a, 0x03, 0xcf, 0x40]);
+        // Node startup sets ACTIVE_MAGIC from the protocol engine's params.
+        let engine = BitcoinProtocolEngine::new(ProtocolVersion::Signet).unwrap();
+        let magic = engine.get_network_params().magic_bytes;
+        assert_eq!(magic, super::BITCOIN_MAGIC_SIGNET);
+        assert_eq!(
+            ProtocolParser::dns_seed_network_for(magic),
+            ("signet", 38333)
+        );
+        assert_eq!(
+            ProtocolParser::dns_seed_network_for([0x0f, 0x1b, 0xf2, 0xe1]),
+            ("mainnet", 8333),
+            "stale pre-protocol#7 signet magic must not map to signet"
+        );
+    }
+
+    #[test]
+    fn a_testnet4_seed_version_and_verack_parse() {
+        let version = hex_frame(
+            "1c163f2876657273696f6e00000000006c000000c7f7a7a181110100090c0000000000009defe26a00000000000000000000000000000000000000000000ffff6c040dbf9096090c000000000000000000000000000000000000000000000000a6960f924d5ce593162f5361746f7368693a33322e312e30284077697a292f3f69020001",
+        );
+        let verack = hex_frame("1c163f2876657261636b000000000000000000005df6e0e2");
+        ProtocolParser::set_network_magic(super::BITCOIN_MAGIC_TESTNET4);
+        ProtocolParser::parse_message(&version).expect("seed version");
+        ProtocolParser::parse_message(&verack).expect("seed verack");
+        ProtocolParser::set_network_magic(super::BITCOIN_MAGIC_MAINNET);
+    }
+
+    fn hex_frame(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+}

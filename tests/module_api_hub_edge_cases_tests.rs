@@ -1,0 +1,141 @@
+//! Module API Hub Edge Cases Tests
+//!
+//! Additional edge cases for module API hub: concurrent requests, timeouts, error recovery.
+
+#[path = "stub_node_api.rs"]
+mod stub_node_api;
+
+use blvm_node::module::api::hub::ModuleApiHub;
+use blvm_node::module::ipc::protocol::{
+    MessageType, RequestMessage, RequestPayload, ResponsePayload,
+};
+use blvm_node::module::security::permissions::{Permission, PermissionSet};
+use std::sync::Arc;
+
+use stub_node_api::MockNodeAPI;
+
+#[tokio::test]
+async fn test_concurrent_requests() {
+    // Test handling multiple concurrent requests
+    let node_api = Arc::new(MockNodeAPI);
+    let hub = Arc::new(tokio::sync::Mutex::new(ModuleApiHub::new(node_api)));
+
+    let mut handles = vec![];
+    for i in 0..10 {
+        let hub_clone = hub.clone();
+        handles.push(tokio::spawn(async move {
+            let request = RequestMessage {
+                correlation_id: i,
+                request_type: MessageType::Handshake,
+                payload: RequestPayload::Handshake {
+                    module_id: format!("test_module_{i}"),
+                    module_name: "Test Module".to_string(),
+                    version: "1.0.0".to_string(),
+                },
+            };
+            let mut hub_guard = hub_clone.lock().await;
+            hub_guard
+                .handle_request(&format!("test_module_{i}"), request)
+                .await
+        }));
+    }
+
+    let results: Vec<_> = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|r| r.unwrap())
+        .collect();
+
+    assert_eq!(results.len(), 10);
+    for result in results {
+        let response = result.expect("handshake");
+        assert!(matches!(
+            response.payload,
+            Some(ResponsePayload::HandshakeAck { .. })
+        ));
+    }
+}
+
+#[tokio::test]
+async fn test_permission_edge_cases() {
+    // Test permission edge cases
+    let node_api = Arc::new(MockNodeAPI);
+    let mut hub = ModuleApiHub::new(node_api);
+
+    // Test with empty permission set
+    let empty_permissions = PermissionSet::new();
+    hub.register_module_permissions("test_module".to_string(), empty_permissions.clone());
+
+    let request = RequestMessage {
+        correlation_id: 1,
+        request_type: MessageType::Handshake,
+        payload: RequestPayload::Handshake {
+            module_id: "test_module".to_string(),
+            module_name: "Test".to_string(),
+            version: "1.0.0".to_string(),
+        },
+    };
+
+    let response = hub
+        .handle_request("test_module", request)
+        .await
+        .expect("handshake");
+    assert!(matches!(
+        response.payload,
+        Some(ResponsePayload::HandshakeAck { .. })
+    ));
+
+    // Test with all permissions
+    let mut all_permissions = PermissionSet::new();
+    all_permissions.add(Permission::ReadBlockchain);
+    all_permissions.add(Permission::ReadUTXO);
+    all_permissions.add(Permission::ReadChainState);
+    all_permissions.add(Permission::SubscribeEvents);
+
+    hub.register_module_permissions("test_module2".to_string(), all_permissions);
+
+    let request2 = RequestMessage {
+        correlation_id: 2,
+        request_type: MessageType::Handshake,
+        payload: RequestPayload::Handshake {
+            module_id: "test_module2".to_string(),
+            module_name: "Test".to_string(),
+            version: "1.0.0".to_string(),
+        },
+    };
+
+    let response = hub
+        .handle_request("test_module2", request2)
+        .await
+        .expect("handshake");
+    assert!(matches!(
+        response.payload,
+        Some(ResponsePayload::HandshakeAck { .. })
+    ));
+}
+
+#[tokio::test]
+async fn test_error_recovery() {
+    // Test error recovery scenarios
+    let node_api = Arc::new(MockNodeAPI);
+    let mut hub = ModuleApiHub::new(node_api);
+
+    // Test with invalid module ID mismatch
+    let request = RequestMessage {
+        correlation_id: 1,
+        request_type: MessageType::Handshake,
+        payload: RequestPayload::Handshake {
+            module_id: "wrong_module".to_string(),
+            module_name: "Test".to_string(),
+            version: "1.0.0".to_string(),
+        },
+    };
+
+    let result = hub.handle_request("test_module", request).await;
+
+    let message = result.expect_err("module id mismatch").to_string();
+    assert!(
+        message.contains("module_id mismatch"),
+        "unexpected error: {message}"
+    );
+}

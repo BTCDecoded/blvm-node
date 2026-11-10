@@ -1,0 +1,409 @@
+//! RBF (Replace-By-Fee) Mode Tests
+//!
+//! Comprehensive tests for all RBF modes:
+//! - Disabled: No replacements allowed
+//! - Conservative: Strict rules with higher fee requirements
+//! - Standard: BIP125-compliant (default)
+//! - Aggressive: Relaxed rules for miners
+
+use blvm_node::config::{MempoolPolicyConfig, RbfConfig, RbfMode};
+use blvm_node::node::mempool::MempoolManager;
+use blvm_protocol::block::calculate_tx_id;
+use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput, UTXO, UtxoSet};
+use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
+
+/// Create a test transaction with RBF signaling
+fn create_rbf_tx(input_value: u64, output_value: u64) -> Transaction {
+    create_rbf_tx_spending(
+        OutPoint {
+            hash: [1; 32],
+            index: 0,
+        },
+        output_value,
+    )
+}
+
+/// These fixtures spend a bare `OP_1`. That script is valid and non-standard.
+fn admit_bare_op1(mempool: &MempoolManager) {
+    let mut policy = MempoolPolicyConfig::default();
+    policy.require_standard = false;
+    mempool.set_policy_config(Some(policy));
+}
+
+fn create_rbf_tx_spending(prevout: OutPoint, output_value: u64) -> Transaction {
+    Transaction {
+        version: 1,
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
+            prevout,
+            script_sig: vec![],
+            sequence: 0xfffffffd, // BIP125: below 0xfffffffe
+        }],
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
+            value: output_value as i64,
+            script_pubkey: vec![0x51, 0x61, 0x61, 0x61, 0x61],
+        }],
+        lock_time: 0,
+    }
+}
+
+/// Create a test UTXO set
+fn create_test_utxo_set() -> UtxoSet {
+    let mut utxo_set = UtxoSet::default();
+    utxo_set.insert(
+        OutPoint {
+            hash: [1; 32],
+            index: 0,
+        },
+        Arc::new(UTXO {
+            value: 100_000,
+            script_pubkey: vec![blvm_protocol::opcodes::OP_1].into(),
+            height: 0,
+            is_coinbase: false,
+        }),
+    );
+    utxo_set
+}
+
+#[test]
+fn test_rbf_mode_disabled() {
+    let mempool = MempoolManager::new();
+    let rbf_config = RbfConfig::with_mode(RbfMode::Disabled);
+    mempool.set_rbf_config(Some(rbf_config));
+
+    let existing_tx = create_rbf_tx(100_000, 90_000); // Fee: 10,000
+    let new_tx = create_rbf_tx(100_000, 80_000); // Fee: 20,000 (higher)
+
+    let utxo_set = create_test_utxo_set();
+    let result = mempool.check_rbf_replacement(&new_tx, &existing_tx, &utxo_set, None);
+
+    // RBF disabled - should reject
+    assert!(result.is_ok());
+    assert!(!result.unwrap(), "RBF should be disabled");
+}
+
+#[test]
+fn test_rbf_mode_conservative() {
+    let mempool = MempoolManager::new();
+    let rbf_config = RbfConfig::with_mode(RbfMode::Conservative);
+    mempool.set_rbf_config(Some(rbf_config));
+
+    let existing_tx = create_rbf_tx(100_000, 90_000); // Fee: 10,000, Fee rate: ~100 sat/vB
+    let new_tx = create_rbf_tx(100_000, 70_000); // Fee: 30,000, Fee rate: ~300 sat/vB (3x increase)
+
+    let utxo_set = create_test_utxo_set();
+    let result = mempool.check_rbf_replacement(&new_tx, &existing_tx, &utxo_set, None);
+
+    // Conservative mode requires 2x fee rate multiplier and 5000 sat absolute bump
+    // 300 / 100 = 3x (passes 2x requirement)
+    // 30,000 - 10,000 = 20,000 (passes 5000 sat requirement)
+    assert!(result.is_ok());
+    // Note: This will also check BIP125 rules, so result depends on full validation
+}
+
+#[test]
+fn test_rbf_mode_standard() {
+    let mempool = MempoolManager::new();
+    let rbf_config = RbfConfig::with_mode(RbfMode::Standard);
+    mempool.set_rbf_config(Some(rbf_config));
+
+    let existing_tx = create_rbf_tx(100_000, 90_000); // Fee: 10,000
+    let new_tx = create_rbf_tx(100_000, 88_000); // Fee: 12,000 (1.2x fee rate, 2000 sat bump)
+
+    let utxo_set = create_test_utxo_set();
+    let result = mempool.check_rbf_replacement(&new_tx, &existing_tx, &utxo_set, None);
+
+    // Standard mode requires a strictly higher fee rate.
+    // Should pass if BIP125 rules are satisfied
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_rbf_mode_aggressive() {
+    let mempool = MempoolManager::new();
+    let rbf_config = RbfConfig::with_mode(RbfMode::Aggressive);
+    mempool.set_rbf_config(Some(rbf_config));
+
+    let existing_tx = create_rbf_tx(100_000, 90_000); // Fee: 10,000
+    let new_tx = create_rbf_tx(100_000, 89_500); // Fee: 10,500 (1.05x fee rate, 500 sat bump)
+
+    let utxo_set = create_test_utxo_set();
+    let result = mempool.check_rbf_replacement(&new_tx, &existing_tx, &utxo_set, None);
+
+    // Aggressive mode requires 1.05x fee rate multiplier and 500 sat absolute bump
+    // Should pass if BIP125 rules are satisfied
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_rbf_replacement_count_limit() {
+    // Test that replacement count limit is configured correctly
+    let mut rbf_config = RbfConfig::with_mode(RbfMode::Standard);
+    rbf_config.max_replacements_per_tx = 2; // Allow only 2 replacements
+
+    assert_eq!(rbf_config.max_replacements_per_tx, 2);
+    assert_eq!(rbf_config.mode, RbfMode::Standard);
+}
+
+#[test]
+fn test_rbf_cooldown_period() {
+    // Test that cooldown period is configured correctly
+    let mut rbf_config = RbfConfig::with_mode(RbfMode::Standard);
+    rbf_config.cooldown_seconds = 60; // 60 second cooldown
+
+    assert_eq!(rbf_config.cooldown_seconds, 60);
+    assert_eq!(rbf_config.mode, RbfMode::Standard);
+}
+
+#[test]
+fn test_rbf_fee_rate_multiplier() {
+    let mempool = MempoolManager::new();
+    let mut rbf_config = RbfConfig::with_mode(RbfMode::Standard);
+    rbf_config.min_fee_rate_multiplier = 1.5; // Require 50% increase
+    mempool.set_rbf_config(Some(rbf_config));
+
+    let existing_tx = create_rbf_tx(100_000, 90_000); // Fee: 10,000, ~100 sat/vB
+    let new_tx_insufficient = create_rbf_tx(100_000, 91_000); // Fee: 9,000, ~90 sat/vB (less than 1.5x)
+    let new_tx_sufficient = create_rbf_tx(100_000, 85_000); // Fee: 15,000, ~150 sat/vB (1.5x)
+
+    let utxo_set = create_test_utxo_set();
+
+    // Insufficient fee rate increase should fail
+    let result1 =
+        mempool.check_rbf_replacement(&new_tx_insufficient, &existing_tx, &utxo_set, None);
+    assert!(result1.is_ok());
+    // Should be rejected due to insufficient fee rate
+
+    // Sufficient fee rate increase should pass (if other checks pass)
+    let result2 = mempool.check_rbf_replacement(&new_tx_sufficient, &existing_tx, &utxo_set, None);
+    assert!(result2.is_ok());
+}
+
+#[test]
+fn test_rbf_absolute_fee_bump() {
+    let mempool = MempoolManager::new();
+    let mut rbf_config = RbfConfig::with_mode(RbfMode::Standard);
+    rbf_config.min_fee_bump_satoshis = 5000; // Require 5000 sat absolute bump
+    mempool.set_rbf_config(Some(rbf_config));
+
+    let existing_tx = create_rbf_tx(100_000, 90_000); // Fee: 10,000
+    let new_tx_insufficient = create_rbf_tx(100_000, 89_500); // Fee: 10,500 (only 500 sat bump)
+    let new_tx_sufficient = create_rbf_tx(100_000, 84_000); // Fee: 16,000 (6000 sat bump)
+
+    let utxo_set = create_test_utxo_set();
+
+    // Insufficient absolute fee bump should fail
+    let result1 =
+        mempool.check_rbf_replacement(&new_tx_insufficient, &existing_tx, &utxo_set, None);
+    assert!(result1.is_ok());
+    // Should be rejected due to insufficient absolute fee bump
+
+    // Sufficient absolute fee bump should pass (if other checks pass)
+    let result2 = mempool.check_rbf_replacement(&new_tx_sufficient, &existing_tx, &utxo_set, None);
+    assert!(result2.is_ok());
+}
+
+#[test]
+fn test_rbf_config_with_mode() {
+    // Test that with_mode sets appropriate defaults
+    let conservative = RbfConfig::with_mode(RbfMode::Conservative);
+    assert_eq!(conservative.mode, RbfMode::Conservative);
+    assert_eq!(conservative.min_fee_rate_multiplier, 2.0);
+    assert_eq!(conservative.min_fee_bump_satoshis, 5000);
+    assert_eq!(conservative.min_confirmations, 1);
+
+    let aggressive = RbfConfig::with_mode(RbfMode::Aggressive);
+    assert_eq!(aggressive.mode, RbfMode::Aggressive);
+    assert_eq!(aggressive.min_fee_rate_multiplier, 1.05);
+    assert_eq!(aggressive.min_fee_bump_satoshis, 500);
+    assert!(aggressive.allow_package_replacements);
+
+    let standard = RbfConfig::with_mode(RbfMode::Standard);
+    assert_eq!(standard.mode, RbfMode::Standard);
+    assert_eq!(standard.min_fee_rate_multiplier, 1.0);
+    assert_eq!(standard.min_fee_bump_satoshis, 1000);
+}
+
+#[test]
+fn test_rbf_package_replacement_uses_descendant_fees() {
+    let mempool = MempoolManager::new();
+    admit_bare_op1(&mempool);
+    let rbf_config = RbfConfig::with_mode(RbfMode::Aggressive);
+    mempool.set_rbf_config(Some(rbf_config));
+
+    let utxo_set = create_test_utxo_set();
+    mempool.set_utxo_set_arc(Arc::new(TokioMutex::new(utxo_set.clone())));
+
+    // Parent: 15k fee; child: 5k fee (package total 20k).
+    let parent = create_rbf_tx(100_000, 85_000);
+    let parent_hash = calculate_tx_id(&parent);
+    assert!(mempool.add_transaction(parent.clone()).unwrap());
+
+    let child = create_rbf_tx_spending(
+        OutPoint {
+            hash: parent_hash,
+            index: 0,
+        },
+        80_000,
+    );
+    let child_hash = calculate_tx_id(&child);
+    assert!(mempool.add_transaction(child).unwrap());
+    assert_eq!(mempool.size(), 2);
+
+    // 19_000 sat fee beats the parent alone and does not cover the child.
+    let replacement = create_rbf_tx(100_000, 81_000);
+    let result = mempool.check_rbf_replacement(&replacement, &parent, &utxo_set, None);
+    assert!(result.is_ok());
+    assert!(
+        !result.unwrap(),
+        "package replacement should require fees covering displaced descendants"
+    );
+
+    // 22_000 covers the 20_000 sat package and the replacement's own relay.
+    let sufficient = create_rbf_tx(100_000, 78_000);
+    let result2 = mempool.check_rbf_replacement(&sufficient, &parent, &utxo_set, None);
+    assert!(result2.is_ok());
+    assert!(result2.unwrap());
+
+    // Displacement removes parent and child when replacement is accepted.
+    assert!(mempool.add_transaction(sufficient).unwrap());
+    assert_eq!(mempool.size(), 1);
+    assert!(mempool.get_transaction(&parent_hash).is_none());
+    assert!(mempool.get_transaction(&child_hash).is_none());
+}
+
+#[test]
+fn standard_replacement_pays_for_the_descendant() {
+    let mempool = MempoolManager::new();
+    admit_bare_op1(&mempool);
+    mempool.set_rbf_config(Some(RbfConfig::default()));
+
+    let utxo_set = create_test_utxo_set();
+    mempool.set_utxo_set_arc(Arc::new(TokioMutex::new(utxo_set.clone())));
+
+    // Parent fee 15_000, child fee 5_000. The set that will be removed totals 20_000.
+    let parent = create_rbf_tx(100_000, 85_000);
+    let parent_hash = calculate_tx_id(&parent);
+    assert!(mempool.add_transaction(parent).unwrap());
+
+    let child = create_rbf_tx_spending(
+        OutPoint {
+            hash: parent_hash,
+            index: 0,
+        },
+        80_000,
+    );
+    let child_hash = calculate_tx_id(&child);
+    assert!(mempool.add_transaction(child).unwrap());
+
+    // 19_000 beats the parent and does not beat the child as well.
+    let cheap = create_rbf_tx(100_000, 81_000);
+    assert!(!mempool.add_transaction(cheap).unwrap());
+    assert!(mempool.get_transaction(&parent_hash).is_some());
+    assert!(mempool.get_transaction(&child_hash).is_some());
+    assert_eq!(mempool.size(), 2);
+
+    // Covers the 20_000 sat package and the replacement's own relay.
+    let enough = create_rbf_tx(100_000, 78_000);
+    assert!(mempool.add_transaction(enough).unwrap());
+    assert_eq!(mempool.size(), 1);
+    assert!(mempool.get_transaction(&parent_hash).is_none());
+    assert!(mempool.get_transaction(&child_hash).is_none());
+}
+
+#[test]
+fn sequence_fffffffe_is_replaced() {
+    let mempool = MempoolManager::new();
+    admit_bare_op1(&mempool);
+    let utxo_set = create_test_utxo_set();
+    mempool.set_utxo_set_arc(Arc::new(TokioMutex::new(utxo_set)));
+
+    let mut existing = create_rbf_tx(100_000, 90_000);
+    existing.inputs[0].sequence = 0xfffffffe;
+    let existing_hash = calculate_tx_id(&existing);
+    assert!(mempool.add_transaction(existing).unwrap());
+
+    let replacement = create_rbf_tx(100_000, 70_000);
+    assert!(mempool.add_transaction(replacement).unwrap());
+    assert!(mempool.get_transaction(&existing_hash).is_none());
+    assert_eq!(mempool.size(), 1);
+}
+
+#[test]
+fn final_child_is_replaced_with_its_parent() {
+    let mempool = MempoolManager::new();
+    admit_bare_op1(&mempool);
+    let utxo_set = create_test_utxo_set();
+    mempool.set_utxo_set_arc(Arc::new(TokioMutex::new(utxo_set)));
+
+    let parent = create_rbf_tx(100_000, 85_000);
+    let parent_hash = calculate_tx_id(&parent);
+    assert!(mempool.add_transaction(parent).unwrap());
+
+    let mut child = create_rbf_tx_spending(
+        OutPoint {
+            hash: parent_hash,
+            index: 0,
+        },
+        80_000,
+    );
+    child.inputs[0].sequence = 0xffffffff;
+    let child_hash = calculate_tx_id(&child);
+    assert!(mempool.add_transaction(child).unwrap());
+
+    let replacement = create_rbf_tx(100_000, 70_000);
+    assert!(mempool.add_transaction(replacement).unwrap());
+    assert!(mempool.get_transaction(&parent_hash).is_none());
+    assert!(mempool.get_transaction(&child_hash).is_none());
+    assert_eq!(mempool.size(), 1);
+}
+
+#[test]
+fn replacement_bump_of_300_sats_is_admitted() {
+    let try_replace = |replacement_output: u64| {
+        let mempool = MempoolManager::new();
+        admit_bare_op1(&mempool);
+        let utxo_set = create_test_utxo_set();
+        mempool.set_utxo_set_arc(Arc::new(TokioMutex::new(utxo_set)));
+        let original = create_rbf_tx(100_000, 98_000);
+        let original_hash = calculate_tx_id(&original);
+        assert!(mempool.add_transaction(original).unwrap());
+        let replacement = create_rbf_tx(100_000, replacement_output);
+        let admitted = mempool.add_transaction(replacement).unwrap();
+        (admitted, mempool.get_transaction(&original_hash).is_none())
+    };
+    let (bump_300, original_gone) = try_replace(97_700);
+    let (bump_1001, control_gone) = try_replace(96_999);
+    let (below_original, _) = try_replace(98_001);
+    eprintln!(
+        "bump 300 admitted={bump_300} original_removed={original_gone}; bump 1001 admitted={bump_1001} original_removed={control_gone}; fee 1999 admitted={below_original}"
+    );
+    assert!(bump_300 && original_gone);
+    assert!(bump_1001 && control_gone);
+    assert!(!below_original);
+}
+
+#[test]
+fn five_percent_fee_increase_is_admitted() {
+    let try_replace = |replacement_output: u64| {
+        let mempool = MempoolManager::new();
+        admit_bare_op1(&mempool);
+        let utxo_set = create_test_utxo_set();
+        mempool.set_utxo_set_arc(Arc::new(TokioMutex::new(utxo_set)));
+        let original = create_rbf_tx(100_000, 90_000);
+        let original_hash = calculate_tx_id(&original);
+        assert!(mempool.add_transaction(original).unwrap());
+        let replacement = create_rbf_tx(100_000, replacement_output);
+        let admitted = mempool.add_transaction(replacement).unwrap();
+        (admitted, mempool.get_transaction(&original_hash).is_none())
+    };
+    let (five_percent, five_removed) = try_replace(89_500);
+    let (twenty_percent, twenty_removed) = try_replace(88_000);
+    let (lower_fee, _) = try_replace(90_001);
+    eprintln!(
+        "fee 10500 admitted={five_percent} original_removed={five_removed}; fee 12000 admitted={twenty_percent} original_removed={twenty_removed}; fee 9999 admitted={lower_fee}"
+    );
+    assert!(five_percent && five_removed);
+    assert!(twenty_percent && twenty_removed);
+    assert!(!lower_fee);
+}

@@ -1,0 +1,78 @@
+//! IPC ModuleAPI proxy registration for subprocess modules.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use blvm_node::module::inter_module::api::ModuleAPI;
+use blvm_node::module::inter_module::{IpcForwardingModuleAPI, ModuleApiRegistry};
+use blvm_node::module::ipc::server::ModuleIpcServer;
+use blvm_node::module::traits::ModuleError;
+
+struct EchoApi;
+
+#[async_trait]
+impl ModuleAPI for EchoApi {
+    async fn handle_request(
+        &self,
+        method: &str,
+        params: &[u8],
+        _caller: &str,
+    ) -> Result<Vec<u8>, ModuleError> {
+        match method {
+            "echo" => Ok(params.to_vec()),
+            _ => Err(ModuleError::OperationError(format!(
+                "unknown method {method}"
+            ))),
+        }
+    }
+
+    fn list_methods(&self) -> Vec<String> {
+        vec!["echo".to_string()]
+    }
+
+    fn api_version(&self) -> u32 {
+        1
+    }
+}
+
+#[tokio::test]
+async fn ipc_forwarding_module_api_lists_registered_methods() {
+    let server = ModuleIpcServer::new("/tmp/blvm-ipc-proxy-test.sock");
+    let proxy = IpcForwardingModuleAPI::new(
+        "example_mod_test".to_string(),
+        server.handle(),
+        vec!["foo".to_string(), "bar".to_string()],
+        1,
+    );
+    assert!(proxy.list_methods().contains(&"foo".to_string()));
+    assert_eq!(proxy.api_version(), 1);
+}
+
+#[tokio::test]
+async fn module_api_registry_accepts_ipc_proxy() {
+    let registry = ModuleApiRegistry::new();
+    let server = ModuleIpcServer::new("/tmp/blvm-ipc-reg-test.sock");
+    let proxy = IpcForwardingModuleAPI::new(
+        "example_mod_abc".to_string(),
+        server.handle(),
+        vec!["foo".to_string()],
+        1,
+    );
+    registry
+        .register_api("example_mod_abc".to_string(), Arc::new(proxy))
+        .await
+        .unwrap();
+    assert!(registry.get_api("example_mod_abc").await.is_some());
+}
+
+#[tokio::test]
+async fn in_process_api_still_registers_for_tests() {
+    let registry = ModuleApiRegistry::new();
+    registry
+        .register_api("echo_mod".to_string(), Arc::new(EchoApi))
+        .await
+        .unwrap();
+    let api = registry.get_api("echo_mod").await.unwrap();
+    let out = api.handle_request("echo", b"hi", "caller").await.unwrap();
+    assert_eq!(out, b"hi");
+}

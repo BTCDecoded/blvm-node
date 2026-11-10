@@ -1,0 +1,1027 @@
+//! RPC interface for blvm-node
+//!
+//! This module provides JSON-RPC server, blockchain query methods,
+//! network info methods, transaction submission, and mining methods.
+
+pub mod auth;
+pub mod blockchain;
+pub mod cache;
+pub mod commons_gbt;
+pub mod control;
+pub mod errors;
+pub mod mempool;
+pub mod merkle_block;
+pub mod methods;
+pub mod mining;
+
+pub mod network;
+pub mod params;
+pub mod rawtx;
+#[cfg(feature = "rest-api")]
+pub mod rest;
+pub mod server;
+pub mod txwire;
+pub mod types;
+pub mod validation;
+
+#[cfg(feature = "quinn")]
+pub mod quinn_server;
+
+use crate::config::{RequestTimeoutConfig, RpcAuthConfig};
+use crate::module::manager::ModuleManager;
+use crate::network::dos_protection::ConnectionRateLimiter;
+use crate::node::mempool::MempoolManager;
+use crate::node::metrics::MetricsCollector;
+use crate::node::performance::PerformanceProfiler;
+use crate::storage::Storage;
+use crate::utils::AUTH_RATE_LIMITER_CLEANUP_INTERVAL;
+use anyhow::Result;
+use blvm_protocol::BitcoinProtocolEngine;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tracing::{error, info, warn};
+
+#[cfg(feature = "rest-api")]
+use crate::rpc::rest::RestApiServer;
+
+/// RPC manager that coordinates all RPC operations
+///
+/// Supports both TCP (default, standard compatible) and optional QUIC transport.
+pub struct RpcManager {
+    server_addr: SocketAddr,
+    quinn_addr: Option<SocketAddr>,
+    #[cfg(feature = "rest-api")]
+    rest_api_addr: Option<SocketAddr>,
+    blockchain_rpc: blockchain::BlockchainRpc,
+    network_rpc: network::NetworkRpc,
+    mining_rpc: mining::MiningRpc,
+    control_rpc: control::ControlRpc,
+    storage: Option<Arc<Storage>>,
+    mempool: Option<Arc<MempoolManager>>,
+    network_manager: Option<Arc<crate::network::NetworkManager>>,
+    shutdown_tx: Option<mpsc::UnboundedSender<()>>,
+    #[cfg(feature = "quinn")]
+    quinn_shutdown_tx: Option<mpsc::UnboundedSender<()>>,
+    #[cfg(feature = "rest-api")]
+    rest_api_shutdown_tx: Option<mpsc::UnboundedSender<()>>,
+    /// RPC authentication manager (optional)
+    auth_manager: Option<Arc<auth::RpcAuthManager>>,
+    /// `.cookie` path this process created. `stop` unlinks only this path.
+    rpc_cookie_path: Option<std::path::PathBuf>,
+    /// Node shutdown callback (optional)
+    node_shutdown: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
+    /// Metrics collector (optional)
+    metrics: Option<Arc<MetricsCollector>>,
+    /// Performance profiler (optional)
+    profiler: Option<Arc<PerformanceProfiler>>,
+    /// Event publisher for module event notifications (optional)
+    event_publisher: Option<Arc<crate::node::event_publisher::EventPublisher>>,
+    /// Maximum request body size in bytes (default: 1MB)
+    max_request_size_bytes: usize,
+    /// Max connections per IP per minute (default: 10)
+    max_connections_per_ip_per_minute: u32,
+    /// Batch rate multiplier cap: min(batch_len, this) (default: 10)
+    batch_rate_multiplier_cap: u32,
+    /// Shared RpcServer arc — set after start() so ModuleManager and NodeApiImpl can register
+    /// dynamic endpoints and overrides against the live server.
+    server_arc: Option<Arc<server::RpcServer>>,
+    /// Connection rate limit window in seconds (default: 60)
+    connection_rate_limit_window_seconds: u64,
+    /// Request timeout config (storage/network/rpc timeouts)
+    request_timeouts: Option<RequestTimeoutConfig>,
+    /// Module manager for load/unload/reload RPC (optional)
+    module_manager: Option<Arc<tokio::sync::Mutex<ModuleManager>>>,
+    /// Protocol engine for mining RPC (`generatetoaddress` on regtest).
+    protocol_engine: Option<Arc<BitcoinProtocolEngine>>,
+    /// Shared late-bind so JSON-RPC and REST `MiningRpc` copies see Commons GBT.
+    commons_gbt: mining::CommonsGbtSlot,
+    /// Allow binding a non-loopback address without an auth_manager.
+    /// Defaults to `false` — startup fails if a public bind is attempted without auth.
+    /// Set to `true` only in controlled environments (e.g. isolated test networks).
+    allow_unauthenticated_rpc: bool,
+    /// When true, `loadmodule` may call blvm-marketplace to fetch missing modules before local discovery retry.
+    marketplace_fetch_enabled: bool,
+}
+
+const RPC_COOKIE_USER: &str = "__cookie__";
+
+/// Write `{datadir}/.cookie` as `__cookie__:<hex>` mode `0600` when no password is set.
+/// A configured password leaves the directory untouched and returns `None`.
+fn install_rpc_cookie(
+    datadir: &std::path::Path,
+    auth: &mut RpcAuthConfig,
+) -> Result<Option<std::path::PathBuf>> {
+    if auth.password.is_some() {
+        return Ok(None);
+    }
+    let mut secret = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
+    let password = hex::encode(secret);
+    zeroize::Zeroize::zeroize(&mut secret);
+    let path = datadir.join(".cookie");
+    write_cookie_file(&path, &format!("{RPC_COOKIE_USER}:{password}"))?;
+    auth.username = Some(RPC_COOKIE_USER.to_string());
+    auth.password = Some(password);
+    auth.required = true;
+    Ok(Some(path))
+}
+
+fn write_cookie_file(path: &std::path::Path, contents: &str) -> Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+        // A symlink at `.cookie` must fail the open instead of truncating the target.
+        #[cfg(feature = "libc")]
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(contents.as_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+impl RpcManager {
+    /// Create a new RPC manager with TCP only (standard compatible)
+    pub fn new(server_addr: SocketAddr) -> Self {
+        let commons_gbt = mining::CommonsGbtSlot::default();
+        Self {
+            server_addr,
+            quinn_addr: None,
+            #[cfg(feature = "rest-api")]
+            rest_api_addr: None,
+            blockchain_rpc: blockchain::BlockchainRpc::new(),
+            network_rpc: network::NetworkRpc::new(),
+            mining_rpc: mining::MiningRpc::new().with_commons_gbt(commons_gbt.clone()),
+            control_rpc: control::ControlRpc::new(),
+            commons_gbt,
+            storage: None,
+            metrics: None,
+            profiler: None,
+            mempool: None,
+            network_manager: None,
+            shutdown_tx: None,
+            #[cfg(feature = "quinn")]
+            quinn_shutdown_tx: None,
+            #[cfg(feature = "rest-api")]
+            rest_api_shutdown_tx: None,
+            auth_manager: None,
+            rpc_cookie_path: None,
+            allow_unauthenticated_rpc: false,
+            marketplace_fetch_enabled: false,
+            node_shutdown: None,
+            event_publisher: None,
+            max_request_size_bytes: 1_048_576,
+            max_connections_per_ip_per_minute: 10,
+            batch_rate_multiplier_cap: 10,
+            connection_rate_limit_window_seconds: 60,
+            request_timeouts: None,
+            module_manager: None,
+            protocol_engine: None,
+            server_arc: None,
+        }
+    }
+
+    /// Return the live `RpcServer` arc (available after `start()`).
+    /// Used by `ModuleManager` and `NodeApiImpl` to register dynamic endpoints.
+    pub fn rpc_server(&self) -> Option<Arc<server::RpcServer>> {
+        self.server_arc.clone()
+    }
+
+    /// Set batch rate multiplier cap (from config or BLVM_RPC_BATCH_RATE_MULTIPLIER_CAP)
+    pub fn with_batch_rate_multiplier_cap(mut self, cap: u32) -> Self {
+        self.batch_rate_multiplier_cap = cap;
+        self
+    }
+
+    /// Set connection rate limit window in seconds (from config or BLVM_RPC_CONNECTION_RATE_LIMIT_WINDOW_SECS)
+    pub fn with_connection_rate_limit_window(mut self, secs: u64) -> Self {
+        self.connection_rate_limit_window_seconds = secs;
+        self
+    }
+
+    /// Set max connections per IP per minute (from config rpc.max_connections_per_ip_per_minute)
+    pub fn with_max_connections_per_ip(mut self, n: u32) -> Self {
+        self.max_connections_per_ip_per_minute = n;
+        self
+    }
+
+    /// Set module manager for load/unload/reload RPC methods
+    pub fn set_module_manager(&mut self, module_manager: Arc<tokio::sync::Mutex<ModuleManager>>) {
+        self.module_manager = Some(module_manager);
+    }
+
+    /// Late-bind Commons GBT after `NodeApiImpl` exists (RPC may already be running).
+    pub fn set_commons_gbt(&self, caller: Arc<dyn mining::CommonsGbtCaller>) {
+        self.commons_gbt.set(caller);
+    }
+
+    /// Same slot JSON-RPC / REST / the built-in miner must share.
+    pub fn commons_gbt_slot(&self) -> mining::CommonsGbtSlot {
+        self.commons_gbt.clone()
+    }
+
+    /// Set request timeout config (storage/network/rpc timeouts from config)
+    pub fn with_request_timeouts(mut self, config: Option<RequestTimeoutConfig>) -> Self {
+        self.request_timeouts = config;
+        self
+    }
+
+    /// Set maximum request body size (from config rpc.max_request_size_bytes)
+    pub fn with_max_request_size(mut self, bytes: usize) -> Self {
+        self.max_request_size_bytes = bytes;
+        self
+    }
+
+    /// Set node shutdown callback
+    pub fn with_node_shutdown(
+        mut self,
+        shutdown_fn: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    ) -> Self {
+        self.node_shutdown = Some(shutdown_fn);
+        self
+    }
+
+    /// Set RPC authentication configuration. Does not write a cookie.
+    pub async fn with_auth_config(&mut self, auth_config: RpcAuthConfig) {
+        self.apply_auth_config(auth_config, None)
+            .await
+            .expect("RPC auth without a datadir does not write a cookie");
+    }
+
+    /// Apply RPC auth. When `datadir` is set and no password is configured, write
+    /// `{datadir}/.cookie` and use it as the HTTP Basic pair.
+    pub async fn apply_auth_config(
+        &mut self,
+        mut auth_config: RpcAuthConfig,
+        datadir: Option<&std::path::Path>,
+    ) -> Result<()> {
+        if let Some(dir) = datadir {
+            if let Some(path) = install_rpc_cookie(dir, &mut auth_config)? {
+                info!("RPC cookie written at {}", path.display());
+                self.rpc_cookie_path = Some(path);
+            }
+        }
+        self.auth_manager = Some(Self::build_auth_manager(auth_config).await?);
+        Ok(())
+    }
+
+    /// Build an [`RpcAuthManager`] from TOML / env [`RpcAuthConfig`] (shared by startup and tests).
+    pub async fn build_auth_manager(
+        auth_config: RpcAuthConfig,
+    ) -> Result<Arc<auth::RpcAuthManager>> {
+        let auth_manager = Arc::new(auth::RpcAuthManager::with_rate_limits(
+            auth_config.required,
+            auth_config.rate_limit_burst,
+            auth_config.rate_limit_rate,
+        ));
+
+        // Load tokens from environment variable, token file, or config file
+        match auth_config.load_tokens() {
+            Ok(tokens) => {
+                if !tokens.is_empty() {
+                    info!(
+                        "Loaded {} RPC auth token(s) from secure source",
+                        tokens.len()
+                    );
+                }
+                for token in tokens {
+                    if let Err(e) = auth_manager.add_token(token.clone()).await {
+                        let redacted_error =
+                            auth::redact_tokens_from_log(&format!("{e}"), &[token]);
+                        error!("Failed to add RPC auth token: {}", redacted_error);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to load RPC auth tokens: {}. Using tokens from config file if available.",
+                    e
+                );
+                for token in auth_config.tokens {
+                    if let Err(e) = auth_manager.add_token(token.clone()).await {
+                        let redacted_error =
+                            auth::redact_tokens_from_log(&format!("{e}"), &[token]);
+                        error!("Failed to add RPC auth token: {}", redacted_error);
+                    }
+                }
+            }
+        }
+
+        if !auth_config.admin_tokens.is_empty() {
+            info!(
+                "Loaded {} RPC admin token(s) with destructive-method access",
+                auth_config.admin_tokens.len()
+            );
+        }
+        for token in auth_config.admin_tokens {
+            if let Err(e) = auth_manager.add_admin_token(token.clone()).await {
+                let redacted_error = auth::redact_tokens_from_log(&format!("{e}"), &[token]);
+                error!("Failed to add RPC admin token: {}", redacted_error);
+            }
+        }
+
+        for cert in auth_config.certificates {
+            if let Err(e) = auth_manager.add_certificate(cert).await {
+                error!("Failed to add RPC auth certificate: {}", e);
+            }
+        }
+
+        if let Some(ref password) = auth_config.password {
+            auth_manager
+                .set_basic_auth(auth_config.username.clone(), password.clone())
+                .await?;
+            // ckpool / Bitcoin Core Basic clients need admin methods (getblocktemplate, submitblock).
+            if let Err(e) = auth_manager.add_admin_token(password.clone()).await {
+                let redacted_error =
+                    auth::redact_tokens_from_log(&format!("{e}"), &[password.clone()]);
+                error!(
+                    "Failed to grant admin RPC access for HTTP Basic password: {}",
+                    redacted_error
+                );
+            }
+            info!("HTTP Basic RPC auth configured (Bitcoin Core / ckpool compatible)");
+        }
+
+        Ok(auth_manager)
+    }
+
+    /// Allow the RPC server to start on a non-loopback address without an auth manager.
+    /// Call this only in isolated test networks or when a reverse-proxy enforces auth upstream.
+    pub fn allow_unauthenticated_rpc(mut self, allow: bool) -> Self {
+        self.allow_unauthenticated_rpc = allow;
+        self
+    }
+
+    /// `rate_limit_only` installs a manager with authentication turned off.
+    /// That manager does not satisfy the public-bind check.
+    fn authentication_required(&self) -> bool {
+        self.auth_manager
+            .as_ref()
+            .is_some_and(|manager| manager.is_authentication_required())
+    }
+
+    fn public_bind_without_auth(&self, addr: SocketAddr) -> bool {
+        !self.authentication_required()
+            && !addr.ip().is_loopback()
+            && !self.allow_unauthenticated_rpc
+    }
+
+    /// Enable marketplace auto-fetch for `loadmodule` (requires blvm-marketplace loaded).
+    pub fn set_marketplace_fetch(&mut self, enabled: bool) {
+        self.marketplace_fetch_enabled = enabled;
+    }
+
+    /// Set storage and mempool dependencies for RPC handlers
+    pub fn with_dependencies(
+        mut self,
+        storage: Arc<Storage>,
+        mempool: Arc<MempoolManager>,
+    ) -> Self {
+        // Update all RPC handlers with dependencies
+        self.mining_rpc =
+            mining::MiningRpc::with_dependencies(Arc::clone(&storage), Arc::clone(&mempool))
+                .with_commons_gbt(self.commons_gbt.clone());
+        self.blockchain_rpc = blockchain::BlockchainRpc::with_dependencies(Arc::clone(&storage));
+        // Note: mempool_rpc is created later in with_dependencies_auth_and_metrics if needed
+        // This early creation was unused - removed to avoid warning
+        let _rawtx_rpc = rawtx::RawTxRpc::with_dependencies(
+            Arc::clone(&storage),
+            Arc::clone(&mempool),
+            self.metrics.clone(),
+            self.profiler.clone(),
+        );
+
+        self.mempool = Some(Arc::clone(&mempool));
+
+        self.storage = Some(storage);
+        self.mempool = Some(mempool);
+        self
+    }
+
+    /// Set metrics collector
+    pub fn with_metrics(mut self, metrics: Arc<MetricsCollector>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// Set performance profiler
+    pub fn with_profiler(mut self, profiler: Arc<PerformanceProfiler>) -> Self {
+        self.profiler = Some(profiler);
+        self
+    }
+
+    /// Set event publisher for module event notifications
+    pub fn with_event_publisher(
+        mut self,
+        event_publisher: Arc<crate::node::event_publisher::EventPublisher>,
+    ) -> Self {
+        self.event_publisher = Some(event_publisher);
+        self
+    }
+
+    /// Set event publisher after construction (e.g. when created during startup)
+    pub fn set_event_publisher(
+        &mut self,
+        event_publisher: Option<Arc<crate::node::event_publisher::EventPublisher>>,
+    ) {
+        self.event_publisher = event_publisher;
+    }
+
+    /// Get event publisher for IBD/sync event emission
+    pub fn event_publisher(&self) -> Option<Arc<crate::node::event_publisher::EventPublisher>> {
+        self.event_publisher.clone()
+    }
+
+    /// Set network manager dependency
+    pub fn with_network_manager(
+        mut self,
+        network_manager: Arc<crate::network::NetworkManager>,
+    ) -> Self {
+        self.network_rpc = network::NetworkRpc::with_dependencies(Arc::clone(&network_manager));
+        self.network_manager = Some(network_manager);
+        self
+    }
+
+    /// Set protocol engine (enables `generatetoaddress` on regtest).
+    pub fn with_protocol_engine(mut self, engine: Arc<BitcoinProtocolEngine>) -> Self {
+        self.protocol_engine = Some(engine);
+        self
+    }
+
+    /// Create a new RPC manager with both TCP and QUIC transports
+    #[cfg(feature = "quinn")]
+    pub fn with_quinn(tcp_addr: SocketAddr, quinn_addr: SocketAddr) -> Self {
+        let commons_gbt = mining::CommonsGbtSlot::default();
+        Self {
+            server_addr: tcp_addr,
+            quinn_addr: Some(quinn_addr),
+            #[cfg(feature = "rest-api")]
+            rest_api_addr: None,
+            #[cfg(feature = "rest-api")]
+            rest_api_shutdown_tx: None,
+            blockchain_rpc: blockchain::BlockchainRpc::new(),
+            network_rpc: network::NetworkRpc::new(),
+            mining_rpc: mining::MiningRpc::new().with_commons_gbt(commons_gbt.clone()),
+            commons_gbt,
+            metrics: None,
+            profiler: None,
+            control_rpc: control::ControlRpc::new(),
+            storage: None,
+            mempool: None,
+            network_manager: None,
+            shutdown_tx: None,
+            quinn_shutdown_tx: None,
+            auth_manager: None,
+            rpc_cookie_path: None,
+            allow_unauthenticated_rpc: false,
+            marketplace_fetch_enabled: false,
+            node_shutdown: None,
+            event_publisher: None,
+            max_request_size_bytes: 1_048_576,
+            max_connections_per_ip_per_minute: 10,
+            batch_rate_multiplier_cap: 10,
+            connection_rate_limit_window_seconds: 60,
+            request_timeouts: None,
+            module_manager: None,
+            protocol_engine: None,
+            server_arc: None,
+        }
+    }
+
+    /// Enable QUIC RPC server on specified address
+    #[cfg(feature = "quinn")]
+    pub fn enable_quinn(&mut self, quinn_addr: SocketAddr) {
+        self.quinn_addr = Some(quinn_addr);
+    }
+
+    /// Enable REST API server on specified address
+    #[cfg(feature = "rest-api")]
+    pub fn enable_rest_api(&mut self, rest_api_addr: SocketAddr) {
+        self.rest_api_addr = Some(rest_api_addr);
+    }
+
+    /// Get the RPC server address
+    pub fn rpc_addr(&self) -> SocketAddr {
+        self.server_addr
+    }
+
+    /// Get the REST API server address (if enabled)
+    #[cfg(feature = "rest-api")]
+    pub fn rest_api_addr(&self) -> Option<SocketAddr> {
+        self.rest_api_addr
+    }
+
+    /// Start the RPC server(s)
+    ///
+    /// Starts TCP server (always) and optionally QUIC server if enabled
+    pub async fn start(&mut self) -> Result<()> {
+        // A rate limiter is not authentication. Public bind still requires
+        // `auth_required`, unless the operator opted out.
+        if self.public_bind_without_auth(self.server_addr) {
+            return Err(anyhow::anyhow!(
+                "RPC server would bind to public address {} without authentication. \
+                 Configure rpc.auth (add tokens) or call .allow_unauthenticated_rpc(true) \
+                 to explicitly opt out of this safety check.",
+                self.server_addr
+            ));
+        }
+        #[cfg(feature = "rest-api")]
+        if let Some(rest_api_addr) = self.rest_api_addr {
+            if self.public_bind_without_auth(rest_api_addr) {
+                return Err(anyhow::anyhow!(
+                    "REST API server would bind to public address {} without authentication. \
+                     Configure rpc.auth (add tokens) or call .allow_unauthenticated_rpc(true) \
+                     to explicitly opt out of this safety check.",
+                    rest_api_addr
+                ));
+            }
+        }
+
+        info!("Starting TCP RPC server on {}", self.server_addr);
+
+        let connection_limiter = Arc::new(tokio::sync::Mutex::new(ConnectionRateLimiter::new(
+            self.max_connections_per_ip_per_minute as usize,
+            self.connection_rate_limit_window_seconds,
+        )));
+
+        let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
+        self.shutdown_tx = Some(shutdown_tx.clone());
+
+        // Create control RPC with shutdown capability and optional module manager
+        let mut control_rpc =
+            control::ControlRpc::with_shutdown(shutdown_tx.clone(), self.node_shutdown.clone());
+        if let Some(ref mgr) = self.module_manager {
+            control_rpc = control_rpc.with_module_manager(Arc::clone(mgr));
+        }
+        if self.marketplace_fetch_enabled {
+            control_rpc = control_rpc.with_marketplace_fetch(true);
+        }
+        if let Some(ref metrics) = self.metrics {
+            control_rpc = control_rpc.with_monitoring(
+                Arc::clone(metrics),
+                self.network_manager.clone(),
+                self.storage.clone(),
+            );
+        }
+        let control_rpc = Arc::new(control_rpc);
+
+        // Create server with or without authentication
+        let server = if let (Some(storage), Some(mempool)) =
+            (self.storage.as_ref(), self.mempool.as_ref())
+        {
+            let blockchain = Arc::new(
+                blockchain::BlockchainRpc::with_dependencies(Arc::clone(storage))
+                    .with_event_publisher(self.event_publisher.clone())
+                    .with_request_timeouts(self.request_timeouts.clone()),
+            );
+            let mempool_rpc = Arc::new(mempool::MempoolRpc::with_dependencies(
+                Arc::clone(mempool),
+                Arc::clone(storage),
+            ));
+            let rawtx_rpc = Arc::new(
+                rawtx::RawTxRpc::with_dependencies(
+                    Arc::clone(storage),
+                    Arc::clone(mempool),
+                    self.metrics.clone(),
+                    self.profiler.clone(),
+                )
+                .with_network(self.network_manager.clone())
+                .with_request_timeouts(self.request_timeouts.clone()),
+            );
+            let mining = Arc::new({
+                let mut m =
+                    mining::MiningRpc::with_dependencies(Arc::clone(storage), Arc::clone(mempool))
+                        .with_event_publisher(self.event_publisher.clone())
+                        .with_commons_gbt(self.commons_gbt.clone());
+                if let Some(ref pe) = self.protocol_engine {
+                    m = m.with_protocol_engine(Arc::clone(pe));
+                }
+                match &self.network_manager {
+                    Some(nm) => m.with_network_manager(Some(Arc::clone(nm))),
+                    None => m,
+                }
+            });
+            let network = if let Some(ref network_manager) = self.network_manager {
+                Arc::new(network::NetworkRpc::with_dependencies(Arc::clone(
+                    network_manager,
+                )))
+            } else {
+                Arc::new(network::NetworkRpc::new())
+            };
+
+            // Use auth manager and/or metrics if configured
+            let max_request_size = self.max_request_size_bytes;
+            let add_limiter = |s: server::RpcServer| {
+                s.with_connection_limiter(Arc::clone(&connection_limiter))
+                    .with_batch_rate_multiplier_cap(self.batch_rate_multiplier_cap)
+            };
+            match (self.auth_manager.as_ref(), self.metrics.as_ref()) {
+                (Some(auth_manager), Some(metrics)) => {
+                    add_limiter(server::RpcServer::with_dependencies_auth_and_metrics(
+                        self.server_addr,
+                        blockchain,
+                        network,
+                        mempool_rpc,
+                        mining,
+                        rawtx_rpc,
+                        Arc::clone(&control_rpc),
+                        Arc::clone(auth_manager),
+                        Arc::clone(metrics),
+                        max_request_size,
+                    ))
+                }
+                (Some(auth_manager), None) => {
+                    add_limiter(server::RpcServer::with_dependencies_and_auth(
+                        self.server_addr,
+                        blockchain,
+                        network,
+                        mempool_rpc,
+                        mining,
+                        rawtx_rpc,
+                        Arc::clone(&control_rpc),
+                        Arc::clone(auth_manager),
+                        max_request_size,
+                    ))
+                }
+                (None, Some(metrics)) => {
+                    add_limiter(server::RpcServer::with_dependencies_and_metrics(
+                        self.server_addr,
+                        blockchain,
+                        network,
+                        mempool_rpc,
+                        mining,
+                        rawtx_rpc,
+                        Arc::clone(&control_rpc),
+                        Arc::clone(metrics),
+                        max_request_size,
+                    ))
+                }
+                (None, None) => add_limiter(server::RpcServer::with_dependencies(
+                    self.server_addr,
+                    blockchain,
+                    network,
+                    mempool_rpc,
+                    mining,
+                    rawtx_rpc,
+                    Arc::clone(&control_rpc),
+                    max_request_size,
+                )),
+            }
+        } else {
+            // No dependencies - use auth and/or metrics if configured
+            let connection_limiter = Arc::new(tokio::sync::Mutex::new(ConnectionRateLimiter::new(
+                self.max_connections_per_ip_per_minute as usize,
+                self.connection_rate_limit_window_seconds,
+            )));
+            if let Some(ref auth_manager) = self.auth_manager {
+                server::RpcServer::with_auth(self.server_addr, Arc::clone(auth_manager))
+                    .with_connection_limiter(connection_limiter)
+                    .with_batch_rate_multiplier_cap(self.batch_rate_multiplier_cap)
+            } else {
+                server::RpcServer::new(self.server_addr)
+                    .with_connection_limiter(connection_limiter)
+                    .with_batch_rate_multiplier_cap(self.batch_rate_multiplier_cap)
+            }
+        };
+
+        let server = server.with_rpc_timeout(crate::utils::timeout::rpc_timeout_from_config(
+            self.request_timeouts.as_ref(),
+        ));
+
+        // Wrap in Arc so ModuleManager and NodeApiImpl can reference the same live server.
+        let server_arc = Arc::new(server);
+        self.server_arc = Some(Arc::clone(&server_arc));
+
+        let server_arc_tcp = Arc::clone(&server_arc);
+
+        // Start TCP server in a background task
+        let tcp_handle = tokio::spawn(async move {
+            if let Err(e) = server_arc_tcp.start().await {
+                error!("TCP RPC server error: {}", e);
+            }
+        });
+
+        // Start periodic rate limiter cleanup when auth is enabled
+        if let Some(ref auth_manager) = self.auth_manager {
+            let auth_manager = Arc::clone(auth_manager);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(AUTH_RATE_LIMITER_CLEANUP_INTERVAL);
+                interval.tick().await; // skip immediate first tick
+                loop {
+                    interval.tick().await;
+                    auth_manager.cleanup_stale_limiters().await;
+                }
+            });
+        }
+
+        // Start QUIC HTTP/3 JSON-RPC (same RpcServer Arc as TCP HTTP).
+        #[cfg(feature = "quinn")]
+        let quinn_handle = if let Some(quinn_addr) = self.quinn_addr {
+            info!("Starting HTTP/3 JSON-RPC (QUIC) on {}", quinn_addr);
+
+            let (quinn_shutdown_tx, mut quinn_shutdown_rx) = mpsc::unbounded_channel();
+            self.quinn_shutdown_tx = Some(quinn_shutdown_tx);
+
+            let quinn_server =
+                quinn_server::QuinnRpcServer::new(quinn_addr, Arc::clone(&server_arc));
+
+            Some(tokio::spawn(async move {
+                tokio::select! {
+                    result = quinn_server.start() => {
+                        if let Err(e) = result {
+                            error!("HTTP/3 RPC server error: {}", e);
+                        }
+                    }
+                    _ = quinn_shutdown_rx.recv() => {
+                        info!("HTTP/3 RPC server shutdown requested");
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
+        // Start REST API server if enabled
+        #[cfg(feature = "rest-api")]
+        let rest_api_handle = if let Some(rest_api_addr) = self.rest_api_addr {
+            if let (Some(storage), Some(mempool)) = (self.storage.as_ref(), self.mempool.as_ref()) {
+                info!("Starting REST API server on {}", rest_api_addr);
+
+                let (rest_api_shutdown_tx, mut rest_api_shutdown_rx) = mpsc::unbounded_channel();
+                self.rest_api_shutdown_tx = Some(rest_api_shutdown_tx);
+
+                let blockchain = Arc::new(
+                    blockchain::BlockchainRpc::with_dependencies(Arc::clone(storage))
+                        .with_event_publisher(self.event_publisher.clone()),
+                );
+                let mempool_rpc = Arc::new(mempool::MempoolRpc::with_dependencies(
+                    Arc::clone(mempool),
+                    Arc::clone(storage),
+                ));
+                let rawtx_rpc = Arc::new(
+                    rawtx::RawTxRpc::with_dependencies(
+                        Arc::clone(storage),
+                        Arc::clone(mempool),
+                        None,
+                        None,
+                    )
+                    .with_network(self.network_manager.clone()),
+                );
+                let mining = Arc::new({
+                    let mut m = mining::MiningRpc::with_dependencies(
+                        Arc::clone(storage),
+                        Arc::clone(mempool),
+                    )
+                    .with_event_publisher(self.event_publisher.clone())
+                    .with_commons_gbt(self.commons_gbt.clone());
+                    if let Some(ref pe) = self.protocol_engine {
+                        m = m.with_protocol_engine(Arc::clone(pe));
+                    }
+                    match &self.network_manager {
+                        Some(nm) => m.with_network_manager(Some(Arc::clone(nm))),
+                        None => m,
+                    }
+                });
+                let network = if let Some(ref network_manager) = self.network_manager {
+                    Arc::new(network::NetworkRpc::with_dependencies(Arc::clone(
+                        network_manager,
+                    )))
+                } else {
+                    Arc::new(network::NetworkRpc::new())
+                };
+
+                // Create REST API server with authentication if available
+                let mut rest_server = if let Some(ref auth_manager) = self.auth_manager {
+                    RestApiServer::with_auth(
+                        rest_api_addr,
+                        blockchain,
+                        network,
+                        mempool_rpc,
+                        mining,
+                        rawtx_rpc,
+                        Arc::clone(auth_manager),
+                    )
+                } else {
+                    RestApiServer::new(
+                        rest_api_addr,
+                        blockchain,
+                        network,
+                        mempool_rpc,
+                        mining,
+                        rawtx_rpc,
+                    )
+                };
+                rest_server = rest_server.with_connection_limiter(Arc::clone(&connection_limiter));
+                rest_server = rest_server.with_control(Arc::clone(&control_rpc));
+
+                Some(tokio::spawn(async move {
+                    tokio::select! {
+                        result = rest_server.start() => {
+                            if let Err(e) = result {
+                                error!("REST API server error: {}", e);
+                            }
+                        }
+                        _ = rest_api_shutdown_rx.recv() => {
+                            info!("REST API server shutdown requested");
+                        }
+                    }
+                }))
+            } else {
+                warn!("REST API requested but storage/mempool not available");
+                None
+            }
+        } else {
+            None
+        };
+
+        // Don't wait for shutdown - return immediately after spawning servers
+        // Shutdown is handled via the shutdown channels stored in self.shutdown_tx
+        // The spawned tasks will continue running in the background
+        // The stop() method sends shutdown signals via those channels
+        Ok(())
+    }
+
+    /// Stop the RPC server(s)
+    pub fn stop(&self) -> Result<()> {
+        if let Some(tx) = &self.shutdown_tx {
+            let _ = tx.send(());
+        }
+
+        #[cfg(feature = "quinn")]
+        if let Some(tx) = &self.quinn_shutdown_tx {
+            let _ = tx.send(());
+        }
+
+        #[cfg(feature = "rest-api")]
+        if let Some(tx) = &self.rest_api_shutdown_tx {
+            let _ = tx.send(());
+        }
+
+        if let Some(path) = &self.rpc_cookie_path {
+            if let Err(e) = std::fs::remove_file(path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("Failed to remove RPC cookie {}: {e}", path.display());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get blockchain RPC methods
+    pub fn blockchain(&self) -> &blockchain::BlockchainRpc {
+        &self.blockchain_rpc
+    }
+
+    /// Get network RPC methods
+    pub fn network(&self) -> &network::NetworkRpc {
+        &self.network_rpc
+    }
+
+    /// Get mining RPC methods
+    pub fn mining(&self) -> &mining::MiningRpc {
+        &self.mining_rpc
+    }
+
+    #[cfg(test)]
+    pub(crate) fn auth_manager_for_test(&self) -> &auth::RpcAuthManager {
+        self.auth_manager.as_ref().expect("auth manager")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RpcManager;
+    use crate::config::RpcAuthConfig;
+    use crate::rpc::auth::RpcAuthManager;
+    use hyper::HeaderMap;
+    use std::net::SocketAddr;
+
+    #[tokio::test]
+    async fn a_public_bind_with_only_a_rate_limiter_fails_startup() {
+        let addr: SocketAddr = "0.0.0.0:18332".parse().unwrap();
+        let mut rpc = RpcManager::new(addr);
+        rpc.with_auth_config(RpcAuthConfig::rate_limit_only(10, 1))
+            .await;
+        let err = rpc.start().await.unwrap_err().to_string();
+        assert!(err.contains("without authentication"), "{err}");
+
+        let mut rest = RpcManager::new("127.0.0.1:18332".parse().unwrap());
+        rest.enable_rest_api("0.0.0.0:18333".parse().unwrap());
+        rest.with_auth_config(RpcAuthConfig::rate_limit_only(10, 1))
+            .await;
+        let rest_err = rest.start().await.unwrap_err().to_string();
+        assert!(rest_err.contains("REST"), "{rest_err}");
+
+        let manager = RpcAuthManager::with_rate_limits(false, 10, 1);
+        let public_client: SocketAddr = "8.8.8.8:18332".parse().unwrap();
+        let rejected = manager
+            .authenticate_request(&HeaderMap::new(), public_client)
+            .await;
+        assert!(rejected.error.is_some(), "{rejected:?}");
+
+        let loopback: SocketAddr = "127.0.0.1:18332".parse().unwrap();
+        let allowed = manager
+            .authenticate_request(&HeaderMap::new(), loopback)
+            .await;
+        assert!(allowed.error.is_none());
+    }
+
+    fn basic_header(user: &str, password: &str) -> HeaderMap {
+        const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let raw = format!("{user}:{password}");
+        let bytes = raw.as_bytes();
+        let mut out = String::new();
+        let mut i = 0;
+        while i + 3 <= bytes.len() {
+            let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | bytes[i + 2] as u32;
+            out.push(TABLE[((n >> 18) & 63) as usize] as char);
+            out.push(TABLE[((n >> 12) & 63) as usize] as char);
+            out.push(TABLE[((n >> 6) & 63) as usize] as char);
+            out.push(TABLE[(n & 63) as usize] as char);
+            i += 3;
+        }
+        let rest = bytes.len() - i;
+        if rest == 1 {
+            let n = (bytes[i] as u32) << 16;
+            out.push(TABLE[((n >> 18) & 63) as usize] as char);
+            out.push(TABLE[((n >> 12) & 63) as usize] as char);
+            out.push('=');
+            out.push('=');
+        } else if rest == 2 {
+            let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8);
+            out.push(TABLE[((n >> 18) & 63) as usize] as char);
+            out.push(TABLE[((n >> 12) & 63) as usize] as char);
+            out.push(TABLE[((n >> 6) & 63) as usize] as char);
+            out.push('=');
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Basic {out}").parse().expect("basic header"),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn cookie_basic_auth_accepts_the_file_and_stop_removes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rpc = RpcManager::new("127.0.0.1:18332".parse().unwrap());
+        rpc.apply_auth_config(RpcAuthConfig::default(), Some(dir.path()))
+            .await
+            .unwrap();
+        let path = dir.path().join(".cookie");
+        let body = std::fs::read_to_string(&path).unwrap();
+        let (user, password) = body.split_once(':').unwrap();
+        assert_eq!(user, "__cookie__");
+        assert_eq!(password.len(), 64);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        let client: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let ok = rpc
+            .auth_manager_for_test()
+            .authenticate_request(&basic_header(user, password), client)
+            .await;
+        assert!(ok.error.is_none(), "{ok:?}");
+        let bad = rpc
+            .auth_manager_for_test()
+            .authenticate_request(&basic_header(user, "nope"), client)
+            .await;
+        assert!(bad.error.is_some(), "{bad:?}");
+
+        rpc.stop().unwrap();
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn configured_password_does_not_write_a_cookie() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut auth = RpcAuthConfig::default();
+        auth.username = Some("ckpool".to_string());
+        auth.password = Some("s3cret".to_string());
+        let mut rpc = RpcManager::new("127.0.0.1:18332".parse().unwrap());
+        rpc.apply_auth_config(auth, Some(dir.path())).await.unwrap();
+        assert!(!dir.path().join(".cookie").exists());
+
+        let client: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let ok = rpc
+            .auth_manager_for_test()
+            .authenticate_request(&basic_header("ckpool", "s3cret"), client)
+            .await;
+        assert!(ok.error.is_none(), "{ok:?}");
+    }
+}

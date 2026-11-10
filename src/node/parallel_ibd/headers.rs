@@ -1,0 +1,1275 @@
+//! Header download for parallel IBD.
+//!
+//! Downloads block headers from peers for a given height range.
+//! Used by both sequential and checkpoint-parallel header sync.
+
+use std::collections::VecDeque;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use blvm_protocol::BlockHeader;
+use tokio::task::JoinSet;
+use tokio::time::{Duration, timeout};
+use tracing::{debug, info, warn};
+
+/// One checkpoint-bounded header download range: `[start, end]` with GetHeaders locator.
+pub(crate) type HeaderRange = (u64, u64, [u8; 32]);
+
+/// Build all checkpoint window ranges in `[start_height, end_height]` (N13: no peer cap).
+pub(crate) fn checkpoint_header_ranges(
+    checkpoints: &[(u64, [u8; 32])],
+    start_height: u64,
+    end_height: u64,
+) -> Vec<HeaderRange> {
+    checkpoints
+        .windows(2)
+        .filter_map(|w| {
+            let (range_start, start_hash) = w[0];
+            let (range_end, _) = w[1];
+            if range_end < start_height {
+                return None;
+            }
+            let actual_start = range_start.max(start_height);
+            let actual_end = range_end.min(end_height);
+            if actual_start > actual_end {
+                return None;
+            }
+            Some((actual_start, actual_end, start_hash))
+        })
+        .collect()
+}
+
+/// N13 unit helper: simulate ≤1 in-flight range per peer until all ranges are assigned.
+/// Returns `(peer_idx, range_idx)` in completion/assignment order (initial fills then reuses).
+pub(crate) fn simulate_header_range_schedule(
+    peer_count: usize,
+    range_count: usize,
+) -> Vec<(usize, usize)> {
+    if peer_count == 0 || range_count == 0 {
+        return Vec::new();
+    }
+    let mut pending: VecDeque<usize> = (0..range_count).collect();
+    let mut free: VecDeque<usize> = (0..peer_count).collect();
+    let mut in_flight: VecDeque<(usize, usize)> = VecDeque::new();
+    let mut assigned = Vec::with_capacity(range_count);
+
+    while !pending.is_empty() || !in_flight.is_empty() {
+        while !free.is_empty() && !pending.is_empty() {
+            let peer = free.pop_front().unwrap();
+            let range = pending.pop_front().unwrap();
+            in_flight.push_back((peer, range));
+            assigned.push((peer, range));
+        }
+        if let Some((peer, _)) = in_flight.pop_front() {
+            free.push_back(peer);
+        }
+    }
+    assigned
+}
+
+use crate::network::NetworkManager;
+use crate::network::peer_scoring::PeerScorer;
+use crate::network::protocol::{GetHeadersMessage, ProtocolMessage, ProtocolParser};
+use crate::node::event_publisher::EventPublisher;
+use crate::storage::blockstore::BlockStore;
+use crate::storage::hashing::double_sha256;
+
+/// Result of a header download pass (sequential or parallel merge).
+pub(crate) struct HeaderSyncResult {
+    pub tip_height: u64,
+    /// False while pre-sync still holds the headers. The block assigner stays idle.
+    pub may_assign: bool,
+}
+
+impl HeaderSyncResult {
+    fn at_height(tip_height: u64) -> Self {
+        Self {
+            tip_height,
+            may_assign: true,
+        }
+    }
+}
+
+/// Sequential GetHeaders only rotated on send-fail / empty-not-tip / chain-break.
+/// Timeout default is 5s (`BLVM_IBD_HEADERS_TIMEOUT`), so a peer that answers
+/// slowly still sticks for the whole 967k walk.
+///
+/// R-214 COMPLETE **19466 h/s** ⇒ ~103ms per 2000-header batch. Stays.
+/// R-215 COMPLETE **1127 h/s** / **857.9s** ⇒ ~1770ms/batch, never rotated.
+/// 400ms = 4× the R-214 batch. Replay: 103 → false; 1770 → true.
+pub(crate) fn header_batch_rtt_should_rotate(latency_ms: f64) -> bool {
+    latency_ms > 400.0
+}
+
+/// BIP130 empty HEADERS means *this peer's* tip. dest-bg: a LIMITED/mute
+/// peer returned empty at genesis → COMPLETE height 0 against target ~964k,
+/// then CATCH_UP 480s backoff. Empty with **no progress** is rotate, not tip.
+pub(crate) fn empty_headers_is_ibd_tip(
+    fetched_tip: u64,
+    start_height: u64,
+    end_height: u64,
+) -> bool {
+    if fetched_tip >= end_height {
+        return true;
+    }
+    fetched_tip + 1 > start_height
+}
+
+/// Download target when no peer has advertised a height above the tip.
+///
+/// A caught-up node stays at `synced_tip`. Headers that extend the tip set
+/// the target to that height. A fresh node with neither still uses the
+/// million-block bootstrap so the first IBD can start before a handshake.
+pub(crate) fn ibd_target_height(
+    synced_tip: u64,
+    peer_ahead: Option<u64>,
+    extending_height: u64,
+) -> u64 {
+    if let Some(peer) = peer_ahead.filter(|height| *height > synced_tip) {
+        return peer;
+    }
+    if extending_height > synced_tip {
+        return extending_height;
+    }
+    if synced_tip == 0 {
+        return 1_000_000;
+    }
+    synced_tip
+}
+
+/// Highest stored height whose header links back to `synced_tip`.
+pub(crate) fn highest_extending_height(blockstore: &BlockStore, synced_tip: u64) -> Result<u64> {
+    let mut height = synced_tip;
+    loop {
+        let next = height.saturating_add(1);
+        if next == height {
+            return Ok(height);
+        }
+        let Some(hash) = blockstore.get_hash_by_height(next)? else {
+            return Ok(height);
+        };
+        if !stored_height_extends_active_parent(blockstore, next, &hash)? {
+            return Ok(height);
+        }
+        height = next;
+    }
+}
+
+/// The hash at `height` extends the active chain only when its header's prev is
+/// the active hash at `height - 1`. A side header that shares a height does not.
+pub(crate) fn stored_height_extends_active_parent(
+    blockstore: &BlockStore,
+    height: u64,
+    hash: &[u8; 32],
+) -> Result<bool> {
+    if height == 0 {
+        return Ok(true);
+    }
+    let Some(header) = blockstore.get_header(hash)? else {
+        return Ok(false);
+    };
+    let Some(parent) = blockstore.get_hash_by_height(height - 1)? else {
+        return Ok(false);
+    };
+    Ok(header.prev_block_hash == parent)
+}
+
+/// H08: child links to the parent this walk has already accepted.
+///
+/// A stored row at `height - 1` is that parent only when its hash is `last_hash`.
+/// During a rewind the corrected parent is still in the uncommitted batch, so the
+/// row on disk is the old tip. Linking against that row rejects the replacement
+/// even though `prev` equals `last_hash` (testnet4 catch-up at height 155499).
+fn header_links_to_parent(
+    blockstore: &BlockStore,
+    header: &BlockHeader,
+    height: u64,
+    last_hash: &[u8; 32],
+) -> Result<bool> {
+    let stored = if height > 0 {
+        blockstore
+            .get_header_at_height(height - 1)?
+            .map(|parent| blvm_consensus::block::block_header_hash(&parent))
+    } else {
+        None
+    };
+    Ok(header_prev_links(
+        stored.as_ref(),
+        last_hash,
+        &header.prev_block_hash,
+    ))
+}
+
+/// `stored_parent_hash` is the hash of the header row already at this height's parent.
+/// `last_hash` is the parent accepted by this walk, including a header in the current
+/// batch that has not been committed. `prev` is the candidate header's prev hash.
+pub(crate) fn header_prev_links(
+    stored_parent_hash: Option<&[u8; 32]>,
+    last_hash: &[u8; 32],
+    prev: &[u8; 32],
+) -> bool {
+    if let Some(parent_hash) = stored_parent_hash {
+        if parent_hash == last_hash {
+            return prev == parent_hash;
+        }
+    }
+    prev == last_hash
+}
+
+/// Bitcoin Core-style GetHeaders locator heights (tip, tip-1, … then doubling).
+///
+/// A single-hash locator at a skipped stored tip (leftover dest 961637) makes every
+/// public peer answer from genesis (`6fe28c0a…`) when that hash is unknown — leftover
+/// peer-rotate then loops forever (`leftover-c1t-recv0` 5976×).
+pub(crate) fn ibd_header_locator_heights(last_known_height: u64) -> Vec<u64> {
+    let mut out = Vec::with_capacity(32);
+    let mut h = last_known_height;
+    let mut step = 1u64;
+    loop {
+        out.push(h);
+        if h == 0 || out.len() >= 32 {
+            break;
+        }
+        if out.len() > 10 {
+            step = step.saturating_mul(2);
+        }
+        h = h.saturating_sub(step);
+    }
+    if out.last() != Some(&0) {
+        out.push(0);
+    }
+    out
+}
+
+fn ibd_header_locator_hashes(
+    blockstore: &BlockStore,
+    last_known_height: u64,
+    last_hash: &[u8; 32],
+    genesis_hash: &[u8; 32],
+) -> Result<Vec<[u8; 32]>> {
+    let mut hashes = Vec::with_capacity(32);
+    for h in ibd_header_locator_heights(last_known_height) {
+        if h == last_known_height {
+            hashes.push(*last_hash);
+            continue;
+        }
+        match blockstore.get_hash_by_height(h)? {
+            Some(stored) => hashes.push(stored),
+            None if h == 0 => hashes.push(*genesis_hash),
+            None => {}
+        }
+    }
+    if hashes.is_empty() {
+        hashes.push(*last_hash);
+    }
+    Ok(hashes)
+}
+
+pub(crate) fn header_range_timeout(config: &crate::config::RequestTimeoutConfig) -> Duration {
+    Duration::from_secs(config.async_request_timeout_seconds)
+}
+
+pub(crate) fn header_batch_extends(locator: &[u8; 32], first_prev: &[u8; 32]) -> bool {
+    first_prev == locator
+}
+
+/// Download headers for a range starting from the given locator hash.
+///
+/// Standalone async function that can be spawned as a task.
+/// Downloads headers until end height or empty response.
+pub(crate) async fn download_header_range(
+    network: Arc<NetworkManager>,
+    peer: SocketAddr,
+    locator_hash: [u8; 32],
+    start_height: u64,
+    end_height: u64,
+) -> Result<Vec<blvm_protocol::BlockHeader>> {
+    let mut all_headers = Vec::new();
+    let mut current_hash = locator_hash;
+    let mut current_height = start_height;
+    let mut consecutive_failures = 0;
+    let mut current_peer = peer;
+    const MAX_FAILURES: u32 = 3; // fail fast per peer, then switch
+    let timeout_wait = header_range_timeout(network.request_timeout_config());
+
+    while current_height <= end_height {
+        let get_headers = GetHeadersMessage {
+            version: 70015,
+            block_locator_hashes: vec![current_hash],
+            hash_stop: [0; 32],
+        };
+
+        let wire_msg = ProtocolParser::serialize_message(&ProtocolMessage::GetHeaders(get_headers))
+            .map_err(|e| anyhow::anyhow!("Failed to serialize GetHeaders: {}", e))?;
+
+        let headers_rx = network.register_headers_request(current_peer);
+
+        if let Err(e) = network.send_to_peer(current_peer, wire_msg).await {
+            consecutive_failures += 1;
+            if consecutive_failures >= MAX_FAILURES {
+                // Switch to a fresh connected peer instead of giving up.
+                let fresh = network.get_connected_peer_addresses().await;
+                if let Some(&next) = fresh.iter().find(|&&p| p != current_peer) {
+                    debug!(
+                        "Range {}-{}: switching from {} to {}",
+                        start_height, end_height, current_peer, next
+                    );
+                    current_peer = next;
+                    consecutive_failures = 0;
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "No peers for range {}-{}: {}",
+                        start_height,
+                        end_height,
+                        e
+                    ));
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            continue;
+        }
+
+        match timeout(timeout_wait, headers_rx).await {
+            Ok(Ok(headers)) => {
+                consecutive_failures = 0;
+
+                if headers.is_empty() {
+                    break;
+                }
+
+                if !header_batch_extends(&current_hash, &headers[0].prev_block_hash) {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= MAX_FAILURES {
+                        return Err(anyhow::anyhow!(
+                            "Headers from {} do not connect to the locator",
+                            current_peer
+                        ));
+                    }
+                    continue;
+                }
+
+                for header in headers {
+                    match blvm_protocol::pow::check_proof_of_work(&header) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            return Err(anyhow::anyhow!(
+                                "Header at height {} failed PoW — refusing to skip (would corrupt height index)",
+                                current_height
+                            ));
+                        }
+                        Err(e) => {
+                            return Err(anyhow::anyhow!(
+                                "Header at height {} PoW check error: {e}",
+                                current_height
+                            ));
+                        }
+                    }
+
+                    let mut header_data = [0u8; 80];
+                    header_data[0..4].copy_from_slice(&(header.version as i32).to_le_bytes());
+                    header_data[4..36].copy_from_slice(&header.prev_block_hash);
+                    header_data[36..68].copy_from_slice(&header.merkle_root);
+                    header_data[68..72].copy_from_slice(&(header.timestamp as u32).to_le_bytes());
+                    header_data[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());
+                    header_data[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());
+                    let header_hash = double_sha256(&header_data);
+
+                    all_headers.push(header);
+                    current_hash = header_hash;
+                    current_height += 1;
+
+                    if current_height > end_height {
+                        break;
+                    }
+                }
+
+                let max_headers = network.protocol_limits().max_headers_results;
+                if !crate::config::headers_batch_is_full(all_headers.len(), max_headers) {
+                    break;
+                }
+            }
+            Ok(Err(_)) => {
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_FAILURES {
+                    return Err(anyhow::anyhow!("Headers channel closed too many times"));
+                }
+            }
+            Err(_) => {
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_FAILURES {
+                    return Err(anyhow::anyhow!("Timeout waiting for headers from {}", peer));
+                }
+            }
+        }
+    }
+
+    debug!(
+        "Downloaded {} headers from {} for range {} - {}",
+        all_headers.len(),
+        peer,
+        start_height,
+        end_height
+    );
+
+    Ok(all_headers)
+}
+
+type HeaderRangeJob = (
+    SocketAddr,
+    u64,
+    u64,
+    [u8; 32],
+    Result<Vec<blvm_protocol::BlockHeader>>,
+);
+
+/// N13: fill free peer slots from the pending range queue (≤1 in-flight range per peer).
+fn spawn_header_range_jobs(
+    join_set: &mut JoinSet<HeaderRangeJob>,
+    pending: &mut VecDeque<HeaderRange>,
+    free_peers: &mut VecDeque<SocketAddr>,
+    network_mgr: &Arc<NetworkManager>,
+) {
+    while !free_peers.is_empty() && !pending.is_empty() {
+        let peer_addr = free_peers.pop_front().expect("non-empty");
+        let (actual_start, actual_end, locator_hash) = pending.pop_front().expect("non-empty");
+        let network_clone = Arc::clone(network_mgr);
+        join_set.spawn(async move {
+            let result = download_header_range(
+                network_clone,
+                peer_addr,
+                locator_hash,
+                actual_start,
+                actual_end,
+            )
+            .await;
+            (peer_addr, actual_start, actual_end, locator_hash, result)
+        });
+    }
+}
+
+/// Download headers sequentially for the given height range.
+pub(crate) async fn download_headers(
+    peer_scorer: Arc<PeerScorer>,
+    start_height: u64,
+    end_height: u64,
+    peer_ids: &[String],
+    blockstore: &BlockStore,
+    network: Option<Arc<NetworkManager>>,
+    headers_timeout_secs: u64,
+    headers_max_failures: u32,
+    event_publisher: Option<Arc<EventPublisher>>,
+) -> Result<HeaderSyncResult> {
+    let network = match network.as_ref() {
+        Some(n) => n,
+        None => {
+            warn!("NetworkManager not available, skipping header download");
+            return Ok(HeaderSyncResult::at_height(start_height));
+        }
+    };
+
+    // Zero-peer / synthetic WAN: headers already contiguous on disk — skip network.
+    if peer_ids.is_empty() {
+        if !super::synthetic_wan::allow_zero_real_peers() {
+            return Err(anyhow::anyhow!("No peers available for header download"));
+        }
+        let mut h = start_height;
+        while h <= end_height {
+            match blockstore.get_hash_by_height(h) {
+                Ok(Some(stored_hash)) => {
+                    if !stored_height_extends_active_parent(blockstore, h, &stored_hash)? {
+                        warn!(
+                            "[IBD_HEADER_LINK] height {h} does not extend the active parent — not replaying"
+                        );
+                        break;
+                    }
+                    h += 1;
+                }
+                _ => break,
+            }
+        }
+        if h > start_height {
+            let tip = h.saturating_sub(1);
+            info!(
+                "IBD header sync: zero-peer local-replay — using {} already-stored headers (tip={})",
+                tip.saturating_sub(start_height).saturating_add(1),
+                tip
+            );
+            return Ok(HeaderSyncResult::at_height(tip));
+        }
+        return Err(anyhow::anyhow!(
+            "No peers and no stored headers from {} (synthetic WAN / ALLOW_ZERO_PEERS)",
+            start_height
+        ));
+    }
+
+    let mut peer_addrs: Vec<SocketAddr> = peer_ids
+        .iter()
+        .filter_map(|id| id.parse::<SocketAddr>().ok())
+        .collect();
+
+    if peer_addrs.is_empty() {
+        return Err(anyhow::anyhow!("No valid peer addresses found"));
+    }
+
+    peer_addrs.sort_by(|a, b| {
+        let a_score = peer_scorer.get_score(a);
+        let b_score = peer_scorer.get_score(b);
+        b_score
+            .partial_cmp(&a_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    info!(
+        "Using {} peers for sequential header download",
+        peer_addrs.len()
+    );
+
+    let stored_network = match network.storage().as_ref() {
+        Some(storage) => storage.chain().consensus_network()?,
+        None => blvm_protocol::types::Network::Mainnet,
+    };
+    let consensus_network = crate::network::header_work::network_for_header_work(
+        network
+            .protocol_engine()
+            .map(|engine| engine.get_protocol_version()),
+        stored_network,
+    );
+    let genesis = blvm_consensus::block::genesis_block(consensus_network);
+    let genesis_hash = blvm_consensus::block::block_header_hash(&genesis.header);
+    let mut header_presync = super::headers_presync::HeadersPresync::new(
+        super::headers_presync::network_key(consensus_network),
+    );
+
+    // `sync_parallel` passes the next block height to fetch. When resuming (start_height > 0),
+    // we must anchor GetHeaders to the stored parent hash — not genesis — or peers return
+    // block 1,2,… which get written at the wrong height (BIP90 rejects v1 at high height).
+    let mut current_height: u64;
+    let mut last_hash: [u8; 32];
+
+    if start_height == 0 {
+        blockstore
+            .store_header(&genesis_hash, &genesis.header)
+            .context("Failed to store genesis header")?;
+        blockstore
+            .store_height(0, &genesis_hash)
+            .context("Failed to store genesis height")?;
+
+        info!(
+            "Stored genesis block (height 0, hash: {})",
+            hex::encode(genesis_hash)
+        );
+        current_height = 1;
+        last_hash = genesis_hash;
+    } else {
+        let parent_h = start_height
+            .checked_sub(1)
+            .ok_or_else(|| anyhow::anyhow!("header sync: invalid start_height"))?;
+        last_hash = blockstore.get_hash_by_height(parent_h)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cannot resume header sync at height {}: missing parent hash at height {}. \
+                     Sync from genesis or repair height_index (data may be inconsistent).",
+                start_height,
+                parent_h
+            )
+        })?;
+        current_height = start_height;
+        info!(
+            "Resuming header sync at height {} (GetHeaders locator = parent {})",
+            start_height,
+            hex::encode(last_hash)
+        );
+    }
+    // Genesis stores the local header and asks the peer for height 1. An empty
+    // reply at that floor is no progress. A resume asks from `start_height`.
+    let request_floor = current_height;
+    let mut consecutive_failures = 0;
+    let mut current_peer_idx = 0;
+    let mut last_progress_log = start_height;
+    let mut last_progress_event = start_height;
+    let start_time = std::time::Instant::now();
+
+    // Fast-forward through headers already on disk.  During local replay after a UTXO repair,
+    // `start_height` may be well below `highest_stored_height`.  For every contiguous run of
+    // already-stored headers we can advance without any network round-trip — reading 2000 hashes
+    // from LMDB is orders of magnitude faster than one getheaders/headers RTT.
+    {
+        let mut skip_count: u64 = 0;
+        while current_height <= end_height {
+            match blockstore.get_hash_by_height(current_height) {
+                Ok(Some(stored_hash)) => {
+                    if !stored_height_extends_active_parent(
+                        blockstore,
+                        current_height,
+                        &stored_hash,
+                    )? {
+                        warn!(
+                            "[IBD_HEADER_LINK] height {current_height} hash {} does not extend the active parent — not skipping",
+                            hex::encode(stored_hash)
+                        );
+                        break;
+                    }
+                    last_hash = stored_hash;
+                    if let Some(stored_header) = blockstore.get_header(&stored_hash)? {
+                        header_presync.note(&stored_header);
+                    }
+                    skip_count += 1;
+                    current_height += 1;
+                }
+                _ => break,
+            }
+        }
+        if skip_count > 0 {
+            info!(
+                "IBD header sync: skipped {} already-stored headers (now at height {}); \
+                 only fetching new headers from peers",
+                skip_count, current_height
+            );
+            last_progress_log = current_height;
+        }
+    }
+
+    while current_height <= end_height {
+        if peer_addrs.is_empty() {
+            peer_addrs = network.get_connected_peer_addresses().await;
+            if peer_addrs.is_empty() {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                peer_addrs = network.get_connected_peer_addresses().await;
+                if peer_addrs.is_empty() {
+                    return Err(anyhow::anyhow!("No peers available"));
+                }
+            }
+        }
+
+        let peer_addr = peer_addrs[current_peer_idx % peer_addrs.len()];
+
+        let get_headers = GetHeadersMessage {
+            version: 70015,
+            block_locator_hashes: ibd_header_locator_hashes(
+                blockstore,
+                current_height.saturating_sub(1),
+                &last_hash,
+                &genesis_hash,
+            )?,
+            hash_stop: [0; 32],
+        };
+
+        let wire_msg =
+            match ProtocolParser::serialize_message(&ProtocolMessage::GetHeaders(get_headers)) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    warn!("Failed to serialize GetHeaders: {}", e);
+                    return Err(anyhow::anyhow!("Serialization failed"));
+                }
+            };
+
+        let headers_rx = network.register_headers_request(peer_addr);
+        let request_start = std::time::Instant::now();
+
+        if let Err(e) = network.send_to_peer(peer_addr, wire_msg).await {
+            debug!("Send failed to {}: {}", peer_addr, e);
+            peer_addrs.retain(|&a| a != peer_addr);
+            current_peer_idx += 1;
+            consecutive_failures += 1;
+            if consecutive_failures >= headers_max_failures {
+                return Err(anyhow::anyhow!("Too many failures"));
+            }
+            continue;
+        }
+
+        debug!(
+            "Waiting for headers from {} (timeout: {}s)",
+            peer_addr, headers_timeout_secs
+        );
+        match timeout(Duration::from_secs(headers_timeout_secs), headers_rx).await {
+            Ok(Ok(headers)) => {
+                let latency_ms = request_start.elapsed().as_secs_f64() * 1000.0;
+                peer_scorer.record_latency_sample(peer_addr, latency_ms);
+                debug!(
+                    "Received {} headers from {} ({}ms)",
+                    headers.len(),
+                    peer_addr,
+                    latency_ms as u64
+                );
+
+                if headers.is_empty() {
+                    let fetched_tip = current_height.saturating_sub(1);
+                    if !empty_headers_is_ibd_tip(fetched_tip, request_floor, end_height) {
+                        warn!(
+                            "[IBD_HEADER_EMPTY] peer={} fetched_tip={} start={} end={} — not IBD tip; rotate",
+                            peer_addr, fetched_tip, request_floor, end_height
+                        );
+                        consecutive_failures += 1;
+                        current_peer_idx += 1;
+                        if let Some(idx) = peer_addrs.iter().position(|&a| a == peer_addr) {
+                            let p = peer_addrs.remove(idx);
+                            peer_addrs.push(p);
+                        }
+                        continue;
+                    }
+                    info!(
+                        "Header sync COMPLETE at height {} (chain tip reached)",
+                        fetched_tip
+                    );
+                    break;
+                }
+
+                debug!(
+                    "Processing {} headers starting at height {}",
+                    headers.len(),
+                    current_height
+                );
+                let mut batch_entries: Vec<(blvm_protocol::Hash, BlockHeader, u64)> =
+                    Vec::with_capacity(headers.len());
+
+                for header in &headers {
+                    if !header_links_to_parent(blockstore, header, current_height, &last_hash)? {
+                        // Live 2026-08-20: skip-to-tip + one-hash locator → genesis-start.
+                        // leftover-c1t-recv0: peer rotate never rewound last_hash (5976×).
+                        if let Ok(Some(attach_h)) =
+                            blockstore.get_height_by_hash(&header.prev_block_hash)
+                        {
+                            if attach_h > 0 && attach_h + 1 < current_height {
+                                warn!(
+                                    "[IBD_HEADER_REWIND] attach prev height {} → ask {} (was {}) peer={}",
+                                    attach_h,
+                                    attach_h + 1,
+                                    current_height,
+                                    peer_addr
+                                );
+                                last_hash = header.prev_block_hash;
+                                current_height = attach_h + 1;
+                                consecutive_failures = 0;
+                                batch_entries.clear();
+                                break;
+                            }
+                        }
+                        if header.prev_block_hash == genesis_hash && current_height > 1 {
+                            let back = 2048u64.min(current_height.saturating_sub(1));
+                            let new_h = current_height - back;
+                            if let Ok(Some(hh)) =
+                                blockstore.get_hash_by_height(new_h.saturating_sub(1))
+                            {
+                                warn!(
+                                    "[IBD_HEADER_REWIND] genesis-start at {} — step back to {} peer={}",
+                                    current_height, new_h, peer_addr
+                                );
+                                current_height = new_h;
+                                last_hash = hh;
+                                consecutive_failures = 0;
+                                batch_entries.clear();
+                                break;
+                            }
+                        }
+                        warn!(
+                            "[IBD_HEADER_PEER] chain break at height {} from {}: expected prev {} got {} — trying next peer",
+                            current_height,
+                            peer_addr,
+                            hex::encode(last_hash),
+                            hex::encode(header.prev_block_hash)
+                        );
+                        current_peer_idx += 1;
+                        consecutive_failures += 1;
+                        if consecutive_failures >= headers_max_failures {
+                            return Err(anyhow::anyhow!(
+                                "Header chain break at height {}: expected prev {} got {} ({} peers failed)",
+                                current_height,
+                                hex::encode(last_hash),
+                                hex::encode(header.prev_block_hash),
+                                consecutive_failures
+                            ));
+                        }
+                        batch_entries.clear();
+                        break;
+                    }
+
+                    let pending: Vec<(u64, u64, u64)> = batch_entries
+                        .iter()
+                        .map(|(_, accepted, accepted_height)| {
+                            (*accepted_height, accepted.bits, accepted.timestamp)
+                        })
+                        .collect();
+                    let stored_at = |h: u64| {
+                        blockstore
+                            .get_header_at_height(h)
+                            .ok()
+                            .flatten()
+                            .map(|found| (found.bits, found.timestamp))
+                    };
+                    let ancestor =
+                        crate::network::header_work::ancestor_seeing_pending(&pending, &stored_at);
+                    if !crate::network::header_work::header_meets_required_work(
+                        header,
+                        current_height,
+                        consensus_network,
+                        &ancestor,
+                    ) {
+                        warn!(
+                            "[IBD_HEADER_WORK] height {} bits {:#x} are not the required work from {} — not storing",
+                            current_height, header.bits, peer_addr
+                        );
+                        current_peer_idx += 1;
+                        consecutive_failures += 1;
+                        if consecutive_failures >= headers_max_failures {
+                            return Err(anyhow::anyhow!(
+                                "Header at height {} does not meet required work ({} peers failed)",
+                                current_height,
+                                consecutive_failures
+                            ));
+                        }
+                        break;
+                    }
+
+                    let mut header_data = [0u8; 80];
+                    header_data[0..4].copy_from_slice(&(header.version as i32).to_le_bytes());
+                    header_data[4..36].copy_from_slice(&header.prev_block_hash);
+                    header_data[36..68].copy_from_slice(&header.merkle_root);
+                    header_data[68..72].copy_from_slice(&(header.timestamp as u32).to_le_bytes());
+                    header_data[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());
+                    header_data[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());
+                    let header_hash = double_sha256(&header_data);
+
+                    batch_entries.push((header_hash, header.clone(), current_height));
+                    header_presync.note(header);
+
+                    last_hash = header_hash;
+                    current_height += 1;
+
+                    if current_height > end_height {
+                        break;
+                    }
+                }
+
+                let batch_count = batch_entries.len();
+                if batch_count == 0 {
+                    continue;
+                }
+                consecutive_failures = 0;
+                debug!("Storing {} headers in batch...", batch_count);
+                let store_start = std::time::Instant::now();
+                let blockstore_clone = blockstore.clone();
+                tokio::task::spawn_blocking(move || {
+                    blockstore_clone.store_headers_batch(&batch_entries)
+                })
+                .await
+                .context("Failed to spawn blocking task")?
+                .context("Failed to store headers batch")?;
+                debug!(
+                    "Stored {} headers in {:?}",
+                    batch_count,
+                    store_start.elapsed()
+                );
+                if header_batch_rtt_should_rotate(latency_ms) {
+                    warn!(
+                        "[IBD_HEADER_SLOW] peer={} rtt_ms={:.0} n={} — rotate",
+                        peer_addr, latency_ms, batch_count
+                    );
+                    current_peer_idx += 1;
+                }
+
+                if current_height > last_progress_log && current_height - last_progress_log >= 20000
+                {
+                    let elapsed = start_time.elapsed().as_secs_f64();
+                    let synced = current_height - start_height;
+                    let rate = if elapsed > 0.0 {
+                        synced as f64 / elapsed
+                    } else {
+                        0.0
+                    };
+                    let remaining = end_height.saturating_sub(current_height);
+                    let eta = if rate > 0.0 {
+                        remaining as f64 / rate
+                    } else {
+                        f64::INFINITY
+                    };
+
+                    info!(
+                        "Header sync: {} / {} ({:.1}%) - {:.0} h/s - ETA: {:.0}s",
+                        current_height,
+                        end_height,
+                        (current_height as f64 / end_height as f64) * 100.0,
+                        rate,
+                        eta
+                    );
+                    last_progress_log = current_height;
+                }
+
+                // Publish HeadersSyncProgress every 5000 headers for module event subscribers
+                if current_height > last_progress_event
+                    && (current_height - last_progress_event) >= 5000
+                {
+                    if let Some(ref ep) = event_publisher {
+                        let progress_percent = if end_height > start_height {
+                            ((current_height - start_height) as f64
+                                / (end_height - start_height + 1) as f64)
+                                * 100.0
+                        } else {
+                            100.0
+                        };
+                        ep.publish_headers_sync_progress(
+                            current_height.saturating_sub(1),
+                            end_height,
+                            progress_percent,
+                        )
+                        .await;
+                        last_progress_event = current_height;
+                    }
+                }
+
+                let max_headers = network.protocol_limits().max_headers_results;
+                if headers.len() < max_headers {
+                    let total = current_height - start_height;
+                    let elapsed = start_time.elapsed();
+                    let rate = if elapsed.as_secs_f64() > 0.0 {
+                        total as f64 / elapsed.as_secs_f64()
+                    } else {
+                        0.0
+                    };
+                    info!(
+                        "Header sync COMPLETE: {} headers in {:.1}s ({:.0} h/s) - chain tip reached",
+                        total,
+                        elapsed.as_secs_f64(),
+                        rate
+                    );
+                    return Ok(HeaderSyncResult {
+                        tip_height: current_height.saturating_sub(1),
+                        may_assign: header_presync.releases_assigner(),
+                    });
+                }
+            }
+            Ok(Err(_)) => {
+                debug!("Channel closed for request to {}", peer_addr);
+                consecutive_failures += 1;
+                current_peer_idx += 1;
+            }
+            Err(_) => {
+                debug!("Timeout waiting for headers from {}", peer_addr);
+                consecutive_failures += 1;
+                current_peer_idx += 1;
+                if let Some(idx) = peer_addrs.iter().position(|&a| a == peer_addr) {
+                    let p = peer_addrs.remove(idx);
+                    peer_addrs.push(p);
+                }
+            }
+        }
+
+        if consecutive_failures >= headers_max_failures {
+            warn!(
+                "Too many failures ({}), refreshing peers",
+                consecutive_failures
+            );
+            consecutive_failures = 0;
+            peer_addrs = network.get_connected_peer_addresses().await;
+            if peer_addrs.is_empty() {
+                // Actively trigger archive peer discovery before waiting — don't just
+                // sit idle for 5 s then give up. The address DB may be drained of
+                // full-history peers after mass evictions; seed it explicitly.
+                warn!("Header sync: no connected peers — triggering archive peer re-discovery");
+                // Fire both archive and regular DNS seeds in parallel for speed.
+                let default_ban = Default::default();
+                let (arc_res, _) = tokio::join!(network.discover_archive_peers_from_dns(), {
+                    let (net_name, port) =
+                        crate::network::protocol::ProtocolParser::dns_seed_network();
+                    network.discover_peers_from_dns(net_name, port, &default_ban)
+                },);
+                let _ = arc_res;
+                let _ = network.connect_peers_from_database(16).await;
+                // Wait up to 15 s in 2-second slices for a peer to connect.
+                for _ in 0..8 {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    peer_addrs = network.get_connected_peer_addresses().await;
+                    if !peer_addrs.is_empty() {
+                        info!(
+                            "Header sync: {} peer(s) reconnected, resuming",
+                            peer_addrs.len()
+                        );
+                        break;
+                    }
+                }
+                if peer_addrs.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "No peers available after 70s wait + re-discovery"
+                    ));
+                }
+            }
+        }
+    }
+
+    let total = current_height - start_height;
+    let elapsed = start_time.elapsed();
+    let rate = if elapsed.as_secs_f64() > 0.0 {
+        total as f64 / elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
+
+    info!(
+        "Header sync COMPLETE: {} headers in {:.1}s ({:.0} h/s)",
+        total,
+        elapsed.as_secs_f64(),
+        rate
+    );
+
+    Ok(HeaderSyncResult {
+        tip_height: current_height.saturating_sub(1),
+        may_assign: header_presync.releases_assigner(),
+    })
+}
+
+#[cfg(test)]
+mod n13_tests {
+    use super::*;
+
+    #[test]
+    fn n13_checkpoint_ranges_not_capped_by_peer_count() {
+        let cps = [
+            (0u64, [0u8; 32]),
+            (100, [1u8; 32]),
+            (200, [2u8; 32]),
+            (300, [3u8; 32]),
+            (400, [4u8; 32]),
+        ];
+        let ranges = checkpoint_header_ranges(&cps, 0, 400);
+        assert_eq!(
+            ranges.len(),
+            4,
+            "all windows kept (old bug: take(peers) dropped tail)"
+        );
+        assert_eq!(ranges[0].0, 0);
+        assert_eq!(ranges[3].1, 400);
+        // Peers=2 would have dropped ranges 2–3 under the old .take(peers) cap.
+        assert!(ranges.len() > 2);
+    }
+
+    #[test]
+    fn ibd_header_locator_heights_doubles_after_ten_steps() {
+        let hs = ibd_header_locator_heights(20);
+        assert_eq!(hs[0], 20);
+        assert_eq!(&hs[0..10], &[20, 19, 18, 17, 16, 15, 14, 13, 12, 11]);
+        assert!(hs.contains(&0), "locator must include genesis");
+        let high = ibd_header_locator_heights(961_637);
+        assert_eq!(high[0], 961_637);
+        assert!(high.len() > 12);
+        assert_eq!(*high.last().unwrap(), 0);
+        assert!(high.contains(&961_628));
+    }
+
+    #[test]
+    fn missing_height_zero_uses_the_caller_genesis() {
+        use crate::storage::blockstore::BlockStore;
+        use crate::storage::database::{Database, create_database, default_backend};
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        let tip = [9u8; 32];
+        let genesis = [0xabu8; 32];
+        store.store_height(1, &tip).unwrap();
+        let hashes = ibd_header_locator_hashes(&store, 1, &tip, &genesis).unwrap();
+        assert_eq!(hashes.first(), Some(&tip));
+        assert!(hashes.contains(&genesis));
+        assert!(!hashes.contains(&blvm_protocol::GENESIS_BLOCK_HASH_INTERNAL));
+    }
+
+    #[test]
+    fn n13_schedule_covers_all_ranges_with_one_inflight_per_peer() {
+        let peer_count = 3;
+        let range_count = 7;
+        let assigned = simulate_header_range_schedule(peer_count, range_count);
+        assert_eq!(assigned.len(), range_count);
+        let mut seen = vec![false; range_count];
+        for &(peer, range) in &assigned {
+            assert!(peer < peer_count);
+            assert!(!seen[range], "range {range} assigned twice");
+            seen[range] = true;
+        }
+        assert!(seen.iter().all(|&s| s));
+
+        // Replay concurrency: never exceed peer_count in-flight.
+        let first_wave = peer_count.min(range_count);
+        let mut inflight = first_wave;
+        let mut free = peer_count - first_wave;
+        let mut pending = range_count - first_wave;
+        let mut max_inflight = inflight;
+        for _ in first_wave..range_count {
+            inflight -= 1;
+            free += 1;
+            inflight += 1;
+            free -= 1;
+            pending -= 1;
+            max_inflight = max_inflight.max(inflight);
+        }
+        assert_eq!(pending, 0);
+        assert!(max_inflight <= peer_count);
+        assert_eq!(free + inflight, peer_count);
+    }
+
+    #[test]
+    fn n13_extra_peers_idle_when_fewer_ranges() {
+        let assigned = simulate_header_range_schedule(8, 3);
+        assert_eq!(assigned.len(), 3);
+        let peers_used: std::collections::HashSet<_> = assigned.iter().map(|(p, _)| *p).collect();
+        assert_eq!(peers_used.len(), 3);
+    }
+
+    #[test]
+    fn r216_header_slow_rtt_rotates_r215_stays_on_r214() {
+        // R-214 ~103ms/batch (19466 h/s). R-215 ~1770ms/batch (1127 h/s).
+        assert!(!header_batch_rtt_should_rotate(103.0));
+        assert!(!header_batch_rtt_should_rotate(400.0));
+        assert!(header_batch_rtt_should_rotate(401.0));
+        assert!(header_batch_rtt_should_rotate(1770.0));
+    }
+
+    #[test]
+    fn dest_bg_empty_headers_at_genesis_is_not_ibd_tip() {
+        // dest-bg 2026-08-25T07:21Z: empty getheaders at height 1 → COMPLETE 0
+        // against target 963969. Rotate, do not declare tip.
+        assert!(!empty_headers_is_ibd_tip(0, 1, 963_969));
+        // Genesis asks from height 1. One accepted header, then empty, is this peer's tip.
+        assert!(empty_headers_is_ibd_tip(1, 1, 963_969));
+        assert!(
+            empty_headers_is_ibd_tip(961_638, 1, 963_969),
+            "progress then empty is BIP130 this-peer tip (dest-bf 961k complete)"
+        );
+        assert!(empty_headers_is_ibd_tip(963_969, 1, 963_969));
+        assert!(!empty_headers_is_ibd_tip(499_999, 500_000, 963_969));
+    }
+
+    /// Testnet4 catch-up: rewind accepts a new 155498 in the batch, then the next
+    /// header's prev equals that in-memory hash. The disk row at 155498 is the old
+    /// tip and must not be the parent.
+    #[test]
+    fn stale_disk_parent_links_to_in_batch_hash() {
+        let disk_155498 = [0x11u8; 32];
+        let accepted_155498 = [0x22u8; 32];
+        let unrelated = [0x33u8; 32];
+
+        assert!(
+            header_prev_links(Some(&disk_155498), &accepted_155498, &accepted_155498),
+            "prev matches the header just accepted in this batch"
+        );
+        assert!(
+            !header_prev_links(Some(&disk_155498), &accepted_155498, &disk_155498),
+            "a header that extends the stale disk row is not this walk's child"
+        );
+        assert!(!header_prev_links(
+            Some(&disk_155498),
+            &accepted_155498,
+            &unrelated
+        ));
+
+        // Committed parent: disk hash and walk hash are the same.
+        assert!(header_prev_links(
+            Some(&accepted_155498),
+            &accepted_155498,
+            &accepted_155498
+        ));
+        assert!(!header_prev_links(
+            Some(&accepted_155498),
+            &accepted_155498,
+            &disk_155498
+        ));
+
+        // No row yet (header still inside the same uncommitted batch).
+        assert!(header_prev_links(None, &accepted_155498, &accepted_155498));
+        assert!(!header_prev_links(None, &accepted_155498, &disk_155498));
+    }
+
+    /// av3: height 157905's header pointed at the other block stored at 157904.
+    /// Skipping that height would treat it as the next block of the active chain.
+    #[test]
+    fn stored_height_stops_when_prev_is_not_the_active_parent() {
+        use crate::storage::database::{Database, create_database, default_backend};
+        use std::sync::Arc;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        let grandparent = [0x0fu8; 32];
+        let active_parent = [0x32u8; 32];
+        let side_parent = [0x02u8; 32];
+        let child = [0x06u8; 32];
+        let parent_header = blvm_protocol::BlockHeader {
+            version: 1,
+            prev_block_hash: grandparent,
+            merkle_root: [1u8; 32],
+            timestamp: 1_700_000_000,
+            bits: 0x1d00ffff,
+            nonce: 1,
+        };
+        let child_header = blvm_protocol::BlockHeader {
+            version: 1,
+            prev_block_hash: side_parent,
+            merkle_root: [2u8; 32],
+            timestamp: 1_700_000_001,
+            bits: 0x1d00ffff,
+            nonce: 2,
+        };
+        store.store_height(157903, &grandparent).unwrap();
+        store.store_header(&active_parent, &parent_header).unwrap();
+        store.store_height(157904, &active_parent).unwrap();
+        store.store_header(&child, &child_header).unwrap();
+        store.store_height(157905, &child).unwrap();
+
+        assert!(
+            stored_height_extends_active_parent(&store, 157904, &active_parent).unwrap(),
+            "157904 extends the active hash at 157903"
+        );
+        assert!(
+            !stored_height_extends_active_parent(&store, 157905, &child).unwrap(),
+            "157905 extends the side header at 157904, not the active hash"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ibd_target_tests {
+    use super::ibd_target_height;
+
+    #[test]
+    fn a_caught_up_node_does_not_aim_a_million_blocks_past_the_tip() {
+        assert_eq!(ibd_target_height(158_040, None, 158_040), 158_040);
+        assert_eq!(ibd_target_height(158_040, Some(158_040), 158_040), 158_040);
+    }
+
+    #[test]
+    fn linked_headers_above_the_tip_are_the_target_when_no_peer_is_ahead() {
+        assert_eq!(ibd_target_height(157_910, None, 158_036), 158_036);
+    }
+
+    #[test]
+    fn a_peer_ahead_of_the_tip_wins_over_stored_headers() {
+        assert_eq!(ibd_target_height(100, Some(250), 180), 250);
+    }
+
+    #[test]
+    fn a_fresh_node_still_bootstraps_without_peers_or_headers() {
+        assert_eq!(ibd_target_height(0, None, 0), 1_000_000);
+    }
+}
+
+#[cfg(test)]
+mod header_range_timeout_tests {
+    use super::header_range_timeout;
+    use crate::config::RequestTimeoutConfig;
+    use tokio::time::Duration;
+
+    #[test]
+    fn header_range_waits_for_the_configured_async_timeout() {
+        let wait = header_range_timeout(&RequestTimeoutConfig::default());
+        assert_eq!(wait, Duration::from_secs(300));
+        assert!(wait > Duration::from_secs(11));
+    }
+
+    #[test]
+    fn disconnected_header_is_not_appended() {
+        let locator = [1u8; 32];
+        assert!(!super::header_batch_extends(&locator, &[2u8; 32]));
+        assert!(super::header_batch_extends(&locator, &locator));
+    }
+}

@@ -1,0 +1,54 @@
+//! Example: Connect Electrum wallet to blvm-node
+//!
+//! This example demonstrates how to configure blvm-node to work with Electrum wallet.
+//! Electrum connects via JSON-RPC and requires specific RPC methods.
+//!
+//! Note: This is a configuration example. For a full running node, use the blvm binary
+//! with the generated config.toml file.
+
+use blvm_node::config::NodeConfig;
+
+fn main() -> anyhow::Result<()> {
+    println!("blvm-node Electrum Integration Configuration");
+    println!("=============================================");
+    println!();
+
+    // Create configuration optimized for Electrum
+    let mut config = NodeConfig::default();
+
+    // Network configuration
+    config.protocol_version = Some("testnet3".to_string()); // Use "bitcoin-v1" for mainnet
+    config.listen_addr = Some("127.0.0.1:18333".parse().unwrap()); // Testnet P2P port
+    config.max_outbound_peers = Some(8);
+
+    // RPC configuration
+    // RPC bind address is chosen when starting the node (e.g. blvm --rpc-addr 127.0.0.1:18332)
+    // RPC auth is optional - configure in generated config.toml if needed
+    config.rpc_auth = Some(blvm_node::config::RpcAuthConfig {
+        required: false, // No auth required for localhost
+        tokens: Vec::new(),
+        certificates: Vec::new(),
+        ..Default::default()
+    });
+
+    // Save configuration
+    let config_path = "electrum-config.toml";
+    config.to_toml_file(std::path::Path::new(config_path))?;
+
+    println!("✓ Configuration created: {config_path}");
+    println!();
+    println!("Configuration Summary:");
+    println!("  RPC Port: 18332 (testnet)");
+    println!("  RPC Bind: 127.0.0.1");
+    println!("  Network: testnet3");
+    println!("  P2P Port: 18333");
+    println!();
+    println!("To start the node with this config (operator binary is `blvm`, not `blvm-node`):");
+    println!("  blvm --config {config_path} --network testnet --rpc-addr 127.0.0.1:18332");
+    println!();
+    println!("Electrum protocol is the blvm-wallet-index module, not this RPC port.");
+    println!("Set listen = \"127.0.0.1:50001\" in that module's config.toml.");
+    println!("The node RPC port speaks Bitcoin Core JSON-RPC.");
+
+    Ok(())
+}

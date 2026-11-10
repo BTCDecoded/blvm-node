@@ -1,0 +1,48 @@
+# cargo-audit configuration for blvm-node
+# Each advisory is documented with:
+#   - whether it is a direct or transitive dependency
+#   - why it cannot be upgraded right now
+#   - the upgrade path / tracking issue
+
+[advisories]
+
+# RUSTSEC-2023-0089 — atomic-polyfill is unmaintained
+# Transitive dep: pulled in by embedded/WASM-era crates in the iroh dependency tree.
+# Not used directly; iroh is the eventual fix path (iroh 0.96+ removes it).
+# Severity: informational (unmaintained, no CVE).
+ignore = [
+    # atomic-polyfill: unmaintained — no security CVE; dropped when iroh dependency tree updates.
+    "RUSTSEC-2023-0089",
+
+    # bincode 1.3.3: unmaintained — no CVE or memory-safety issue.
+    # Upgrading to bincode 2 requires a full API rewrite (different encode/decode interface).
+    # Tracking: https://github.com/BTCDecoded/blvm-node/issues (add ticket)
+    "RUSTSEC-2025-0141",
+
+    # fxhash: unmaintained — no CVE; consider migrating to rustc-hash (already used elsewhere).
+    # Transitive dep; cannot remove without upgrading the parent crate that pulls it in.
+    "RUSTSEC-2025-0057",
+
+    # instant: unmaintained — no CVE; replaced by std::time or web-time in newer versions.
+    # Transitive dep from iroh internals; will be resolved with iroh upgrade.
+    "RUSTSEC-2024-0384",
+
+    # paste: unmaintained — no CVE.
+    # Transitive dep from macro crates; iroh upgrade path.
+    "RUSTSEC-2024-0436",
+
+    # lru 0.12.5: IterMut unsoundness (Stacked Borrows).
+    # Transitive dep via blvm-protocol 0.1.14 (pinned to lru ^0.12).
+    # blvm-node's DIRECT dep now uses lru 0.16.4 (see Cargo.toml).
+    # The 0.12.5 instance is internal to blvm-protocol and we do NOT call iter_mut() on it.
+    # Will be resolved when blvm-protocol publishes a release with lru ^0.16.
+    "RUSTSEC-2026-0002",
+
+    # rand 0.8.5: unsound with custom logger and rand::rng().
+    # rand::rng() was introduced in rand 0.9; our code uses thread_rng() (rand 0.8 API).
+    # The unsoundness requires a user-installed custom global logger AND calling rand::rng(),
+    # neither of which applies to our usage.
+    # Transitive: also pulled in by proptest 1.x and iroh-quinn-proto (both require rand ^0.8).
+    # Direct dep (rand = "=0.8.5") will be upgraded to 0.9 once proptest and iroh move to 0.9.
+    "RUSTSEC-2026-0097",
+]

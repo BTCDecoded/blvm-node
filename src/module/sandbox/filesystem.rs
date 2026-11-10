@@ -1,0 +1,120 @@
+//! File system access control for modules
+//!
+//! Ensures modules can only access files within their allowed data directory.
+
+use std::path::{Path, PathBuf};
+use tracing::{debug, warn};
+
+use crate::module::traits::ModuleError;
+
+/// Make a path absolute using the current working directory when relative.
+fn absolutize_path(path: &Path) -> PathBuf {
+    if path.as_os_str().is_empty() {
+        return PathBuf::from(".");
+    }
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
+/// File system sandbox that restricts module file access
+pub struct FileSystemSandbox {
+    /// Allowed data directory (modules can only access files under this)
+    allowed_path: PathBuf,
+}
+
+impl FileSystemSandbox {
+    /// Create a new file system sandbox
+    pub fn new<P: AsRef<Path>>(data_dir: P) -> Self {
+        let abs = absolutize_path(data_dir.as_ref());
+        let allowed_path = std::fs::canonicalize(&abs).unwrap_or(abs);
+        Self { allowed_path }
+    }
+
+    /// Validate that a file path is within the allowed directory
+    pub fn validate_path<P: AsRef<Path>>(&self, path: P) -> Result<PathBuf, ModuleError> {
+        let path = path.as_ref();
+
+        // Fast path: if path is already absolute and clearly within sandbox, avoid canonicalize
+        if path.is_absolute() && path.starts_with(&self.allowed_path) {
+            // Still canonicalize for security (handles symlinks, etc.)
+            // But we can optimize by checking prefix first
+        }
+
+        // A missing final component is a new file. Canonicalize the parent and
+        // join the file name so create can succeed inside the sandbox.
+        let canonical = match path.canonicalize() {
+            Ok(canonical) => canonical,
+            Err(_) => {
+                let parent = path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(path);
+                let parent_canonical = parent.canonicalize().map_err(|e| {
+                    ModuleError::OperationError(format!(
+                        "Failed to canonicalize path {path:?}: {e}"
+                    ))
+                })?;
+                let name = path.file_name().ok_or_else(|| {
+                    ModuleError::OperationError(format!(
+                        "Access denied: path {path:?} has no file name"
+                    ))
+                })?;
+                if name == ".." || name == "." {
+                    return Err(ModuleError::OperationError(format!(
+                        "Access denied: path {path:?} is outside allowed directory {:?}",
+                        self.allowed_path
+                    )));
+                }
+                parent_canonical.join(name)
+            }
+        };
+
+        // Check if path is within allowed directory
+        if !canonical.starts_with(&self.allowed_path) {
+            warn!(
+                "Module attempted to access path outside sandbox: {:?} (allowed: {:?})",
+                canonical, self.allowed_path
+            );
+            return Err(ModuleError::OperationError(format!(
+                "Access denied: path {:?} is outside allowed directory {:?}",
+                canonical, self.allowed_path
+            )));
+        }
+
+        debug!("Path validated: {:?} is within sandbox", canonical);
+        Ok(canonical)
+    }
+
+    /// Get the allowed data directory
+    pub fn allowed_path(&self) -> &Path {
+        &self.allowed_path
+    }
+
+    /// Check if a path is within the sandbox (without canonicalizing)
+    ///
+    /// This is a fast check that avoids filesystem I/O for common cases.
+    #[inline]
+    pub fn is_within_sandbox<P: AsRef<Path>>(&self, path: P) -> bool {
+        let path = path.as_ref();
+
+        // Fast path: check prefix first (no I/O)
+        if !path.starts_with(&self.allowed_path) {
+            return false;
+        }
+
+        // If prefix matches, try to canonicalize for security (handles symlinks)
+        // But don't fail if path doesn't exist yet
+        if let Ok(canonical) = path.canonicalize() {
+            canonical.starts_with(&self.allowed_path)
+        } else {
+            // If canonicalization fails (path doesn't exist), trust prefix check
+            // This is safe because we've already verified the prefix
+            true
+        }
+    }
+}

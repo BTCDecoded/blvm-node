@@ -1,0 +1,57 @@
+# Full BLVM configuration example
+# Copy and customize for your deployment. Uncomment sections as needed.
+# Precedence: CLI > ENV > config file > defaults
+
+transport_preference = "tcponly"
+listen_addr = "127.0.0.1:8333"
+protocol_version = "BitcoinV1"
+# max_outbound_peers = 100
+
+# [block_validation]
+# assume_valid_height = 0
+# assume_valid_hash = null
+
+# [storage]
+# data_dir = "data"
+# dbcache_mb = 450
+# database_backend = "auto"
+
+# [storage.rocksdb]
+# parallelism = 0
+# max_background_compactions = 4
+# max_background_flushes = 4
+
+# [storage.pruning]
+# incremental_prune_during_ibd = false
+# prune_window_size = 144
+
+# [ibd]
+# chunk_size = 128                    # blocks per request round-trip (default 128; fewer round-trips vs old 16)
+# max_blocks_in_transit_per_peer = 128  # must stay >= chunk_size; memory bounded by MemoryGuard max_ahead
+# download_timeout_secs = 30
+# mode = "parallel"
+# eviction = "fifo"
+# headers_timeout_secs = 30
+# headers_max_failures = 10
+
+# [rpc]
+# max_request_size_bytes = 1048576
+
+# [request_timeouts]
+# async_request_timeout_seconds = 300
+# storage_timeout_seconds = 10
+# rpc_timeout_seconds = 60
+# handshake_timeout_secs = 10
+
+# [protocol_limits]
+# max_protocol_message_length = 4000024
+# max_addr_to_send = 1000
+# max_inv_sz = 50000
+# max_headers_results = 2000
+
+# [network_timing]
+# target_outbound_peers = 8
+# peer_connection_delay_seconds = 2
+
+# [logging]
+# filter = "info"   # or level = "info" (alias)

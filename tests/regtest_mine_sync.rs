@@ -1,0 +1,187 @@
+//! Regtest: mine N blocks on one node, then replay the same wire bytes on a follower (sync).
+//! Exercises consensus mining + `SyncCoordinator::process_block` end-to-end.
+//!
+//! Default N is 60 (CI-friendly). Override locally for stress runs:
+//! `BLVM_TEST_REGTEST_BLOCKS=600 cargo test --test regtest_mine_sync -- --nocapture`
+
+use blvm_node::node::sync::SyncCoordinator;
+use blvm_node::storage::Storage;
+use blvm_protocol::ConsensusProof;
+use blvm_protocol::mining::MiningResult;
+use blvm_protocol::segwit::Witness;
+use blvm_protocol::serialization::serialize_block_with_witnesses;
+use blvm_protocol::types::Network;
+use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion, UtxoSet};
+use std::sync::Arc;
+use tempfile::TempDir;
+
+const DEFAULT_REGTEST_BLOCKS: u64 = 60;
+const MINE_ATTEMPTS: u64 = 2_000_000;
+
+fn regtest_block_count() -> u64 {
+    std::env::var("BLVM_TEST_REGTEST_BLOCKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_REGTEST_BLOCKS)
+}
+
+/// BIP34 height in coinbase scriptSig (regtest has BIP34 active from height 0).
+fn regtest_coinbase_script_sig(height: u64) -> Vec<u8> {
+    blvm_protocol::bip_validation::encode_bip34_coinbase_script(height)
+}
+
+fn seed_genesis_block(storage: &Storage, genesis: &blvm_protocol::Block) -> anyhow::Result<()> {
+    let hash = storage.blocks().get_block_hash(genesis);
+    storage.blocks().store_block(genesis)?;
+    storage.blocks().store_height(0, &hash)?;
+    storage.blocks().store_recent_header(0, &genesis.header)?;
+    let witnesses: Vec<Vec<Witness>> = genesis
+        .transactions
+        .iter()
+        .map(|tx| tx.inputs.iter().map(|_| Witness::default()).collect())
+        .collect();
+    storage.blocks().store_witness(&hash, &witnesses)?;
+    Ok(())
+}
+
+fn bootstrap_miner_storage(
+    storage: &Arc<Storage>,
+    genesis: &blvm_protocol::Block,
+) -> anyhow::Result<()> {
+    storage.chain().initialize(&genesis.header)?;
+    seed_genesis_block(storage.as_ref(), genesis)
+}
+
+fn bootstrap_follower_storage(
+    storage: &Arc<Storage>,
+    genesis: &blvm_protocol::Block,
+) -> anyhow::Result<()> {
+    storage.chain().initialize(&genesis.header)?;
+    seed_genesis_block(storage.as_ref(), genesis)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn regtest_mine_blocks_then_sync_follower() -> anyhow::Result<()> {
+    let regtest_blocks = regtest_block_count();
+    let protocol = Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest)?);
+    let genesis = protocol.get_network_params().genesis_block.clone();
+
+    let consensus = ConsensusProof::new();
+
+    let miner_dir = TempDir::new()?;
+    let follower_dir = TempDir::new()?;
+    let storage_m = Arc::new(Storage::new(miner_dir.path())?);
+    let storage_f = Arc::new(Storage::new(follower_dir.path())?);
+
+    bootstrap_miner_storage(&storage_m, &genesis)?;
+    bootstrap_follower_storage(&storage_f, &genesis)?;
+
+    let mut miner_utxo = UtxoSet::default();
+    let mut follower_utxo = UtxoSet::default();
+    let mut coord_m = SyncCoordinator::new();
+    let mut coord_f = SyncCoordinator::new();
+
+    let mut wire_blocks: Vec<Vec<u8>> = Vec::with_capacity(regtest_blocks as usize);
+
+    for _ in 0..regtest_blocks {
+        let connect_height = storage_m.chain().get_height()?.unwrap_or(0) + 1;
+        let stored: u64 = storage_m.blocks().block_count()? as u64;
+        assert_eq!(
+            stored, connect_height,
+            "miner blockstore height index vs connect height"
+        );
+
+        let prev_header = storage_m
+            .chain()
+            .get_tip_header()?
+            .ok_or_else(|| anyhow::anyhow!("missing tip header"))?;
+
+        let mut prev_headers = storage_m
+            .blocks()
+            .headers_back_from(connect_height.saturating_sub(1), 2016)
+            .unwrap_or_default();
+        if prev_headers.len() < 2 {
+            prev_headers = vec![prev_header.clone(), prev_header.clone()];
+        }
+
+        let coinbase_script = regtest_coinbase_script_sig(connect_height);
+        let coinbase_address = vec![0x51u8];
+        let block_time = prev_header.timestamp.saturating_add(600);
+
+        let mut block = consensus.create_new_block_with_time(
+            &miner_utxo,
+            &[],
+            connect_height,
+            &prev_header,
+            &prev_headers,
+            &coinbase_script,
+            &coinbase_address,
+            block_time,
+            Network::Regtest,
+            None,
+        )?;
+        // BIP90 on regtest: BIP34/BIP66/BIP65 active from height 0 → need version >= 4.
+        block.header.version = 4;
+
+        let (mined, result) = consensus.mine_block(block, MINE_ATTEMPTS)?;
+        assert!(
+            matches!(result, MiningResult::Success),
+            "PoW failed at connect_height {connect_height} (regtest target should be easy)"
+        );
+
+        let witnesses: Vec<Vec<Witness>> = mined
+            .transactions
+            .iter()
+            .map(|tx| tx.inputs.iter().map(|_| Witness::default()).collect())
+            .collect();
+        let wire = serialize_block_with_witnesses(&mined, &witnesses, true);
+
+        let accepted = coord_m.process_block(
+            storage_m.blocks().as_ref(),
+            protocol.as_ref(),
+            Some(&storage_m),
+            &wire,
+            connect_height,
+            &mut miner_utxo,
+            None,
+            None,
+        )?;
+        assert!(accepted, "miner rejected block at {connect_height}");
+
+        wire_blocks.push(wire);
+    }
+
+    storage_m.utxos().store_utxo_set(&miner_utxo)?;
+
+    assert_eq!(storage_m.chain().get_height()?.unwrap(), regtest_blocks);
+    assert_eq!(wire_blocks.len() as u64, regtest_blocks);
+
+    let miner_tip = storage_m.chain().get_tip_hash()?.unwrap();
+
+    for wire in &wire_blocks {
+        let connect_height = storage_f.chain().get_height()?.unwrap_or(0) + 1;
+        let accepted = coord_f.process_block(
+            storage_f.blocks().as_ref(),
+            protocol.as_ref(),
+            Some(&storage_f),
+            wire,
+            connect_height,
+            &mut follower_utxo,
+            None,
+            None,
+        )?;
+        assert!(accepted, "follower rejected block at {connect_height}");
+    }
+
+    storage_f.utxos().store_utxo_set(&follower_utxo)?;
+
+    assert_eq!(storage_f.chain().get_height()?.unwrap(), regtest_blocks);
+    let follower_tip = storage_f.chain().get_tip_hash()?.unwrap();
+    assert_eq!(
+        follower_tip, miner_tip,
+        "follower tip hash must match miner after full replay"
+    );
+
+    Ok(())
+}

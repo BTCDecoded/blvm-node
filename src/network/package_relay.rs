@@ -1,0 +1,628 @@
+//! BIP 331: Package Relay
+//!
+//! Specification: https://github.com/bitcoin/bips/blob/master/bip-0331.mediawiki
+//!
+//! Package relay allows nodes to relay and validate groups of transactions together.
+//! This is particularly useful for:
+//! - Fee-bumping (RBF) transactions (parent + child)
+//! - CPFP (Child Pays For Parent) scenarios
+//! - Atomic transaction sets
+//!
+//! Benefits:
+//! - Better fee rate calculation for package
+//! - Reduces orphan transactions in mempool
+//! - More efficient validation (package as unit)
+
+use crate::network::txhash::calculate_wtxid;
+use blvm_protocol::block::calculate_tx_id;
+use blvm_protocol::{Hash, Transaction};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use tracing::{debug, info, warn};
+
+/// Package relay manager
+pub struct PackageRelay {
+    /// Pending package requests
+    pending_packages: HashMap<PackageId, PackageState>,
+    /// Package validator
+    validator: PackageValidator,
+}
+
+/// Package ID (combined hash of all transactions)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PackageId(pub Hash);
+
+/// Transaction package
+#[derive(Debug, Clone)]
+pub struct TransactionPackage {
+    /// Transactions in package (ordered: parents first)
+    pub transactions: Vec<Transaction>,
+    /// Package ID
+    pub package_id: PackageId,
+    /// Combined fee (sum of all transaction fees)
+    pub combined_fee: u64,
+    /// Combined weight (for fee rate calculation)
+    pub combined_weight: usize,
+    /// `combined_fee` was priced from a UTXO set. A zero fee is then a real rate.
+    pub fee_known: bool,
+}
+
+/// Package state
+#[derive(Debug, Clone)]
+struct PackageState {
+    /// Package data
+    package: TransactionPackage,
+    /// When package was received
+    received_at: u64,
+    /// Package status
+    status: PackageStatus,
+}
+
+/// Package status
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageStatus {
+    /// Pending validation
+    Pending,
+    /// Validated and accepted
+    Accepted,
+    /// Rejected (validation failed)
+    Rejected { reason: PackageRejectReason },
+}
+
+/// Package rejection reason
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageRejectReason {
+    /// Package too large (transaction count)
+    TooManyTransactions,
+    /// Package weight exceeds limit
+    WeightExceedsLimit,
+    /// Invalid fee rate (below minimum)
+    FeeRateTooLow,
+    /// Transactions not properly ordered (parent before child)
+    InvalidOrder,
+    /// Duplicate transactions
+    DuplicateTransactions,
+    /// Invalid package structure
+    InvalidStructure,
+}
+
+/// Package validator
+#[derive(Debug, Clone)]
+pub struct PackageValidator {
+    /// Maximum transactions in package (BIP 331: 25)
+    pub max_package_size: usize,
+    /// Maximum package weight in WU (BIP 331: 404000)
+    pub max_package_weight: usize,
+    /// Minimum package fee rate in satoshis per 1,000 virtual bytes.
+    pub min_fee_rate: u64,
+}
+
+impl Default for PackageValidator {
+    fn default() -> Self {
+        Self {
+            max_package_size: 25,
+            max_package_weight: 404_000, // 404k WU = ~101k vB
+            min_fee_rate: 100,
+        }
+    }
+}
+
+impl PackageId {
+    /// Calculate package ID per BIP331: SHA256 of wtxids concatenated in lexicographical order.
+    /// When witnesses is None (typical for packages), wtxid == txid for non-SegWit transactions.
+    pub fn from_transactions(
+        transactions: &[Transaction],
+        witnesses: Option<&[Option<Vec<Vec<u8>>>]>,
+    ) -> Self {
+        let mut wtxids: Vec<Hash> = transactions
+            .iter()
+            .enumerate()
+            .map(|(i, tx)| {
+                let w = witnesses.and_then(|w| w.get(i)).and_then(|o| o.as_ref());
+                match w {
+                    Some(v) => {
+                        let arr = [v.clone()];
+                        calculate_wtxid(tx, Some(&arr))
+                    }
+                    None => calculate_wtxid(tx, None),
+                }
+            })
+            .collect();
+        wtxids.sort(); // Lexicographical order (Hash is [u8; 32])
+        let mut hasher = Sha256::new();
+        for w in &wtxids {
+            hasher.update(w);
+        }
+        let hash_bytes = hasher.finalize();
+        let mut package_hash = [0u8; 32];
+        package_hash.copy_from_slice(&hash_bytes);
+        PackageId(package_hash)
+    }
+}
+
+impl TransactionPackage {
+    /// Create a new transaction package
+    pub fn new(transactions: Vec<Transaction>) -> Result<Self, PackageError> {
+        Self::new_with_utxo_set(transactions, None)
+    }
+
+    /// Create a new transaction package with UTXO set for fee calculation
+    pub fn new_with_utxo_set(
+        transactions: Vec<Transaction>,
+        utxo_set: Option<&blvm_protocol::UtxoSet>,
+    ) -> Result<Self, PackageError> {
+        Self::new_with_utxo_set_and_witnesses(transactions, utxo_set, None)
+    }
+
+    /// Create a package with optional per-transaction witnesses for BIP141 weight.
+    pub fn new_with_utxo_set_and_witnesses(
+        transactions: Vec<Transaction>,
+        utxo_set: Option<&blvm_protocol::UtxoSet>,
+        witnesses: Option<&[Option<blvm_consensus::segwit::Witness>]>,
+    ) -> Result<Self, PackageError> {
+        if transactions.is_empty() {
+            return Err(PackageError::EmptyPackage);
+        }
+
+        // Validate ordering (parents before children)
+        Self::validate_ordering(&transactions)?;
+
+        // Calculate package ID per BIP331: SHA256 of wtxids in lexicographical order
+        let package_id = PackageId::from_transactions(&transactions, witnesses);
+
+        // Confirmed inputs come from the UTXO set. An output created by an
+        // earlier transaction in this package is priced from that parent.
+        // Values outside the money range are not added.
+        let (combined_fee, fee_known) = if let Some(utxo_set) = utxo_set {
+            match package_combined_fee(&transactions, utxo_set) {
+                Some(fee) => (fee, true),
+                None => (0, false),
+            }
+        } else {
+            (0, false)
+        };
+
+        let combined_weight: usize = transactions
+            .iter()
+            .enumerate()
+            .map(|(i, tx)| {
+                let witness = witnesses.and_then(|w| w.get(i)).and_then(|o| o.as_ref());
+                package_transaction_weight_wu(tx, witness)
+            })
+            .sum();
+
+        Ok(Self {
+            transactions,
+            package_id,
+            combined_fee,
+            combined_weight,
+            fee_known,
+        })
+    }
+
+    /// Validate transaction ordering (parents before children)
+    fn validate_ordering(transactions: &[Transaction]) -> Result<(), PackageError> {
+        // Build index of txids to position
+        let mut idx = std::collections::HashMap::new();
+        for (i, tx) in transactions.iter().enumerate() {
+            idx.insert(calculate_tx_id(tx), i);
+        }
+
+        // Check each transaction: inputs that reference in-package parents must be earlier
+        for (i, tx) in transactions.iter().enumerate() {
+            for input in &tx.inputs {
+                if let Some(&parent_pos) = idx.get(&input.prevout.hash) {
+                    if parent_pos >= i {
+                        return Err(PackageError::InvalidOrder);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Calculate package fee rate (sat/vB)
+    pub fn fee_rate(&self) -> f64 {
+        if self.combined_weight == 0 {
+            return 0.0;
+        }
+
+        // Convert weight to virtual bytes (weight / 4)
+        let vbytes = self.combined_weight as f64 / 4.0;
+
+        if vbytes == 0.0 {
+            return 0.0;
+        }
+
+        self.combined_fee as f64 / vbytes
+    }
+}
+
+impl Default for PackageRelay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PackageRelay {
+    /// Create a new package relay manager
+    pub fn new() -> Self {
+        Self {
+            pending_packages: HashMap::new(),
+            validator: PackageValidator::default(),
+        }
+    }
+
+    /// Create package from transactions
+    pub fn create_package(
+        &self,
+        transactions: Vec<Transaction>,
+    ) -> Result<TransactionPackage, PackageError> {
+        TransactionPackage::new(transactions)
+    }
+
+    /// Validate package against limits
+    pub fn validate_package(
+        &self,
+        package: &TransactionPackage,
+    ) -> Result<(), PackageRejectReason> {
+        // Check package size
+        if package.transactions.len() > self.validator.max_package_size {
+            return Err(PackageRejectReason::TooManyTransactions);
+        }
+
+        // Check package weight
+        if package.combined_weight > self.validator.max_package_weight {
+            return Err(PackageRejectReason::WeightExceedsLimit);
+        }
+
+        // A priced package pays the relay floor, satoshis per 1,000 virtual bytes, rounded up.
+        if package.fee_known {
+            let vsize = (package.combined_weight as u64).div_ceil(4);
+            let required = (self.validator.min_fee_rate as u128)
+                .saturating_mul(vsize as u128)
+                .div_ceil(1000);
+            if (package.combined_fee as u128) < required {
+                return Err(PackageRejectReason::FeeRateTooLow);
+            }
+        }
+
+        // Check for duplicates by txid
+        let mut seen = std::collections::HashSet::new();
+        for tx in &package.transactions {
+            let txid = calculate_tx_id(tx);
+            if !seen.insert(txid) {
+                return Err(PackageRejectReason::DuplicateTransactions);
+            }
+        }
+
+        // Validate ordering
+        TransactionPackage::validate_ordering(&package.transactions)
+            .map_err(|_| PackageRejectReason::InvalidOrder)?;
+
+        Ok(())
+    }
+
+    /// Register package for relay
+    pub fn register_package(
+        &mut self,
+        package: TransactionPackage,
+    ) -> Result<PackageId, PackageError> {
+        // Validate package
+        self.validate_package(&package)
+            .map_err(PackageError::ValidationFailed)?;
+
+        let package_id = package.package_id;
+        let tx_count = package.transactions.len();
+        let now = crate::utils::current_timestamp();
+
+        let state = PackageState {
+            package,
+            received_at: now,
+            status: PackageStatus::Pending,
+        };
+
+        self.pending_packages.insert(package_id, state);
+        debug!(
+            "Registered package {} with {} transactions",
+            hex::encode(package_id.0),
+            tx_count
+        );
+
+        Ok(package_id)
+    }
+
+    /// Get package by ID
+    pub fn get_package(&self, package_id: &PackageId) -> Option<&TransactionPackage> {
+        self.pending_packages.get(package_id).map(|s| &s.package)
+    }
+
+    /// Mark package as accepted
+    pub fn mark_accepted(&mut self, package_id: &PackageId) {
+        if let Some(state) = self.pending_packages.get_mut(package_id) {
+            state.status = PackageStatus::Accepted;
+            info!("Package {} accepted", hex::encode(package_id.0));
+        }
+    }
+
+    /// Mark package as rejected
+    pub fn mark_rejected(&mut self, package_id: &PackageId, reason: PackageRejectReason) {
+        if let Some(state) = self.pending_packages.get_mut(package_id) {
+            state.status = PackageStatus::Rejected { reason };
+            warn!(
+                "Package {} rejected: {:?}",
+                hex::encode(package_id.0),
+                reason
+            );
+        }
+    }
+
+    /// Clean up old packages
+    pub fn cleanup_old_packages(&mut self, max_age: u64) {
+        let now = crate::utils::current_timestamp();
+
+        let expired: Vec<PackageId> = self
+            .pending_packages
+            .iter()
+            .filter(|(_, state)| now - state.received_at > max_age)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for id in expired {
+            self.pending_packages.remove(&id);
+            debug!("Cleaned up expired package {}", hex::encode(id.0));
+        }
+    }
+}
+
+/// Sum of per-transaction fees. A parent output created inside the package
+/// counts as an input of the child. An out-of-range value contributes nothing.
+/// `None` when an input is not in the UTXO set and not created by an earlier
+/// transaction in the package.
+fn package_combined_fee(
+    transactions: &[Transaction],
+    utxo_set: &blvm_protocol::UtxoSet,
+) -> Option<u64> {
+    use crate::node::mempool::{add_money, money_sats, output_sum_sats};
+
+    let mut created: HashMap<Hash, usize> = HashMap::new();
+    let mut total_fee = 0u64;
+    for (i, tx) in transactions.iter().enumerate() {
+        if let Some(output_total) = output_sum_sats(tx) {
+            let mut input_total = 0u64;
+            let mut within_money = true;
+            for input in &tx.inputs {
+                let sats = if let Some(utxo) = utxo_set.get(&input.prevout) {
+                    money_sats(utxo.value)
+                } else if let Some(&parent_i) = created.get(&input.prevout.hash) {
+                    let output = transactions[parent_i]
+                        .outputs
+                        .get(input.prevout.index as usize)?;
+                    money_sats(output.value)
+                } else {
+                    return None;
+                };
+                let Some(sats) = sats else {
+                    continue;
+                };
+                match add_money(input_total, sats) {
+                    Some(sum) => input_total = sum,
+                    None => {
+                        within_money = false;
+                        break;
+                    }
+                }
+            }
+            if within_money {
+                total_fee = total_fee.saturating_add(input_total.saturating_sub(output_total));
+            }
+        }
+        created.insert(calculate_tx_id(tx), i);
+    }
+    Some(total_fee)
+}
+
+/// BIP141 transaction weight (WU) for package fee-rate checks.
+fn package_transaction_weight_wu(
+    tx: &Transaction,
+    witness: Option<&blvm_consensus::segwit::Witness>,
+) -> usize {
+    use blvm_consensus::segwit::calculate_transaction_weight;
+    calculate_transaction_weight(tx, witness).unwrap_or(0) as usize
+}
+
+/// Package error
+#[derive(Debug, thiserror::Error)]
+pub enum PackageError {
+    #[error("Empty package (no transactions)")]
+    EmptyPackage,
+
+    #[error("Invalid transaction ordering (children before parents)")]
+    InvalidOrder,
+
+    #[error("Package validation failed: {0:?}")]
+    ValidationFailed(PackageRejectReason),
+
+    #[error("Package not found")]
+    PackageNotFound,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blvm_protocol::opcodes::OP_1;
+    use blvm_protocol::{OutPoint, TransactionInput, TransactionOutput, UTXO};
+    use std::sync::Arc;
+
+    fn spend(prevout: OutPoint, output_value: i64) -> Transaction {
+        Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout,
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: output_value,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        }
+    }
+
+    #[test]
+    fn package_fee_counts_an_in_package_parent_and_ignores_a_negative_value() {
+        let funding = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        let negative = OutPoint {
+            hash: [9u8; 32],
+            index: 0,
+        };
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            funding,
+            Arc::new(UTXO {
+                value: 50_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+        utxo_set.insert(
+            negative,
+            Arc::new(UTXO {
+                value: -1,
+                script_pubkey: vec![OP_1].into(),
+                height: 0,
+                is_coinbase: false,
+            }),
+        );
+
+        let parent = spend(funding, 40_000);
+        let child = spend(
+            OutPoint {
+                hash: calculate_tx_id(&parent),
+                index: 0,
+            },
+            25_000,
+        );
+        let package = TransactionPackage::new_with_utxo_set(
+            vec![parent, child, spend(negative, 1_000)],
+            Some(&utxo_set),
+        )
+        .unwrap();
+        assert_eq!(package.combined_fee, 25_000);
+    }
+
+    #[test]
+    fn missing_input_is_not_priced_as_zero() {
+        let present = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        let absent = OutPoint {
+            hash: [2u8; 32],
+            index: 0,
+        };
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            present,
+            Arc::new(UTXO {
+                value: 50_000,
+                script_pubkey: vec![OP_1].into(),
+                height: 1,
+                is_coinbase: false,
+            }),
+        );
+        let mut tx = spend(present, 40_000);
+        tx.inputs.push(TransactionInput {
+            prevout: absent,
+            script_sig: Vec::new(),
+            sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+        });
+        let package = TransactionPackage::new_with_utxo_set(vec![tx], Some(&utxo_set)).unwrap();
+        assert!(!package.fee_known);
+        assert_eq!(package.combined_fee, 0);
+    }
+
+    #[test]
+    fn one_sat_per_vb_package_is_not_rejected_for_fee_rate() {
+        let prevout = OutPoint {
+            hash: [9u8; 32],
+            index: 0,
+        };
+        let mut tx = spend(prevout, 1);
+        let vsize = super::package_transaction_weight_wu(&tx, None)
+            .div_ceil(4)
+            .max(1) as i64;
+        let input_value = 50_000i64;
+        tx.outputs[0].value = input_value - vsize;
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            prevout,
+            Arc::new(UTXO {
+                value: input_value,
+                script_pubkey: vec![OP_1].into(),
+                height: 1,
+                is_coinbase: false,
+            }),
+        );
+        let package = TransactionPackage::new_with_utxo_set(vec![tx], Some(&utxo_set)).unwrap();
+        assert!(package.fee_known);
+        assert!(package.fee_rate() >= 1.0);
+        assert!(PackageRelay::new().validate_package(&package).is_ok());
+
+        let mut free = spend(prevout, input_value);
+        free.outputs[0].value = input_value;
+        let free_package =
+            TransactionPackage::new_with_utxo_set(vec![free], Some(&utxo_set)).unwrap();
+        assert!(matches!(
+            PackageRelay::new().validate_package(&free_package),
+            Err(PackageRejectReason::FeeRateTooLow)
+        ));
+    }
+
+    #[test]
+    fn relay_floor_package_is_not_rejected_for_fee_rate() {
+        let prevout = OutPoint {
+            hash: [9u8; 32],
+            index: 0,
+        };
+        let sample = spend(prevout, 1);
+        let vsize = super::package_transaction_weight_wu(&sample, None).div_ceil(4) as i64;
+        let floor = vsize * 100 / 1000 + i64::from(vsize * 100 % 1000 != 0);
+        let input_value = 50_000i64;
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            prevout,
+            Arc::new(UTXO {
+                value: input_value,
+                script_pubkey: vec![OP_1].into(),
+                height: 1,
+                is_coinbase: false,
+            }),
+        );
+        let priced = |fee: i64| {
+            let tx = spend(prevout, input_value - fee);
+            let package = TransactionPackage::new_with_utxo_set(vec![tx], Some(&utxo_set)).unwrap();
+            PackageRelay::new().validate_package(&package).is_ok()
+        };
+        let at_one = priced(vsize);
+        let at_floor = priced(floor);
+        let under = priced(floor - 1);
+        eprintln!(
+            "vsize={vsize}; fee {vsize} accepted={at_one}; fee {floor} accepted={at_floor}; fee {} accepted={under}",
+            floor - 1
+        );
+        assert_eq!(vsize, 61);
+        assert_eq!(floor, 7);
+        assert!(at_one);
+        assert!(at_floor);
+        assert!(!under);
+    }
+}

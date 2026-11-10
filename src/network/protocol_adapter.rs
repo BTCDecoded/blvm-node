@@ -1,0 +1,430 @@
+//! Protocol adapter for Bitcoin message serialization
+//!
+//! # Wire formats (REV-N-14)
+//!
+//! | Transport | On-the-wire format | Bitcoin Core compatible? |
+//! |-----------|-------------------|---------------------------|
+//! | **TCP** | Standard P2P envelope: magic + 12-byte command + length + checksum + payload. Payload uses Core wire encoders where implemented (`version`, `addrv2`, …) or bincode for a small ping/pong subset. | **Partial** — only mapped message types; unmapped types return `Err`. |
+//! | **Iroh / Quinn** | **BLVM internal**: bincode serialization of [`ProtocolMessage`](crate::network::protocol::ProtocolMessage). No magic/checksum envelope. | **No** — BLVM-only alternate transport; not interoperable with Core P2P bytes. |
+//!
+//! Production builds cache TCP/Iroh serialization keyed by message variant + salient fields (not by discriminant alone).
+//!
+//! Message *processing* (handshake, inv dispatch, block relay) lives in [`NetworkManager`](crate::network::network_manager::NetworkManager) /
+//! `wire_dispatch`, not in [`MessageBridge`](crate::network::message_bridge::MessageBridge).
+
+use crate::network::transport::TransportType;
+use anyhow::Result;
+use blvm_protocol::network::NetworkMessage as ConsensusNetworkMessage;
+
+#[cfg(feature = "production")]
+use std::collections::hash_map::DefaultHasher;
+#[cfg(feature = "production")]
+use std::hash::{Hash, Hasher};
+#[cfg(feature = "production")]
+use std::sync::{OnceLock, RwLock};
+
+/// Network message serialization cache (production feature only)
+///
+/// Caches serialized message bytes to avoid re-serializing the same message.
+/// Cache key is a fast hash of message type + content.
+#[cfg(feature = "production")]
+static SERIALIZATION_CACHE: OnceLock<RwLock<blvm_protocol::lru::LruCache<u64, Vec<u8>>>> =
+    OnceLock::new();
+
+#[cfg(feature = "production")]
+fn get_serialization_cache() -> &'static RwLock<blvm_protocol::lru::LruCache<u64, Vec<u8>>> {
+    SERIALIZATION_CACHE.get_or_init(|| {
+        use blvm_protocol::lru::LruCache;
+        use std::num::NonZeroUsize;
+        // Cache 5,000 serialized messages (balance between memory and hit rate)
+        // Each entry is ~100-500 bytes average, so ~0.5-2.5MB total
+        RwLock::new(LruCache::new(NonZeroUsize::new(5_000).unwrap()))
+    })
+}
+
+/// Calculate a cache key for production serialization memoization.
+///
+/// Keys must differ when serialized bytes would differ. Unsupported adapter types are not cached
+/// on this path (they error in `serialize_message_inner` before caching matters).
+#[cfg(feature = "production")]
+fn calculate_message_cache_key(msg: &ConsensusNetworkMessage, transport: TransportType) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    std::mem::discriminant(msg).hash(&mut hasher);
+    std::mem::discriminant(&transport).hash(&mut hasher);
+    match msg {
+        ConsensusNetworkMessage::Version(v) => {
+            v.version.hash(&mut hasher);
+            v.services.hash(&mut hasher);
+            v.timestamp.hash(&mut hasher);
+            v.nonce.hash(&mut hasher);
+            v.start_height.hash(&mut hasher);
+            v.relay.hash(&mut hasher);
+            v.user_agent.hash(&mut hasher);
+        }
+        ConsensusNetworkMessage::Ping(p) => p.nonce.hash(&mut hasher),
+        ConsensusNetworkMessage::Pong(p) => p.nonce.hash(&mut hasher),
+        ConsensusNetworkMessage::AddrV2(a) => {
+            a.addresses.len().hash(&mut hasher);
+            for entry in &a.addresses {
+                entry.time.hash(&mut hasher);
+                entry.services.hash(&mut hasher);
+                entry.port.hash(&mut hasher);
+                entry.address.hash(&mut hasher);
+            }
+        }
+        ConsensusNetworkMessage::VerAck => {}
+        _ => {
+            // Rare on this adapter path; fall back to Debug string to avoid collisions.
+            format!("{msg:?}").hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Protocol adapter for Bitcoin messages
+///
+/// Converts between blvm-consensus message types and transport wire formats.
+pub struct ProtocolAdapter;
+
+impl ProtocolAdapter {
+    /// Serialize a blvm-consensus NetworkMessage to transport format
+    ///
+    /// - **TCP**: Bitcoin P2P wire envelope (Core-compatible subset only).
+    /// - **Iroh / Quinn**: BLVM-internal bincode of `ProtocolMessage` (not Core wire).
+    pub fn serialize_message(
+        msg: &ConsensusNetworkMessage,
+        transport: TransportType,
+    ) -> Result<Vec<u8>> {
+        #[cfg(feature = "production")]
+        {
+            // Check cache first
+            let cache = get_serialization_cache();
+            let cache_key = calculate_message_cache_key(msg, transport);
+
+            // Try to get from cache
+            if let Ok(cached) = cache.read() {
+                if let Some(serialized) = cached.peek(&cache_key) {
+                    return Ok(serialized.clone()); // Clone cached result
+                }
+            }
+
+            // Cache miss - serialize and cache
+            let serialized = Self::serialize_message_inner(msg, transport)?;
+
+            // Store in cache
+            if let Ok(mut cache) = cache.write() {
+                cache.put(cache_key, serialized.clone());
+            }
+
+            Ok(serialized)
+        }
+
+        #[cfg(not(feature = "production"))]
+        {
+            Self::serialize_message_inner(msg, transport)
+        }
+    }
+
+    /// Inner serialization function (actual implementation)
+    fn serialize_message_inner(
+        msg: &ConsensusNetworkMessage,
+        transport: TransportType,
+    ) -> Result<Vec<u8>> {
+        match transport {
+            TransportType::Tcp => Self::serialize_bitcoin_wire_format(msg),
+            #[cfg(feature = "quinn")]
+            TransportType::Quinn => {
+                // BLVM-internal bincode envelope (see module docs); not Bitcoin Core P2P.
+                Self::serialize_internal_bincode_format(msg)
+            }
+            #[cfg(feature = "iroh")]
+            TransportType::Iroh => Self::serialize_internal_bincode_format(msg),
+        }
+    }
+
+    /// Deserialize transport bytes to blvm-consensus NetworkMessage
+    pub fn deserialize_message(
+        data: &[u8],
+        transport: TransportType,
+    ) -> Result<ConsensusNetworkMessage> {
+        match transport {
+            TransportType::Tcp => Self::deserialize_bitcoin_wire_format(data),
+            #[cfg(feature = "quinn")]
+            TransportType::Quinn => Self::deserialize_internal_bincode_format(data),
+            #[cfg(feature = "iroh")]
+            TransportType::Iroh => Self::deserialize_internal_bincode_format(data),
+        }
+    }
+
+    /// Serialize using Bitcoin P2P wire protocol format
+    ///
+    /// Format: [magic:4][command:12][length:4][checksum:4][payload:var]
+    fn serialize_bitcoin_wire_format(msg: &ConsensusNetworkMessage) -> Result<Vec<u8>> {
+        // Convert blvm-consensus message to protocol message
+        let protocol_msg = Self::consensus_to_protocol_message(msg)?;
+
+        // Serialize payload
+        let payload = match &protocol_msg {
+            crate::network::protocol::ProtocolMessage::Version(v) => {
+                // Use proper Bitcoin wire format for version messages
+                use blvm_protocol::network::{NetworkAddress, VersionMessage};
+                use blvm_protocol::wire::serialize_version;
+
+                let version_msg = VersionMessage {
+                    version: v.version,
+                    services: v.services,
+                    timestamp: v.timestamp,
+                    addr_recv: NetworkAddress {
+                        time: 0,
+                        services: v.addr_recv.services,
+                        ip: v.addr_recv.ip,
+                        port: v.addr_recv.port,
+                    },
+                    addr_from: NetworkAddress {
+                        time: 0,
+                        services: v.addr_from.services,
+                        ip: v.addr_from.ip,
+                        port: v.addr_from.port,
+                    },
+                    nonce: v.nonce,
+                    user_agent: v.user_agent.clone(),
+                    start_height: v.start_height,
+                    relay: v.relay,
+                };
+
+                serialize_version(&version_msg)?
+            }
+            crate::network::protocol::ProtocolMessage::Verack => {
+                vec![]
+            }
+            crate::network::protocol::ProtocolMessage::Ping(p) => bincode::serialize(p)?,
+            crate::network::protocol::ProtocolMessage::Pong(p) => bincode::serialize(p)?,
+            crate::network::protocol::ProtocolMessage::AddrV2(a) => {
+                blvm_protocol::wire::serialize_addrv2(a).map_err(|e| anyhow::anyhow!("{e}"))?
+            }
+            // Add other message types as needed
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Unsupported message type for serialization"
+                ));
+            }
+        };
+
+        // Get command string
+        let command = Self::message_to_command(msg);
+        let mut command_bytes = [0u8; 12];
+        command_bytes[..command.len().min(12)].copy_from_slice(command.as_bytes());
+
+        // Calculate checksum (double SHA256 of payload, first 4 bytes)
+        // Optimization: Use optimized SHA256 in production
+        #[cfg(feature = "production")]
+        let checksum_bytes = {
+            use blvm_consensus::crypto::OptimizedSha256;
+            let hasher = OptimizedSha256::new();
+            hasher.hash256(&payload)
+        };
+        #[cfg(feature = "production")]
+        let checksum = &checksum_bytes[..4];
+
+        // Non-production: compute double-SHA256 with sha2 directly and store as owned bytes.
+        // The previous approach returned &hash2[..4] (reference to a block-local), which is a
+        // dangling-reference bug.  Use a fixed [u8; 4] array to keep the value alive.
+        #[cfg(not(feature = "production"))]
+        let checksum_bytes: [u8; 4] = {
+            use sha2::{Digest, Sha256};
+            let hash1 = Sha256::digest(&payload);
+            let hash2 = Sha256::digest(hash1);
+            hash2[..4].try_into().expect("slice is exactly 4 bytes")
+        };
+        #[cfg(not(feature = "production"))]
+        let checksum = checksum_bytes.as_ref();
+
+        // Build message
+        let mut message = Vec::new();
+
+        // Magic bytes — must match ProtocolParser's active network magic
+        use crate::network::protocol::ACTIVE_MAGIC;
+        let active_magic = ACTIVE_MAGIC.load(std::sync::atomic::Ordering::Relaxed);
+        message.extend_from_slice(&active_magic.to_le_bytes());
+
+        // Command
+        message.extend_from_slice(&command_bytes);
+
+        // Payload length
+        message.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+
+        // Checksum
+        message.extend_from_slice(checksum);
+
+        // Payload
+        message.extend_from_slice(&payload);
+
+        Ok(message)
+    }
+
+    /// Deserialize from Bitcoin P2P wire protocol format
+    fn deserialize_bitcoin_wire_format(data: &[u8]) -> Result<ConsensusNetworkMessage> {
+        use crate::network::protocol::ProtocolParser;
+
+        // Parse using existing protocol parser
+        let protocol_msg = ProtocolParser::parse_message(data)?;
+
+        // Convert to blvm-consensus message
+        Self::protocol_to_consensus_message(&protocol_msg)
+    }
+
+    #[cfg(any(feature = "iroh", feature = "quinn"))]
+    /// Serialize using the BLVM-internal bincode transport (Iroh/Quinn only).
+    ///
+    /// This is **not** Bitcoin Core P2P wire format. Peers must both use BLVM alternate transports.
+    fn serialize_internal_bincode_format(msg: &ConsensusNetworkMessage) -> Result<Vec<u8>> {
+        let protocol_msg = Self::consensus_to_protocol_message(msg)?;
+        bincode::serialize(&protocol_msg)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize internal transport message: {}", e))
+    }
+
+    #[cfg(any(feature = "iroh", feature = "quinn"))]
+    /// Deserialize BLVM-internal bincode transport bytes (Iroh/Quinn only).
+    fn deserialize_internal_bincode_format(data: &[u8]) -> Result<ConsensusNetworkMessage> {
+        let protocol_msg: crate::network::protocol::ProtocolMessage = bincode::deserialize(data)
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to deserialize internal transport message: {}", e)
+            })?;
+        Self::protocol_to_consensus_message(&protocol_msg)
+    }
+
+    /// Convert blvm-consensus message to protocol message
+    fn consensus_to_protocol_message(
+        msg: &ConsensusNetworkMessage,
+    ) -> Result<crate::network::protocol::ProtocolMessage> {
+        use crate::network::protocol::{
+            NetworkAddress as ProtoNetworkAddress, PingMessage as ProtoPingMessage,
+            PongMessage as ProtoPongMessage, ProtocolMessage,
+            VersionMessage as ProtoVersionMessage,
+        };
+
+        match msg {
+            ConsensusNetworkMessage::Version(v) => {
+                Ok(ProtocolMessage::Version(ProtoVersionMessage {
+                    version: v.version,
+                    services: v.services,
+                    timestamp: v.timestamp,
+                    addr_recv: ProtoNetworkAddress {
+                        time: 0,
+                        services: v.addr_recv.services,
+                        ip: v.addr_recv.ip,
+                        port: v.addr_recv.port,
+                    },
+                    addr_from: ProtoNetworkAddress {
+                        time: 0,
+                        services: v.addr_from.services,
+                        ip: v.addr_from.ip,
+                        port: v.addr_from.port,
+                    },
+                    nonce: v.nonce,
+                    user_agent: v.user_agent.clone(),
+                    start_height: v.start_height,
+                    relay: v.relay,
+                }))
+            }
+            ConsensusNetworkMessage::VerAck => Ok(ProtocolMessage::Verack),
+            ConsensusNetworkMessage::Ping(p) => {
+                Ok(ProtocolMessage::Ping(ProtoPingMessage { nonce: p.nonce }))
+            }
+            ConsensusNetworkMessage::Pong(p) => {
+                Ok(ProtocolMessage::Pong(ProtoPongMessage { nonce: p.nonce }))
+            }
+            ConsensusNetworkMessage::AddrV2(a) => Ok(ProtocolMessage::AddrV2(a.clone())),
+            _ => Err(anyhow::anyhow!(
+                "Unsupported message type for protocol conversion"
+            )),
+        }
+    }
+
+    /// Convert protocol message to blvm-consensus message
+    pub fn protocol_to_consensus_message(
+        msg: &crate::network::protocol::ProtocolMessage,
+    ) -> Result<ConsensusNetworkMessage> {
+        use crate::network::protocol::ProtocolMessage;
+        use blvm_protocol::network::{
+            NetworkAddress as ConsensusNetworkAddress, PingMessage as ConsensusPingMessage,
+            PongMessage as ConsensusPongMessage, VersionMessage as ConsensusVersionMessage,
+        };
+
+        match msg {
+            ProtocolMessage::Version(v) => {
+                Ok(ConsensusNetworkMessage::Version(ConsensusVersionMessage {
+                    version: v.version,
+                    services: v.services,
+                    timestamp: v.timestamp,
+                    addr_recv: ConsensusNetworkAddress {
+                        time: 0,
+                        services: v.addr_recv.services,
+                        ip: v.addr_recv.ip,
+                        port: v.addr_recv.port,
+                    },
+                    addr_from: ConsensusNetworkAddress {
+                        time: 0,
+                        services: v.addr_from.services,
+                        ip: v.addr_from.ip,
+                        port: v.addr_from.port,
+                    },
+                    nonce: v.nonce,
+                    user_agent: v.user_agent.clone(),
+                    start_height: v.start_height,
+                    relay: v.relay,
+                }))
+            }
+            ProtocolMessage::Verack => Ok(ConsensusNetworkMessage::VerAck),
+            ProtocolMessage::Ping(p) => Ok(ConsensusNetworkMessage::Ping(ConsensusPingMessage {
+                nonce: p.nonce,
+            })),
+            ProtocolMessage::Pong(p) => Ok(ConsensusNetworkMessage::Pong(ConsensusPongMessage {
+                nonce: p.nonce,
+            })),
+            ProtocolMessage::AddrV2(a) => Ok(ConsensusNetworkMessage::AddrV2(a.clone())),
+            _ => Err(anyhow::anyhow!(
+                "Unsupported message type for consensus conversion"
+            )),
+        }
+    }
+
+    /// Get command string for a message type
+    fn message_to_command(msg: &ConsensusNetworkMessage) -> &'static str {
+        match msg {
+            ConsensusNetworkMessage::Version(_) => "version",
+            ConsensusNetworkMessage::VerAck => "verack",
+            ConsensusNetworkMessage::Addr(_) => "addr",
+            ConsensusNetworkMessage::AddrV2(_) => "addrv2",
+            ConsensusNetworkMessage::Inv(_) => "inv",
+            ConsensusNetworkMessage::GetData(_) => "getdata",
+            ConsensusNetworkMessage::GetHeaders(_) => "getheaders",
+            ConsensusNetworkMessage::Headers(_) => "headers",
+            ConsensusNetworkMessage::Block(..) => "block",
+            ConsensusNetworkMessage::Tx(_, _) => "tx",
+            ConsensusNetworkMessage::Ping(_) => "ping",
+            ConsensusNetworkMessage::Pong(_) => "pong",
+            ConsensusNetworkMessage::MemPool => "mempool",
+            ConsensusNetworkMessage::FeeFilter(_) => "feefilter",
+            ConsensusNetworkMessage::GetBlocks(_) => "getblocks",
+            ConsensusNetworkMessage::GetAddr => "getaddr",
+            ConsensusNetworkMessage::NotFound(_) => "notfound",
+            ConsensusNetworkMessage::Reject(_) => "reject",
+            ConsensusNetworkMessage::SendHeaders => "sendheaders",
+            ConsensusNetworkMessage::SendCmpct(_) => "sendcmpct",
+            ConsensusNetworkMessage::CmpctBlock(_) => "cmpctblock",
+            ConsensusNetworkMessage::GetBlockTxn(_) => "getblocktxn",
+            ConsensusNetworkMessage::BlockTxn(_) => "blocktxn",
+            #[cfg(feature = "utxo-commitments")]
+            ConsensusNetworkMessage::GetUTXOSet(_) => "getutxoset",
+            #[cfg(feature = "utxo-commitments")]
+            ConsensusNetworkMessage::UTXOSet(_) => "utxoset",
+            #[cfg(feature = "utxo-commitments")]
+            ConsensusNetworkMessage::GetFilteredBlock(_) => "getfilteredblock",
+            #[cfg(feature = "utxo-commitments")]
+            ConsensusNetworkMessage::FilteredBlock(_) => "filteredblock",
+            ConsensusNetworkMessage::GetBanList(_) => "getbanlist",
+            ConsensusNetworkMessage::BanList(_) => "banlist",
+        }
+    }
+}

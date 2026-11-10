@@ -1,0 +1,247 @@
+# blvm-node Examples
+
+This directory contains example code demonstrating how to use blvm-node.
+
+## Examples
+
+### electrum-integration.rs
+
+**Purpose**: Generate configuration for Electrum wallet integration
+
+**What it does**:
+- Creates a `config.toml` optimized for Electrum
+- Configures RPC server on localhost
+- Sets up testnet/mainnet ports
+
+**Usage**:
+```bash
+cargo run --example electrum-integration
+# Generates electrum-config.toml
+
+# Then start node with:
+blvm --config electrum-config.toml --network testnet --rpc-addr 127.0.0.1:18332
+```
+
+**Output**: `electrum-config.toml` file ready to use
+
+---
+
+### wallet-integration.rs
+
+**Purpose**: Show RPC API usage for wallet integration
+
+**What it does**:
+- Demonstrates RPC request format
+- Shows essential methods for wallets
+- Provides integration checklist
+
+**Usage**:
+```bash
+cargo run --example wallet-integration
+```
+
+**Output**: Prints example RPC requests and integration checklist
+
+**Note**: This shows the request format. To test with a running node:
+1. Start node: `blvm --network testnet --rpc-addr 127.0.0.1:18332` (add `--listen-addr` / `--config` as needed)
+2. Use curl or HTTP client to send requests
+3. Or use blvm-sdk for Rust integration
+
+---
+
+### rpc-blockchain.rs
+
+**Purpose**: Demonstrate blockchain RPC methods
+
+**What it does**:
+- Shows `getblockchaininfo`, `getblockcount`, `getbestblockhash`, `getblockhash`, `getblockheader`, `getblock`, `loadtxoutset`, and more
+
+**Usage**:
+```bash
+cargo run --example rpc-blockchain
+```
+
+---
+
+### rpc-mempool.rs
+
+**Purpose**: Demonstrate mempool RPC methods
+
+**What it does**:
+- Shows `getmempoolinfo`, `getrawmempool`, `getmempoolentry`, `testmempoolaccept`, `getmempoolancestors`
+
+**Usage**:
+```bash
+cargo run --example rpc-mempool
+```
+
+---
+
+### rpc-network.rs
+
+**Purpose**: Demonstrate network RPC methods
+
+**What it does**:
+- Shows `getnetworkinfo`, `getconnectioncount`, `getpeerinfo`, `addnode`, `setban`, `listbanned`
+
+**Usage**:
+```bash
+cargo run --example rpc-network
+```
+
+---
+
+### rpc-mining.rs
+
+**Purpose**: Demonstrate mining RPC methods
+
+**What it does**:
+- Shows `getmininginfo`, `getblocktemplate`, `generatetoaddress`, `submitblock`, `estimatesmartfee`, `prioritisetransaction`
+
+**Usage**:
+```bash
+cargo run --example rpc-mining
+```
+
+---
+
+### rpc-rawtransaction.rs
+
+**Purpose**: Demonstrate raw transaction RPC methods
+
+**What it does**:
+- Shows `getrawtransaction`, `decoderawtransaction`, `createrawtransaction`, `sendrawtransaction`, `gettxoutproof`
+
+**Usage**:
+```bash
+cargo run --example rpc-rawtransaction
+```
+
+---
+
+### rpc-control.rs
+
+**Purpose**: Demonstrate node control and utility RPC methods
+
+**What it does**:
+- Shows `stop`, `uptime`, `getmemoryinfo`, `getrpcinfo`, `help`, `logging`, `gethealth`, `getmetrics`
+
+**Usage**:
+```bash
+cargo run --example rpc-control
+```
+
+---
+
+### rpc-address.rs
+
+**Purpose**: Demonstrate address validation and chain index RPC methods
+
+**What it does**:
+- Shows `getblockfilter`, `getindexinfo`, `getblockchainstate`, `validateaddress`, `getaddressinfo`
+
+**Usage**:
+```bash
+cargo run --example rpc-address
+```
+
+---
+
+### rpc-payment.rs
+
+**Purpose**: Demonstrate payment, vault, and pool RPC methods served by blvm-payment
+
+**What it does**:
+- Shows `createpaymentrequest`, `createcovenantproof`, `getpaymentstate`, `listpayments`
+- Shows vault methods: `createvault`, `getvaultstate`, `unvault`, `withdrawfromvault`
+- Shows pool methods: `createpool`, `getpoolstate`, `joinpool`, `distributepool`
+
+**Usage**:
+```bash
+cargo run --example rpc-payment
+```
+
+**Note**: The node returns method-not-found until `blvm-payment` is loaded. That module is not in the default set.
+
+---
+
+### rpc-modules.rs
+
+**Purpose**: Demonstrate module lifecycle management RPC methods
+
+**What it does**:
+- Shows `listmodules`, `loadmodule`, `unloadmodule`, `reloadmodule`
+- Shows `getmoduleclispecs`, `runmodulecli`
+
+**Usage**:
+```bash
+cargo run --example rpc-modules
+```
+
+**Note**: Modules are sandboxed processes declared in `module.toml` manifests. See `examples/simple-module/` for a minimal implementation.
+
+---
+
+### rpc-batch.rs
+
+**Purpose**: Demonstrate transaction batching, congestion monitoring, and script analysis
+
+**What it does**:
+- Shows `getcongestion`, `getcongestionmetrics`, `createbatch`, `addtobatch`, `broadcastbatch`
+- Shows `getdescriptorinfo`, `analyzepsbt`
+
+**Usage**:
+```bash
+cargo run --example rpc-batch
+```
+
+**Note**: Batch methods require `--features ctv`; descriptor/PSBT methods require `--features miniscript`
+
+---
+
+## Integration Workflow
+
+### For Electrum
+
+1. **Generate config**:
+   ```bash
+   cargo run --example electrum-integration
+   ```
+
+2. **Start node**:
+   ```bash
+   blvm --config electrum-config.toml --network testnet --rpc-addr 127.0.0.1:18332
+   ```
+
+3. **Configure Electrum**:
+   - Tools → Network → Server
+   - Enter: `127.0.0.1`
+   - Port: `18332` (testnet) or `8332` (mainnet)
+
+### For Custom Wallet
+
+1. **Review RPC examples**:
+   ```bash
+   cargo run --example wallet-integration
+   ```
+
+2. **Implement RPC client**:
+   - Use HTTP client (reqwest, curl, etc.)
+   - Send JSON-RPC requests
+   - Handle responses
+
+3. **Essential methods**:
+   - `getblockchaininfo` - Chain state
+   - `gettxout` - UTXO queries
+   - `getrawtransaction` - Transaction data
+   - `sendrawtransaction` - Broadcast transactions
+   - `estimatesmartfee` - Fee estimation
+
+---
+
+## See Also
+
+- **Integration Guide**: `docs/INTEGRATION_GUIDE.md`
+- **RPC Reference**: `docs/RPC_REFERENCE.md`
+- **Quick Start**: `../BLVM_NODE_QUICK_START.md`
+

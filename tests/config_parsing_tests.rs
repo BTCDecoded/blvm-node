@@ -1,0 +1,901 @@
+//! Tests for configuration parsing and validation
+
+use blvm_node::config::{
+    BanListSharingConfig, DosProtectionConfig, IbdProtectionConfig, IndexingConfig,
+    IndexingStrategy, MempoolPolicyConfig, ModuleConfig, ModuleResourceLimitsConfig,
+    NetworkTimingConfig, NodeConfig, ProtocolLimitsConfig, PruningConfig, PruningMode,
+    RequestTimeoutConfig, RpcAuthConfig, StorageConfig, TransportPreferenceConfig,
+    bandwidth_gb_to_bytes, headers_batch_is_full, headers_message_exceeds_limit,
+};
+use std::path::PathBuf;
+use tempfile::TempDir;
+
+#[test]
+fn test_module_config_default() {
+    let config = ModuleConfig::default();
+    assert!(config.enabled);
+    assert_eq!(config.modules_dir, "modules");
+    assert_eq!(config.data_dir, "data/modules");
+    assert_eq!(config.socket_dir, "data/modules/sockets");
+    assert_eq!(
+        config
+            .enabled_modules
+            .get("blvm-miniscript")
+            .map(String::as_str),
+        Some("0.1.*")
+    );
+    assert_eq!(
+        config.enabled_modules.get("blvm-zmq").map(String::as_str),
+        Some("0.1.*")
+    );
+    assert_eq!(
+        config
+            .enabled_modules
+            .get("blvm-wallet-index")
+            .map(String::as_str),
+        Some("0.1.*")
+    );
+    assert!(config.registry_url.is_some());
+    assert!(config.disabled_modules.is_empty());
+    assert!(config.module_database_backend.is_none());
+    assert!(!config.marketplace_fetch_enabled);
+}
+
+#[test]
+fn test_module_config_marketplace_fetch_from_toml() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"listen_addr = "127.0.0.1:8333"
+transport_preference = "tcponly"
+
+[modules]
+marketplace_fetch_enabled = true
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("modules");
+    assert!(modules.marketplace_fetch_enabled);
+}
+
+#[test]
+fn test_module_config_module_database_backend_from_toml() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"listen_addr = "127.0.0.1:8333"
+transport_preference = "tcponly"
+
+[modules]
+module_database_backend = "sled"
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("modules");
+    assert_eq!(modules.module_database_backend.as_deref(), Some("sled"));
+}
+
+#[test]
+fn test_module_subprocess_database_backend_preference() {
+    use blvm_node::storage::database::{
+        DatabaseBackend, module_subprocess_database_backend_preference,
+    };
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::RocksDB, None),
+        "sled"
+    );
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::Redb, None),
+        "sled"
+    );
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::Sled, None),
+        "sled"
+    );
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::Heed3, None),
+        "heed3"
+    );
+    #[cfg(feature = "heed3")]
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::Heed3, None),
+        "heed3"
+    );
+    #[cfg(not(feature = "heed3"))]
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::Heed3, None),
+        "sled"
+    );
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::RocksDB, Some("sled")),
+        "sled"
+    );
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::RocksDB, Some("auto")),
+        "sled"
+    );
+    assert_eq!(
+        module_subprocess_database_backend_preference(DatabaseBackend::Heed3, Some("auto")),
+        "heed3"
+    );
+}
+
+#[test]
+fn test_module_config_disabled_modules_from_toml() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"listen_addr = "127.0.0.1:8333"
+transport_preference = "tcponly"
+
+[modules]
+disabled_modules = ["skip-me", "other"]
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("modules");
+    assert_eq!(
+        modules.disabled_modules,
+        vec!["skip-me".to_string(), "other".to_string()]
+    );
+}
+
+/// Omitted `[modules]` in TOML still yields default module subsystem (enabled, auto-discover paths).
+#[test]
+fn test_node_config_omitted_modules_section_toml() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"listen_addr = "127.0.0.1:8333"
+transport_preference = "tcponly"
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("default modules");
+    assert!(modules.enabled);
+    assert_eq!(modules.modules_dir, "modules");
+    assert_eq!(
+        modules
+            .enabled_modules
+            .get("blvm-miniscript")
+            .map(String::as_str),
+        Some("0.1.*")
+    );
+    assert_eq!(
+        modules.enabled_modules.get("blvm-zmq").map(String::as_str),
+        Some("0.1.*")
+    );
+    assert_eq!(
+        modules
+            .enabled_modules
+            .get("blvm-wallet-index")
+            .map(String::as_str),
+        Some("0.1.*")
+    );
+    assert!(modules.registry_url.is_some());
+    assert_eq!(
+        modules
+            .module_configs
+            .get("blvm-zmq")
+            .and_then(|c| c.get("hashblock"))
+            .map(String::as_str),
+        Some("tcp://127.0.0.1:28332")
+    );
+    assert!(modules.module_configs.get("blvm-wallet-index").is_none());
+}
+
+#[test]
+fn test_modules_table_keeps_the_baseline_pins() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"transport_preference = "tcponly"
+
+[modules]
+data_dir = "data/modules"
+blvm-payment = "0.1.*"
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("modules");
+    assert_eq!(modules.enabled_modules.len(), 4);
+    assert_eq!(
+        modules
+            .enabled_modules
+            .get("blvm-payment")
+            .map(String::as_str),
+        Some("0.1.*")
+    );
+    assert_eq!(
+        modules
+            .enabled_modules
+            .get("blvm-wallet-index")
+            .map(String::as_str),
+        Some("0.1.*")
+    );
+    assert_eq!(
+        modules
+            .module_configs
+            .get("blvm-zmq")
+            .and_then(|c| c.get("sequence"))
+            .map(String::as_str),
+        Some("tcp://127.0.0.1:28336")
+    );
+}
+
+#[test]
+fn test_explicit_empty_enabled_modules_clears_the_baseline() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"transport_preference = "tcponly"
+
+[modules]
+enabled_modules = []
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("modules");
+    assert!(modules.enabled_modules.is_empty());
+}
+
+#[test]
+fn test_module_config_inline_version_pins_toml() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"listen_addr = "127.0.0.1:8333"
+transport_preference = "tcponly"
+
+[modules]
+blvm-miniscript = "0.1.*"
+blvm-zmq = "0.3.*"
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("modules");
+    assert_eq!(modules.enabled_modules.len(), 3);
+    assert_eq!(
+        modules
+            .enabled_modules
+            .get("blvm-miniscript")
+            .map(String::as_str),
+        Some("0.1.*")
+    );
+    assert_eq!(
+        modules.enabled_modules.get("blvm-zmq").map(String::as_str),
+        Some("0.3.*")
+    );
+    assert_eq!(
+        modules
+            .enabled_modules
+            .get("blvm-wallet-index")
+            .map(String::as_str),
+        Some("0.1.*")
+    );
+    assert_eq!(
+        modules
+            .module_configs
+            .get("blvm-zmq")
+            .and_then(|c| c.get("hashblock"))
+            .map(String::as_str),
+        Some("tcp://127.0.0.1:28332")
+    );
+}
+
+#[test]
+fn test_module_config_legacy_enabled_modules_array_toml() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"transport_preference = "tcponly"
+
+[modules]
+enabled_modules = ["blvm-miniscript", "blvm-zmq"]
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("modules");
+    assert_eq!(modules.enabled_modules.len(), 2);
+    assert_eq!(
+        modules
+            .enabled_modules
+            .get("blvm-miniscript")
+            .map(String::as_str),
+        Some("*")
+    );
+    assert!(modules.enabled_modules.get("blvm-wallet-index").is_none());
+}
+
+#[test]
+fn test_module_config_version_in_module_table_toml() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("cfg.toml");
+    std::fs::write(
+        &path,
+        r#"transport_preference = "tcponly"
+
+[modules]
+blvm-miniscript = "0.1.*"
+
+[modules.blvm-zmq]
+version = "0.3.*"
+hashblock = "tcp://127.0.0.1:28332"
+"#,
+    )
+    .unwrap();
+    let config = NodeConfig::from_toml_file(&path).unwrap();
+    let modules = config.modules.as_ref().expect("modules");
+    assert_eq!(modules.enabled_modules.len(), 3);
+    assert_eq!(
+        modules.enabled_modules.get("blvm-zmq").map(String::as_str),
+        Some("0.3.*")
+    );
+    assert_eq!(
+        modules
+            .enabled_modules
+            .get("blvm-wallet-index")
+            .map(String::as_str),
+        Some("0.1.*")
+    );
+    assert_eq!(
+        modules
+            .module_configs
+            .get("blvm-zmq")
+            .and_then(|c| c.get("hashblock"))
+            .map(String::as_str),
+        Some("tcp://127.0.0.1:28332")
+    );
+    assert_eq!(
+        modules
+            .module_configs
+            .get("blvm-zmq")
+            .and_then(|c| c.get("hashtx"))
+            .map(String::as_str),
+        Some("tcp://127.0.0.1:28333")
+    );
+    assert!(
+        !modules
+            .module_configs
+            .get("blvm-zmq")
+            .map(|c| c.contains_key("version"))
+            .unwrap_or(false)
+    );
+}
+
+#[test]
+fn test_network_timing_config_default() {
+    let config = NetworkTimingConfig::default();
+    assert_eq!(config.target_outbound_peers, 8);
+    assert_eq!(config.peer_connection_delay_seconds, 2);
+    assert_eq!(config.addr_relay_min_interval_seconds, 8640);
+    assert_eq!(config.max_addresses_per_addr_message, 1000);
+    assert_eq!(config.max_addresses_from_dns, 100);
+}
+
+#[test]
+fn test_request_timeout_config_default() {
+    let config = RequestTimeoutConfig::default();
+    assert!(config.async_request_timeout_seconds > 0);
+    assert!(config.utxo_commitment_request_timeout_seconds > 0);
+    assert!(config.request_cleanup_interval_seconds > 0);
+    assert!(config.pending_request_max_age_seconds > 0);
+    assert!(config.storage_timeout_seconds > 0);
+    assert!(config.rpc_timeout_seconds > 0);
+}
+
+#[test]
+fn test_module_resource_limits_config_default() {
+    let config = ModuleResourceLimitsConfig::default();
+    assert_eq!(config.default_max_cpu_percent, 50);
+    assert_eq!(config.default_max_memory_bytes, 512 * 1024 * 1024);
+    assert_eq!(config.default_max_file_descriptors, 256);
+    assert_eq!(config.default_max_child_processes, 10);
+}
+
+#[test]
+fn test_node_config_default() {
+    let config = NodeConfig::default();
+    assert!(config.listen_addr.is_none());
+    // TransportPreferenceConfig doesn't implement PartialEq, check via conversion
+    let pref = config.get_transport_preference();
+    assert!(pref.allows_tcp());
+    assert_eq!(config.max_outbound_peers, Some(100));
+    assert!(config.protocol_version.is_none());
+    assert!(config.modules.is_some());
+    assert!(config.persistent_peers.is_empty());
+    assert!(config.enable_self_advertisement);
+}
+
+#[test]
+fn test_node_config_from_json_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("config.json");
+
+    let mut config = NodeConfig::default();
+    config.listen_addr = Some("127.0.0.1:8334".parse().unwrap());
+    config.max_outbound_peers = Some(50);
+
+    // Save to JSON
+    config.to_json_file(&config_path).unwrap();
+
+    // Load from JSON
+    let loaded = NodeConfig::from_json_file(&config_path).unwrap();
+    assert_eq!(loaded.listen_addr, config.listen_addr);
+    assert_eq!(loaded.max_outbound_peers, config.max_outbound_peers);
+}
+
+#[test]
+fn test_node_config_from_toml_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("config.toml");
+
+    let mut config = NodeConfig::default();
+    config.listen_addr = Some("127.0.0.1:8335".parse().unwrap());
+    config.max_outbound_peers = Some(75);
+
+    // Save to TOML
+    config.to_toml_file(&config_path).unwrap();
+
+    // Load from TOML
+    let loaded = NodeConfig::from_toml_file(&config_path).unwrap();
+    assert_eq!(loaded.listen_addr, config.listen_addr);
+    assert_eq!(loaded.max_outbound_peers, config.max_outbound_peers);
+}
+
+#[test]
+fn test_node_config_from_file_auto_detect_toml() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("config.toml");
+
+    let config = NodeConfig::default();
+    config.to_toml_file(&config_path).unwrap();
+
+    // Should auto-detect TOML from extension
+    let loaded = NodeConfig::from_file(&config_path).unwrap();
+    assert_eq!(loaded.listen_addr, config.listen_addr);
+}
+
+#[test]
+fn test_node_config_from_file_auto_detect_json() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("config.json");
+
+    let config = NodeConfig::default();
+    config.to_json_file(&config_path).unwrap();
+
+    // Should auto-detect JSON from extension
+    let loaded = NodeConfig::from_file(&config_path).unwrap();
+    assert_eq!(loaded.listen_addr, config.listen_addr);
+}
+
+#[test]
+fn test_node_config_get_transport_preference() {
+    let mut config = NodeConfig::default();
+    config.transport_preference = TransportPreferenceConfig::TcpOnly;
+
+    let pref = config.get_transport_preference();
+    assert!(pref.allows_tcp());
+    #[cfg(feature = "iroh")]
+    {
+        assert!(!pref.allows_iroh());
+    }
+}
+
+#[test]
+fn test_bandwidth_gigabytes_that_overflow_bytes_are_rejected() {
+    assert_eq!(bandwidth_gb_to_bytes(50), Some(50 * 1024 * 1024 * 1024));
+    assert_eq!(bandwidth_gb_to_bytes(1 << 34), None);
+
+    let mut config = NodeConfig::default();
+    let mut ibd = IbdProtectionConfig::default();
+    ibd.max_bandwidth_per_peer_per_day_gb = 1 << 34;
+    config.ibd_protection = Some(ibd);
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("max_bandwidth_per_peer_per_day_gb"));
+
+    config
+        .ibd_protection
+        .as_mut()
+        .unwrap()
+        .max_bandwidth_per_peer_per_day_gb = 50;
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_zero_header_cap_is_rejected_and_is_not_a_protocol_violation() {
+    let mut config = NodeConfig::default();
+    let mut limits = ProtocolLimitsConfig::default();
+    limits.max_headers_results = 0;
+    config.protocol_limits = Some(limits);
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("max_headers_results"));
+    assert!(!headers_message_exceeds_limit(1, 0));
+    assert!(!headers_batch_is_full(1, 0));
+    assert!(headers_batch_is_full(2000, 2000));
+    assert!(headers_message_exceeds_limit(2001, 2000));
+}
+
+#[test]
+fn test_message_ceiling_clamps_to_protocol_maximum() {
+    let mut limits = ProtocolLimitsConfig::default();
+    assert_eq!(limits.max_protocol_message_length, 4_000_024);
+    limits.max_protocol_message_length = 32 * 1024 * 1024;
+    limits.clamp_message_ceiling();
+    assert_eq!(limits.max_protocol_message_length, 4_000_024);
+    limits.max_protocol_message_length = 1_000;
+    limits.clamp_message_ceiling();
+    assert_eq!(limits.max_protocol_message_length, 1_000);
+}
+
+#[test]
+fn test_mempool_expiry_hours_that_overflow_seconds_are_rejected() {
+    let mut config = NodeConfig::default();
+    let mut mempool = MempoolPolicyConfig::default();
+    mempool.mempool_expiry_hours = u64::MAX / 3600 + 1;
+    config.mempool = Some(mempool);
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("mempool_expiry_hours"));
+
+    config.mempool.as_mut().unwrap().mempool_expiry_hours = 336;
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_pruning_config_validate_normal_mode() {
+    let config = PruningConfig {
+        mode: PruningMode::Normal {
+            keep_from_height: 0,
+            min_recent_blocks: 10,
+        },
+        min_blocks_to_keep: 100,
+        auto_prune: false,
+        auto_prune_interval: 0,
+        ..Default::default()
+    };
+
+    let result = config.validate();
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_pruning_config_validate_normal_mode_invalid() {
+    let config = PruningConfig {
+        mode: PruningMode::Normal {
+            keep_from_height: 0,
+            min_recent_blocks: 0, // Invalid: must be > 0
+        },
+        min_blocks_to_keep: 100,
+        auto_prune: false,
+        auto_prune_interval: 0,
+        ..Default::default()
+    };
+
+    let result = config.validate();
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("min_recent_blocks")
+    );
+}
+
+#[test]
+fn test_pruning_config_validate_min_blocks_to_keep_zero() {
+    let config = PruningConfig {
+        mode: PruningMode::Disabled,
+        min_blocks_to_keep: 0, // Invalid: must be > 0
+        auto_prune: false,
+        auto_prune_interval: 0,
+        ..Default::default()
+    };
+
+    let result = config.validate();
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("min_blocks_to_keep")
+    );
+}
+
+#[test]
+fn test_pruning_config_validate_auto_prune_interval_zero() {
+    let config = PruningConfig {
+        mode: PruningMode::Disabled,
+        min_blocks_to_keep: 100,
+        auto_prune: true,
+        auto_prune_interval: 0, // Invalid: must be > 0 when auto_prune is true
+        ..Default::default()
+    };
+
+    let result = config.validate();
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("auto_prune_interval")
+    );
+}
+
+#[test]
+fn test_pruning_config_validate_custom_mode_keep_headers_false() {
+    let config = PruningConfig {
+        mode: PruningMode::Custom {
+            keep_headers: false, // Invalid: must be true
+            keep_bodies_from_height: 0,
+            keep_commitments: false,
+            keep_filters: false,
+            keep_filtered_blocks: false,
+            keep_witnesses: false,
+            keep_tx_index: false,
+        },
+        min_blocks_to_keep: 100,
+        auto_prune: false,
+        auto_prune_interval: 0,
+        ..Default::default()
+    };
+
+    let result = config.validate();
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("keep_headers"));
+}
+
+#[test]
+fn test_pruning_config_validate_custom_mode_keep_headers_true() {
+    let config = PruningConfig {
+        mode: PruningMode::Custom {
+            keep_headers: true,
+            keep_bodies_from_height: 0,
+            keep_commitments: false,
+            keep_filters: false,
+            keep_filtered_blocks: false,
+            keep_witnesses: false,
+            keep_tx_index: false,
+        },
+        min_blocks_to_keep: 100,
+        auto_prune: false,
+        auto_prune_interval: 0,
+        ..Default::default()
+    };
+
+    let result = config.validate();
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_indexing_config_default() {
+    let config = IndexingConfig::default();
+    assert!(!config.enable_address_index);
+    assert!(!config.enable_value_index);
+    // IndexingStrategy doesn't implement PartialEq, check via match
+    match config.strategy {
+        IndexingStrategy::Eager => {}
+        IndexingStrategy::Lazy => assert!(false, "Default should be Eager"),
+    }
+}
+
+#[test]
+fn test_indexing_config_eager_strategy() {
+    let config = IndexingConfig {
+        enable_address_index: true,
+        enable_value_index: true,
+        strategy: IndexingStrategy::Eager,
+        max_indexed_addresses: 0, // 0 = unlimited
+        enable_compression: false,
+        background_indexing: false,
+    };
+
+    // Eager strategy should be valid
+    assert!(config.enable_address_index);
+    assert!(config.enable_value_index);
+}
+
+#[test]
+fn test_indexing_config_lazy_strategy() {
+    let config = IndexingConfig {
+        enable_address_index: true,
+        enable_value_index: false,
+        strategy: IndexingStrategy::Lazy,
+        max_indexed_addresses: 1000,
+        enable_compression: true,
+        background_indexing: true,
+    };
+
+    // Lazy strategy should be valid
+    assert!(config.enable_address_index);
+    assert!(!config.enable_value_index);
+    match config.strategy {
+        IndexingStrategy::Lazy => {}
+        IndexingStrategy::Eager => assert!(false, "Should be Lazy"),
+    }
+}
+
+#[test]
+fn test_rpc_auth_config_default() {
+    let config = RpcAuthConfig::default();
+    assert!(config.username.is_none());
+    assert!(config.password.is_none());
+}
+
+#[test]
+fn test_rpc_auth_config_basic_credentials_parse() {
+    let toml_str = r#"
+required = true
+username = "ckpool"
+password = "s3cret"
+tokens = ["bearer-token"]
+"#;
+    let config: RpcAuthConfig = toml::from_str(toml_str).expect("parse rpc_auth");
+    assert_eq!(config.username.as_deref(), Some("ckpool"));
+    assert_eq!(config.password.as_deref(), Some("s3cret"));
+    assert_eq!(config.tokens, vec!["bearer-token"]);
+}
+
+#[test]
+fn test_ban_list_sharing_config_default() {
+    let _config = BanListSharingConfig::default();
+    // Verify defaults are set
+}
+
+#[test]
+fn test_dos_protection_config_default() {
+    let _config = DosProtectionConfig::default();
+    // Verify defaults are set
+}
+
+#[test]
+fn test_node_config_with_custom_modules() {
+    let mut config = NodeConfig::default();
+    let mut module_config = ModuleConfig::default();
+    module_config
+        .enabled_modules
+        .insert("module1".into(), "1.0.*".into());
+    module_config
+        .enabled_modules
+        .insert("module2".into(), "2.0.0".into());
+    config.modules = Some(module_config);
+
+    assert_eq!(config.modules.as_ref().unwrap().enabled_modules.len(), 5);
+}
+
+#[test]
+fn test_node_config_with_persistent_peers() {
+    let mut config = NodeConfig::default();
+    config.persistent_peers = vec!["127.0.0.1:8333".to_string(), "192.168.1.1:8333".to_string()];
+
+    assert_eq!(config.persistent_peers.len(), 2);
+}
+
+#[test]
+fn test_node_config_serialization_roundtrip_json() {
+    let mut config = NodeConfig::default();
+    config.max_outbound_peers = Some(150);
+    config.enable_self_advertisement = false;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("test.json");
+
+    config.to_json_file(&config_path).unwrap();
+    let loaded = NodeConfig::from_json_file(&config_path).unwrap();
+
+    assert_eq!(loaded.max_outbound_peers, config.max_outbound_peers);
+    assert_eq!(
+        loaded.enable_self_advertisement,
+        config.enable_self_advertisement
+    );
+}
+
+#[test]
+fn test_node_config_serialization_roundtrip_toml() {
+    let mut config = NodeConfig::default();
+    config.max_outbound_peers = Some(200);
+    config.enable_self_advertisement = true;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("test.toml");
+
+    config.to_toml_file(&config_path).unwrap();
+    let loaded = NodeConfig::from_toml_file(&config_path).unwrap();
+
+    assert_eq!(loaded.max_outbound_peers, config.max_outbound_peers);
+    assert_eq!(
+        loaded.enable_self_advertisement,
+        config.enable_self_advertisement
+    );
+}
+
+#[test]
+fn test_node_config_invalid_json() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("invalid.json");
+    std::fs::write(&config_path, "{ invalid json }").unwrap();
+
+    let result = NodeConfig::from_json_file(&config_path);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_node_config_invalid_toml() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("invalid.toml");
+    std::fs::write(&config_path, "[invalid toml").unwrap();
+
+    let result = NodeConfig::from_toml_file(&config_path);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_node_config_missing_file() {
+    let config_path = PathBuf::from("/nonexistent/config.json");
+    let result = NodeConfig::from_json_file(&config_path);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_storage_config_default() {
+    let config = StorageConfig::default();
+    assert!(!config.data_dir.is_empty());
+    // database_backend is not Option, it's a direct field
+}
+
+#[test]
+fn test_transport_preference_config_variants() {
+    // TransportPreferenceConfig doesn't implement PartialEq, so we can't use assert_eq!
+    // Instead, test via conversion to TransportPreference
+    let tcp = TransportPreferenceConfig::TcpOnly;
+    let pref: blvm_node::network::transport::TransportPreference = tcp.into();
+    assert!(pref.allows_tcp());
+
+    #[cfg(feature = "quinn")]
+    {
+        let quinn = TransportPreferenceConfig::QuinnOnly;
+        let pref: blvm_node::network::transport::TransportPreference = quinn.into();
+        assert!(pref.allows_quinn());
+    }
+
+    #[cfg(feature = "iroh")]
+    {
+        let iroh = TransportPreferenceConfig::IrohOnly;
+        let pref: blvm_node::network::transport::TransportPreference = iroh.into();
+        assert!(pref.allows_iroh());
+    }
+}
+
+#[test]
+fn rpc_auth_only_file_keeps_the_auth_block() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("auth.toml");
+    std::fs::write(
+        &path,
+        "[rpc_auth]\nusername = \"miner\"\npassword = \"secret\"\n",
+    )
+    .unwrap();
+    let config = NodeConfig::from_file(&path).unwrap();
+    let auth = config.rpc_auth.expect("rpc_auth");
+    assert_eq!(auth.username.as_deref(), Some("miner"));
+    assert_eq!(auth.password.as_deref(), Some("secret"));
+
+    let broken = temp_dir.path().join("broken.toml");
+    std::fs::write(&broken, "listen_addr = [\n").unwrap();
+    assert!(NodeConfig::from_file(&broken).is_err());
+}

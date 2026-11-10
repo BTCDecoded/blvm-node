@@ -1,0 +1,47 @@
+# ============================================================================
+# Module Manifest
+# ============================================================================
+# This file defines the module's identity, dependencies, and capabilities.
+# See docs/MODULE_SYSTEM.md for complete documentation.
+
+# ----------------------------------------------------------------------------
+# Core Identity (Required)
+# ----------------------------------------------------------------------------
+name = "simple-module"
+version = "0.1.0"
+entry_point = "simple-module"
+
+# ----------------------------------------------------------------------------
+# Metadata (Optional)
+# ----------------------------------------------------------------------------
+description = "A simple example module demonstrating module system capabilities"
+author = "BTCDecoded Team"
+
+# ----------------------------------------------------------------------------
+# Capabilities
+# ----------------------------------------------------------------------------
+# Permissions this module requires to function
+capabilities = [
+    "read_blockchain",    # Query blockchain data
+    "subscribe_events",   # Receive node events
+]
+
+# ----------------------------------------------------------------------------
+# Dependencies
+# ----------------------------------------------------------------------------
+# Required dependencies (module cannot load without these)
+[dependencies]
+# "blvm-lightning" = ">=1.0.0"
+
+# Optional dependencies (module can work without these)
+[optional_dependencies]
+# "blvm-mesh" = ">=0.5.0"
+
+# ----------------------------------------------------------------------------
+# Configuration Schema
+# ----------------------------------------------------------------------------
+# Descriptions of configuration keys this module accepts
+[config_schema]
+poll_interval = "Polling interval in seconds (default: 5)"
+log_level = "Logging level: trace, debug, info, warn, error (default: info)"
+

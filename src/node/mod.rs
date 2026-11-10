@@ -1,0 +1,2849 @@
+//! Node orchestration for blvm-node
+//!
+//! This module provides sync coordination, mempool management,
+//! mining coordination, and overall node state management.
+
+#[cfg(feature = "production")]
+pub mod background_validation;
+pub mod block_processor;
+#[cfg(feature = "production")]
+pub mod chain_selector;
+pub mod core_mempool_dat;
+pub mod data_dir_lock;
+pub mod event_publisher;
+pub mod health;
+pub mod mempool;
+pub mod metrics;
+pub mod miner;
+#[cfg(feature = "production")]
+pub mod parallel_ibd;
+pub mod performance;
+#[cfg(feature = "production")]
+pub mod reorg_executor;
+pub mod run_loop;
+pub mod startup_verify;
+pub mod subsystems;
+pub mod sync;
+#[cfg(feature = "production")]
+pub mod undo_repair;
+
+use anyhow::Result;
+use hex;
+use std::net::SocketAddr;
+use tracing::{debug, error, info, warn};
+
+use crate::config::{NodeConfig, RpcAuthConfig};
+use crate::module::ModuleManager;
+use crate::module::api::events::EventManager;
+use crate::network::NetworkManager;
+use crate::node::event_publisher::EventPublisher;
+use crate::node::metrics::MetricsCollector;
+use crate::node::performance::PerformanceProfiler;
+use crate::rpc::RpcManager;
+use crate::storage::Storage;
+use crate::utils::{HANDSHAKE_POLL_SLEEP, MESSAGE_PROCESSOR_POLL_SLEEP, log_error_async};
+use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// Main node orchestrator
+pub struct Node {
+    protocol: Arc<BitcoinProtocolEngine>,
+    storage: Arc<Storage>,
+    network: Arc<NetworkManager>,
+    /// Module subsystem: registry, manager, event publisher
+    module_subsystem: Option<subsystems::ModuleSubsystem>,
+    /// Payment subsystem: processor, state machine, reorg handler
+    rpc: RpcManager,
+    #[allow(dead_code)]
+    sync_coordinator: sync::SyncCoordinator,
+    mempool_manager: Arc<mempool::MempoolManager>,
+    #[allow(dead_code)]
+    mining_coordinator: miner::MiningCoordinator,
+    /// Metrics collector for monitoring
+    metrics: Arc<MetricsCollector>,
+    /// Performance profiler for critical path timing
+    profiler: Arc<PerformanceProfiler>,
+    /// Protocol version (for determining network type)
+    protocol_version: ProtocolVersion,
+    /// Network address (for determining port)
+    network_addr: SocketAddr,
+    /// Node configuration (optional)
+    config: Option<NodeConfig>,
+    /// Data directory path (stored for recreating storage if needed)
+    data_dir: PathBuf,
+    /// Disk check counter (for periodic monitoring)
+    disk_check_counter: std::sync::atomic::AtomicU64,
+    /// WASM loader (injected by binary; e.g. from blvm-sdk)
+    #[cfg(feature = "wasm-modules")]
+    wasm_loader: Option<std::sync::Arc<dyn crate::module::wasm::WasmModuleLoader>>,
+    // Governance is handled via the module system (blvm-governance module)
+    // The module subscribes to governance events and handles webhook delivery
+}
+
+impl Node {
+    /// Return a config subfield if config is present; avoids repeating `config.as_ref().and_then(|c| c.field.as_ref())`.
+    fn config_sub<T>(&self, f: impl FnOnce(&NodeConfig) -> Option<&T>) -> Option<&T> {
+        self.config.as_ref().and_then(f)
+    }
+
+    /// Create a new node
+    pub fn new(
+        data_dir: &str,
+        network_addr: SocketAddr,
+        rpc_addr: SocketAddr,
+        protocol_version: Option<ProtocolVersion>,
+    ) -> Result<Self> {
+        Self::with_storage_config(data_dir, network_addr, rpc_addr, protocol_version, None)
+    }
+
+    /// Create a new node with storage configuration
+    ///
+    /// When `storage_config` is `Some`, uses its `database_backend`, `pruning`, and `indexing`.
+    /// When `None`, uses default backend and no pruning/indexing.
+    pub fn with_storage_config(
+        data_dir: &str,
+        network_addr: SocketAddr,
+        rpc_addr: SocketAddr,
+        protocol_version: Option<ProtocolVersion>,
+        storage_config: Option<&crate::config::StorageConfig>,
+    ) -> Result<Self> {
+        info!("Initializing node");
+
+        if let Some(header_mb) = storage_config
+            .and_then(|config| config.cache.as_ref())
+            .map(|cache| cache.header_cache_mb)
+            .filter(|&mb| mb > 0)
+        {
+            crate::storage::serialization_cache::set_header_serialize_cache_mb(header_mb);
+        }
+
+        // Initialize components
+        let protocol_version = protocol_version.unwrap_or(ProtocolVersion::Regtest);
+        let protocol = BitcoinProtocolEngine::new(protocol_version)?;
+        // Set the P2P network magic before any protocol parser calls
+        crate::network::protocol::ProtocolParser::set_network_magic(
+            protocol.get_network_params().magic_bytes,
+        );
+        let protocol_arc = Arc::new(protocol);
+
+        // Create storage with configuration
+        info!("[NODE_INIT] Creating storage...");
+        info!("[NODE_INIT] Calling Storage::open_for_node()...");
+        let mut storage = Storage::open_for_node(
+            data_dir,
+            protocol_version.consensus_network(),
+            storage_config,
+        )?;
+        info!("[NODE_INIT] Storage created successfully");
+        let pruning_network = protocol_version.consensus_network();
+        storage.set_pruning_network(pruning_network);
+        let storage_arc = Arc::new(storage);
+        let mempool_manager_arc = Arc::new(mempool::MempoolManager::new());
+
+        // Create network manager (config will be applied later if available)
+        let network = NetworkManager::new(network_addr).with_dependencies(
+            Arc::clone(&protocol_arc),
+            Arc::clone(&storage_arc),
+            Arc::clone(&mempool_manager_arc),
+        );
+        let network_arc = Arc::new(network);
+
+        // Wire the live UTXO set into MempoolManager so RBF fee checks use real values.
+        mempool_manager_arc.set_utxo_set_arc(network_arc.utxo_set_arc());
+        mempool_manager_arc.set_storage(Arc::clone(&storage_arc));
+        let metrics_arc = Arc::new(MetricsCollector::new());
+        let profiler_arc = Arc::new(PerformanceProfiler::new(1000));
+        let rpc = RpcManager::new(rpc_addr)
+            .with_metrics(Arc::clone(&metrics_arc))
+            .with_profiler(Arc::clone(&profiler_arc))
+            .with_dependencies(Arc::clone(&storage_arc), Arc::clone(&mempool_manager_arc))
+            .with_network_manager(Arc::clone(&network_arc))
+            .with_protocol_engine(Arc::clone(&protocol_arc));
+        // Note: EventPublisher will be set later in start_components() after it's created
+        let mut sync_coordinator = sync::SyncCoordinator::default();
+        sync_coordinator.set_mempool(Some(Arc::clone(&mempool_manager_arc)));
+        let mut mining_coordinator = miner::MiningCoordinator::new(
+            Arc::clone(&mempool_manager_arc),
+            Some(Arc::clone(&storage_arc)),
+        );
+        mining_coordinator.set_protocol_engine(Arc::clone(&protocol_arc));
+        mining_coordinator.set_commons_gbt_slot(rpc.commons_gbt_slot());
+        let metrics = metrics_arc;
+        let profiler = profiler_arc;
+
+        Ok(Self {
+            protocol: protocol_arc,
+            storage: storage_arc,
+            network: network_arc,
+            rpc,
+            data_dir: PathBuf::from(data_dir),
+            sync_coordinator,
+            mempool_manager: mempool_manager_arc,
+            mining_coordinator,
+            module_subsystem: None,
+            metrics,
+            profiler,
+            protocol_version,
+            network_addr,
+            config: None,
+            disk_check_counter: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "wasm-modules")]
+            wasm_loader: None,
+            // Governance handled via module system
+        })
+    }
+
+    /// Set node configuration
+    pub fn with_config(mut self, config: NodeConfig) -> Result<Self> {
+        // Wire block validation (assume-valid) to consensus config FIRST.
+        // Must call init_consensus_config before init_rayon (which reads the global config).
+        // Precedence: ENV (BLVM_ASSUME_VALID_HEIGHT) > config > defaults.
+        // Always init (not only when block_validation is Some): otherwise OnceLock fell back to
+        // from_env() without merge, and assume_valid_height could stay 0 (no skip in connect_block).
+        #[cfg(feature = "production")]
+        {
+            let mut consensus_config = blvm_protocol::consensus_config::ConsensusConfig::from_env();
+            let env_height = std::env::var("BLVM_ASSUME_VALID_HEIGHT")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok());
+            let assume_valid_from_env = env_height.is_some();
+            let file_assume_valid_height = config
+                .block_validation
+                .as_ref()
+                .map(|bv| bv.assume_valid_height)
+                .unwrap_or(0);
+            let (height, hash) =
+                crate::config::overlay_assume_valid(env_height, config.block_validation.as_ref());
+            consensus_config.block_validation.assume_valid_height = height;
+            consensus_config.block_validation.assume_valid_hash = hash;
+            let chain_work_network = match self.protocol_version {
+                ProtocolVersion::BitcoinV1 => "mainnet",
+                ProtocolVersion::Testnet3 => "testnet3",
+                ProtocolVersion::Testnet4 => "testnet4",
+                ProtocolVersion::Signet => "signet",
+                ProtocolVersion::Regtest => "regtest",
+            };
+            consensus_config.block_validation.n_minimum_chain_work =
+                crate::config::minimum_chain_work_for_network(chain_work_network);
+            crate::config::overlay_mempool_onto_consensus(
+                &mut consensus_config.mempool,
+                config.mempool.as_ref(),
+                config.rbf.as_ref(),
+            );
+            blvm_protocol::consensus_config::init_consensus_config(consensus_config);
+            let source = if assume_valid_from_env {
+                "env"
+            } else if file_assume_valid_height > 0 {
+                "config"
+            } else if height > 0 {
+                "default"
+            } else {
+                "off"
+            };
+            if height > 0 {
+                let hash_s = hash.map(hex::encode).unwrap_or_else(|| "none".to_string());
+                if hash.is_some() {
+                    info!(
+                        "Consensus assume-valid: height={} hash={} source={} (blocks before this height may skip script checks when chainwork is high enough)",
+                        height, hash_s, source
+                    );
+                } else {
+                    info!(
+                        "Consensus assume-valid: height={} hash=none source={} (script checks still run until a hash is set)",
+                        height, source
+                    );
+                }
+            } else {
+                info!(
+                    "Consensus assume-valid: disabled height=0 source={}",
+                    source
+                );
+            }
+        }
+
+        // Initialize Rayon pool for script verification (uses BLVM_SCRIPT_THREADS from consensus config)
+        #[cfg(feature = "production")]
+        blvm_protocol::consensus_config::init_rayon_for_script_verification();
+
+        if self.protocol_version == ProtocolVersion::Signet {
+            if let Some(ref hex) = config.signet_challenge {
+                match crate::config::parse_signet_challenge_hex(hex) {
+                    Ok(bytes) => {
+                        let override_script = if bytes.is_empty() { None } else { Some(bytes) };
+                        let engine = BitcoinProtocolEngine::new(self.protocol_version)?
+                            .with_signet_challenge(override_script);
+                        crate::network::protocol::ProtocolParser::set_network_magic(
+                            engine.get_network_params().magic_bytes,
+                        );
+                        self.protocol = Arc::new(engine);
+                        info!("Signet challenge script loaded from config");
+                    }
+                    Err(e) => {
+                        warn!("Invalid signet_challenge in config: {e}");
+                    }
+                }
+            }
+        }
+
+        // Auto-detect governance server if configured (best-effort, non-blocking)
+        #[cfg(feature = "governance")]
+        {
+            // Spawn async task to check governance server health (if in async runtime)
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                if let Some(ref gov_config) = config.governance {
+                    if !gov_config.enabled {
+                        if let Some(ref commons_url) = gov_config.commons_url {
+                            let url = commons_url.clone();
+                            let api_key = gov_config.resolved_api_key();
+                            handle.spawn(async move {
+                                // Check if governance server is reachable
+                                let client = reqwest::Client::builder()
+                                    .timeout(std::time::Duration::from_secs(5))
+                                    .build();
+
+                                if let Ok(client) = client {
+                                    let health_url = format!("{url}/internal/health");
+                                    let mut request = client.get(&health_url);
+                                    if let Some(key) = api_key {
+                                        request = request.header(
+                                            reqwest::header::AUTHORIZATION,
+                                            format!("Bearer {key}"),
+                                        );
+                                    }
+                                    if let Ok(response) = request.send().await {
+                                        if response.status().is_success() {
+                                            info!("Governance server detected at {}, consider setting governance.enabled = true", url);
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply network configuration if available
+        let max_peers = config.max_outbound_peers.unwrap_or(100);
+        let transport_preference = config.get_transport_preference();
+
+        // Recreate network manager with config
+        let network_addr = self.network_addr;
+        let protocol_arc = self.protocol.clone();
+        // Use existing storage Arc instead of creating a new one
+        let storage_arc = Arc::clone(&self.storage);
+        let mempool_manager_arc = Arc::clone(&self.mempool_manager);
+
+        let network = Arc::new(
+            NetworkManager::with_config(
+                network_addr,
+                max_peers,
+                transport_preference,
+                Some(&config),
+            )
+            .with_dependencies(protocol_arc, storage_arc, mempool_manager_arc),
+        );
+
+        // Governance is handled via the blvm-governance module (webhooks, proposal store, etc.)
+
+        self.network = network;
+        self.config = Some(config.clone());
+
+        // Apply RPC config (max request size, request timeouts, connection limits).
+        // `self.network` was just replaced above; re-wire RPC so MiningRpc/NetworkRpc use the same
+        // NetworkManager instance that receives `network.start()` and peer connections (otherwise
+        // e.g. `generatetoaddress` P2P broadcast targets a stale manager with no peers).
+        self.rpc = self
+            .rpc
+            .with_max_request_size(config.max_request_size_bytes())
+            .with_max_connections_per_ip(config.max_connections_per_ip_per_minute())
+            .with_batch_rate_multiplier_cap(config.rpc_batch_rate_multiplier_cap())
+            .with_connection_rate_limit_window(config.rpc_connection_rate_limit_window_seconds())
+            .with_request_timeouts(config.request_timeouts.clone())
+            .with_network_manager(Arc::clone(&self.network));
+
+        // Apply RBF and mempool policy configurations to mempool manager
+        // Uses interior mutability so we can set configs even when mempool is in an Arc
+        if let Some(ref rbf_config) = config.rbf {
+            self.mempool_manager
+                .set_rbf_config(Some(rbf_config.clone()));
+            info!("RBF configuration applied: mode={:?}", rbf_config.mode);
+        }
+        if let Some(ref mempool_policy) = config.mempool {
+            self.mempool_manager
+                .set_policy_config(Some(mempool_policy.clone()));
+            if mempool_policy.persist_mempool {
+                let path = std::path::Path::new(&mempool_policy.mempool_persistence_path);
+                if path.exists() {
+                    match self.mempool_manager.load_from_disk(path) {
+                        Ok(()) => info!("Loaded mempool from {}", path.display()),
+                        Err(e) => warn!("Failed to load mempool from {}: {}", path.display(), e),
+                    }
+                }
+            }
+            info!(
+                "Mempool policy configuration applied: max_mempool_mb={}, eviction_strategy={:?}, reject_spam_in_mempool={}",
+                mempool_policy.max_mempool_mb,
+                mempool_policy.eviction_strategy,
+                mempool_policy.reject_spam_in_mempool
+            );
+        }
+
+        // Governance handled via module system - no direct webhook client needed
+        Ok(self)
+    }
+
+    /// Set WASM module loader (injected by binary; e.g. from blvm-sdk).
+    /// Call before with_modules_from_config when WASM support is desired.
+    #[cfg(feature = "wasm-modules")]
+    pub fn with_wasm_loader(
+        mut self,
+        loader: std::sync::Arc<dyn crate::module::wasm::WasmModuleLoader>,
+    ) -> Self {
+        self.wasm_loader = Some(loader);
+        self
+    }
+
+    /// Enable module system from configuration
+    pub fn with_modules_from_config(mut self, config: &NodeConfig) -> anyhow::Result<Self> {
+        if let Some(module_config) = &config.modules {
+            if !module_config.enabled {
+                info!("Module system disabled in configuration");
+                return Ok(self);
+            }
+
+            // Get module resource limits config
+            let module_resource_limits = self.config_sub(|c| c.module_resource_limits.as_ref());
+            let mut module_manager = ModuleManager::with_config(
+                &module_config.modules_dir,
+                &module_config.data_dir,
+                &module_config.socket_dir,
+                module_resource_limits,
+            );
+            #[cfg(feature = "wasm-modules")]
+            if let Some(ref loader) = self.wasm_loader {
+                module_manager.set_wasm_loader(std::sync::Arc::clone(loader));
+            }
+            self.module_subsystem
+                .get_or_insert_with(Default::default)
+                .module_manager = Some(Arc::new(tokio::sync::Mutex::new(module_manager)));
+            info!(
+                "Module system enabled: modules_dir={}, data_dir={}, socket_dir={}",
+                module_config.modules_dir, module_config.data_dir, module_config.socket_dir
+            );
+        }
+        Ok(self)
+    }
+
+    /// Enable module system with explicit paths (for backward compatibility)
+    pub fn with_modules<P: AsRef<Path>>(
+        mut self,
+        modules_dir: P,
+        socket_dir: P,
+    ) -> anyhow::Result<Self> {
+        use crate::utils::env_or_default;
+        let data_dir = PathBuf::from(env_or_default("DATA_DIR", "data"));
+        let modules_data_dir = data_dir.join("modules");
+
+        let mut module_manager = ModuleManager::new(
+            modules_dir.as_ref(),
+            modules_data_dir.as_ref(),
+            socket_dir.as_ref(),
+        );
+        #[cfg(feature = "wasm-modules")]
+        if let Some(ref loader) = self.wasm_loader {
+            module_manager.set_wasm_loader(std::sync::Arc::clone(loader));
+        }
+        self.module_subsystem
+            .get_or_insert_with(Default::default)
+            .module_manager = Some(Arc::new(tokio::sync::Mutex::new(module_manager)));
+        Ok(self)
+    }
+
+    /// Start the node
+    pub async fn start(&mut self) -> Result<()> {
+        info!("[NODE] Starting node");
+
+        // Start all components
+        info!("[NODE] Calling start_components()...");
+        self.start_components().await?;
+        info!("[NODE] start_components() completed");
+
+        // Main node loop
+        info!("[NODE] Starting main run loop...");
+        self.run().await?;
+        info!("[NODE] Main run loop exited");
+
+        Ok(())
+    }
+
+    /// Start all node components
+    async fn start_components(&mut self) -> Result<()> {
+        info!("[START_COMPONENTS] Starting node components");
+        if let Ok(Some(info)) = self.storage.chain().load_chain_info() {
+            let params = self.protocol.get_network_params();
+            let running_genesis =
+                blvm_consensus::block::block_header_hash(&params.genesis_block.header);
+            if let Some(message) = crate::storage::chainstate::datadir_network_conflict(
+                &info,
+                &params.network_name,
+                &running_genesis,
+            ) {
+                return Err(anyhow::anyhow!(message));
+            }
+        }
+
+        // Validate security configuration and emit warnings
+        if let Some(ref config) = self.config {
+            let rpc_addr = self.rpc.rpc_addr();
+            #[cfg(feature = "rest-api")]
+            let rest_api_addr: Option<SocketAddr> = self.rpc.rest_api_addr();
+            #[cfg(not(feature = "rest-api"))]
+            let rest_api_addr: Option<SocketAddr> = None;
+
+            let warnings: Vec<String> = config.validate_security(rpc_addr, rest_api_addr);
+            for warning in warnings {
+                warn!("{}", warning);
+            }
+        }
+
+        // Sequential startup in this task: wire RPC auth/events/modules, then start RPC and subsystems.
+
+        // Create early event publisher for RPC (BlockchainRpc needs it for invalidateblock → BlockDisconnected)
+        // Must be done before rpc.start() so BlockchainRpc gets event_publisher
+        if let Some(module_manager) = self
+            .module_subsystem
+            .as_ref()
+            .and_then(|s| s.module_manager.as_ref())
+        {
+            let event_manager = Arc::clone(module_manager.lock().await.event_manager());
+            let early_publisher = Arc::new(EventPublisher::new(event_manager));
+            self.rpc.set_event_publisher(Some(early_publisher));
+            self.rpc.set_module_manager(Arc::clone(module_manager));
+            info!("[START_COMPONENTS] Event publisher and module manager set on RPC");
+        }
+
+        // Apply RPC auth config before starting RPC server
+        if let Some(ref config) = self.config {
+            if let Some(ref rpc_auth) = config.rpc_auth {
+                self.rpc
+                    .apply_auth_config(rpc_auth.clone(), Some(&self.data_dir))
+                    .await?;
+                info!("[START_COMPONENTS] RPC auth config applied (tokens/certs from rpc_auth)");
+            } else if config.rpc_rate_limit_when_auth_disabled() {
+                let burst = config.rpc_ip_rate_limit_burst();
+                let rate = config.rpc_ip_rate_limit_rate();
+                self.rpc
+                    .apply_auth_config(
+                        RpcAuthConfig::rate_limit_only(burst, rate),
+                        Some(&self.data_dir),
+                    )
+                    .await?;
+                info!(
+                    "[START_COMPONENTS] RPC cookie auth applied (burst={}, rate={})",
+                    burst, rate
+                );
+            }
+        }
+
+        #[cfg(feature = "rest-api")]
+        if let Some(ref config) = self.config {
+            if let Some(ref rest_cfg) = config.rest_api {
+                if rest_cfg.enabled {
+                    let bind = rest_cfg.resolve_bind_addr(self.rpc.rpc_addr());
+                    self.rpc.enable_rest_api(bind);
+                    info!("[START_COMPONENTS] REST API enabled on {}", bind);
+                }
+            }
+        }
+        #[cfg(not(feature = "rest-api"))]
+        if self
+            .config
+            .as_ref()
+            .and_then(|c| c.rest_api.as_ref())
+            .is_some_and(|r| r.enabled)
+        {
+            warn!(
+                "[START_COMPONENTS] rest_api.enabled = true but this build lacks the rest-api feature; REST will not start"
+            );
+        }
+
+        if let Some(ref config) = self.config {
+            if config
+                .modules
+                .as_ref()
+                .is_some_and(|m| m.marketplace_fetch_enabled)
+            {
+                self.rpc.set_marketplace_fetch(true);
+                info!("[START_COMPONENTS] loadmodule marketplace auto-fetch enabled");
+            }
+        }
+
+        // Start RPC server
+        info!("[START_COMPONENTS] Starting RPC server...");
+        if log_error_async(
+            || self.rpc.start(),
+            "[START_COMPONENTS] Failed to start RPC server",
+        )
+        .await
+        .is_some()
+        {
+            info!(
+                "[START_COMPONENTS] RPC server started on {}",
+                self.rpc.rpc_addr()
+            );
+        }
+
+        info!("Network manager initialized");
+        info!("Sync coordinator initialized");
+        info!("Mempool manager initialized");
+        info!("Mining coordinator initialized");
+
+        if let Err(e) = self.network.sync_utxo_from_storage().await {
+            warn!("Failed to load UTXO snapshot for mempool checks: {}", e);
+        }
+
+        // Start network manager
+        info!(
+            "[START_COMPONENTS] About to call network.start() on {:?}",
+            self.network_addr
+        );
+        if let Err(e) = self.network.start(self.network_addr).await {
+            warn!("[START_COMPONENTS] Failed to start network manager: {}", e);
+            // Continue anyway - network might be optional
+        } else {
+            info!("[START_COMPONENTS] network.start() completed successfully");
+        }
+
+        // Initialize peer connections automatically
+        let serve_only = crate::config::ibd_serve_only();
+        if serve_only {
+            info!(
+                "[START_COMPONENTS] BLVM_SERVE_ONLY=1 — skip outbound discovery (listen+getdata only)"
+            );
+        } else {
+            info!("[START_COMPONENTS] Initializing peer connections...");
+            self.initialize_peer_connections().await?;
+            info!("[START_COMPONENTS] Peer connections initialized");
+        }
+
+        // Wait for peer handshakes to complete (Version/VerAck exchange)
+        // Process network messages during this time to handle Version/VerAck exchange
+        // Serve-only: no outbound peers — skip the fixed handshake wait.
+        let handshake_secs = if serve_only {
+            0
+        } else {
+            self.config_sub(|c| c.request_timeouts.as_ref())
+                .map(|t| t.handshake_timeout_secs)
+                .unwrap_or(10)
+        };
+        if handshake_secs > 0 {
+            info!("[START_COMPONENTS] Waiting for peer handshakes to complete...");
+        }
+        let handshake_timeout = tokio::time::Duration::from_secs(handshake_secs);
+        let handshake_start = std::time::Instant::now();
+        let mut total_processed = 0usize;
+        while handshake_start.elapsed() < handshake_timeout {
+            // Process pending network messages without blocking (handles Version/VerAck)
+            match self.network.process_pending_messages().await {
+                Ok(count) => {
+                    if count > 0 {
+                        info!("Processed {} network messages during handshake", count);
+                        total_processed += count;
+                    }
+                }
+                Err(e) => {
+                    warn!("Error processing network messages during handshake: {}", e);
+                }
+            }
+            tokio::time::sleep(HANDSHAKE_POLL_SLEEP).await;
+        }
+        info!(
+            "[START_COMPONENTS] Handshake period complete, processed {} total messages",
+            total_processed
+        );
+
+        // Spawn background message processing task BEFORE starting IBD
+        // This ensures Headers responses and other messages are processed during IBD
+        let network_for_processing = Arc::clone(&self.network);
+        let _message_processor = tokio::spawn(async move {
+            loop {
+                if let Err(e) = network_for_processing.process_messages().await {
+                    tracing::warn!("Error in background message processing: {}", e);
+                }
+                // Small sleep to prevent busy-looping if no messages
+                tokio::time::sleep(MESSAGE_PROCESSOR_POLL_SLEEP).await;
+            }
+        });
+        info!("[START_COMPONENTS] Background message processor spawned");
+
+        // Rebuild `chain_info` from block index if missing (crash mid-flush, legacy IBD path).
+        if let Err(e) = self.storage.recover_chain_tip_from_blockstore() {
+            warn!(
+                "[START_COMPONENTS] recover_chain_tip_from_blockstore failed: {}",
+                e
+            );
+        }
+        if let Err(e) = crate::node::reorg_executor::recover_snapshot_commit(
+            self.storage.as_ref(),
+            self.storage.blocks().as_ref(),
+        ) {
+            warn!("[START_COMPONENTS] recover_snapshot_commit failed: {e}");
+        }
+
+        // Fresh datadir: no `chain_info` yet — anchor with this network's genesis so RPC mining
+        // (`generatetoaddress`, templates) and tip queries work without a prior sync.
+        if self.storage.chain().load_chain_info()?.is_none() {
+            let np = self.protocol.get_network_params();
+            let header = np.genesis_block.header.clone();
+            match self.storage.chain().initialize_from_network_metadata(
+                &header,
+                &np.network_name,
+                np.max_target as u64,
+                np.halving_interval,
+            ) {
+                Ok(()) => info!(
+                    "[START_COMPONENTS] Initialized chainstate from network genesis (fresh datadir)"
+                ),
+                Err(e) => warn!(
+                    "[START_COMPONENTS] Failed to initialize chain with genesis: {}",
+                    e
+                ),
+            }
+        }
+
+        // Header sync starts at height 1 and anchors GetHeaders on `get_hash_by_height(0)`.
+        // Fresh `initialize_from_network_metadata` only wrote chain_info — index genesis here.
+        if let Ok(Some(info)) = self.storage.chain().load_chain_info() {
+            if info.height == 0 {
+                let bs = self.storage.blocks();
+                if matches!(bs.get_hash_by_height(0), Ok(None)) {
+                    match bs
+                        .store_header(&info.tip_hash, &info.tip_header)
+                        .and_then(|_| bs.store_height(0, &info.tip_hash))
+                        .and_then(|_| bs.store_recent_header(0, &info.tip_header))
+                    {
+                        Ok(()) => info!(
+                            "[START_COMPONENTS] Indexed genesis header in blockstore (height 0)"
+                        ),
+                        Err(e) => warn!(
+                            "[START_COMPONENTS] Failed to index genesis in blockstore: {}",
+                            e
+                        ),
+                    }
+                }
+            }
+        }
+
+        // AssumeUTXO: if -assumeutxo=<blockhash> and empty chain, try to load snapshot
+        let mut current_height = match self.storage.chain().get_height() {
+            Ok(Some(h)) => {
+                info!("[START_COMPONENTS] Storage returned height: {}", h);
+                h
+            }
+            Ok(None) => {
+                info!("[START_COMPONENTS] Storage returned None for height, using 0");
+                0
+            }
+            Err(e) => {
+                warn!(
+                    "[START_COMPONENTS] Error getting height from storage: {}, using 0",
+                    e
+                );
+                0
+            }
+        };
+        let mut initial_utxo_set = blvm_protocol::UtxoSet::default();
+        if current_height == 0 {
+            if let Some(block_hash) = self.config_sub(|c| c.assumeutxo_blockhash.as_ref()) {
+                use crate::storage::assumeutxo::{
+                    open_trust_anchor_snapshot, write_base_blockhash_marker,
+                };
+                let network = self
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.protocol_version.as_deref())
+                    .unwrap_or("regtest");
+                let data_dir = std::path::Path::new(&self.data_dir);
+                match open_trust_anchor_snapshot(data_dir, network, block_hash) {
+                    Ok(Some((utxo_set, metadata))) => {
+                        if let Err(e) = self
+                            .storage
+                            .load_assumeutxo_snapshot(&utxo_set, &metadata, None)
+                        {
+                            warn!(
+                                "AssumeUTXO: failed to load snapshot into storage: {}. Falling back to full IBD.",
+                                e
+                            );
+                        } else {
+                            current_height = metadata.block_height;
+                            initial_utxo_set = utxo_set;
+                            if let Err(e) =
+                                write_base_blockhash_marker(data_dir, &metadata.block_hash)
+                            {
+                                warn!(
+                                    "AssumeUTXO: failed to write chainstate_snapshot marker: {}",
+                                    e
+                                );
+                            }
+                            info!(
+                                "AssumeUTXO: loaded snapshot at height {}, continuing sync from tip",
+                                current_height
+                            );
+                        }
+                    }
+                    Ok(None) => {
+                        warn!(
+                            "AssumeUTXO: block hash not in chainparams. Add to MAINNET_ASSUMEUTXO_DATA or REGTEST_ASSUMEUTXO_DATA. Falling back to full IBD."
+                        );
+                    }
+                    Err(e) => {
+                        warn!("AssumeUTXO: {e}. Falling back to full IBD.");
+                    }
+                }
+            }
+        }
+        // Get target height and peer addresses for IBD decision.
+        // Use IBD-filtered list: excludes NODE_NETWORK_LIMITED (pruned) peers that cannot serve
+        // historical blocks. Falls back to all peers if no full-history peers are found.
+        let peer_addresses: Vec<String> = self
+            .network
+            .peer_addresses_for_ibd()
+            .iter()
+            .map(|addr| addr.to_string())
+            .collect();
+
+        // AssumeUTXO: spawn background validation when snapshot is active (marker present)
+        #[cfg(feature = "production")]
+        {
+            use crate::storage::assumeutxo::{
+                height_for_blockhash, is_background_validated, read_base_blockhash_marker,
+            };
+            let data_dir = std::path::Path::new(&self.data_dir);
+            if crate::storage::assumeutxo::active_chainstate_refused(data_dir) {
+                return Err(anyhow::anyhow!(
+                    "assumeutxo active chainstate refused: commitment status is Failed"
+                ));
+            }
+            if let Ok(Some(base_blockhash)) = read_base_blockhash_marker(data_dir) {
+                if !is_background_validated(data_dir, &base_blockhash) {
+                    let network = self
+                        .config
+                        .as_ref()
+                        .and_then(|c| c.protocol_version.as_deref())
+                        .unwrap_or("regtest");
+                    if let Some(base_height) = height_for_blockhash(network, &base_blockhash) {
+                        crate::node::background_validation::spawn_assumeutxo_background_validation(
+                            data_dir,
+                            base_blockhash,
+                            base_height,
+                            network,
+                            Arc::clone(&self.protocol),
+                            Arc::clone(&self.network),
+                            peer_addresses.clone(),
+                        );
+                    }
+                }
+            }
+        }
+
+        #[cfg(feature = "production")]
+        if !serve_only {
+            let data_dir = self.data_dir.as_path();
+            if let Err(e) = crate::storage::ibd_autorepair::apply_ibd_utxo_autorepair_if_needed(
+                self.storage.as_ref(),
+                data_dir,
+            ) {
+                warn!(
+                    "IBD UTXO autorepair (marker-based) failed: {} — continuing with existing state",
+                    e
+                );
+            }
+        }
+
+        // Local-replay hybrid: newer heed3 (bodies + both ping-pong ckpts) + pin resume
+        // to a prior-rung export so validation restarts at N with bodies ahead.
+        // Also select the ckpt slot that still holds height `h` (inactive slot after a
+        // later export) — otherwise seed loads the active tip ckpt and skips the band.
+        // Serve-only archives must not rewrite watermarks / export pins.
+        if !serve_only {
+            if let Ok(v) = std::env::var("BLVM_IBD_FORCE_RESUME_HEIGHT") {
+                if let Ok(h) = v.trim().parse::<u64>() {
+                    if h > 0 {
+                        let mut slot_note = String::new();
+                        let active = self.storage.chain().get_engine_ckpt_slot().unwrap_or(0);
+                        let mut chosen: Option<u8> = None;
+                        for slot in [0u8, 1u8] {
+                            if self.storage.chain().get_engine_ckpt_slot_height(slot).ok()
+                                == Some(h)
+                            {
+                                chosen = Some(slot);
+                                break;
+                            }
+                        }
+                        if chosen.is_none() {
+                            // Slot-height metadata may be missing on the inactive tree; if the
+                            // active export is ahead of `h`, prefer the other non-empty slot.
+                            let active_export = self
+                                .storage
+                                .chain()
+                                .get_engine_export_height()
+                                .ok()
+                                .flatten()
+                                .unwrap_or(0);
+                            if active_export > h {
+                                let other = active ^ 1;
+                                let other_name =
+                                    crate::storage::ibd_engine::ckpt_tree_for_slot(other);
+                                if let Ok(tree) = self.storage.open_tree(other_name) {
+                                    if !tree.is_empty().unwrap_or(true) {
+                                        chosen = Some(other);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(slot) = chosen {
+                            if let Err(e) = self.storage.chain().force_set_engine_ckpt_slot(slot) {
+                                warn!(
+                                    "[IBD_FORCE_RESUME] force_set_engine_ckpt_slot({slot}): {e:#}"
+                                );
+                            } else {
+                                let _ = self.storage.chain().set_engine_ckpt_slot_height(slot, h);
+                                // Tip export left chain_info.utxo_count at the *newer* rung;
+                                // seed refuses unless expected count matches the prior-rung tree.
+                                let tree_name =
+                                    crate::storage::ibd_engine::ckpt_tree_for_slot(slot);
+                                if let Ok(tree) = self.storage.open_tree(tree_name) {
+                                    if let Ok(n) = tree.len() {
+                                        if n > 0 {
+                                            let _ = self
+                                                .storage
+                                                .chain()
+                                                .force_set_engine_export_utxo_count(n as u64);
+                                            slot_note = format!(
+                                                " ckpt_slot={slot} (was {active}) utxo_count={n}"
+                                            );
+                                        } else {
+                                            slot_note = format!(" ckpt_slot={slot} (was {active})");
+                                        }
+                                    } else {
+                                        slot_note = format!(" ckpt_slot={slot} (was {active})");
+                                    }
+                                } else {
+                                    slot_note = format!(" ckpt_slot={slot} (was {active})");
+                                }
+                            }
+                        }
+                        match (
+                            self.storage.chain().force_set_ibd_utxo_watermark(h),
+                            self.storage.chain().force_set_engine_export_height(h),
+                            self.storage.chain().force_set_engine_validation_tip(h),
+                        ) {
+                            (Ok(()), Ok(()), Ok(())) => {
+                                warn!(
+                                    "[IBD_FORCE_RESUME] pinned watermark/export/validation_tip → {} \
+                                 (BLVM_IBD_FORCE_RESUME_HEIGHT){}",
+                                    h, slot_note
+                                );
+                            }
+                            (e1, e2, e3) => {
+                                warn!(
+                                    "[IBD_FORCE_RESUME] failed to pin height {}: wm={:?} export={:?} tip={:?}",
+                                    h,
+                                    e1.err(),
+                                    e2.err(),
+                                    e3.err()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        } // !serve_only — skip FORCE_RESUME watermark rewrite
+
+        // Determine the effective resume point. Two heights matter:
+        //   chain_tip      — the last block index height written (chain_info.height)
+        //   utxo_watermark — the last height at which ALL UTXOs were guaranteed flushed to disk
+        //
+        // After a clean shutdown they are equal. After an unclean shutdown either may lag:
+        //   watermark < chain_tip — UTXO flush incomplete; replay watermark+1..chain_tip.
+        //   watermark > chain_tip — block metadata flush incomplete; resume at watermark.
+        //
+        // Fresh DB: get_height() returns None → start from genesis (synced_tip=0, first_block=0).
+        // Existing DB: effective_tip = min(chain_tip, watermark), except watermark > chain_tip
+        // uses watermark (UTXO durable through that height; blocks assumed on disk).
+        let (synced_tip, ibd_first_block_height) = self.ibd_resume_heights()?;
+
+        // One-line resume summary (post-reconcile reads reflect disk). Helps verify we are not
+        // accidentally treating an existing chain as genesis (e.g. wrong --data-dir or BLVM_CLEAN).
+        let chain_tip_for_log = self.storage.chain().get_height().ok().flatten();
+        let wm_for_log = self.storage.chain().get_utxo_watermark().ok().flatten();
+        let export_for_log = self
+            .storage
+            .chain()
+            .get_engine_export_height()
+            .ok()
+            .flatten();
+        let validation_tip_for_log = self
+            .storage
+            .chain()
+            .get_engine_validation_tip()
+            .ok()
+            .flatten();
+        if chain_tip_for_log.is_some_and(|h| h > 0) || synced_tip > 0 {
+            info!(
+                "Resuming sync from existing data in this data directory — keep the same --data-dir between runs (do not delete rocksdb/)"
+            );
+        }
+        info!(
+            "[IBD_RESUME] chain_tip={:?} ibd_utxo_watermark={:?} engine_export_height={:?} \
+             engine_validation_tip={:?} effective_validated_tip={} next_block_height={}",
+            chain_tip_for_log,
+            wm_for_log,
+            export_for_log,
+            validation_tip_for_log,
+            synced_tip,
+            ibd_first_block_height
+        );
+        if !serve_only && chain_tip_for_log.is_some_and(|h| h > 0) && synced_tip == 0 {
+            warn!(
+                "[IBD_RESUME] Chain tip is {:?} but durable UTXO watermark is still 0 — validation reconnects from block 1 until the first flush persists `ibd_utxo_watermark`. \
+                 After that, restarts resume at min(chain_tip, watermark). Use the same --data-dir and omit BLVM_CLEAN=1 between runs.",
+                chain_tip_for_log
+            );
+        }
+
+        // Wait for the archive Version start_height before the +1e6 fallback.
+        // Immediate fallback (synced_tip+1000000 → 1400287) starts IBD before
+        // handshake lands and poisons Mode T rematch (FAIL_TARGET / cold tip30).
+        // A peer that is only at our tip is not new work. The old fallback
+        // added a million blocks anyway, which starts parallel IBD on a node
+        // that is already caught up.
+        let mut peer_ahead = self
+            .network
+            .get_highest_peer_start_height_async()
+            .await
+            .filter(|height| *height > synced_tip);
+        if !serve_only && peer_ahead.is_none() {
+            let wait_ms: u64 = std::env::var("BLVM_IBD_PEER_HEIGHT_WAIT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30_000);
+            let deadline =
+                tokio::time::Instant::now() + tokio::time::Duration::from_millis(wait_ms);
+            while tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                if let Some(h) = self.network.get_highest_peer_start_height_async().await {
+                    if h > synced_tip {
+                        peer_ahead = Some(h);
+                        info!("[START_COMPONENTS] peer start_height={h} after Version wait");
+                        break;
+                    }
+                }
+            }
+        }
+        let extending_height = crate::node::parallel_ibd::headers::highest_extending_height(
+            self.storage.blocks().as_ref(),
+            synced_tip,
+        )
+        .unwrap_or(synced_tip);
+        let target_height = crate::node::parallel_ibd::headers::ibd_target_height(
+            synced_tip,
+            peer_ahead,
+            extending_height,
+        );
+        if peer_ahead.is_none() && synced_tip > 0 && target_height == synced_tip {
+            info!(
+                "[START_COMPONENTS] no peer ahead of {synced_tip} and no linked headers above it — not starting parallel IBD"
+            );
+        }
+        let is_ibd = !serve_only && synced_tip < target_height;
+
+        info!(
+            "[START_COMPONENTS] IBD check: synced_tip={}, ibd_first_block_height={}, target_height={}, is_ibd={} serve_only={}",
+            synced_tip, ibd_first_block_height, target_height, is_ibd, serve_only
+        );
+        if serve_only {
+            info!(
+                "[START_COMPONENTS] BLVM_SERVE_ONLY=1 — skip parallel IBD (archive/getdata serve)"
+            );
+        }
+
+        let next_header_extends = match self
+            .storage
+            .blocks()
+            .get_hash_by_height(ibd_first_block_height)
+        {
+            Ok(Some(next_hash)) => {
+                crate::node::parallel_ibd::headers::stored_height_extends_active_parent(
+                    self.storage.blocks().as_ref(),
+                    ibd_first_block_height,
+                    &next_hash,
+                )
+                .unwrap_or(false)
+            }
+            _ => true,
+        };
+        if is_ibd && !next_header_extends {
+            warn!(
+                "[START_COMPONENTS] height {ibd_first_block_height} does not extend the tip — not starting parallel IBD"
+            );
+        }
+        if is_ibd && next_header_extends {
+            info!(
+                "[START_COMPONENTS] Need to sync (synced_tip {} < target {}), checking for parallel IBD support...",
+                synced_tip, target_height
+            );
+
+            info!(
+                "[START_COMPONENTS] IBD: Found {} peer addresses: {:?}",
+                peer_addresses.len(),
+                peer_addresses
+            );
+
+            #[cfg(feature = "production")]
+            {
+                let ibd_config_owned = self.config_sub(|c| c.ibd.as_ref()).cloned();
+                let ibd_session_config =
+                    crate::node::parallel_ibd::ParallelIBDConfig::resolve_for_session(
+                        ibd_config_owned.as_ref(),
+                        synced_tip,
+                        &peer_addresses,
+                    );
+                let min_peers = ibd_session_config.min_peers_for_ibd();
+                if peer_addresses.len() >= min_peers {
+                    info!(
+                        "[START_COMPONENTS] Attempting parallel IBD with {} peers",
+                        peer_addresses.len()
+                    );
+
+                    info!(
+                        "[START_COMPONENTS] Starting parallel IBD: synced_tip={}, first_block={}, target_height={}",
+                        synced_tip, ibd_first_block_height, target_height
+                    );
+
+                    // Attempt parallel IBD (initial_utxo_set is snapshot when AssumeUTXO loaded, else empty)
+                    let blockstore = Arc::clone(&self.storage.blocks());
+                    let storage_arc = Arc::clone(&self.storage);
+                    let protocol_arc = Arc::clone(&self.protocol);
+                    let mut utxo_set = initial_utxo_set;
+
+                    info!("[START_COMPONENTS] Calling sync_coordinator.start_parallel_ibd()...");
+                    match self
+                        .sync_coordinator
+                        .start_parallel_ibd(
+                            synced_tip,
+                            ibd_first_block_height,
+                            target_height,
+                            blockstore,
+                            Some(storage_arc),
+                            protocol_arc,
+                            &mut utxo_set,
+                            Some(Arc::clone(&self.network)),
+                            peer_addresses,
+                            ibd_config_owned.as_ref(),
+                            self.rpc.event_publisher(),
+                            Some(self.data_dir.as_path()),
+                        )
+                        .await
+                    {
+                        Ok(true) => {
+                            info!("[START_COMPONENTS] Parallel IBD completed successfully");
+                            if let Err(e) =
+                                crate::storage::ibd_autorepair::clear_ibd_utxo_repair_flag(
+                                    self.data_dir.as_path(),
+                                )
+                            {
+                                warn!(
+                                    "Failed to clear IBD UTXO autorepair marker: {} (safe to delete {} manually)",
+                                    e,
+                                    crate::storage::ibd_autorepair::repair_marker_path(
+                                        self.data_dir.as_path()
+                                    )
+                                    .display()
+                                );
+                            }
+                            // Update current height after parallel IBD
+                            let new_height = self.storage.chain().get_height()?.unwrap_or(0);
+                            info!(
+                                "[START_COMPONENTS] IBD completed, current height: {}",
+                                new_height
+                            );
+                        }
+                        Ok(false) => {
+                            warn!(
+                                "[START_COMPONENTS] Parallel IBD not available (not enough peers or already synced)"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                "[START_COMPONENTS] Parallel IBD failed: {} — continuing to main loop; \
+                                 catch-up will retry periodically",
+                                e
+                            );
+                        }
+                    }
+                } else {
+                    info!(
+                        "[START_COMPONENTS] Not enough peers for parallel IBD (have {}, need {}), waiting for more peers...",
+                        peer_addresses.len(),
+                        min_peers
+                    );
+                }
+            }
+            #[cfg(not(feature = "production"))]
+            {
+                info!(
+                    "[START_COMPONENTS] Parallel IBD not available without production feature; skipping."
+                );
+                let _ = initial_utxo_set;
+            }
+        } else {
+            info!(
+                "[START_COMPONENTS] Not in IBD (synced_tip={}), skipping IBD",
+                synced_tip
+            );
+        }
+
+        info!("[START_COMPONENTS] Component startup complete");
+
+        // Prune on startup if configured
+        if let Some(pruning_manager) = self.storage.pruning() {
+            let config = &pruning_manager.config;
+            if config.prune_on_startup {
+                let current_height = self.storage.chain().get_height()?.unwrap_or(0);
+                let is_ibd = current_height == 0;
+
+                if !is_ibd && pruning_manager.is_enabled() {
+                    info!("Prune on startup enabled, checking if pruning is needed...");
+
+                    // Calculate prune height based on configuration
+                    let prune_height = match &config.mode {
+                        crate::config::PruningMode::Disabled => {
+                            // Skip if disabled
+                            None
+                        }
+                        crate::config::PruningMode::Normal {
+                            keep_from_height, ..
+                        } => {
+                            // Prune up to keep_from_height
+                            Some(keep_from_height)
+                        }
+                        #[cfg(feature = "utxo-commitments")]
+                        crate::config::PruningMode::Aggressive {
+                            keep_from_height, ..
+                        } => {
+                            // Prune up to keep_from_height
+                            Some(keep_from_height)
+                        }
+                        #[cfg(not(feature = "utxo-commitments"))]
+                        crate::config::PruningMode::Aggressive { .. } => {
+                            // Aggressive pruning requires utxo-commitments feature
+                            // Fall back to no pruning if feature is disabled
+                            None
+                        }
+                        crate::config::PruningMode::Custom {
+                            keep_bodies_from_height,
+                            ..
+                        } => {
+                            // Prune up to keep_bodies_from_height
+                            Some(keep_bodies_from_height)
+                        }
+                    };
+
+                    if let Some(prune_to_height) = prune_height {
+                        if *prune_to_height < current_height {
+                            match pruning_manager.prune_to_height(
+                                *prune_to_height,
+                                current_height,
+                                is_ibd,
+                            ) {
+                                Ok(stats) => {
+                                    info!(
+                                        "Startup pruning completed: {} blocks pruned, {} blocks kept",
+                                        stats.blocks_pruned, stats.blocks_kept
+                                    );
+                                    // Flush storage to persist pruning changes
+                                    use crate::utils::log_error;
+                                    log_error(
+                                        || self.storage.flush(),
+                                        "Failed to flush storage after startup pruning",
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!("Startup pruning failed: {}", e);
+                                }
+                            }
+                        }
+                    }
+                } else if is_ibd {
+                    info!("Skipping startup pruning: initial block download in progress");
+                }
+            }
+        }
+
+        // Initialize module registry before borrowing module_manager (avoids overlapping mutable borrows)
+        use crate::utils::env_or_default;
+        let registry_cache_dir = self.data_dir.join("modules").join("registry_cache");
+        let registry_cas_dir = self.data_dir.join("modules").join("registry_cas");
+        let registry_mirrors = Vec::new();
+        let module_registry_arc = if let Ok(mut module_registry) =
+            crate::module::registry::client::ModuleRegistry::new(
+                &registry_cache_dir,
+                &registry_cas_dir,
+                registry_mirrors.clone(),
+            ) {
+            module_registry.set_network_manager(Arc::clone(&self.network));
+            let arc = Arc::new(module_registry);
+            self.module_subsystem
+                .get_or_insert_with(Default::default)
+                .module_registry = Some(Arc::clone(&arc));
+            self.network.set_module_registry(Arc::clone(&arc)).await;
+            Some(arc)
+        } else {
+            None
+        };
+
+        // Start module manager if enabled
+        if let Some(module_manager) = self
+            .module_subsystem
+            .as_ref()
+            .and_then(|s| s.module_manager.as_ref())
+        {
+            // Reuse the existing storage instance (Redb only allows one connection)
+            let storage_arc = Arc::clone(&self.storage);
+
+            // Get event manager from module manager
+            let event_manager = Arc::clone(module_manager.lock().await.event_manager());
+
+            // Create NodeApiImpl with all dependencies
+            let mut node_api_impl = crate::module::api::node_api::NodeApiImpl::with_dependencies(
+                Arc::clone(&storage_arc),
+                Some(Arc::clone(&event_manager)),
+                None, // module_id will be set per-module
+                Some(Arc::clone(&self.mempool_manager)),
+                Some(Arc::clone(&self.network)), // Now we can set it directly
+            );
+
+            // Set sync coordinator for sync status checking
+            let sync_coord_arc = Arc::new(tokio::sync::Mutex::new(self.sync_coordinator.clone()));
+            node_api_impl.set_sync_coordinator(sync_coord_arc);
+
+            // Wire live RpcServer so NodeApiImpl can register module endpoints / core overrides.
+            if let Some(rpc_server) = self.rpc.rpc_server() {
+                node_api_impl.set_rpc_server(Arc::clone(&rpc_server));
+            }
+
+            // Set module manager for module discovery and RPC
+            node_api_impl.set_module_manager(Arc::clone(module_manager));
+
+            // Set up module API registry and router for module-to-module communication
+            let module_api_registry =
+                Arc::new(crate::module::inter_module::registry::ModuleApiRegistry::new());
+            let module_router = Arc::new(
+                crate::module::inter_module::router::ModuleRouter::new(Arc::clone(
+                    &module_api_registry,
+                ))
+                .with_module_manager(Arc::clone(module_manager)),
+            );
+            node_api_impl.set_module_api_registry(
+                Arc::clone(&module_api_registry),
+                Arc::clone(&module_router),
+            );
+            crate::module::pipeline::install_block_pipeline(Arc::clone(&module_router));
+            crate::module::pipeline::install_pipeline_network(Arc::clone(&self.network));
+
+            // Note: Payment state machine will be set after payment processor initialization
+            // We'll update it via Arc::get_mut if possible, or store it separately
+
+            let mut node_api = Arc::new(node_api_impl);
+            self.network
+                .set_node_api(Arc::clone(&node_api) as Arc<dyn crate::module::traits::NodeAPI>)
+                .await;
+            // RPC may already be running; slot is shared with the live MiningRpc copies.
+            self.rpc.set_commons_gbt(
+                Arc::clone(&node_api) as Arc<dyn crate::rpc::mining::CommonsGbtCaller>
+            );
+            let socket_path = self
+                .config_sub(|c| c.modules.as_ref())
+                .map(|mc| PathBuf::from(&mc.socket_dir).join("node.sock"))
+                .unwrap_or_else(|| {
+                    PathBuf::from(env_or_default("MODULE_SOCKET_DIR", "data/modules/socket"))
+                });
+
+            if let Some(ref module_registry_arc) = module_registry_arc {
+                module_manager
+                    .lock()
+                    .await
+                    .set_module_registry(Arc::clone(module_registry_arc));
+                info!("Module registry initialized and connected to network and module manager");
+
+                // Paid module download decrypts here. Payment state lives in blvm-payment.
+                let module_encryption =
+                    Arc::new(crate::module::encryption::ModuleEncryption::new());
+                self.network
+                    .set_module_encryption(Arc::clone(&module_encryption))
+                    .await;
+                if let Some(module_config) = self.config_sub(|c| c.modules.as_ref()) {
+                    self.network
+                        .set_modules_dir(PathBuf::from(&module_config.modules_dir))
+                        .await;
+                }
+            }
+
+            if module_registry_arc.is_none() {
+                warn!(
+                    "Failed to initialize module registry - modules will only load from local directory"
+                );
+            }
+
+            // Wire RpcServer into ModuleManager so unload_module can clean up endpoints/overrides.
+            if let Some(rpc_server) = self.rpc.rpc_server() {
+                module_manager.lock().await.with_rpc_server(rpc_server);
+            }
+
+            module_manager
+                .lock()
+                .await
+                .start(&socket_path, node_api)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to start module manager: {}", e))?;
+
+            info!("Module manager started");
+
+            // Set node config overrides ([modules.<name>] from config.toml) before loading
+            if let Some(module_config) = self.config_sub(|c| c.modules.as_ref()) {
+                module_manager
+                    .lock()
+                    .await
+                    .set_module_config_overrides(module_config.module_configs.clone());
+            }
+
+            // Default database backend for module *subprocess* KV stores: follows node storage +
+            // optional `[modules] module_database_backend` (see
+            // `storage::database::module_subprocess_database_backend_preference`).
+            let chain_backend = self
+                .config_sub(|c| c.storage.as_ref())
+                .and_then(|sc| {
+                    crate::storage::database::backend_from_config(sc.database_backend).ok()
+                })
+                .unwrap_or_else(crate::storage::database::default_backend);
+            let modules_db_override = self
+                .config_sub(|c| c.modules.as_ref())
+                .and_then(|m| m.module_database_backend.as_deref());
+            let backend_str =
+                crate::storage::database::module_subprocess_database_backend_preference(
+                    chain_backend,
+                    modules_db_override,
+                );
+            module_manager
+                .lock()
+                .await
+                .set_default_database_backend(backend_str);
+
+            // FIBRE module parity: subprocesses can derive UDP bind (TCP+1) from node P2P listen.
+            module_manager
+                .lock()
+                .await
+                .set_node_p2p_listen_for_modules(self.network_addr);
+
+            // Apply module allowlists from config before auto-loading.
+            if let Some(module_config) = self.config_sub(|c| c.modules.as_ref()) {
+                module_manager
+                    .lock()
+                    .await
+                    .set_disabled_modules(module_config.disabled_modules.clone());
+                module_manager
+                    .lock()
+                    .await
+                    .set_allow_unsigned_modules(module_config.allow_unsigned_modules);
+                if !module_config.enabled_modules.is_empty() {
+                    module_manager
+                        .lock()
+                        .await
+                        .set_enabled_modules(module_config.enabled_modules.clone());
+                }
+                // Bootstrap registry: prefer [modules] registry_url, else legacy
+                // `[modules.blvm-marketplace] registry_url`.
+                let registry_url = module_config.registry_url.clone().or_else(|| {
+                    module_config
+                        .module_configs
+                        .get("blvm-marketplace")
+                        .and_then(|c| c.get("registry_url"))
+                        .cloned()
+                });
+                if let Some(ref url) = registry_url {
+                    let url = url.trim();
+                    if !url.is_empty() {
+                        module_manager
+                            .lock()
+                            .await
+                            .set_registry_url(url.to_string());
+                    }
+                }
+            }
+
+            // Auto-discover and load modules
+            if let Err(e) = module_manager.lock().await.auto_load_modules().await {
+                warn!("Failed to auto-load modules: {}", e);
+            }
+
+            // Start module file watcher for hot-reload (when feature enabled and watch_enabled)
+            #[cfg(feature = "module-watcher")]
+            {
+                let watch_enabled = self
+                    .config_sub(|c| c.modules.as_ref())
+                    .map_or(true, |m| m.watch_enabled);
+                if watch_enabled {
+                    let modules_dir = module_manager.lock().await.modules_dir().to_path_buf();
+                    let watcher_config = self
+                        .config_sub(|c| c.modules.as_ref())
+                        .map(|m| crate::module::watcher::WatcherConfig {
+                            auto_load: m.watch_auto_load,
+                            auto_unload: m.watch_auto_unload,
+                        })
+                        .unwrap_or_default();
+                    let watcher = Arc::new(crate::module::watcher::ModuleWatcher::with_config(
+                        modules_dir,
+                        Arc::clone(module_manager),
+                        watcher_config,
+                    ));
+                    if let Err(e) = watcher.clone().start() {
+                        warn!("Module watcher failed to start: {}", e);
+                    } else {
+                        info!("Module file watcher started (hot-reload on change)");
+                    }
+                }
+            }
+
+            // Create event publisher for this node
+            // Clone event_manager Arc while lock is held so we can use it after
+            let event_manager = Arc::clone(module_manager.lock().await.event_manager());
+
+            self.module_subsystem
+                .get_or_insert_with(Default::default)
+                .event_publisher = Some(Arc::new(EventPublisher::new(event_manager)));
+            info!("Event publisher initialized");
+
+            // Set EventPublisher on MempoolManager for mempool event publishing
+            if let Some(event_publisher) = self
+                .module_subsystem
+                .as_ref()
+                .and_then(|s| s.event_publisher.as_ref())
+            {
+                self.mempool_manager
+                    .set_event_publisher(Some(Arc::clone(event_publisher)));
+                info!("Event publisher set on mempool manager");
+
+                // Set EventPublisher on NetworkManager for network event publishing
+                // Note: NetworkManager is stored as a value, not Arc, so we need to use a mutable reference
+                // Since we're in start_components which is &mut self, we can do this
+                self.network
+                    .set_event_publisher(Some(Arc::clone(event_publisher)))
+                    .await;
+                info!("Event publisher set on network manager");
+
+                self.sync_coordinator
+                    .set_event_publisher(Some(Arc::clone(event_publisher)));
+                info!("Event publisher set on sync coordinator");
+
+                self.mining_coordinator
+                    .set_event_publisher(Some(Arc::clone(event_publisher)));
+                info!("Event publisher set on mining coordinator");
+
+                // Publish ConfigLoaded event for modules to react to node configuration
+                // This allows modules like blvm-governance to configure themselves based on node config
+                if let Some(ref config) = self.config {
+                    // Determine which config sections are relevant
+                    let mut changed_sections = Vec::new();
+                    if config.network_timing.is_some() {
+                        changed_sections.push("network_timing".to_string());
+                    }
+                    #[cfg(feature = "governance")]
+                    if config.governance.is_some() {
+                        changed_sections.push("governance".to_string());
+                    }
+                    if config.modules.is_some() {
+                        changed_sections.push("modules".to_string());
+                    }
+                    if config.mempool.is_some() {
+                        changed_sections.push("mempool".to_string());
+                    }
+                    if config.rbf.is_some() {
+                        changed_sections.push("rbf".to_string());
+                    }
+
+                    // Serialize config to JSON for modules that need full config
+                    let config_json = serde_json::to_string(config)
+                        .ok()
+                        .map(|s| format!("{{\"config\":{s}}}"));
+
+                    // Publish event (non-blocking, modules will receive it when they subscribe)
+                    // Modules can also request config via NodeAPI if needed
+                    let sections_count = changed_sections.len();
+                    event_publisher
+                        .publish_config_loaded(changed_sections, config_json)
+                        .await;
+                    info!(
+                        "ConfigLoaded event published for {} sections",
+                        sections_count
+                    );
+
+                    // Publish NodeStartupCompleted event
+                    use crate::module::ipc::protocol::EventPayload;
+                    use crate::module::traits::EventType;
+                    let startup_components = vec![
+                        "network".to_string(),
+                        "storage".to_string(),
+                        "rpc".to_string(),
+                        "modules".to_string(),
+                    ];
+                    let payload = EventPayload::NodeStartupCompleted {
+                        duration_ms: 0, // Could track actual startup duration
+                        components: startup_components,
+                    };
+                    if let Err(e) = event_publisher
+                        .publish_event(EventType::NodeStartupCompleted, payload)
+                        .await
+                    {
+                        warn!("Failed to publish NodeStartupCompleted event: {}", e);
+                    } else {
+                        info!("NodeStartupCompleted event published");
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Initialize peer connections automatically
+    ///
+    /// Determines network type from protocol version and uses config if available.
+    async fn initialize_peer_connections(&self) -> Result<()> {
+        // Determine network type from protocol version
+        let network = match self.protocol_version {
+            ProtocolVersion::BitcoinV1 => "mainnet",
+            ProtocolVersion::Testnet3 => "testnet",
+            ProtocolVersion::Signet => "signet",
+            ProtocolVersion::Testnet4 => "testnet4",
+            ProtocolVersion::Regtest => {
+                // Regtest doesn't use DNS seeds
+                info!("Regtest network: skipping DNS seed discovery");
+                // Still connect to persistent peers if configured
+                if let Some(ref config) = self.config {
+                    if !config.persistent_peers.is_empty() {
+                        let persistent_peers =
+                            crate::config::persistent_peer_sockets(&config.persistent_peers);
+                        if let Err(e) = self
+                            .network
+                            .connect_persistent_peers(&persistent_peers)
+                            .await
+                        {
+                            warn!("Failed to connect to some persistent peers: {}", e);
+                        }
+                    }
+                }
+                return Ok(());
+            }
+        };
+
+        // Outbound / DNS / LAN scan use the network P2P port, not listen_addr.
+        // Listen 8334 (second dest) must still dial Bitcoin peers on 8333.
+        // R-66 dest-dead: every connect was :8334 → 0 peers. Archive DNS uses this
+        // same port (`discover_archive_peers_from_dns`), so testnet4 dials 48333.
+        let port = crate::network::protocol::ProtocolParser::dns_seed_network().1;
+
+        // Use config if available, otherwise use defaults
+        let default_config = NodeConfig {
+            rest_api: None,
+            listen_addr: Some(self.network_addr),
+            ..Default::default()
+        };
+        let config = self.config.as_ref().unwrap_or(&default_config);
+
+        // Get target peer count from config
+        let default_timing = crate::config::NetworkTimingConfig::default();
+        let timing_config = config.network_timing.as_ref().unwrap_or(&default_timing);
+        let target_peer_count = timing_config.effective_target_outbound_peers();
+
+        // Initialize peer connections
+        if let Err(e) = self
+            .network
+            .initialize_peer_connections(config, network, port, target_peer_count)
+            .await
+        {
+            warn!("Failed to initialize peer connections: {}", e);
+            // Don't fail startup - peer connections are best-effort
+        }
+
+        Ok(())
+    }
+
+    /// Main node run loop
+    async fn run(&mut self) -> Result<()> {
+        run_loop::run(self).await
+    }
+
+    /// Effective IBD resume heights: `(synced_tip, next_block_height)`.
+    fn ibd_resume_heights(&self) -> Result<(u64, u64)> {
+        match self.storage.chain().get_height() {
+            Ok(None) => Ok((0u64, 0u64)),
+            Ok(Some(chain_tip)) => {
+                let watermark_val = match self.storage.chain().get_utxo_watermark() {
+                    Ok(Some(w)) => w,
+                    Ok(None) => 0,
+                    Err(e) => {
+                        warn!("[IBD_RESUME] get_utxo_watermark failed ({}); assuming 0", e);
+                        0
+                    }
+                };
+                #[cfg(feature = "production")]
+                let watermark_val =
+                    match crate::storage::ibd_autorepair::reconcile_ibd_utxo_watermark_with_disk(
+                        self.storage.as_ref(),
+                        watermark_val,
+                    ) {
+                        Ok(w) => w,
+                        Err(e) => {
+                            warn!(
+                                "[IBD_RESUME] reconcile_ibd_utxo_watermark_with_disk failed ({}); using disk watermark as read",
+                                e
+                            );
+                            watermark_val
+                        }
+                    };
+
+                let engine_enabled = crate::config::ibd::ibd_engine_enabled(
+                    self.config.as_ref().and_then(|c| c.ibd.as_ref()),
+                );
+                #[cfg(feature = "production")]
+                if watermark_val > 0
+                    && !engine_enabled
+                    && std::env::var("BLVM_VERIFY_IBD_UTXO_MUHASH")
+                        .map(|v| v == "1")
+                        .unwrap_or(false)
+                {
+                    crate::storage::ibd_utxo_muhash::verify_ibd_utxo_muhash_startup(
+                        self.storage.as_ref(),
+                    )?;
+                }
+
+                #[cfg(feature = "production")]
+                let export_override = crate::config::ibd::export_height_override_from_env();
+                #[cfg(feature = "production")]
+                let stored_export = if engine_enabled {
+                    self.storage
+                        .chain()
+                        .get_engine_export_height()
+                        .ok()
+                        .flatten()
+                } else {
+                    None
+                };
+                #[cfg(feature = "production")]
+                let (export_height, ignored_override) = if engine_enabled {
+                    let (resolved, ignored) = crate::config::ibd::resolve_engine_export_height(
+                        stored_export,
+                        export_override,
+                    );
+                    if let Some(oh) = ignored {
+                        warn!(
+                            "[IBD_RESUME] ignoring BLVM_IBD_EXPORT_HEIGHT_OVERRIDE={oh} \
+                             (< stored export_h={}) — active checkpoint is a UTXO snapshot \
+                             at the stored height; resuming earlier causes UTXO misses",
+                            stored_export.unwrap_or(0)
+                        );
+                    }
+                    (resolved, ignored)
+                } else {
+                    (None, None)
+                };
+                #[cfg(not(feature = "production"))]
+                let export_height: Option<u64> = None;
+                #[cfg(not(feature = "production"))]
+                let export_override: Option<u64> = None;
+                #[cfg(feature = "production")]
+                let _ = ignored_override;
+                let durable_watermark = match export_height {
+                    Some(eh) if eh > 0 => {
+                        // Override is only applied when it resolves to `eh` (at/above stored
+                        // export). Below-stored overrides are discarded by
+                        // `resolve_engine_export_height` — never resume below ckpt content.
+                        if export_override == Some(eh) {
+                            if watermark_val != eh {
+                                warn!(
+                                    "[IBD_RESUME] BLVM_IBD_EXPORT_HEIGHT_OVERRIDE={eh} \
+                                     (stored wm={watermark_val}) — using override as resume tip"
+                                );
+                            }
+                            eh
+                        } else if watermark_val > eh {
+                            warn!(
+                                "[IBD_RESUME] ibd_utxo_watermark ({}) > last engine export \
+                                 ({}) — clamping durable resume to export height (re-validate {} \
+                                 blocks)",
+                                watermark_val,
+                                eh,
+                                watermark_val.saturating_sub(eh),
+                            );
+                            eh
+                        } else if watermark_val == 0 {
+                            eh
+                        } else if watermark_val < eh {
+                            // Live 2026-07-15: soft autorepair rolled wm 543250→542500 while
+                            // export_h stayed 543250 → resume at 542501 with engine seed at
+                            // 543250 → UTXO-miss storm. Engine seed is a complete snapshot at
+                            // export_h; never start below it.
+                            warn!(
+                                "[IBD_RESUME] ibd_utxo_watermark ({watermark_val}) < engine export_h \
+                                 ({eh}) — clamping durable resume UP to export (was soft-repair \
+                                 below-export trap)"
+                            );
+                            eh
+                        } else {
+                            watermark_val.min(eh)
+                        }
+                    }
+                    _ => watermark_val,
+                };
+
+                // Engine contiguous_length / segment_max are NOT a complete durable UTXO set:
+                // age tiers live in RAM and are lost on every process exit (clean or dirty).
+                // Never advance resume past export_h from sidecar/segment_max — live 2026-07-11:
+                // clean cl=698719 skip-reseed → Invalid inputs at 699221 → autorepair to 640k.
+                let resume_tip = durable_watermark;
+                if engine_enabled {
+                    if let Some(data_dir) = self.storage.data_dir() {
+                        let engine_path =
+                            crate::config::ibd::ibd_engine_path(Some(data_dir.as_path()));
+                        let dirty =
+                            crate::storage::ibd_engine::engine_dirty_flag_path(&engine_path)
+                                .exists();
+                        if dirty {
+                            info!(
+                                "[IBD_RESUME] engine .dirty set — resume from export_h={} \
+                                 (will re-seed; segment_max is not a complete UTXO set)",
+                                durable_watermark
+                            );
+                        } else {
+                            let sidecar_cl =
+                                crate::storage::ibd_engine::read_contiguous_length_sidecar(
+                                    &engine_path,
+                                );
+                            if let Some(cl) = sidecar_cl.filter(|&c| c as u64 > durable_watermark) {
+                                info!(
+                                    "[IBD_RESUME] clean shutdown sidecar_cl={cl} > export_h={} — \
+                                     still resume from export_h (ages are RAM-only; will re-seed)",
+                                    durable_watermark
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Poisoned checkpoint: export/watermark labeled at chain_tip but validation
+                // raced far ahead and a clamped persist wrote a mid-IBD UTXO snapshot under
+                // the tip label → UTXO miss at tip+1. Detect via validation_tip ≫ tip.
+                let validation_tip = self
+                    .storage
+                    .chain()
+                    .get_engine_validation_tip()
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0);
+                let poisoned_ckpt = durable_watermark > 0
+                    && durable_watermark == chain_tip
+                    && validation_tip > chain_tip.saturating_add(10_000);
+
+                let effective_tip = if poisoned_ckpt {
+                    warn!(
+                        "[IBD_RESUME] poisoned UTXO checkpoint: watermark/export={wm} equals \
+                         chain_tip but engine_validation_tip={vt} is far ahead — checkpoint \
+                         content is from a higher height (clamped label). Resetting UTXO state \
+                         for local replay from genesis through tip.",
+                        wm = durable_watermark,
+                        vt = validation_tip,
+                    );
+                    // Same wipe path as watermark > tip, plus engine files / ckpt trees.
+                    if let Some(data_dir) = self.storage.data_dir() {
+                        let confined = |path: &std::path::Path| {
+                            crate::config::path_is_strictly_within(data_dir.as_path(), path)
+                        };
+                        let utxo_store_dir =
+                            data_dir.join(crate::storage::database::IBD_UTXO_STORE_SUBDIR);
+                        if utxo_store_dir.exists() && confined(&utxo_store_dir) {
+                            let _ = std::fs::remove_dir_all(&utxo_store_dir);
+                        }
+                        // Default engine lives under `$data_dir/ibd_engine/` — wipe the tree.
+                        let engine_dir = data_dir.join("ibd_engine");
+                        if engine_dir.exists() && confined(&engine_dir) {
+                            let _ = std::fs::remove_dir_all(&engine_dir);
+                        }
+                        let engine_path =
+                            crate::config::ibd::ibd_engine_path(Some(data_dir.as_path()));
+                        if engine_path.exists() && confined(&engine_path) {
+                            let _ = std::fs::remove_file(&engine_path);
+                            crate::storage::ibd_engine::remove_contiguous_length_sidecar(
+                                &engine_path,
+                            );
+                            let mut segs = engine_path.as_os_str().to_owned();
+                            segs.push(".segs");
+                            let segs = std::path::PathBuf::from(segs);
+                            if confined(&segs) {
+                                let _ = std::fs::remove_dir_all(&segs);
+                            }
+                        }
+                    }
+                    self.storage.clear_ibd_snapshot_trees();
+                    let _ = self.storage.chain().force_set_ibd_utxo_watermark(0);
+                    let _ = self
+                        .storage
+                        .chain()
+                        .force_reset_engine_checkpoint_metadata();
+                    let _ = self.storage.flush();
+                    0
+                } else if durable_watermark > chain_tip {
+                    // The UTXO watermark is ahead of the block store tip. This happens when
+                    // MDB_NOSYNC + SIGKILL (or an abrupt process exit) persisted UTXO checkpoints
+                    // for blocks that were never durably written to the block store (heed3/).
+                    //
+                    // We cannot safely resume at `durable_watermark` because:
+                    //   1. Block bodies for h=(chain_tip+1)..=durable_watermark are missing.
+                    //   2. sync_chain_info_to_height used to synthesize a *fake* header with a
+                    //      wrong hash for `durable_watermark` (now refuses; still do not call it).
+                    //   3. The next block (durable_watermark+1) has a prevhash that references
+                    //      the REAL durable_watermark hash — validation rejects it immediately,
+                    //      causing an infinite feeder-stall freeze.
+                    //
+                    // The safe recovery: wipe the standalone UTXO store and reset the watermark
+                    // to 0. The block store (heed3/) is preserved, so the IBD performs a fast
+                    // local-replay (typically 5–10 min) to rebuild UTXO state from the on-disk
+                    // blocks, then continues downloading from chain_tip+1.
+                    //
+                    // Root cause prevention: watermark advances are clamped to durable
+                    // chain_tip; SIGTERM drains pending block flushes before watermark.
+                    // Abrupt SIGKILL can still leave watermark ahead of tip — this path
+                    // recovers safely via local replay.
+                    warn!(
+                        "[IBD_RESUME] UTXO watermark ({wm}) > block store tip ({tip}): \
+                         block bodies for h={tip1}..={wm} are missing (MDB_NOSYNC + abrupt exit). \
+                         Synthesising a fake header would corrupt the prevhash chain — \
+                         resetting UTXO state to 0 and rebuilding via local replay \
+                         (block store h=0..={tip} is intact; replay will be fast). \
+                         Prefer SIGTERM so pending block flushes complete before exit.",
+                        wm = durable_watermark,
+                        tip = chain_tip,
+                        tip1 = chain_tip + 1,
+                    );
+                    // Wipe the standalone ibd_utxo_store directory (contains UTXOs that are
+                    // inconsistent above chain_tip). The main heed3/ block store is untouched.
+                    if let Some(data_dir) = self.storage.data_dir() {
+                        let utxo_store_dir =
+                            data_dir.join(crate::storage::database::IBD_UTXO_STORE_SUBDIR);
+                        if utxo_store_dir.exists()
+                            && crate::config::path_is_strictly_within(
+                                data_dir.as_path(),
+                                &utxo_store_dir,
+                            )
+                        {
+                            if let Err(e) = std::fs::remove_dir_all(&utxo_store_dir) {
+                                warn!(
+                                    "[IBD_RESUME] failed to remove {}: {} — continuing anyway",
+                                    utxo_store_dir.display(),
+                                    e
+                                );
+                            } else {
+                                info!(
+                                    "[IBD_RESUME] removed {} (UTXO state reset for safe replay)",
+                                    utxo_store_dir.display()
+                                );
+                            }
+                        }
+                    }
+                    // The label reset is not enough. `open_engine_resume_snapshot`
+                    // follows whichever checkpoint still has rows, so a leftover
+                    // `ibd_utxos_ckpt_*` stays spendable after the replay starts.
+                    self.storage.clear_ibd_snapshot_trees();
+                    if let Err(e) = self.storage.chain().force_set_ibd_utxo_watermark(0) {
+                        warn!("[IBD_RESUME] force_set_ibd_utxo_watermark(0) failed: {e}");
+                    }
+                    // Stale engine export height (e.g. 460k) would otherwise claim a checkpoint
+                    // that no longer matches the wiped UTXO state / block tip.
+                    if let Err(e) = self
+                        .storage
+                        .chain()
+                        .force_reset_engine_checkpoint_metadata()
+                    {
+                        warn!("[IBD_RESUME] force_reset_engine_checkpoint_metadata failed: {e}");
+                    }
+                    let _ = self.storage.flush();
+                    // UTXO store is now empty → must start from genesis (h=0) so the
+                    // validation loop rebuilds UTXO state from scratch.  The block store
+                    // (heed3/) is intact, so h=1..=chain_tip will be served via local
+                    // replay (fast) and only h=chain_tip+1 onward needs downloading.
+                    0
+                } else {
+                    let tip = chain_tip.min(resume_tip);
+                    if tip < chain_tip && !crate::config::ibd_serve_only() {
+                        warn!(
+                            "[IBD_RESUME] UTXO resume tip ({}) < chain tip ({}); \
+                             IBD will re-validate {} block(s) from height {} to restore UTXO consistency",
+                            resume_tip,
+                            chain_tip,
+                            chain_tip - tip,
+                            tip + 1,
+                        );
+                    }
+                    tip
+                };
+                Ok((effective_tip, effective_tip.saturating_add(1)))
+            }
+            Err(e) => {
+                warn!(
+                    "[IBD_RESUME] get_height failed: {}, treating as fresh sync",
+                    e
+                );
+                Ok((0u64, 0u64))
+            }
+        }
+    }
+
+    /// Resume parallel IBD when peers report a higher chain tip than our validated watermark.
+    #[cfg(feature = "production")]
+    pub(crate) async fn try_catch_up_ibd(
+        &mut self,
+        utxo_set: &mut blvm_protocol::UtxoSet,
+    ) -> Result<()> {
+        use crate::node::parallel_ibd::PARALLEL_IBD_SESSION_ACTIVE;
+        use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+        static CATCH_UP_LAST_FAIL_SECS: AtomicU64 = AtomicU64::new(0);
+        static CATCH_UP_FAIL_STREAK: AtomicU32 = AtomicU32::new(0);
+
+        // Mode T archive: never catch-up IBD / DNS reseed while serving getdata.
+        if crate::config::ibd_serve_only() {
+            return Ok(());
+        }
+
+        if PARALLEL_IBD_SESSION_ACTIVE.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        // Live 2026-07-16: failed seed/IBD catch-up was retried every few seconds for hours.
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let last = CATCH_UP_LAST_FAIL_SECS.load(Ordering::Relaxed);
+            let streak = CATCH_UP_FAIL_STREAK.load(Ordering::Relaxed);
+            if last > 0 && streak > 0 {
+                let backoff = (30u64 << streak.min(4)).min(600);
+                if now.saturating_sub(last) < backoff {
+                    debug!(
+                        "[CATCH_UP] skip — fail streak={} backoff {}s ({}s left)",
+                        streak,
+                        backoff,
+                        backoff.saturating_sub(now.saturating_sub(last))
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        let (synced_tip, ibd_first_block_height) = self.ibd_resume_heights()?;
+        let mut peer_height = match self.network.get_highest_peer_start_height_async().await {
+            Some(h) => h,
+            None => {
+                debug!(
+                    "[CATCH_UP] No peer start_height yet (synced_tip={})",
+                    synced_tip
+                );
+                let net = Arc::clone(&self.network);
+                tokio::spawn(async move {
+                    if let Err(e) = net.connect_outbound_when_no_peers().await {
+                        debug!("[CATCH_UP] empty peer set connect failed: {e}");
+                    }
+                });
+                // A version height is not required to notice a heavier header chain.
+                synced_tip
+            }
+        };
+
+        // Version start_height and inv bumps are stale; always probe headers for the live tip.
+        if let Ok((tip_hash, _)) = self.storage.chain().get_tip_hash_and_height() {
+            if let Ok(Some(probed)) = self
+                .network
+                .refresh_peer_tip_via_headers(synced_tip, tip_hash)
+                .await
+            {
+                peer_height = peer_height.max(probed.peer_height);
+                // A short heavier fork must not start parallel IBD at tip+1.
+                // That path reseeds the UTXO snapshot and downloads whatever hash
+                // already claimed the next height, which is the lighter chain.
+                if probed.heavier_than_tip && probed.forks_before_tip {
+                    warn!(
+                        "[CATCH_UP] headers fork before {} and have more work ({} missing bodies) — not starting parallel IBD",
+                        synced_tip,
+                        probed.missing_bodies.len()
+                    );
+                    if probed.missing_bodies.is_empty() {
+                        let disconnect_from = probed.disconnect_from.unwrap_or(synced_tip);
+                        if let Err(e) = crate::node::undo_repair::repair_missing_active_undo(
+                            &self.network,
+                            &self.storage,
+                            synced_tip,
+                            disconnect_from,
+                        )
+                        .await
+                        {
+                            warn!("[UNDO_REPAIR] heavier fork not activated: {e:#}");
+                            return Ok(());
+                        }
+                        if let Some(candidate) = probed.heavier_tip {
+                            match crate::node::reorg_executor::try_activate_heavier_fork(
+                                &self.storage,
+                                self.storage.blocks().as_ref(),
+                                &self.protocol,
+                                &candidate,
+                                utxo_set,
+                                None,
+                                Some(self.mempool_manager.as_ref()),
+                            ) {
+                                Ok(true) => warn!(
+                                    "[CATCH_UP] activated heavier tip {}",
+                                    hex::encode(candidate)
+                                ),
+                                Ok(false) => warn!(
+                                    "[CATCH_UP] heavier tip {} did not activate",
+                                    hex::encode(candidate)
+                                ),
+                                Err(e) => warn!("[CATCH_UP] heavier tip activate failed: {e:#}"),
+                            }
+                        }
+                    } else if let Err(e) = self
+                        .network
+                        .request_header_chain_bodies(probed.peer, &probed.missing_bodies)
+                        .await
+                    {
+                        warn!("[CATCH_UP] heavier-fork getdata failed: {e}");
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
+        let target_height = peer_height.max(synced_tip);
+        if synced_tip >= target_height {
+            debug!(
+                "[CATCH_UP] Up to date (synced_tip={} >= target={})",
+                synced_tip, target_height
+            );
+            return Ok(());
+        }
+        // av2: the block at synced_tip+1 double-spends an output the connected
+        // parent already spent. Retrying reseeds the same snapshot and fails again.
+        if let Ok(Some(next_hash)) = self
+            .storage
+            .blocks()
+            .get_hash_by_height(synced_tip.saturating_add(1))
+        {
+            if self.storage.chain().is_invalid(&next_hash).unwrap_or(false) {
+                warn!(
+                    "[CATCH_UP] not retrying height {} — {} is marked invalid (double-spend of the connected chain)",
+                    synced_tip.saturating_add(1),
+                    hex::encode(next_hash)
+                );
+                return Ok(());
+            }
+            let extends = crate::node::parallel_ibd::headers::stored_height_extends_active_parent(
+                self.storage.blocks().as_ref(),
+                synced_tip.saturating_add(1),
+                &next_hash,
+            )
+            .unwrap_or(false);
+            if !extends {
+                warn!(
+                    "[CATCH_UP] height {} does not extend the tip — not starting parallel IBD",
+                    synced_tip.saturating_add(1)
+                );
+                return Ok(());
+            }
+        }
+
+        // Clear evicted-IP set BEFORE checking peer count.
+        // Chicken-and-egg fix: after a failed IBD run all peers end up in ibd_evicted_ips,
+        // which causes the reconnection task to skip them, leaving us with 0 connected peers.
+        // Without clearing first, `peer_addresses_for_ibd()` returns empty → min_peers check
+        // fails → IBD never restarts → stuck indefinitely.
+        // Clearing here lets the reconnection task re-try those peers before the next call.
+        // The address DB still marks confirmed pruned peers NODE_NETWORK_LIMITED (low-priority).
+        self.network.clear_ibd_evicted_ips();
+
+        // Proactively seed archive (full-history) peers before checking the peer list.
+        // Skip when BLVM_IBD_PEERS is pinned (archive tip-now) — public DNS pollutes tip/GetData.
+        {
+            static LAST_ARCHIVE_SEED_SECS: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let last = LAST_ARCHIVE_SEED_SECS.load(std::sync::atomic::Ordering::Relaxed);
+            // Re-seed at most once every 5 minutes.
+            if now.saturating_sub(last) >= 300
+                && !crate::node::parallel_ibd::skip_ibd_archive_dns_seed()
+            {
+                LAST_ARCHIVE_SEED_SECS.store(now, std::sync::atomic::Ordering::Relaxed);
+                let net = Arc::clone(&self.network);
+                tokio::spawn(async move {
+                    let _ = net.discover_archive_peers_from_dns().await;
+                });
+            }
+        }
+
+        let peer_addresses: Vec<String> = self
+            .network
+            .peer_addresses_for_ibd()
+            .iter()
+            .map(|addr| addr.to_string())
+            .collect();
+
+        let ibd_config_owned = self.config_sub(|c| c.ibd.as_ref()).cloned();
+        let ibd_session_config = crate::node::parallel_ibd::ParallelIBDConfig::resolve_for_session(
+            ibd_config_owned.as_ref(),
+            synced_tip,
+            &peer_addresses,
+        );
+        let min_peers = ibd_session_config.min_peers_for_ibd();
+        if peer_addresses.len() < min_peers {
+            // Too few IBD-capable peers — trigger background reconnection.
+            // This covers the case where a previous IBD run evicted all peers and the
+            // `clear_ibd_evicted_ips` call above just unblocked reconnection but no peers
+            // have connected yet (reconnection is async).  Proactively seed new addresses
+            // from DNS and connect so the next `try_catch_up_ibd` call (in ~5 s) finds
+            // enough peers to start IBD.
+            let peer_count = peer_addresses.len();
+            let fill = self
+                .network
+                .network_timing()
+                .effective_target_outbound_peers();
+            let needed = min_peers.saturating_sub(peer_count).max(fill);
+            debug!(
+                "[CATCH_UP] Behind peers (synced_tip={} < target={}) but only {} peers connected (need {}); triggering peer re-discovery (need {})",
+                synced_tip, target_height, peer_count, min_peers, needed
+            );
+            // Spawn to avoid blocking the main run loop; errors are logged inside.
+            let net = Arc::clone(&self.network);
+            tokio::spawn(async move {
+                if let Err(e) = net.connect_peers_from_database(needed).await {
+                    debug!("[CATCH_UP] Peer re-discovery failed: {}", e);
+                }
+            });
+            return Ok(());
+        }
+
+        info!(
+            "[CATCH_UP] synced_tip={} < peer_tip={} — starting parallel IBD for heights {}..={}",
+            synced_tip, target_height, ibd_first_block_height, target_height
+        );
+
+        let blockstore = Arc::clone(&self.storage.blocks());
+        let storage_arc = Arc::clone(&self.storage);
+        let protocol_arc = Arc::clone(&self.protocol);
+
+        match self
+            .sync_coordinator
+            .start_parallel_ibd(
+                synced_tip,
+                ibd_first_block_height,
+                target_height,
+                blockstore,
+                Some(storage_arc),
+                protocol_arc,
+                utxo_set,
+                Some(Arc::clone(&self.network)),
+                peer_addresses,
+                ibd_config_owned.as_ref(),
+                self.rpc.event_publisher(),
+                Some(self.data_dir.as_path()),
+            )
+            .await
+        {
+            Ok(true) => {
+                CATCH_UP_FAIL_STREAK.store(0, Ordering::Relaxed);
+                if let Err(e) = crate::storage::ibd_autorepair::clear_ibd_utxo_repair_flag(
+                    self.data_dir.as_path(),
+                ) {
+                    warn!(
+                        "Failed to clear IBD UTXO autorepair marker after catch-up: {}",
+                        e
+                    );
+                }
+                let new_height = self.storage.chain().get_height()?.unwrap_or(0);
+                info!("[CATCH_UP] Completed — chain height now {}", new_height);
+            }
+            Ok(false) => {
+                debug!(
+                    "[CATCH_UP] Parallel IBD not started (already synced or insufficient peers)"
+                );
+            }
+            Err(e) => {
+                // Live 2026-07-16: seed-from-ckpt failures under memory pressure retried every
+                // ~5–12s for hours (629 dirty wipe+reseed loops) — burn RAM + hide root cause.
+                warn!("[CATCH_UP] Parallel IBD failed: {:#}", e);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                CATCH_UP_LAST_FAIL_SECS.store(now, Ordering::Relaxed);
+                let streak = CATCH_UP_FAIL_STREAK.fetch_add(1, Ordering::Relaxed) + 1;
+                let backoff = (30u64 << streak.min(4)).min(600);
+                warn!(
+                    "[CATCH_UP] next retry after ≥{}s (fail streak={})",
+                    backoff, streak
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(feature = "production"))]
+    pub(crate) async fn try_catch_up_ibd(
+        &mut self,
+        _utxo_set: &mut blvm_protocol::UtxoSet,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Run node processing once (for testing)
+    pub async fn run_once(&mut self) -> Result<()> {
+        info!("Running node processing once");
+
+        // Check node health
+        self.check_health().await?;
+
+        Ok(())
+    }
+
+    /// Storage timeout from config or default
+    fn storage_timeout(&self) -> std::time::Duration {
+        crate::utils::storage_timeout_from_config(self.config_sub(|c| c.request_timeouts.as_ref()))
+    }
+
+    /// Check node health with graceful error handling
+    async fn check_health(&self) -> Result<()> {
+        // Check peer count (non-blocking, always succeeds)
+        let peer_count = self.network.peer_count();
+        if peer_count == 0 {
+            // Throttle: emit at most once every 10 seconds to avoid log spam
+            // during reconnection (health check runs every 100 ms).
+            static LAST_NO_PEERS_WARN: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let last = LAST_NO_PEERS_WARN.load(std::sync::atomic::Ordering::Relaxed);
+            if now_secs.saturating_sub(last) >= 10 {
+                LAST_NO_PEERS_WARN.store(now_secs, std::sync::atomic::Ordering::Relaxed);
+                warn!("No peers connected");
+            }
+        }
+
+        // Check storage with timeout and graceful degradation
+        let timeout_dur = self.storage_timeout();
+        use crate::utils::with_custom_timeout;
+        match with_custom_timeout(async { self.storage.blocks().block_count() }, timeout_dur).await
+        {
+            Ok(Ok(blocks)) => {
+                if blocks == 0 {
+                    warn!("No blocks in storage");
+                }
+            }
+            Ok(Err(e)) => {
+                warn!("Storage error during health check: {}", e);
+                // Continue - storage errors don't stop the node
+            }
+            Err(_) => {
+                warn!("Storage health check timed out");
+                // Continue - timeout doesn't stop the node
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get disk space (total, available, percent_free) for the path's mount.
+    /// Uses sysinfo when available; Unix `statvfs` fallback; returns `(0,0,0)` when unknown (fail closed).
+    #[cfg(unix)]
+    fn disk_space_statvfs(path: &Path) -> Option<(u64, u64, f64)> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+            return None;
+        }
+        let frag = stat.f_frsize;
+        if frag == 0 {
+            return None;
+        }
+        let total = stat.f_blocks * frag;
+        let available = stat.f_bavail * frag;
+        let percent_free = if total > 0 {
+            100.0 * (available as f64) / (total as f64)
+        } else {
+            0.0
+        };
+        Some((total, available, percent_free))
+    }
+
+    fn get_disk_space_for_path(path: &Path) -> (u64, u64, f64) {
+        #[cfg(feature = "sysinfo")]
+        {
+            use sysinfo::Disks;
+            let canonical = match std::fs::canonicalize(path) {
+                Ok(p) => p,
+                Err(_) => path.to_path_buf(),
+            };
+            let disks = Disks::new_with_refreshed_list();
+            // Find disk whose mount point is the longest prefix of canonical path
+            let mut best: Option<&sysinfo::Disk> = None;
+            let mut best_len = 0usize;
+            for disk in disks.list() {
+                let mount = disk.mount_point();
+                if canonical.starts_with(mount) {
+                    let mount_len = mount.as_os_str().len();
+                    if mount_len > best_len {
+                        best_len = mount_len;
+                        best = Some(disk);
+                    }
+                }
+            }
+            if let Some(disk) = best {
+                let total = disk.total_space();
+                let available = disk.available_space();
+                let percent_free = if total > 0 {
+                    100.0 * (available as f64) / (total as f64)
+                } else {
+                    0.0
+                };
+                return (total, available, percent_free);
+            }
+        }
+        #[cfg(unix)]
+        if let Some(stats) = Self::disk_space_statvfs(path) {
+            return stats;
+        }
+        // Fail closed: do not invent capacity (avoids bogus auto-prune / DiskSpaceLow metrics).
+        let _ = path;
+        (0, 0, 0.0)
+    }
+
+    /// Check disk space and trigger pruning if needed
+    async fn check_disk_space(&self) -> Result<()> {
+        // Check storage bounds (80% threshold)
+        let within_bounds = self.storage.check_storage_bounds()?;
+
+        if !within_bounds {
+            warn!("Storage bounds exceeded - disk space may be low");
+
+            // Publish DiskSpaceLow event to modules
+            if let Some(event_publisher) = self
+                .module_subsystem
+                .as_ref()
+                .and_then(|s| s.event_publisher.as_ref())
+            {
+                let (total_bytes, available_bytes, percent_free) =
+                    Self::get_disk_space_for_path(&self.data_dir);
+                let disk_path = self.data_dir.to_string_lossy().to_string();
+
+                if total_bytes > 0 {
+                    event_publisher
+                        .publish_disk_space_low(
+                            available_bytes,
+                            total_bytes,
+                            percent_free,
+                            disk_path,
+                        )
+                        .await;
+                } else {
+                    warn!(
+                        "Storage bounds exceeded but disk space for {} is unknown; skipping DiskSpaceLow event",
+                        disk_path
+                    );
+                }
+            }
+
+            // Check if pruning is enabled (only when disk stats are known)
+            if self.storage.is_pruning_enabled() {
+                let (total_bytes, _, _) = Self::get_disk_space_for_path(&self.data_dir);
+                if total_bytes == 0 {
+                    warn!(
+                        "Storage bounds exceeded but disk space is unknown; skipping automatic pruning"
+                    );
+                } else if let Some(pruning_manager) = self.storage.pruning() {
+                    // Get current chain height from chain info
+                    let chain_info = self.storage.chain().load_chain_info()?;
+                    if let Some(info) = chain_info {
+                        let current_height = info.height;
+
+                        // Get last prune height
+                        let last_prune_height = pruning_manager.get_stats().last_prune_height;
+
+                        // Check if we should auto-prune
+                        if pruning_manager.should_auto_prune(current_height, last_prune_height) {
+                            info!("Triggering automatic pruning due to storage bounds");
+
+                            // Perform pruning (prune_to_height is not async, but we're in async context)
+                            // Calculate prune height: keep only the last 1000 blocks (configurable)
+                            let prune_window = 1000; // Keep last 1000 blocks
+                            let prune_to_height = current_height.saturating_sub(prune_window);
+
+                            if prune_to_height > 0 && prune_to_height < current_height {
+                                match tokio::task::spawn_blocking({
+                                    let pruning_manager = Arc::clone(&pruning_manager);
+                                    move || {
+                                        pruning_manager.prune_to_height(
+                                            prune_to_height,
+                                            current_height,
+                                            false,
+                                        )
+                                    }
+                                })
+                                .await
+                                {
+                                    Ok(Ok(stats)) => {
+                                        info!(
+                                            "Automatic pruning completed: {} blocks pruned, {} blocks kept, {} bytes freed",
+                                            stats.blocks_pruned,
+                                            stats.blocks_kept,
+                                            stats.storage_freed
+                                        );
+
+                                        // Flush storage to persist pruning changes
+                                        use crate::utils::log_error;
+                                        log_error(
+                                            || self.storage.flush(),
+                                            "Failed to flush storage after automatic pruning",
+                                        );
+                                    }
+                                    Ok(Err(e)) => {
+                                        warn!("Automatic pruning failed: {}", e);
+                                    }
+                                    Err(e) => {
+                                        warn!("Pruning task failed: {}", e);
+                                    }
+                                }
+                            }
+                        } else {
+                            warn!(
+                                "Storage bounds exceeded but auto-pruning not yet due (last prune: {:?}, current: {})",
+                                last_prune_height, current_height
+                            );
+                        }
+                    } else {
+                        warn!("Storage bounds exceeded but chain info not available");
+                    }
+                } else {
+                    warn!("Storage bounds exceeded but pruning manager not available");
+                }
+            } else {
+                warn!("Storage bounds exceeded but pruning is disabled (archival node mode)");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Stop the node
+    pub async fn stop(&mut self) -> Result<()> {
+        info!("Stopping node");
+        if let Some(policy) = self.config.as_ref().and_then(|cfg| cfg.mempool.as_ref()) {
+            if policy.persist_mempool {
+                let path = std::path::Path::new(&policy.mempool_persistence_path);
+                if let Some(parent) = path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                }
+                match self.mempool_manager.save_to_disk(path) {
+                    Ok(()) => info!("Saved mempool to {}", path.display()),
+                    Err(e) => warn!("Failed to save mempool to {}: {}", path.display(), e),
+                }
+            }
+        }
+
+        // Publish NodeShutdown event to modules (give them time to clean up)
+        if let Some(event_publisher) = self
+            .module_subsystem
+            .as_ref()
+            .and_then(|s| s.event_publisher.as_ref())
+        {
+            event_publisher
+                .publish_node_shutdown("graceful".to_string(), 30)
+                .await;
+            // Give modules a moment to process shutdown event
+            tokio::time::sleep(HANDSHAKE_POLL_SLEEP).await;
+        }
+
+        // Publish DataMaintenance event to modules (high urgency flush for shutdown)
+        if let Some(event_publisher) = self
+            .module_subsystem
+            .as_ref()
+            .and_then(|s| s.event_publisher.as_ref())
+        {
+            event_publisher
+                .publish_data_maintenance(
+                    "flush".to_string(),    // Flush pending writes
+                    "high".to_string(),     // High urgency (shutdown)
+                    "shutdown".to_string(), // Reason
+                    None,                   // No cleanup needed
+                    Some(5),                // 5 second timeout
+                )
+                .await;
+            // Give modules a moment to flush
+            tokio::time::sleep(HANDSHAKE_POLL_SLEEP).await;
+        }
+
+        // Stop module manager
+        if let Some(module_manager) = self
+            .module_subsystem
+            .as_ref()
+            .and_then(|s| s.module_manager.as_ref())
+        {
+            module_manager
+                .lock()
+                .await
+                .shutdown()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to shutdown module manager: {}", e))?;
+        }
+
+        // Network manager doesn't need explicit stopping - it's managed by dropping
+        // The peer manager and connections will be cleaned up when the manager is dropped
+
+        // Stop all components
+        self.rpc.stop()?;
+
+        // Flush storage (bounded — large RocksDB datasets can stall for minutes otherwise)
+        let storage = Arc::clone(&self.storage);
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio::task::spawn_blocking(move || storage.flush()),
+        )
+        .await
+        {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(e))) => warn!("Storage flush failed during shutdown: {}", e),
+            Ok(Err(e)) => warn!("Storage flush task failed during shutdown: {}", e),
+            Err(_) => warn!("Storage flush timed out after 15s during shutdown"),
+        }
+
+        // Publish shutdown completed event
+        if let Some(event_publisher) = self
+            .module_subsystem
+            .as_ref()
+            .and_then(|s| s.event_publisher.as_ref())
+        {
+            use crate::module::ipc::protocol::EventPayload;
+            use crate::module::traits::EventType;
+            let payload = EventPayload::NodeShutdownCompleted {
+                duration_ms: 0, // Could track actual duration if needed
+            };
+            if let Err(e) = event_publisher
+                .publish_event(EventType::NodeShutdownCompleted, payload)
+                .await
+            {
+                warn!("Failed to publish NodeShutdownCompleted event: {}", e);
+            }
+        }
+
+        info!("Node stopped");
+        Ok(())
+    }
+
+    /// Get module manager (shared via Arc<Mutex<>> for RPC and other subsystems)
+    pub fn module_manager(&self) -> Option<Arc<tokio::sync::Mutex<ModuleManager>>> {
+        self.module_subsystem
+            .as_ref()
+            .and_then(|s| s.module_manager.as_ref())
+            .cloned()
+    }
+
+    /// Get event publisher (immutable)
+    pub fn event_publisher(&self) -> Option<&EventPublisher> {
+        self.module_subsystem
+            .as_ref()
+            .and_then(|s| s.event_publisher.as_ref())
+            .map(|arc| arc.as_ref())
+    }
+
+    /// Get event publisher (mutable)
+    /// Note: This returns a reference to the Arc, not the inner EventPublisher
+    /// since Arc doesn't allow mutable access to the inner value
+    pub fn event_publisher_arc(&self) -> Option<&Arc<EventPublisher>> {
+        self.module_subsystem
+            .as_ref()
+            .and_then(|s| s.event_publisher.as_ref())
+    }
+
+    /// Get protocol engine
+    pub fn protocol(&self) -> &BitcoinProtocolEngine {
+        &self.protocol
+    }
+
+    /// Get storage
+    pub fn storage(&self) -> &Storage {
+        &self.storage
+    }
+
+    /// Get network manager
+    pub fn network(&self) -> &NetworkManager {
+        &self.network // Deref Arc to maintain API compatibility
+    }
+
+    /// Get RPC manager
+    pub fn rpc(&self) -> &RpcManager {
+        &self.rpc
+    }
+
+    /// Get health report
+    pub fn health_check(&self) -> health::HealthReport {
+        use crate::node::health::{HealthChecker, HealthStatus};
+
+        let checker = HealthChecker::new();
+        let network_healthy = self.network.is_network_active();
+        let storage_healthy = self.storage.check_storage_bounds().unwrap_or(false);
+        let rpc_healthy = true; // RPC is always healthy if node is running
+
+        let node_metrics = self.metrics.collect();
+        let report = checker.check_health(
+            network_healthy,
+            storage_healthy,
+            rpc_healthy,
+            Some(&node_metrics.network),
+            Some(&node_metrics.storage),
+        );
+
+        // Publish HealthCheck event for module subscribers
+        if let Some(ep) = self
+            .module_subsystem
+            .as_ref()
+            .and_then(|s| s.event_publisher.as_ref())
+        {
+            let check_type = "on_demand".to_string();
+            let node_healthy = report.overall_status == HealthStatus::Healthy;
+            let health_report = serde_json::to_string(&report).ok();
+            let ep_clone = Arc::clone(ep);
+            std::mem::drop(tokio::spawn(async move {
+                ep_clone
+                    .publish_health_check(check_type, node_healthy, health_report)
+                    .await;
+            }));
+        }
+
+        report
+    }
+}
+
+#[cfg(test)]
+mod resume_snapshot_tests {
+    use super::*;
+    use blvm_protocol::BlockHeader;
+    use blvm_protocol::types::{OutPoint, UTXO};
+    use std::net::SocketAddr;
+
+    fn put_ckpt(storage: &Storage, tree: &str, prevout: &OutPoint, utxo: &UTXO) {
+        let tree = storage.open_tree(tree).unwrap();
+        let key = crate::storage::disk_utxo::outpoint_to_key(prevout);
+        let bytes = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+            storage.utxo_value_codec(),
+            utxo,
+        )
+        .unwrap();
+        tree.insert(&key, &bytes).unwrap();
+    }
+
+    #[tokio::test]
+    async fn watermark_above_the_block_tip_drops_checkpoint_coins() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let network: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let rpc: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let node = Node::new(
+            temp.path().to_str().unwrap(),
+            network,
+            rpc,
+            Some(ProtocolVersion::Regtest),
+        )
+        .unwrap();
+        let storage = node.storage();
+        if storage.chain().get_height().unwrap().is_none() {
+            storage
+                .chain()
+                .initialize(&BlockHeader {
+                    version: 1,
+                    prev_block_hash: [0u8; 32],
+                    merkle_root: [0u8; 32],
+                    timestamp: 1_600_000_000,
+                    bits: 0,
+                    nonce: 1,
+                })
+                .unwrap();
+        }
+        let tip = storage.chain().get_height().unwrap().unwrap();
+        let ahead = tip + 5;
+        storage.chain().force_set_ibd_utxo_watermark(ahead).unwrap();
+        storage
+            .chain()
+            .force_set_engine_export_height(ahead)
+            .unwrap();
+
+        let snapshot_coin = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let other_slot = OutPoint {
+            hash: [5u8; 32],
+            index: 0,
+        };
+        let table_coin = OutPoint {
+            hash: [6u8; 32],
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![0x51].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        put_ckpt(storage, "ibd_utxos_ckpt_a", &snapshot_coin, &utxo);
+        put_ckpt(storage, "ibd_utxos_ckpt_b", &other_slot, &utxo);
+        storage
+            .chain()
+            .set_ibd_utxo_canonical_tree("ibd_utxos_ckpt_b")
+            .unwrap();
+        storage.utxos().add_utxo(&table_coin, &utxo).unwrap();
+
+        let (synced, next) = node.ibd_resume_heights().unwrap();
+
+        assert_eq!(synced, 0);
+        assert_eq!(next, 1);
+        assert!(storage.open_engine_resume_snapshot().unwrap().is_none());
+        assert!(
+            storage
+                .read_chain_prevout(&snapshot_coin)
+                .unwrap()
+                .is_none()
+        );
+        assert!(storage.read_chain_prevout(&other_slot).unwrap().is_none());
+        assert!(storage.utxos().get_utxo(&table_coin).unwrap().is_some());
+        assert_eq!(storage.chain().get_utxo_watermark().unwrap(), Some(0));
+        assert_eq!(storage.chain().get_engine_export_height().unwrap(), Some(0));
+    }
+}

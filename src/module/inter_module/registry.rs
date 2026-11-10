@@ -1,0 +1,208 @@
+//! Module API registry
+//!
+//! Tracks which modules expose which APIs and routes requests to them.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::{debug, error, info, warn};
+
+use crate::module::inter_module::api::ModuleAPI;
+use crate::module::traits::ModuleError;
+
+/// Registry of module APIs
+pub struct ModuleApiRegistry {
+    /// Map of module_id -> API implementation
+    apis: Arc<RwLock<HashMap<String, Arc<dyn ModuleAPI>>>>,
+    /// Map of method_name -> (module_id, method_name)
+    /// Used for routing requests to the correct module
+    method_routing: Arc<RwLock<HashMap<String, (String, String)>>>,
+}
+
+impl ModuleApiRegistry {
+    /// Create a new module API registry
+    pub fn new() -> Self {
+        Self {
+            apis: Arc::new(RwLock::new(HashMap::new())),
+            method_routing: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Register a module API
+    ///
+    /// # Arguments
+    /// * `module_id` - ID of the module exposing the API
+    /// * `api` - The API implementation
+    pub async fn register_api(
+        &self,
+        module_id: String,
+        api: Arc<dyn ModuleAPI>,
+    ) -> Result<(), ModuleError> {
+        info!("Registering API for module: {}", module_id);
+
+        let methods = api.list_methods();
+        let api_version = api.api_version();
+
+        debug!(
+            "Module {} API v{} exposes {} methods: {:?}",
+            module_id,
+            api_version,
+            methods.len(),
+            methods
+        );
+
+        // Store the API
+        {
+            let mut apis = self.apis.write().await;
+            apis.insert(module_id.clone(), api);
+        }
+
+        // Register method routing
+        {
+            let mut routing = self.method_routing.write().await;
+            for method in methods {
+                let full_method_name = format!("{module_id}::{method}");
+                routing.insert(
+                    full_method_name.clone(),
+                    (module_id.clone(), method.clone()),
+                );
+
+                // Also allow routing by just method name if unique
+                // (will be overridden if another module uses same method name)
+                routing
+                    .entry(method.clone())
+                    .or_insert_with(|| (module_id.clone(), method.clone()));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Unregister a module API
+    pub async fn unregister_api(&self, module_id: &str) -> Result<(), ModuleError> {
+        info!("Unregistering API for module: {}", module_id);
+
+        // Remove from APIs
+        {
+            let mut apis = self.apis.write().await;
+            apis.remove(module_id);
+        }
+
+        // Remove from routing
+        {
+            let mut routing = self.method_routing.write().await;
+            routing.retain(|_, (mid, _)| mid != module_id);
+        }
+
+        Ok(())
+    }
+
+    /// Get API for a module
+    pub async fn get_api(&self, module_id: &str) -> Option<Arc<dyn ModuleAPI>> {
+        let apis = self.apis.read().await;
+        apis.get(module_id).cloned()
+    }
+
+    /// Resolve module_id: exact match first, then prefix match (module_name_uuid).
+    /// Callers can pass "blvm-lightning" and get "blvm-lightning_<uuid>" when needed.
+    pub async fn resolve_module_id(&self, target: &str) -> Option<String> {
+        let apis = self.apis.read().await;
+        if apis.contains_key(target) {
+            return Some(target.to_string());
+        }
+        let prefix = format!("{target}_");
+        apis.keys().find(|k| k.starts_with(&prefix)).cloned()
+    }
+
+    /// Route a method call to the appropriate module
+    ///
+    /// # Arguments
+    /// * `method_name` - Full method name (module_id::method) or just method name
+    ///
+    /// # Returns
+    /// (module_id, actual_method_name) if found
+    pub async fn route_method(&self, method_name: &str) -> Option<(String, String)> {
+        let routing = self.method_routing.read().await;
+        routing.get(method_name).cloned()
+    }
+
+    /// Non-blocking probe: `Some(false)` when no module routes `method_name` (safe to skip the
+    /// call entirely), `Some(true)` when one does, `None` when the routing table is write-locked
+    /// right now (caller must fall back to the async path). Never blocks the calling thread, so
+    /// it is safe from synchronous hot paths that run on tokio worker threads (R-350: the IBD
+    /// per-block `filter_block_*` hooks parked every runtime worker for 6 s while the spawned
+    /// lookup could not be scheduled — 1.3 blocks/s with zero modules loaded).
+    pub fn method_registered_now(&self, method_name: &str) -> Option<bool> {
+        match self.method_routing.try_read() {
+            Ok(routing) => Some(routing.contains_key(method_name)),
+            Err(_) => None,
+        }
+    }
+
+    /// List all registered modules
+    pub async fn list_modules(&self) -> Vec<String> {
+        let apis = self.apis.read().await;
+        apis.keys().cloned().collect()
+    }
+
+    /// Get methods exposed by a module
+    pub async fn get_module_methods(&self, module_id: &str) -> Option<Vec<String>> {
+        let apis = self.apis.read().await;
+        apis.get(module_id).map(|api| api.list_methods())
+    }
+}
+
+impl Default for ModuleApiRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct EchoApi;
+
+    #[async_trait]
+    impl ModuleAPI for EchoApi {
+        async fn handle_request(
+            &self,
+            method: &str,
+            params: &[u8],
+            _caller: &str,
+        ) -> Result<Vec<u8>, ModuleError> {
+            match method {
+                "echo" => Ok(params.to_vec()),
+                _ => Err(ModuleError::OperationError(format!(
+                    "unknown method {method}"
+                ))),
+            }
+        }
+
+        fn list_methods(&self) -> Vec<String> {
+            vec!["echo".to_string()]
+        }
+
+        fn api_version(&self) -> u32 {
+            1
+        }
+    }
+
+    #[tokio::test]
+    async fn route_method_by_short_name_uses_short_handler_name() {
+        let registry = ModuleApiRegistry::new();
+        registry
+            .register_api("selective-sync_abc".to_string(), Arc::new(EchoApi))
+            .await
+            .unwrap();
+        let (module_id, method) = registry
+            .route_method("echo")
+            .await
+            .expect("short method should route");
+        assert_eq!(module_id, "selective-sync_abc");
+        assert_eq!(method, "echo");
+        assert_ne!(method, "selective-sync_abc::echo");
+    }
+}

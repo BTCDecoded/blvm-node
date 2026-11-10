@@ -1,0 +1,113 @@
+//! Tests for fee calculation functionality
+
+use blvm_node::node::mempool::MempoolManager;
+use blvm_protocol::{OutPoint, Transaction, UTXO, UtxoSet};
+
+#[test]
+fn test_calculate_transaction_fee() {
+    let mempool = MempoolManager::new();
+
+    // Create a simple transaction
+    let mut utxo_set = UtxoSet::default();
+
+    // Add a UTXO
+    let outpoint = OutPoint {
+        hash: [0u8; 32],
+        index: 0,
+    };
+    let utxo = UTXO {
+        value: 100_000_000,                           // 1 BTC
+        script_pubkey: vec![0x76, 0xa9, 0x14].into(), // P2PKH script
+        height: 0,
+
+        is_coinbase: false,
+    };
+    utxo_set.insert(outpoint, utxo.into());
+
+    // Create transaction with 1 input and 1 output
+    let tx = Transaction {
+        version: 1,
+        inputs: blvm_protocol::tx_inputs![blvm_protocol::TransactionInput {
+            prevout: outpoint,
+            script_sig: vec![],
+            sequence: 0xffffffff,
+        }],
+        outputs: blvm_protocol::tx_outputs![blvm_protocol::TransactionOutput {
+            value: 99_000_000, // 0.99 BTC (0.01 BTC fee)
+            script_pubkey: vec![0x76, 0xa9, 0x14],
+        }],
+        lock_time: 0,
+    };
+
+    let fee = mempool.calculate_transaction_fee(&tx, &utxo_set);
+
+    // Fee should be 1 BTC - 0.99 BTC = 0.01 BTC = 1,000,000 satoshis
+    assert_eq!(fee, 1_000_000);
+}
+
+#[test]
+fn test_calculate_transaction_fee_zero_fee() {
+    let mempool = MempoolManager::new();
+
+    let mut utxo_set = UtxoSet::default();
+    let outpoint = OutPoint {
+        hash: [0u8; 32],
+        index: 0,
+    };
+    let utxo = UTXO {
+        value: 100_000_000,
+        script_pubkey: vec![].into(),
+        height: 0,
+
+        is_coinbase: false,
+    };
+    utxo_set.insert(outpoint, utxo.into());
+
+    // Transaction with same input and output (no fee)
+    let tx = Transaction {
+        version: 1,
+        inputs: blvm_protocol::tx_inputs![blvm_protocol::TransactionInput {
+            prevout: outpoint,
+            script_sig: vec![],
+            sequence: 0xffffffff,
+        }],
+        outputs: blvm_protocol::tx_outputs![blvm_protocol::TransactionOutput {
+            value: 100_000_000,
+            script_pubkey: vec![],
+        }],
+        lock_time: 0,
+    };
+
+    let fee = mempool.calculate_transaction_fee(&tx, &utxo_set);
+    assert_eq!(fee, 0);
+}
+
+#[test]
+fn test_calculate_transaction_fee_missing_utxo() {
+    let mempool = MempoolManager::new();
+
+    let utxo_set = UtxoSet::default(); // Empty UTXO set
+
+    let outpoint = OutPoint {
+        hash: [0u8; 32],
+        index: 0,
+    };
+
+    let tx = Transaction {
+        version: 1,
+        inputs: blvm_protocol::tx_inputs![blvm_protocol::TransactionInput {
+            prevout: outpoint,
+            script_sig: vec![],
+            sequence: 0xffffffff,
+        }],
+        outputs: blvm_protocol::tx_outputs![blvm_protocol::TransactionOutput {
+            value: 50_000_000,
+            script_pubkey: vec![],
+        }],
+        lock_time: 0,
+    };
+
+    let fee = mempool.calculate_transaction_fee(&tx, &utxo_set);
+    // If UTXO is missing, input_total will be 0, so fee will be 0 (or negative, but we return 0)
+    assert_eq!(fee, 0);
+}

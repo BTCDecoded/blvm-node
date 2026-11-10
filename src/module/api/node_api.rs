@@ -1,0 +1,2484 @@
+//! Node API implementation for modules
+//!
+//! Provides a NodeAPI implementation that modules can use to query the node state.
+
+use async_trait::async_trait;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tracing::debug;
+
+/// Thread-local storage for current module ID during API calls
+thread_local! {
+    static CURRENT_MODULE_ID: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+use crate::module::api::events::EventManager;
+use crate::module::hooks::HookManager;
+use crate::module::ipc::protocol::EventPayload;
+use crate::module::ipc::protocol::ModuleMessage;
+use crate::module::metrics::manager::{Metric, MetricsManager};
+use crate::module::traits::{
+    BlockServeDenylistSnapshot, ChainInfo, EventType, LightningInfo, MempoolSize, ModuleError,
+    ModuleInfo, ModuleState, NetworkStats, NodeAPI, PaymentState, PeerInfo, SubmitBlockResult,
+    SyncStatus, TxServeDenylistSnapshot, module_error_msg,
+};
+use crate::network::{NetworkManager, transport::TransportAddr};
+use crate::node::mempool::MempoolManager;
+use crate::storage::Storage;
+use crate::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
+use hex;
+
+/// Module ids are `{name}_{32 hex}`. Service bits are stored under `name`, which is what unload uses.
+fn module_service_bit_owner(module_id: &str) -> &str {
+    if let Some((name, suffix)) = module_id.rsplit_once('_') {
+        if suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return name;
+        }
+    }
+    module_id
+}
+
+/// Node API implementation for modules
+pub struct NodeApiImpl {
+    /// Storage reference for querying blockchain data
+    storage: Arc<Storage>,
+    /// Event manager for event subscriptions
+    event_manager: Option<Arc<EventManager>>,
+    /// Module ID for this API instance (used for event subscriptions)
+    module_id: Option<String>,
+    /// Mempool manager (optional, for mempool queries)
+    mempool_manager: Option<Arc<MempoolManager>>,
+    /// Network manager (optional, for network queries)
+    network_manager: Option<Arc<NetworkManager>>,
+    /// RPC server (optional, for RPC endpoint registration)
+    rpc_server: Option<Arc<crate::rpc::server::RpcServer>>,
+    /// Hook manager (optional, for module hooks)
+    hook_manager: Option<Arc<tokio::sync::RwLock<HookManager>>>,
+    /// Timer manager (optional, for timers and scheduled tasks)
+    timer_manager: Option<Arc<crate::module::timers::manager::TimerManager>>,
+    /// Module ID (for timer/task registration)
+    module_id_for_timers: Option<String>,
+    /// Metrics manager (optional, for metrics reporting)
+    metrics_manager: Option<Arc<MetricsManager>>,
+    /// Module ID (for metrics reporting)
+    module_id_for_metrics: Option<String>,
+    /// Filesystem sandbox for path validation
+    filesystem_sandbox: Option<Arc<crate::module::sandbox::filesystem::FileSystemSandbox>>,
+    /// Module data directory path
+    module_data_dir: Option<std::path::PathBuf>,
+    /// Per-module filesystem sandboxes (module_id -> sandbox)
+    module_filesystem_sandboxes: Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<
+                String,
+                Arc<crate::module::sandbox::filesystem::FileSystemSandbox>,
+            >,
+        >,
+    >,
+    /// Per-module data directories (module_id -> path)
+    module_data_dirs:
+        Arc<tokio::sync::RwLock<std::collections::HashMap<String, std::path::PathBuf>>>,
+    /// IPC server reference (for RPC endpoint registration)
+    ipc_server: Option<Arc<tokio::sync::Mutex<crate::module::ipc::server::ModuleIpcServer>>>,
+    /// Sync coordinator (optional, for sync status checking)
+    sync_coordinator: Option<Arc<tokio::sync::Mutex<crate::node::sync::SyncCoordinator>>>,
+    /// Module manager (optional, for module discovery)
+    module_manager: Option<Arc<tokio::sync::Mutex<crate::module::manager::ModuleManager>>>,
+    /// Module API registry (for module-to-module communication)
+    module_api_registry: Option<Arc<crate::module::inter_module::registry::ModuleApiRegistry>>,
+    /// Module router (for routing module-to-module calls)
+    module_router: Option<Arc<crate::module::inter_module::router::ModuleRouter>>,
+    /// Current module ID (for API registration)
+    current_module_id_for_api: Option<String>,
+    /// Health a module reported for itself. This is what `get_module_health` returns.
+    reported_health: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, crate::module::process::monitor::ModuleHealth>,
+        >,
+    >,
+}
+
+impl NodeApiImpl {
+    /// Create a new Node API implementation
+    pub fn new(storage: Arc<Storage>) -> Self {
+        let storage_clone = Arc::clone(&storage);
+        Self {
+            storage,
+            event_manager: None,
+            module_id: None,
+            mempool_manager: None,
+            network_manager: None,
+            rpc_server: None,
+            hook_manager: None,
+            timer_manager: None,
+            module_id_for_timers: None,
+            metrics_manager: None,
+            module_id_for_metrics: None,
+            filesystem_sandbox: None,
+            module_data_dir: None,
+            module_filesystem_sandboxes: Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            module_data_dirs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            ipc_server: None,
+            sync_coordinator: None,
+            module_manager: None,
+            module_api_registry: None,
+            module_router: None,
+            current_module_id_for_api: None,
+            reported_health: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    /// Create a new Node API implementation with event manager
+    pub fn with_event_manager(
+        storage: Arc<Storage>,
+        event_manager: Arc<EventManager>,
+        module_id: String,
+    ) -> Self {
+        Self {
+            storage,
+            event_manager: Some(event_manager),
+            module_id: Some(module_id),
+            mempool_manager: None,
+            network_manager: None,
+            rpc_server: None,
+            hook_manager: None,
+            timer_manager: None,
+            module_id_for_timers: None,
+            metrics_manager: None,
+            module_id_for_metrics: None,
+            filesystem_sandbox: None,
+            module_data_dir: None,
+            module_filesystem_sandboxes: Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            module_data_dirs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            ipc_server: None,
+            sync_coordinator: None,
+            module_manager: None,
+            module_api_registry: None,
+            module_router: None,
+            current_module_id_for_api: None,
+            reported_health: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    /// Create a new Node API implementation with all dependencies
+    pub fn with_dependencies(
+        storage: Arc<Storage>,
+        event_manager: Option<Arc<EventManager>>,
+        module_id: Option<String>,
+        mempool_manager: Option<Arc<MempoolManager>>,
+        network_manager: Option<Arc<NetworkManager>>,
+    ) -> Self {
+        let storage_clone = Arc::clone(&storage);
+        Self {
+            storage,
+            event_manager,
+            module_id,
+            mempool_manager,
+            network_manager,
+            rpc_server: None,
+            hook_manager: None,
+            ipc_server: None,
+            timer_manager: None,
+            module_id_for_timers: None,
+            metrics_manager: None,
+            module_id_for_metrics: None,
+            filesystem_sandbox: None,
+            module_data_dir: None,
+            module_filesystem_sandboxes: Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            module_data_dirs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            sync_coordinator: None,
+            module_manager: None,
+            module_api_registry: None,
+            module_router: None,
+            current_module_id_for_api: None,
+            reported_health: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    /// Set module manager (for module discovery)
+    pub fn set_module_manager(
+        &mut self,
+        module_manager: Arc<tokio::sync::Mutex<crate::module::manager::ModuleManager>>,
+    ) {
+        self.module_manager = Some(module_manager);
+    }
+
+    /// Set module API registry and router (for module-to-module communication)
+    pub fn set_module_api_registry(
+        &mut self,
+        registry: Arc<crate::module::inter_module::registry::ModuleApiRegistry>,
+        router: Arc<crate::module::inter_module::router::ModuleRouter>,
+    ) {
+        self.module_api_registry = Some(registry);
+        self.module_router = Some(router);
+    }
+
+    /// Set current module ID (for API registration)
+    pub fn set_current_module_id_for_api(&mut self, module_id: String) {
+        self.current_module_id_for_api = Some(module_id);
+    }
+
+    /// Initialize filesystem and storage access for a module
+    pub async fn initialize_module(
+        &self,
+        module_id: String,
+        module_data_dir: std::path::PathBuf,
+        base_data_dir: std::path::PathBuf,
+    ) -> Result<(), ModuleError> {
+        // Create filesystem sandbox for this module
+        let sandbox = Arc::new(crate::module::sandbox::filesystem::FileSystemSandbox::new(
+            &base_data_dir,
+        ));
+
+        // Store per-module state
+        {
+            let mut sandboxes = self.module_filesystem_sandboxes.write().await;
+            sandboxes.insert(module_id.clone(), sandbox);
+        }
+
+        {
+            let mut dirs = self.module_data_dirs.write().await;
+            dirs.insert(module_id.clone(), module_data_dir);
+        }
+
+        Ok(())
+    }
+
+    /// Get module ID from context (for filesystem/storage operations)
+    /// First tries thread-local (set by API hub), then falls back to instance module_id
+    fn get_module_id(&self) -> Option<String> {
+        CURRENT_MODULE_ID
+            .with(|id| id.borrow().clone())
+            .or_else(|| self.module_id.clone())
+    }
+
+    /// Set current module ID in thread-local (for API hub to use)
+    pub fn set_current_module_id(module_id: String) {
+        CURRENT_MODULE_ID.with(|id| {
+            *id.borrow_mut() = Some(module_id);
+        });
+    }
+
+    /// Clear current module ID from thread-local
+    pub fn clear_current_module_id() {
+        CURRENT_MODULE_ID.with(|id| {
+            *id.borrow_mut() = None;
+        });
+    }
+
+    /// Set filesystem sandbox and module data directory (for late initialization - deprecated, use initialize_module)
+    pub fn set_filesystem_access(
+        &mut self,
+        sandbox: Arc<crate::module::sandbox::filesystem::FileSystemSandbox>,
+        data_dir: std::path::PathBuf,
+    ) {
+        self.filesystem_sandbox = Some(sandbox);
+        self.module_data_dir = Some(data_dir);
+    }
+
+    /// Set hook manager (for late initialization)
+    pub fn set_hook_manager(&mut self, hook_manager: Arc<tokio::sync::RwLock<HookManager>>) {
+        self.hook_manager = Some(hook_manager);
+    }
+
+    /// Set timer manager (for late initialization)
+    pub fn set_timer_manager(
+        &mut self,
+        timer_manager: Arc<crate::module::timers::manager::TimerManager>,
+        module_id: String,
+    ) {
+        self.timer_manager = Some(timer_manager);
+        self.module_id_for_timers = Some(module_id);
+    }
+
+    /// Set metrics manager (for late initialization)
+    pub fn set_metrics_manager(
+        &mut self,
+        metrics_manager: Arc<crate::module::metrics::manager::MetricsManager>,
+        module_id: String,
+    ) {
+        self.metrics_manager = Some(metrics_manager);
+        self.module_id_for_metrics = Some(module_id);
+    }
+
+    /// Set RPC server (for late initialization)
+    pub fn set_rpc_server(&mut self, rpc_server: Arc<crate::rpc::server::RpcServer>) {
+        self.rpc_server = Some(rpc_server);
+    }
+
+    /// Set event manager (for late initialization)
+    pub fn set_event_manager(&mut self, event_manager: Arc<EventManager>, module_id: String) {
+        self.event_manager = Some(event_manager);
+        self.module_id = Some(module_id);
+    }
+
+    /// Set mempool manager (for late initialization)
+    pub fn set_mempool_manager(&mut self, mempool_manager: Arc<MempoolManager>) {
+        self.mempool_manager = Some(mempool_manager);
+    }
+
+    /// Set network manager (for late initialization)
+    pub fn set_network_manager(&mut self, network_manager: Arc<NetworkManager>) {
+        self.network_manager = Some(network_manager);
+    }
+
+    /// Set sync coordinator (for late initialization)
+    pub fn set_sync_coordinator(
+        &mut self,
+        sync_coordinator: Arc<tokio::sync::Mutex<crate::node::sync::SyncCoordinator>>,
+    ) {
+        self.sync_coordinator = Some(sync_coordinator);
+    }
+
+    /// Parse `commons_get_coinbase_outputs`. `None` = do not use Commons.
+    /// Holding is an error so GBT does not issue a node-default coinbase.
+    pub(crate) fn commons_gbt_outputs(
+        v: &serde_json::Value,
+    ) -> Result<Option<Vec<(i64, Vec<u8>)>>, ModuleError> {
+        crate::rpc::commons_gbt::commons_gbt_outputs(v)
+    }
+
+    async fn try_commons_gbt_outputs(&self) -> Result<Option<Vec<(i64, Vec<u8>)>>, ModuleError> {
+        if self.is_module_available("blvm-commons-pool").await.ok() != Some(true) {
+            return Ok(None);
+        }
+        let raw = match self
+            .call_module(
+                Some("blvm-commons-pool"),
+                "commons_get_coinbase_outputs",
+                vec![],
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => return Ok(None),
+        };
+        let v: serde_json::Value = serde_json::from_slice(&raw)
+            .map_err(|e| ModuleError::OperationError(format!("commons outputs json: {e}")))?;
+        Self::commons_gbt_outputs(&v)
+    }
+
+    /// Build a GBT-style template. `coinbase_outputs` uses
+    /// `create_block_template_with_outputs` (subsidy+fees + BIP141).
+    /// `None` is one output at value 0 so fit tops up the address to the reward.
+    /// `declared_txids` is Stage 3b: resolve named txs and error if any vanish.
+    fn build_block_template(
+        &self,
+        coinbase_script: Option<Vec<u8>>,
+        coinbase_address: Option<String>,
+        coinbase_outputs: Option<Vec<(i64, Vec<u8>)>>,
+        declared_txids: Option<&[Hash]>,
+    ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError> {
+        let tip_height = self
+            .storage
+            .chain()
+            .get_height()
+            .map_err(|e| ModuleError::op_err("Failed to get height", e))?
+            .ok_or_else(|| {
+                ModuleError::OperationError(module_error_msg::CHAIN_NOT_INITIALIZED.to_string())
+            })?;
+        let height = tip_height.saturating_add(1);
+
+        let prev_header = self
+            .storage
+            .chain()
+            .get_tip_header()
+            .map_err(|e| ModuleError::op_err("Failed to get tip header", e))?
+            .ok_or_else(|| {
+                ModuleError::OperationError(module_error_msg::NO_CHAIN_TIP.to_string())
+            })?;
+
+        let prev_headers = self
+            .storage
+            .blocks()
+            .headers_back_from(tip_height, 2016)
+            .unwrap_or_default();
+
+        let mempool_manager = self.mempool_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+        let mempool_txs = mempool_manager.get_transactions();
+
+        let utxo_set = match self.storage.open_engine_resume_snapshot() {
+            Ok(Some(_)) => {
+                let mut set = blvm_protocol::UtxoSet::default();
+                for tx in &mempool_txs {
+                    for input in &tx.inputs {
+                        if set.contains_key(&input.prevout) {
+                            continue;
+                        }
+                        match self.storage.read_chain_prevout(&input.prevout) {
+                            Ok(Some(utxo)) => {
+                                set.insert(input.prevout, Arc::new(utxo));
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                return Err(ModuleError::op_err("Failed to get UTXO set", err));
+                            }
+                        }
+                    }
+                }
+                set
+            }
+            Ok(None) => self
+                .storage
+                .utxos()
+                .get_all_utxos()
+                .map_err(|e| ModuleError::op_err("Failed to get UTXO set", e))?,
+            Err(err) => return Err(ModuleError::op_err("Failed to get UTXO set", err)),
+        };
+
+        let coinbase_script_bytes = coinbase_script.unwrap_or_default();
+        let address_bytes = match coinbase_address {
+            None => Vec::new(),
+            Some(a) => {
+                if let Some(h) = a.strip_prefix("hex:") {
+                    hex::decode(h).map_err(|e| {
+                        ModuleError::OperationError(format!("invalid coinbase hex: {e}"))
+                    })?
+                } else {
+                    crate::rpc::rawtx::address_string_to_script_pubkey(&a)
+                        .map_err(|e| ModuleError::OperationError(e.to_string()))?
+                }
+            }
+        };
+
+        let outputs: Vec<(i64, Vec<u8>)> = match coinbase_outputs {
+            Some(outs) if !outs.is_empty() => outs,
+            Some(_) => {
+                return Err(ModuleError::OperationError(
+                    "coinbase_outputs must not be empty".to_string(),
+                ));
+            }
+            None => vec![(0, address_bytes)],
+        };
+
+        let network = self
+            .storage
+            .chain()
+            .consensus_network()
+            .map_err(|err| ModuleError::op_err("Failed to read chain info", err))?;
+        if let Some(ids) = declared_txids {
+            let declared = blvm_protocol::mining::resolve_declared_txs(&mempool_txs, ids)
+                .map_err(|e| ModuleError::op_err("Declared tx resolve failed", e))?;
+            let mempool_witnesses = crate::rpc::mining::mempool_witnesses_for_template(
+                Some(mempool_manager.as_ref()),
+                &utxo_set,
+                &declared,
+            )
+            .map_err(ModuleError::OperationError)?;
+            return blvm_protocol::mining::create_block_template_declared(
+                &utxo_set,
+                &declared,
+                ids,
+                height,
+                &prev_header,
+                &prev_headers,
+                &coinbase_script_bytes,
+                &outputs,
+                network,
+                Some(&mempool_witnesses),
+            )
+            .map_err(|e| ModuleError::op_err("Template creation failed", e));
+        }
+        let mempool_witnesses = crate::rpc::mining::mempool_witnesses_for_template(
+            Some(mempool_manager.as_ref()),
+            &utxo_set,
+            &mempool_txs,
+        )
+        .map_err(ModuleError::OperationError)?;
+        blvm_protocol::mining::create_block_template_with_outputs(
+            &utxo_set,
+            &mempool_txs,
+            height,
+            &prev_header,
+            &prev_headers,
+            &coinbase_script_bytes,
+            &outputs,
+            network,
+            Some(&mempool_witnesses),
+        )
+        .map_err(|e| ModuleError::op_err("Template creation failed", e))
+    }
+}
+
+#[async_trait]
+impl crate::rpc::mining::CommonsGbtCaller for NodeApiImpl {
+    async fn fetch_commons_gbt_outputs(
+        &self,
+    ) -> crate::rpc::errors::RpcResult<Option<Vec<(i64, Vec<u8>)>>> {
+        match self.try_commons_gbt_outputs().await {
+            Ok(v) => Ok(v),
+            Err(e) => Err(crate::rpc::errors::RpcError::internal_error(e.to_string())),
+        }
+    }
+}
+
+#[async_trait]
+impl NodeAPI for NodeApiImpl {
+    async fn get_block(&self, hash: &Hash) -> Result<Option<Block>, ModuleError> {
+        // Query block store (synchronous operation, but we're in async context)
+        tokio::task::spawn_blocking({
+            let storage = Arc::clone(&self.storage);
+            let hash = *hash;
+            move || {
+                storage
+                    .blocks()
+                    .get_block(&hash)
+                    .map_err(|e| ModuleError::op_err("Failed to get block", e))
+            }
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
+    }
+
+    async fn get_block_header(&self, hash: &Hash) -> Result<Option<BlockHeader>, ModuleError> {
+        // Query block store for header
+        tokio::task::spawn_blocking({
+            let storage = Arc::clone(&self.storage);
+            let hash = *hash;
+            move || {
+                storage
+                    .blocks()
+                    .get_header(&hash)
+                    .map_err(|e| ModuleError::op_err("Failed to get block header", e))
+            }
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
+    }
+
+    async fn get_transaction(&self, hash: &Hash) -> Result<Option<Transaction>, ModuleError> {
+        // Query transaction index
+        tokio::task::spawn_blocking({
+            let storage = Arc::clone(&self.storage);
+            let hash = *hash;
+            move || {
+                storage
+                    .transactions()
+                    .get_transaction(&hash)
+                    .map_err(|e| ModuleError::op_err("Failed to get transaction", e))
+            }
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
+    }
+
+    async fn has_transaction(&self, hash: &Hash) -> Result<bool, ModuleError> {
+        // Check if transaction exists in index
+        tokio::task::spawn_blocking({
+            let storage = Arc::clone(&self.storage);
+            let hash = *hash;
+            move || {
+                storage
+                    .transactions()
+                    .has_transaction(&hash)
+                    .map_err(|e| ModuleError::op_err("Failed to check transaction existence", e))
+            }
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
+    }
+
+    async fn get_tx_metadata(
+        &self,
+        txid: &Hash,
+    ) -> Result<Option<crate::module::traits::TxBlockMetadata>, ModuleError> {
+        let txid = *txid;
+        tokio::task::spawn_blocking({
+            let storage = Arc::clone(&self.storage);
+            move || {
+                let metadata = storage
+                    .transactions()
+                    .get_metadata(&txid)
+                    .map_err(|e| ModuleError::op_err("Failed to get tx metadata", e))?;
+                Ok(
+                    metadata.map(|metadata| crate::module::traits::TxBlockMetadata {
+                        block_hash: metadata.block_hash,
+                        block_height: metadata.block_height,
+                    }),
+                )
+            }
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
+    }
+
+    async fn get_mempool_fee_rate_summary(
+        &self,
+    ) -> Result<crate::module::traits::MempoolFeeRateSummary, ModuleError> {
+        let mempool = self.mempool_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+        let mempool = Arc::clone(mempool);
+        let storage = Arc::clone(&self.storage);
+        tokio::task::spawn_blocking(move || {
+            let mut rates: Vec<u64> = mempool
+                .fee_rates_for_storage(Some(storage.as_ref()))
+                .into_iter()
+                .filter(|rate| *rate > 0)
+                .collect();
+            if rates.is_empty() {
+                return crate::module::traits::MempoolFeeRateSummary::default();
+            }
+            rates.sort_unstable();
+            let sum: u64 = rates.iter().sum();
+            let avg = sum / rates.len() as u64;
+            let median = rates[rates.len() / 2];
+            crate::module::traits::MempoolFeeRateSummary {
+                sample_count: rates.len(),
+                avg_sat_vb: avg,
+                median_sat_vb: median,
+            }
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))
+    }
+
+    async fn get_block_height(&self) -> Result<u64, ModuleError> {
+        // Get block height from chain state
+        tokio::task::spawn_blocking({
+            let storage = Arc::clone(&self.storage);
+            move || {
+                storage
+                    .chain()
+                    .get_height()
+                    .map_err(|e| ModuleError::op_err("Failed to get block height", e))?
+                    .ok_or_else(|| {
+                        ModuleError::OperationError(
+                            module_error_msg::CHAIN_NOT_YET_INITIALIZED.to_string(),
+                        )
+                    })
+            }
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
+    }
+
+    async fn get_chain_tip(&self) -> Result<Hash, ModuleError> {
+        // Get chain tip from chain state
+        tokio::task::spawn_blocking({
+            let storage = Arc::clone(&self.storage);
+            move || {
+                storage
+                    .chain()
+                    .get_tip_hash()
+                    .map_err(|e| ModuleError::op_err("Failed to get chain tip", e))?
+                    .ok_or_else(|| {
+                        ModuleError::OperationError(
+                            module_error_msg::CHAIN_NOT_YET_INITIALIZED.to_string(),
+                        )
+                    })
+            }
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
+    }
+
+    async fn get_utxo(&self, outpoint: &OutPoint) -> Result<Option<UTXO>, ModuleError> {
+        // Query UTXO store (read-only)
+        // Note: This is read-only, modules cannot modify UTXO set
+        let outpoint_clone = *outpoint;
+        tokio::task::spawn_blocking({
+            let storage = Arc::clone(&self.storage);
+            move || {
+                storage
+                    .utxos()
+                    .get_utxo(&outpoint_clone)
+                    .map_err(|e| ModuleError::op_err("Failed to get UTXO", e))
+            }
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
+    }
+
+    async fn subscribe_events(
+        &self,
+        event_types: Vec<EventType>,
+    ) -> Result<mpsc::Receiver<ModuleMessage>, ModuleError> {
+        // Create event subscription channel
+        let (Some(event_manager), Some(module_id)) = (&self.event_manager, &self.module_id) else {
+            return Err(ModuleError::OperationError(
+                "event manager is not available".to_string(),
+            ));
+        };
+        let (tx, rx) = mpsc::channel(100);
+        event_manager
+            .subscribe_module(module_id.clone(), event_types, tx)
+            .await?;
+        Ok(rx)
+    }
+
+    // === Mempool API Methods ===
+    async fn get_mempool_transactions(&self) -> Result<Vec<Hash>, ModuleError> {
+        let mempool = self.mempool_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        // Get all transaction hashes from mempool
+        Ok(mempool.transaction_hashes())
+    }
+
+    async fn get_mempool_transaction(
+        &self,
+        tx_hash: &Hash,
+    ) -> Result<Option<Transaction>, ModuleError> {
+        let mempool = self.mempool_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        Ok(mempool.get_transaction(tx_hash))
+    }
+
+    async fn get_mempool_size(&self) -> Result<MempoolSize, ModuleError> {
+        // Check hooks for cached value first
+        if let Some(hook_mgr) = &self.hook_manager {
+            let hooks = hook_mgr.read().await;
+            if let Some(cached_stats) = hooks.get_mempool_stats_cached().await {
+                return Ok(cached_stats);
+            }
+        }
+
+        // Fall back to normal calculation
+        let mempool = self.mempool_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let transaction_count = mempool.size();
+        let transactions = mempool.get_transactions();
+
+        // Calculate total size and fees
+        let size_bytes: usize = transactions
+            .iter()
+            .map(|tx| blvm_protocol::serialization::serialize_transaction(tx).len())
+            .sum();
+
+        // Calculate total fee from transactions. Confirmed inputs come from
+        // storage. An output created by another pool transaction is priced from
+        // that parent. Values outside the money range are not added.
+        let total_fee_sats = tokio::task::spawn_blocking({
+            let storage = Arc::clone(&self.storage);
+            let mempool = Arc::clone(mempool);
+            let transactions_clone = transactions.clone();
+            move || {
+                let mut total_fee = 0u64;
+                for tx in transactions_clone {
+                    // Skip coinbase transactions (no fee)
+                    if tx.inputs.is_empty() || tx.inputs[0].prevout.hash == [0u8; 32] {
+                        continue;
+                    }
+
+                    let mut utxo_set = blvm_protocol::UtxoSet::default();
+                    for input in &tx.inputs {
+                        if let Ok(Some(utxo)) = storage.utxos().get_utxo(&input.prevout) {
+                            utxo_set.insert(input.prevout, Arc::new(utxo));
+                        }
+                    }
+                    total_fee =
+                        total_fee.saturating_add(mempool.calculate_transaction_fee(&tx, &utxo_set));
+                }
+                total_fee
+            }
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?;
+
+        Ok(MempoolSize {
+            transaction_count,
+            size_bytes,
+            total_fee_sats,
+        })
+    }
+
+    // === Network API Methods ===
+    async fn get_network_stats(&self) -> Result<NetworkStats, ModuleError> {
+        let network = self.network_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let peer_count = network.peer_count();
+        let wire = network.get_network_stats().await;
+
+        let hash_rate = tokio::task::spawn_blocking({
+            let storage = Arc::clone(&self.storage);
+            move || hash_rate_from_tip(&storage)
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?;
+
+        Ok(NetworkStats {
+            peer_count,
+            hash_rate,
+            bytes_sent: wire.bytes_sent,
+            bytes_received: wire.bytes_received,
+        })
+    }
+
+    async fn get_network_peers(&self) -> Result<Vec<PeerInfo>, ModuleError> {
+        let network = self.network_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let peer_manager_guard = network.peer_manager().await;
+
+        let mut peers = Vec::new();
+        // Access peers via peer_addresses and get_peer
+        for transport_addr in peer_manager_guard.peer_addresses() {
+            if let Some(peer) = peer_manager_guard.get_peer(&transport_addr) {
+                let addr_str = match transport_addr {
+                    TransportAddr::Tcp(addr) => addr.to_string(),
+                    #[cfg(feature = "quinn")]
+                    TransportAddr::Quinn(addr) => addr.to_string(),
+                    #[cfg(feature = "iroh")]
+                    TransportAddr::Iroh(ref node_id) => format!("iroh:{}", hex::encode(node_id)),
+                };
+
+                let transport_type = match transport_addr {
+                    TransportAddr::Tcp(_) => "tcp".to_string(),
+                    #[cfg(feature = "quinn")]
+                    TransportAddr::Quinn(_) => "quinn".to_string(),
+                    #[cfg(feature = "iroh")]
+                    TransportAddr::Iroh(_) => "iroh".to_string(),
+                };
+
+                // Get peer version (stored when version message is received)
+                let version = peer.version();
+
+                peers.push(PeerInfo {
+                    addr: addr_str,
+                    transport_type,
+                    services: peer.services(),
+                    version,
+                    connected_since: peer.conntime(),
+                });
+            }
+        }
+
+        Ok(peers)
+    }
+
+    // === Chain API Methods ===
+    async fn get_chain_info(&self) -> Result<ChainInfo, ModuleError> {
+        // Get chain tip and height
+        let tip = self.get_chain_tip().await?;
+        let height = self.get_block_height().await?;
+
+        // Get difficulty and chain work from storage
+        let (difficulty, chain_work, is_synced) = tokio::task::spawn_blocking({
+            let storage = Arc::clone(&self.storage);
+            let tip_clone = tip;
+            move || {
+                // Get tip header to calculate difficulty
+                let difficulty = if let Ok(Some(tip_header)) = storage.chain().get_tip_header() {
+                    blvm_protocol::pow::difficulty_from_bits(tip_header.bits).unwrap_or(1.0)
+                } else {
+                    0.0
+                };
+
+                // Get chain work for tip
+                let chain_work = storage
+                    .chain()
+                    .get_chainwork(&tip_clone)
+                    .ok()
+                    .flatten()
+                    .map(|w| w.low_u128() as u64)
+                    .unwrap_or(0);
+
+                (difficulty, chain_work, true) // Sync status will be checked below
+            }
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?;
+
+        // Check sync status from sync coordinator
+        let is_synced = if let Some(ref sync_coord) = self.sync_coordinator {
+            let sync_guard = sync_coord.lock().await;
+            sync_guard.is_synced()
+        } else {
+            // If sync coordinator not available, assume synced if we have blocks
+            height > 0
+        };
+
+        Ok(ChainInfo {
+            tip_hash: tip,
+            height,
+            difficulty,
+            chain_work,
+            is_synced,
+        })
+    }
+
+    async fn get_block_by_height(&self, height: u64) -> Result<Option<Block>, ModuleError> {
+        // Get block hash by height, then get block
+        tokio::task::spawn_blocking({
+            let storage = Arc::clone(&self.storage);
+            move || {
+                storage
+                    .blocks()
+                    .get_hash_by_height(height)
+                    .map_err(|e| ModuleError::op_err("Failed to get hash by height", e))?
+                    .and_then(|hash| {
+                        storage
+                            .blocks()
+                            .get_block(&hash)
+                            .map_err(|e| ModuleError::op_err("Failed to get block", e))
+                            .transpose()
+                    })
+                    .transpose()
+            }
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
+    }
+
+    async fn get_block_and_witnesses(
+        &self,
+        hash: &Hash,
+    ) -> Result<Option<(Block, Vec<Vec<blvm_protocol::segwit::Witness>>)>, ModuleError> {
+        let hash = *hash;
+        tokio::task::spawn_blocking({
+            let storage = Arc::clone(&self.storage);
+            move || {
+                storage
+                    .blocks()
+                    .get_block_and_witnesses(&hash)
+                    .map_err(|e| ModuleError::op_err("Failed to get block and witnesses", e))
+            }
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?
+    }
+
+    // === Lightning API Methods ===
+    async fn get_lightning_node_url(&self) -> Result<Option<String>, ModuleError> {
+        // Query Lightning module storage for node URL
+        // Module storage has been removed. Lightning module should use RPC or its own DB.
+        Ok(None)
+    }
+
+    async fn get_lightning_info(&self) -> Result<Option<LightningInfo>, ModuleError> {
+        // Module storage has been removed. Lightning module should use RPC or its own DB.
+        Ok(None)
+    }
+
+    // === Payment API Methods ===
+    async fn get_payment_state(
+        &self,
+        _payment_id: &str,
+    ) -> Result<Option<PaymentState>, ModuleError> {
+        Err(ModuleError::OperationError(
+            module_error_msg::PAYMENT_STATE_MACHINE_NOT_AVAILABLE.to_string(),
+        ))
+    }
+
+    // === Additional Mempool API Methods ===
+    async fn check_transaction_in_mempool(&self, tx_hash: &Hash) -> Result<bool, ModuleError> {
+        let mempool = self.mempool_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        Ok(mempool.get_transaction(tx_hash).is_some())
+    }
+
+    async fn get_fee_estimate(&self, target_blocks: u32) -> Result<u64, ModuleError> {
+        if target_blocks == 0 {
+            return Err(ModuleError::OperationError(
+                "target_blocks must be at least 1".to_string(),
+            ));
+        }
+        // Check hooks for cached value first
+        if let Some(hook_mgr) = &self.hook_manager {
+            let hooks = hook_mgr.read().await;
+            if let Some(cached_estimate) = hooks.get_fee_estimate_cached(target_blocks).await {
+                return Ok(cached_estimate);
+            }
+        }
+
+        // Fall back to normal calculation
+        let mempool = self.mempool_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        // Implement fee estimation algorithm
+        // Uses a simple approach: calculate fee rate histogram from mempool
+        // and return the fee rate needed for target_blocks confirmation
+
+        let mempool = Arc::clone(mempool);
+        let storage = Arc::clone(&self.storage);
+        let fee_rates = tokio::task::spawn_blocking(move || {
+            mempool.fee_rates_for_storage(Some(storage.as_ref()))
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?;
+
+        let mut fee_rates = fee_rates;
+        if fee_rates.is_empty() {
+            return Err(ModuleError::OperationError(
+                "mempool has no fee rates".to_string(),
+            ));
+        }
+
+        // Sort fee rates and find the rate needed for target_blocks confirmation
+        // Simple approach: use median fee rate, adjusted for target blocks
+        fee_rates.sort();
+        let median_idx = fee_rates.len() / 2;
+        let median_fee_rate = fee_rates[median_idx];
+
+        // Median fee rate scaled by target confirmation window.
+        let adjusted_fee_rate = if target_blocks > 6 {
+            median_fee_rate / 2 // Lower fee for longer confirmation time
+        } else if target_blocks > 1 {
+            median_fee_rate // Standard fee
+        } else {
+            median_fee_rate * 2 // Higher fee for immediate confirmation
+        };
+
+        Ok(adjusted_fee_rate.max(1)) // Minimum 1 sat/vbyte
+    }
+
+    async fn register_rpc_endpoint(
+        &self,
+        method: String,
+        description: String,
+    ) -> Result<(), ModuleError> {
+        let rpc_server = self.rpc_server.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::RPC_SERVER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let ipc_server = self.ipc_server.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::IPC_SERVER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string())
+        })?;
+
+        // Get RPC request channel for this module
+        let ipc_server_guard = ipc_server.lock().await;
+        let rpc_channel = ipc_server_guard
+            .get_rpc_channel(&module_id)
+            .await
+            .ok_or_else(|| {
+                ModuleError::OperationError(format!("RPC channel not found for module {module_id}"))
+            })?;
+        drop(ipc_server_guard);
+
+        // Create IPC-based RPC handler
+        let handler = Arc::new(crate::module::rpc::ipc_handler::IpcRpcHandler::new(
+            module_id.clone(),
+            method.clone(),
+            rpc_channel,
+        ));
+
+        // Register with RPC server
+        rpc_server
+            .register_module_endpoint(method.clone(), module_id.clone(), handler)
+            .await
+            .map_err(|e| ModuleError::op_err("Failed to register RPC endpoint", e))?;
+
+        Ok(())
+    }
+
+    async fn unregister_rpc_endpoint(&self, method: &str) -> Result<(), ModuleError> {
+        let rpc_server = self.rpc_server.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::RPC_SERVER_NOT_AVAILABLE.to_string())
+        })?;
+
+        rpc_server
+            .unregister_module_endpoint(method)
+            .await
+            .map_err(ModuleError::OperationError)
+    }
+
+    async fn register_core_rpc_override(
+        &self,
+        method: String,
+        description: String,
+    ) -> Result<(), ModuleError> {
+        let rpc_server = self.rpc_server.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::RPC_SERVER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let ipc_server = self.ipc_server.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::IPC_SERVER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string())
+        })?;
+
+        let ipc_server_guard = ipc_server.lock().await;
+        let rpc_channel = ipc_server_guard
+            .get_rpc_channel(&module_id)
+            .await
+            .ok_or_else(|| {
+                ModuleError::OperationError(format!("RPC channel not found for module {module_id}"))
+            })?;
+        drop(ipc_server_guard);
+
+        let handler = Arc::new(crate::module::rpc::ipc_handler::IpcRpcHandler::new(
+            module_id.clone(),
+            method.clone(),
+            rpc_channel,
+        ));
+
+        rpc_server
+            .register_core_rpc_override(method, module_id, handler)
+            .await
+            .map_err(|e| ModuleError::op_err("Failed to register core RPC override", e))?;
+
+        // description is informational — stored in future getrpcinfo expansions
+        drop(description);
+        Ok(())
+    }
+
+    async fn unregister_core_rpc_override(&self, method: &str) -> Result<(), ModuleError> {
+        let rpc_server = self.rpc_server.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::RPC_SERVER_NOT_AVAILABLE.to_string())
+        })?;
+
+        rpc_server
+            .unregister_core_rpc_override(method)
+            .await
+            .map_err(ModuleError::OperationError)
+    }
+
+    async fn register_timer(
+        &self,
+        interval_seconds: u64,
+        callback: Arc<dyn crate::module::timers::manager::TimerCallback>,
+    ) -> Result<crate::module::timers::manager::TimerId, ModuleError> {
+        let timer_manager = self.timer_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::TIMER_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let module_id = self.module_id_for_timers.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET_FOR_TIMER.to_string())
+        })?;
+
+        timer_manager
+            .register_timer(module_id.clone(), interval_seconds, callback)
+            .await
+            .map_err(ModuleError::OperationError)
+    }
+
+    async fn cancel_timer(
+        &self,
+        timer_id: crate::module::timers::manager::TimerId,
+    ) -> Result<(), ModuleError> {
+        let timer_manager = self.timer_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::TIMER_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        timer_manager
+            .cancel_timer(timer_id)
+            .await
+            .map_err(ModuleError::OperationError)
+    }
+
+    async fn schedule_task(
+        &self,
+        delay_seconds: u64,
+        callback: Arc<dyn crate::module::timers::manager::TaskCallback>,
+    ) -> Result<crate::module::timers::manager::TaskId, ModuleError> {
+        let timer_manager = self.timer_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::TIMER_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let module_id = self.module_id_for_timers.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET_FOR_TASK.to_string())
+        })?;
+
+        timer_manager
+            .schedule_task(module_id.clone(), delay_seconds, callback)
+            .await
+            .map_err(ModuleError::OperationError)
+    }
+
+    async fn report_metric(&self, metric: Metric) -> Result<(), ModuleError> {
+        let metrics_manager = self.metrics_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::METRICS_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let module_id = self.module_id_for_metrics.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET_FOR_METRICS.to_string())
+        })?;
+
+        metrics_manager
+            .report_metric(module_id.clone(), metric)
+            .await;
+        Ok(())
+    }
+
+    async fn get_module_metrics(&self, module_id: &str) -> Result<Vec<Metric>, ModuleError> {
+        let metrics_manager = self.metrics_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::METRICS_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        Ok(metrics_manager.get_module_metrics(module_id).await)
+    }
+
+    async fn get_all_metrics(
+        &self,
+    ) -> Result<std::collections::HashMap<String, Vec<Metric>>, ModuleError> {
+        let metrics_manager = self.metrics_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::METRICS_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        Ok(metrics_manager.get_all_metrics().await)
+    }
+
+    // === Filesystem API Methods ===
+    async fn read_file(&self, path: String) -> Result<Vec<u8>, ModuleError> {
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string())
+        })?;
+
+        let sandbox = {
+            let sandboxes = self.module_filesystem_sandboxes.read().await;
+            sandboxes
+                .get(&module_id)
+                .ok_or_else(|| {
+                    ModuleError::OperationError(format!(
+                        "Filesystem sandbox not initialized for module {module_id}"
+                    ))
+                })?
+                .clone()
+        };
+
+        let data_dir = {
+            let dirs = self.module_data_dirs.read().await;
+            dirs.get(&module_id)
+                .ok_or_else(|| {
+                    ModuleError::OperationError(format!(
+                        "Module data directory not set for module {module_id}"
+                    ))
+                })?
+                .clone()
+        };
+
+        // Validate and resolve path
+        let full_path = if path.starts_with('/') {
+            // Absolute path - validate against sandbox
+            sandbox.validate_path(&path)?
+        } else {
+            // Relative path - join with module data directory
+            let joined = data_dir.join(&path);
+            sandbox.validate_path(&joined)?
+        };
+
+        tokio::fs::read(&full_path)
+            .await
+            .map_err(|e| ModuleError::op_err("Failed to read file", e))
+    }
+
+    async fn write_file(&self, path: String, data: Vec<u8>) -> Result<(), ModuleError> {
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string())
+        })?;
+
+        let sandbox = {
+            let sandboxes = self.module_filesystem_sandboxes.read().await;
+            sandboxes
+                .get(&module_id)
+                .ok_or_else(|| {
+                    ModuleError::OperationError(format!(
+                        "Filesystem sandbox not initialized for module {module_id}"
+                    ))
+                })?
+                .clone()
+        };
+
+        let data_dir = {
+            let dirs = self.module_data_dirs.read().await;
+            dirs.get(&module_id)
+                .ok_or_else(|| {
+                    ModuleError::OperationError(format!(
+                        "Module data directory not set for module {module_id}"
+                    ))
+                })?
+                .clone()
+        };
+
+        // Validate and resolve path
+        let full_path = if path.starts_with('/') {
+            sandbox.validate_path(&path)?
+        } else {
+            let joined = data_dir.join(&path);
+            sandbox.validate_path(&joined)?
+        };
+
+        // Create parent directory if needed
+        if let Some(parent) = full_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| ModuleError::op_err("Failed to create directory", e))?;
+        }
+
+        tokio::fs::write(&full_path, data)
+            .await
+            .map_err(|e| ModuleError::op_err("Failed to write file", e))
+    }
+
+    async fn delete_file(&self, path: String) -> Result<(), ModuleError> {
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string())
+        })?;
+
+        let sandbox = {
+            let sandboxes = self.module_filesystem_sandboxes.read().await;
+            sandboxes
+                .get(&module_id)
+                .ok_or_else(|| {
+                    ModuleError::OperationError(format!(
+                        "Filesystem sandbox not initialized for module {module_id}"
+                    ))
+                })?
+                .clone()
+        };
+
+        let data_dir = {
+            let dirs = self.module_data_dirs.read().await;
+            dirs.get(&module_id)
+                .ok_or_else(|| {
+                    ModuleError::OperationError(format!(
+                        "Module data directory not set for module {module_id}"
+                    ))
+                })?
+                .clone()
+        };
+
+        // Validate and resolve path
+        let full_path = if path.starts_with('/') {
+            sandbox.validate_path(&path)?
+        } else {
+            let joined = data_dir.join(&path);
+            sandbox.validate_path(&joined)?
+        };
+
+        tokio::fs::remove_file(&full_path)
+            .await
+            .map_err(|e| ModuleError::op_err("Failed to delete file", e))
+    }
+
+    async fn list_directory(&self, path: String) -> Result<Vec<String>, ModuleError> {
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string())
+        })?;
+
+        let sandbox = {
+            let sandboxes = self.module_filesystem_sandboxes.read().await;
+            sandboxes
+                .get(&module_id)
+                .ok_or_else(|| {
+                    ModuleError::OperationError(format!(
+                        "Filesystem sandbox not initialized for module {module_id}"
+                    ))
+                })?
+                .clone()
+        };
+
+        let data_dir = {
+            let dirs = self.module_data_dirs.read().await;
+            dirs.get(&module_id)
+                .ok_or_else(|| {
+                    ModuleError::OperationError(format!(
+                        "Module data directory not set for module {module_id}"
+                    ))
+                })?
+                .clone()
+        };
+
+        // Validate and resolve path
+        let full_path = if path.starts_with('/') {
+            sandbox.validate_path(&path)?
+        } else {
+            let joined = data_dir.join(&path);
+            sandbox.validate_path(&joined)?
+        };
+
+        let mut entries = Vec::new();
+        let mut dir = tokio::fs::read_dir(&full_path)
+            .await
+            .map_err(|e| ModuleError::op_err("Failed to read directory", e))?;
+
+        while let Some(entry) = dir
+            .next_entry()
+            .await
+            .map_err(|e| ModuleError::op_err("Failed to read directory entry", e))?
+        {
+            if let Some(name) = entry.file_name().to_str() {
+                entries.push(name.to_string());
+            }
+        }
+
+        Ok(entries)
+    }
+
+    async fn create_directory(&self, path: String) -> Result<(), ModuleError> {
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string())
+        })?;
+
+        let sandbox = {
+            let sandboxes = self.module_filesystem_sandboxes.read().await;
+            sandboxes
+                .get(&module_id)
+                .ok_or_else(|| {
+                    ModuleError::OperationError(format!(
+                        "Filesystem sandbox not initialized for module {module_id}"
+                    ))
+                })?
+                .clone()
+        };
+
+        let data_dir = {
+            let dirs = self.module_data_dirs.read().await;
+            dirs.get(&module_id)
+                .ok_or_else(|| {
+                    ModuleError::OperationError(format!(
+                        "Module data directory not set for module {module_id}"
+                    ))
+                })?
+                .clone()
+        };
+
+        // Validate and resolve path
+        let full_path = if path.starts_with('/') {
+            sandbox.validate_path(&path)?
+        } else {
+            let joined = data_dir.join(&path);
+            sandbox.validate_path(&joined)?
+        };
+
+        tokio::fs::create_dir_all(&full_path)
+            .await
+            .map_err(|e| ModuleError::op_err("Failed to create directory", e))
+    }
+
+    async fn get_file_metadata(
+        &self,
+        path: String,
+    ) -> Result<crate::module::ipc::protocol::FileMetadata, ModuleError> {
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ID_NOT_SET.to_string())
+        })?;
+
+        let sandbox = {
+            let sandboxes = self.module_filesystem_sandboxes.read().await;
+            sandboxes
+                .get(&module_id)
+                .ok_or_else(|| {
+                    ModuleError::OperationError(format!(
+                        "Filesystem sandbox not initialized for module {module_id}"
+                    ))
+                })?
+                .clone()
+        };
+
+        let data_dir = {
+            let dirs = self.module_data_dirs.read().await;
+            dirs.get(&module_id)
+                .ok_or_else(|| {
+                    ModuleError::OperationError(format!(
+                        "Module data directory not set for module {module_id}"
+                    ))
+                })?
+                .clone()
+        };
+
+        // Validate and resolve path
+        let full_path = if path.starts_with('/') {
+            sandbox.validate_path(&path)?
+        } else {
+            let joined = data_dir.join(&path);
+            sandbox.validate_path(&joined)?
+        };
+
+        let metadata = tokio::fs::metadata(&full_path)
+            .await
+            .map_err(|e| ModuleError::op_err("Failed to get file metadata", e))?;
+
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+
+        let created = metadata
+            .created()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+
+        Ok(crate::module::ipc::protocol::FileMetadata {
+            path: full_path.to_string_lossy().to_string(),
+            size: metadata.len(),
+            is_file: metadata.is_file(),
+            is_directory: metadata.is_dir(),
+            modified,
+            created,
+        })
+    }
+
+    async fn initialize_module(
+        &self,
+        module_id: String,
+        module_data_dir: std::path::PathBuf,
+        base_data_dir: std::path::PathBuf,
+    ) -> Result<(), ModuleError> {
+        // Delegate to the public method
+        NodeApiImpl::initialize_module(self, module_id, module_data_dir, base_data_dir).await
+    }
+
+    async fn discover_modules(
+        &self,
+    ) -> Result<Vec<crate::module::traits::ModuleInfo>, ModuleError> {
+        let module_manager = self.module_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let manager = module_manager.lock().await;
+        let module_info_list = manager.get_all_module_info().await;
+
+        let mut result = Vec::new();
+        for (module_id, metadata, state) in module_info_list {
+            // Extract module name from module_id (format: {module_name}_{uuid})
+            let module_name = module_id
+                .split('_')
+                .next()
+                .unwrap_or(&module_id)
+                .to_string();
+
+            result.push(crate::module::traits::ModuleInfo {
+                module_id: module_id.clone(),
+                module_name: metadata.name.clone(),
+                version: metadata.version.clone(),
+                capabilities: metadata.capabilities.clone(),
+                status: state,
+                api_version: 1, // Current API version
+            });
+        }
+
+        Ok(result)
+    }
+
+    async fn get_module_info(
+        &self,
+        module_id: &str,
+    ) -> Result<Option<crate::module::traits::ModuleInfo>, ModuleError> {
+        let module_manager = self.module_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let manager = module_manager.lock().await;
+
+        // Try to find by full module_id first
+        if let Some(metadata) = manager.get_module_metadata(module_id).await {
+            let state = manager
+                .get_module_state(module_id)
+                .await
+                .unwrap_or(crate::module::traits::ModuleState::Stopped);
+
+            // Extract module name from module_id
+            let module_name = module_id.split('_').next().unwrap_or(module_id).to_string();
+
+            return Ok(Some(crate::module::traits::ModuleInfo {
+                module_id: module_id.to_string(),
+                module_name: metadata.name.clone(),
+                version: metadata.version.clone(),
+                capabilities: metadata.capabilities.clone(),
+                status: state,
+                api_version: 1,
+            }));
+        }
+
+        // If not found by full ID, try by module name (first part before _)
+        let module_name = module_id.split('_').next().unwrap_or(module_id);
+        if let Some(metadata) = manager.get_module_metadata(module_name).await {
+            let state = manager
+                .get_module_state(module_name)
+                .await
+                .unwrap_or(crate::module::traits::ModuleState::Stopped);
+
+            // Find the actual module_id (with UUID)
+            let modules = manager.list_modules().await;
+            let actual_module_id = modules
+                .iter()
+                .find(|id| id.starts_with(&format!("{module_name}_")))
+                .cloned()
+                .unwrap_or_else(|| module_id.to_string());
+
+            return Ok(Some(crate::module::traits::ModuleInfo {
+                module_id: actual_module_id,
+                module_name: metadata.name.clone(),
+                version: metadata.version.clone(),
+                capabilities: metadata.capabilities.clone(),
+                status: state,
+                api_version: 1,
+            }));
+        }
+
+        Ok(None)
+    }
+
+    async fn is_module_available(&self, module_id: &str) -> Result<bool, ModuleError> {
+        let module_manager = self.module_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let manager = module_manager.lock().await;
+
+        // Check by full module_id
+        if manager.get_module_state(module_id).await.is_some() {
+            return Ok(true);
+        }
+
+        // Check by module name
+        let module_name = module_id.split('_').next().unwrap_or(module_id);
+        Ok(manager.get_module_state(module_name).await.is_some())
+    }
+
+    async fn publish_event(
+        &self,
+        event_type: EventType,
+        payload: EventPayload,
+    ) -> Result<(), ModuleError> {
+        let event_manager = self.event_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::EVENT_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        event_manager.publish_event(event_type, payload).await
+    }
+
+    async fn call_module(
+        &self,
+        target_module_id: Option<&str>,
+        method: &str,
+        params: Vec<u8>,
+    ) -> Result<Vec<u8>, ModuleError> {
+        let router = self.module_router.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_ROUTER_NOT_AVAILABLE.to_string())
+        })?;
+
+        // Get caller module ID from instance
+        let caller_module_id = self
+            .module_id
+            .as_ref()
+            .or_else(|| self.current_module_id_for_api.as_ref())
+            .cloned()
+            .unwrap_or_else(|| "blvm".to_string());
+
+        router
+            .route_call(&caller_module_id, target_module_id, method, &params)
+            .await
+    }
+
+    async fn register_module_api(
+        &self,
+        api: Arc<dyn crate::module::inter_module::api::ModuleAPI>,
+    ) -> Result<(), ModuleError> {
+        let registry = self.module_api_registry.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(
+                module_error_msg::MODULE_API_REGISTRY_NOT_AVAILABLE.to_string(),
+            )
+        })?;
+
+        let module_id = self
+            .current_module_id_for_api
+            .as_ref()
+            .or_else(|| self.module_id.as_ref())
+            .ok_or_else(|| {
+                ModuleError::OperationError(
+                    "Module ID not available for API registration".to_string(),
+                )
+            })?
+            .clone();
+
+        registry.register_api(module_id.clone(), api).await
+    }
+
+    async fn unregister_module_api(&self) -> Result<(), ModuleError> {
+        let registry = self.module_api_registry.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(
+                module_error_msg::MODULE_API_REGISTRY_NOT_AVAILABLE.to_string(),
+            )
+        })?;
+
+        let module_id = self
+            .current_module_id_for_api
+            .as_ref()
+            .or_else(|| self.module_id.as_ref())
+            .ok_or_else(|| {
+                ModuleError::OperationError(
+                    "Module ID not available for API unregistration".to_string(),
+                )
+            })?
+            .clone();
+
+        registry.unregister_api(&module_id).await
+    }
+
+    async fn register_subprocess_module_api(
+        &self,
+        module_id: &str,
+        methods: Vec<String>,
+        api_version: u32,
+    ) -> Result<(), ModuleError> {
+        let registry = self.module_api_registry.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(
+                module_error_msg::MODULE_API_REGISTRY_NOT_AVAILABLE.to_string(),
+            )
+        })?;
+
+        let module_manager = self.module_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError("Module manager not available".to_string())
+        })?;
+
+        let ipc_handle = {
+            #[cfg(unix)]
+            {
+                module_manager.lock().await.ipc_handle().ok_or_else(|| {
+                    ModuleError::OperationError("IPC handle not available".to_string())
+                })?
+            }
+            #[cfg(not(unix))]
+            {
+                return Err(ModuleError::OperationError(
+                    "Subprocess ModuleAPI is only supported on Unix".to_string(),
+                ));
+            }
+        };
+
+        let proxy = crate::module::inter_module::IpcForwardingModuleAPI::new(
+            module_id.to_string(),
+            ipc_handle,
+            methods,
+            api_version,
+        );
+
+        registry
+            .register_api(module_id.to_string(), Arc::new(proxy))
+            .await
+    }
+
+    async fn unregister_subprocess_module_api(&self, module_id: &str) -> Result<(), ModuleError> {
+        let Some(registry) = self.module_api_registry.as_ref() else {
+            return Ok(());
+        };
+        registry.unregister_api(module_id).await
+    }
+
+    async fn send_mesh_packet_to_module(
+        &self,
+        module_id: &str,
+        packet_data: Vec<u8>,
+        peer_addr: String,
+    ) -> Result<(), ModuleError> {
+        // Use call_module to send mesh packet to the mesh module
+        // The mesh module should have a "handle_mesh_packet" method registered
+        let params = bincode::serialize(&(packet_data, peer_addr))
+            .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
+
+        self.call_module(Some(module_id), "handle_mesh_packet", params)
+            .await?;
+        Ok(())
+    }
+
+    async fn send_mesh_packet_to_peer(
+        &self,
+        peer_addr: String,
+        packet_data: Vec<u8>,
+    ) -> Result<(), ModuleError> {
+        let network_manager = self.network_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        // Parse peer address (can be SocketAddr string or TransportAddr)
+        // Try parsing as SocketAddr first
+        if let Ok(socket_addr) = peer_addr.parse::<std::net::SocketAddr>() {
+            // Send via SocketAddr
+            network_manager
+                .send_to_peer(socket_addr, packet_data)
+                .await
+                .map_err(|e| ModuleError::op_err("Failed to send mesh packet", e))?;
+        } else {
+            // Try parsing as TransportAddr (format: "tcp:127.0.0.1:8333" or "iroh:...")
+            use crate::network::transport::TransportAddr;
+            let transport_addr = if let Some(addr_str) = peer_addr.strip_prefix("tcp:") {
+                addr_str
+                    .parse::<std::net::SocketAddr>()
+                    .map(TransportAddr::Tcp)
+                    .map_err(|e| ModuleError::op_err("Invalid TCP address", e))?
+            } else if peer_addr.starts_with("quinn:") {
+                #[cfg(feature = "quinn")]
+                {
+                    let addr_str = &peer_addr[6..];
+                    addr_str
+                        .parse::<std::net::SocketAddr>()
+                        .map(TransportAddr::Quinn)
+                        .map_err(|e| ModuleError::op_err("Invalid Quinn address", e))?
+                }
+                #[cfg(not(feature = "quinn"))]
+                return Err(ModuleError::OperationError(
+                    "Quinn transport not enabled".to_string(),
+                ));
+            } else if let Some(node_id_str) = peer_addr.strip_prefix("iroh:") {
+                #[cfg(feature = "iroh")]
+                {
+                    let node_id_bytes = hex::decode(node_id_str)
+                        .map_err(|e| ModuleError::op_err("Invalid Iroh node ID hex", e))?;
+                    if node_id_bytes.len() != 32 {
+                        return Err(ModuleError::OperationError(
+                            "Iroh node ID must be 32 bytes".to_string(),
+                        ));
+                    }
+                    let mut node_id = [0u8; 32];
+                    node_id.copy_from_slice(&node_id_bytes);
+                    TransportAddr::Iroh(node_id.to_vec())
+                }
+                #[cfg(not(feature = "iroh"))]
+                return Err(ModuleError::OperationError(
+                    "Iroh transport not enabled".to_string(),
+                ));
+            } else {
+                return Err(ModuleError::OperationError(format!(
+                    "Invalid peer address format: {peer_addr}"
+                )));
+            };
+
+            // Send via TransportAddr
+            network_manager
+                .send_to_peer_by_transport(transport_addr, packet_data)
+                .await
+                .map_err(|e| ModuleError::op_err("Failed to send mesh packet", e))?;
+        }
+
+        Ok(())
+    }
+
+    async fn send_peer_transport_payload(
+        &self,
+        peer_addr: String,
+        message_data: Vec<u8>,
+    ) -> Result<(), ModuleError> {
+        let network_manager = self.network_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        // Parse peer address (can be SocketAddr string or TransportAddr)
+        // Try parsing as SocketAddr first
+        if let Ok(socket_addr) = peer_addr.parse::<std::net::SocketAddr>() {
+            network_manager
+                .send_to_peer(socket_addr, message_data)
+                .await
+                .map_err(|e| ModuleError::op_err("Failed to send peer transport payload", e))?;
+        } else {
+            // Try parsing as TransportAddr (format: "tcp:127.0.0.1:8333" or "iroh:...")
+            use crate::network::transport::TransportAddr;
+            let transport_addr = if let Some(addr_str) = peer_addr.strip_prefix("tcp:") {
+                addr_str
+                    .parse::<std::net::SocketAddr>()
+                    .map(TransportAddr::Tcp)
+                    .map_err(|e| ModuleError::op_err("Invalid TCP address", e))?
+            } else if peer_addr.starts_with("quinn:") {
+                #[cfg(feature = "quinn")]
+                {
+                    let addr_str = &peer_addr[6..];
+                    addr_str
+                        .parse::<std::net::SocketAddr>()
+                        .map(TransportAddr::Quinn)
+                        .map_err(|e| ModuleError::op_err("Invalid Quinn address", e))?
+                }
+                #[cfg(not(feature = "quinn"))]
+                return Err(ModuleError::OperationError(
+                    "Quinn transport not enabled".to_string(),
+                ));
+            } else if let Some(node_id_str) = peer_addr.strip_prefix("iroh:") {
+                #[cfg(feature = "iroh")]
+                {
+                    let node_id_bytes = hex::decode(node_id_str)
+                        .map_err(|e| ModuleError::op_err("Invalid Iroh node ID hex", e))?;
+                    if node_id_bytes.len() != 32 {
+                        return Err(ModuleError::OperationError(
+                            "Iroh node ID must be 32 bytes".to_string(),
+                        ));
+                    }
+                    let mut node_id = [0u8; 32];
+                    node_id.copy_from_slice(&node_id_bytes);
+                    TransportAddr::Iroh(node_id.to_vec())
+                }
+                #[cfg(not(feature = "iroh"))]
+                return Err(ModuleError::OperationError(
+                    "Iroh transport not enabled".to_string(),
+                ));
+            } else {
+                return Err(ModuleError::OperationError(format!(
+                    "Invalid peer address format: {peer_addr}"
+                )));
+            };
+
+            // Send via TransportAddr
+            network_manager
+                .send_to_peer_by_transport(transport_addr, message_data)
+                .await
+                .map_err(|e| ModuleError::op_err("Failed to send peer transport payload", e))?;
+        }
+
+        Ok(())
+    }
+
+    async fn get_module_health(
+        &self,
+        module_id: &str,
+    ) -> Result<Option<crate::module::process::monitor::ModuleHealth>, ModuleError> {
+        let module_manager = self.module_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let manager = module_manager.lock().await;
+        // Extract module name from module_id (format: {module_name}_{uuid})
+        let module_name = module_id.split('_').next().unwrap_or(module_id);
+
+        // Get module state
+        if let Ok(reported) = self.reported_health.lock() {
+            if let Some(health) = reported
+                .get(module_id)
+                .or_else(|| reported.get(module_name))
+            {
+                return Ok(Some(health.clone()));
+            }
+        }
+
+        let state = manager.get_module_state(module_name).await;
+
+        // Convert ModuleState to ModuleHealth
+        match state {
+            Some(ModuleState::Running) => {
+                Ok(Some(crate::module::process::monitor::ModuleHealth::Healthy))
+            }
+            Some(ModuleState::Initializing) => Ok(Some(
+                crate::module::process::monitor::ModuleHealth::Unresponsive,
+            )),
+            Some(ModuleState::Stopped) => Ok(Some(
+                crate::module::process::monitor::ModuleHealth::Unresponsive,
+            )),
+            Some(ModuleState::Stopping) => Ok(Some(
+                crate::module::process::monitor::ModuleHealth::Unresponsive,
+            )),
+            Some(ModuleState::Error(err)) => Ok(Some(
+                crate::module::process::monitor::ModuleHealth::Crashed(err),
+            )),
+            None => Ok(None),
+        }
+    }
+
+    async fn get_all_module_health(
+        &self,
+    ) -> Result<Vec<(String, crate::module::process::monitor::ModuleHealth)>, ModuleError> {
+        let module_manager = self.module_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MODULE_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let manager = module_manager.lock().await;
+        let modules = manager.list_modules().await;
+
+        let mut result = Vec::new();
+        for module_id in modules {
+            let module_name = module_id.split('_').next().unwrap_or(&module_id);
+            if let Some(state) = manager.get_module_state(module_name).await {
+                let health = match state {
+                    ModuleState::Running => crate::module::process::monitor::ModuleHealth::Healthy,
+                    ModuleState::Initializing => {
+                        crate::module::process::monitor::ModuleHealth::Healthy
+                    }
+                    ModuleState::Stopped => {
+                        crate::module::process::monitor::ModuleHealth::Unresponsive
+                    }
+                    ModuleState::Stopping => {
+                        crate::module::process::monitor::ModuleHealth::Unresponsive
+                    }
+                    ModuleState::Error(err) => {
+                        crate::module::process::monitor::ModuleHealth::Crashed(err)
+                    }
+                };
+                result.push((module_id, health));
+            }
+        }
+
+        Ok(result)
+    }
+
+    async fn get_block_template(
+        &self,
+        _rules: Vec<String>,
+        coinbase_script: Option<Vec<u8>>,
+        coinbase_address: Option<String>,
+    ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError> {
+        let commons = self.try_commons_gbt_outputs().await?;
+        self.build_block_template(coinbase_script, coinbase_address, commons, None)
+    }
+
+    async fn get_block_template_with_outputs(
+        &self,
+        _rules: Vec<String>,
+        coinbase_script: Option<Vec<u8>>,
+        coinbase_outputs: Vec<(i64, Vec<u8>)>,
+    ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError> {
+        self.build_block_template(coinbase_script, None, Some(coinbase_outputs), None)
+    }
+
+    async fn get_block_template_declared(
+        &self,
+        _rules: Vec<String>,
+        coinbase_script: Option<Vec<u8>>,
+        coinbase_outputs: Vec<(i64, Vec<u8>)>,
+        declared_txids: Vec<Hash>,
+    ) -> Result<blvm_protocol::mining::BlockTemplate, ModuleError> {
+        self.build_block_template(
+            coinbase_script,
+            None,
+            Some(coinbase_outputs),
+            Some(&declared_txids),
+        )
+    }
+
+    async fn submit_mempool_transaction(
+        &self,
+        tx: Transaction,
+        witnesses: Option<Vec<blvm_protocol::Witness>>,
+    ) -> Result<bool, ModuleError> {
+        use blvm_protocol::block::calculate_tx_id;
+        let mempool = self.mempool_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+        let txid = calculate_tx_id(&tx);
+        if mempool.get_transaction(&txid).is_some() {
+            return Ok(false);
+        }
+        if self
+            .storage
+            .transactions()
+            .has_transaction(&txid)
+            .unwrap_or(false)
+        {
+            return Err(ModuleError::OperationError(format!(
+                "transaction {} already in chain",
+                hex::encode(txid)
+            )));
+        }
+        match mempool.add_transaction_with_witness(tx, witnesses) {
+            Ok(true) => Ok(true),
+            Ok(false) => Err(ModuleError::OperationError(format!(
+                "transaction {} rejected by mempool policy",
+                hex::encode(txid)
+            ))),
+            Err(e) => Err(ModuleError::op_err(
+                "Failed to add transaction to mempool",
+                e,
+            )),
+        }
+    }
+
+    async fn merge_block_serve_denylist(&self, block_hashes: &[Hash]) -> Result<(), ModuleError> {
+        if block_hashes.is_empty() {
+            return Ok(());
+        }
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.merge_block_serve_denylist(block_hashes);
+        Ok(())
+    }
+
+    async fn get_block_serve_denylist_snapshot(
+        &self,
+    ) -> Result<BlockServeDenylistSnapshot, ModuleError> {
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        Ok(nm.block_serve_denylist_snapshot())
+    }
+
+    async fn clear_block_serve_denylist(&self) -> Result<(), ModuleError> {
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.clear_block_serve_denylist();
+        Ok(())
+    }
+
+    async fn replace_block_serve_denylist(&self, block_hashes: &[Hash]) -> Result<(), ModuleError> {
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.replace_block_serve_denylist(block_hashes);
+        Ok(())
+    }
+
+    async fn merge_tx_serve_denylist(&self, tx_hashes: &[Hash]) -> Result<(), ModuleError> {
+        if tx_hashes.is_empty() {
+            return Ok(());
+        }
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.merge_tx_serve_denylist(tx_hashes);
+        Ok(())
+    }
+
+    async fn get_tx_serve_denylist_snapshot(&self) -> Result<TxServeDenylistSnapshot, ModuleError> {
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        Ok(nm.tx_serve_denylist_snapshot())
+    }
+
+    async fn clear_tx_serve_denylist(&self) -> Result<(), ModuleError> {
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.clear_tx_serve_denylist();
+        Ok(())
+    }
+
+    async fn replace_tx_serve_denylist(&self, tx_hashes: &[Hash]) -> Result<(), ModuleError> {
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.replace_tx_serve_denylist(tx_hashes);
+        Ok(())
+    }
+
+    async fn get_sync_status(&self) -> Result<SyncStatus, ModuleError> {
+        let Some(ref sc) = self.sync_coordinator else {
+            return Err(ModuleError::OperationError(
+                "sync coordinator not available".to_string(),
+            ));
+        };
+        let coordinator = sc.lock().await;
+        let state = coordinator.current_sync_state();
+        let phase = state.as_event_str().to_string();
+        let error_message = match &state {
+            crate::node::sync::SyncState::Error(s) => Some(s.clone()),
+            _ => None,
+        };
+        Ok(SyncStatus {
+            phase,
+            progress: coordinator.progress(),
+            is_synced: coordinator.is_synced(),
+            error_message,
+        })
+    }
+
+    async fn ban_peer(
+        &self,
+        peer_addr: &str,
+        ban_duration_seconds: Option<u64>,
+    ) -> Result<(), ModuleError> {
+        let nm = self.network_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+        let addr: std::net::SocketAddr = peer_addr
+            .parse()
+            .map_err(|e| ModuleError::OperationError(format!("invalid peer address: {e}")))?;
+        let unban_ts = match ban_duration_seconds {
+            None => 0u64,
+            Some(0) => 0u64,
+            Some(secs) => crate::utils::current_timestamp().saturating_add(secs),
+        };
+        let nm = Arc::clone(nm);
+        tokio::task::spawn_blocking(move || {
+            nm.ban_peer(addr, unban_ts);
+        })
+        .await
+        .map_err(|e| ModuleError::op_err("Task join error", e))?;
+        Ok(())
+    }
+
+    async fn set_block_serve_maintenance_mode(&self, enabled: bool) -> Result<(), ModuleError> {
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.set_block_serve_maintenance_mode(enabled);
+        Ok(())
+    }
+
+    async fn submit_block(&self, block: Block) -> Result<SubmitBlockResult, ModuleError> {
+        use crate::rpc::mining::MiningRpc;
+        use serde_json::json;
+
+        // Create MiningRpc instance
+        let storage = self.storage.clone();
+        let mempool_manager = self.mempool_manager.as_ref().ok_or_else(|| {
+            ModuleError::OperationError(module_error_msg::MEMPOOL_MANAGER_NOT_AVAILABLE.to_string())
+        })?;
+
+        let mining_rpc = {
+            let m = MiningRpc::with_dependencies(storage, mempool_manager.clone());
+            match &self.network_manager {
+                Some(nm) => m.with_network_manager(Some(Arc::clone(nm))),
+                None => m,
+            }
+        };
+
+        let witnesses = vec![Vec::new(); block.transactions.len()];
+        let block_bytes =
+            blvm_protocol::serialization::serialize_block_with_witnesses(&block, &witnesses, true);
+        let block_hex = hex::encode(block_bytes);
+
+        // Build params
+        let params = json!([block_hex]);
+
+        // Call submit_block via RPC method
+        let result = mining_rpc
+            .submit_block(&params)
+            .await
+            .map_err(|e| ModuleError::op_err("Failed to submit block", e))?;
+
+        // Parse result
+        let result_str = result.as_str().unwrap_or("");
+        match result_str {
+            "" | "null" => Ok(SubmitBlockResult::Accepted),
+            s if s.contains("duplicate") || s.contains("already") => {
+                Ok(SubmitBlockResult::Duplicate)
+            }
+            s => Ok(SubmitBlockResult::Rejected(s.to_string())),
+        }
+    }
+
+    async fn queue_received_block_bytes(&self, block_bytes: Vec<u8>) -> Result<(), ModuleError> {
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.queue_block(block_bytes);
+        Ok(())
+    }
+
+    async fn set_advertised_service_bits(&self, bits: u64) -> Result<(), ModuleError> {
+        if bits != crate::network::protocol::NODE_FIBRE {
+            return Err(ModuleError::OperationError(
+                "only NODE_FIBRE may be advertised by a module".to_string(),
+            ));
+        }
+        let module_id = self.get_module_id().ok_or_else(|| {
+            ModuleError::OperationError(
+                "module id required to advertise service bits".to_string(),
+            )
+        })?;
+        let name = module_service_bit_owner(&module_id);
+        let Some(nm) = self.network_manager.as_ref() else {
+            return Err(ModuleError::OperationError(
+                module_error_msg::NETWORK_MANAGER_NOT_AVAILABLE.to_string(),
+            ));
+        };
+        nm.set_module_service_bits(name, bits);
+        Ok(())
+    }
+
+    async fn clear_module_service_bits(&self, module_name: &str) -> Result<(), ModuleError> {
+        if let Some(nm) = self.network_manager.as_ref() {
+            nm.clear_module_service_bits(module_name);
+        }
+        Ok(())
+    }
+
+    async fn report_module_health(
+        &self,
+        health: crate::module::process::monitor::ModuleHealth,
+    ) -> Result<(), ModuleError> {
+        // Get current module ID
+        let module_id = self
+            .current_module_id_for_api
+            .as_ref()
+            .or_else(|| self.module_id.as_ref())
+            .ok_or_else(|| {
+                ModuleError::OperationError(
+                    "Module ID not available for health reporting".to_string(),
+                )
+            })?
+            .clone();
+
+        // Health reporting is handled by ModuleProcessMonitor automatically
+        // This method allows modules to self-report additional health information
+        self.reported_health
+            .lock()
+            .map_err(|e| ModuleError::OperationError(format!("health report lock: {e}")))?
+            .insert(module_id, health);
+        Ok(())
+    }
+}
+
+fn hash_rate_from_tip(storage: &crate::storage::Storage) -> f64 {
+    let Ok(Some(header)) = storage.chain().get_tip_header() else {
+        return 0.0;
+    };
+    let difficulty = blvm_protocol::pow::difficulty_from_bits(header.bits).unwrap_or(1.0);
+    let height = storage.chain().get_height().ok().flatten().unwrap_or(0);
+    let mut interval = 600u64;
+    if height >= 1 {
+        if let Ok(Some(prev_hash)) = storage.blocks().get_hash_by_height(height - 1) {
+            if let Ok(Some(prev)) = storage.blocks().get_header(&prev_hash) {
+                let dt = header.timestamp.saturating_sub(prev.timestamp);
+                if dt > 0 {
+                    interval = dt;
+                }
+            }
+        }
+    }
+    difficulty * 4_294_967_296.0 / interval as f64
+}
+
+// Safety: NodeApiImpl is safe to share across threads (Sync) because internal mutable state
+// uses Arc/RwLock/Mutex as appropriate; any non-`Sync` types are only touched via these primitives.
+unsafe impl Sync for NodeApiImpl {}
+
+#[cfg(test)]
+mod commons_gbt_tests {
+    use super::*;
+
+    #[test]
+    fn holding_refuses_gbt_outputs() {
+        let v = serde_json::json!({
+            "issue_work": false,
+            "outputs": [{"script": "51", "value_sats": 1}]
+        });
+        assert!(NodeApiImpl::commons_gbt_outputs(&v).is_err());
+    }
+
+    #[test]
+    fn parses_commons_scripts() {
+        let v = serde_json::json!({
+            "issue_work": true,
+            "outputs": [{"script": "51", "value_sats": 5}]
+        });
+        let outs = NodeApiImpl::commons_gbt_outputs(&v).unwrap().unwrap();
+        assert_eq!(outs.len(), 1);
+        assert_eq!(outs[0].0, 5);
+        assert_eq!(outs[0].1, vec![0x51]);
+    }
+}
+
+#[cfg(test)]
+mod mempool_size_tests {
+    use super::*;
+    use crate::module::traits::NodeAPI;
+    use blvm_protocol::opcodes::OP_1;
+    use blvm_protocol::{TransactionInput, TransactionOutput};
+
+    fn spend(prevout: OutPoint, output_value: i64) -> Transaction {
+        Transaction {
+            version: 1,
+            inputs: vec![TransactionInput {
+                prevout,
+                script_sig: Vec::new(),
+                sequence: blvm_protocol::constants::SEQUENCE_FINAL as u64,
+            }]
+            .into(),
+            outputs: vec![TransactionOutput {
+                value: output_value,
+                script_pubkey: vec![OP_1],
+            }]
+            .into(),
+            lock_time: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn mempool_size_counts_a_parent_output_and_ignores_a_negative_value() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let funding = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        let negative = OutPoint {
+            hash: [9u8; 32],
+            index: 0,
+        };
+        storage
+            .utxos()
+            .add_utxo(
+                &funding,
+                &UTXO {
+                    value: 50_000,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 0,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+        storage
+            .utxos()
+            .add_utxo(
+                &negative,
+                &UTXO {
+                    value: -1,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 0,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+
+        let mempool = Arc::new(MempoolManager::new());
+        let mut policy = crate::config::mempool::MempoolPolicyConfig::default();
+        policy.require_standard = false;
+        policy.min_tx_fee = 0;
+        policy.min_relay_fee_rate = 0;
+        mempool.set_policy_config(Some(policy));
+        let parent = spend(funding, 40_000);
+        assert!(mempool.add_transaction(parent.clone()).unwrap());
+        let child = spend(
+            OutPoint {
+                hash: blvm_protocol::block::calculate_tx_id(&parent),
+                index: 0,
+            },
+            25_000,
+        );
+        assert!(mempool.add_transaction(child).unwrap());
+        assert!(mempool.add_transaction(spend(negative, 1_000)).unwrap());
+
+        let api = NodeApiImpl::with_dependencies(storage, None, None, Some(mempool), None);
+        let size = api.get_mempool_size().await.unwrap();
+        assert_eq!(size.transaction_count, 3);
+        assert_eq!(size.total_fee_sats, 25_000);
+    }
+
+    #[tokio::test]
+    async fn empty_pool_and_target_zero_are_not_a_fee_estimate() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::new(temp.path()).unwrap());
+        let mempool = Arc::new(crate::node::mempool::MempoolManager::new());
+        let api = NodeApiImpl::with_dependencies(storage, None, None, Some(mempool), None);
+        assert!(api.get_fee_estimate(0).await.is_err());
+        assert!(api.get_fee_estimate(1).await.is_err());
+        assert!(api.get_fee_estimate(100).await.is_err());
+    }
+}

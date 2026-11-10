@@ -1,0 +1,2317 @@
+//! REST API Server
+//!
+//! Modern REST API server that runs alongside the JSON-RPC server.
+//! Uses the existing hyper infrastructure for consistency.
+
+use crate::network::dos_protection::ConnectionRateLimiter;
+use crate::node::mempool::MempoolManager;
+use crate::rpc::{auth, blockchain, mempool, mining, network, rawtx};
+use crate::storage::Storage;
+use crate::utils::new_request_id;
+use anyhow::Result;
+use bytes::Bytes;
+use http_body_util::Limited;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Incoming;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Method, Request, Response, StatusCode, Uri};
+use hyper_util::rt::TokioIo;
+use serde_json::{Value, json};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use tracing::{debug, error, info, warn};
+
+use super::addresses;
+use super::blocks;
+use super::chain;
+use super::fees;
+use super::mempool as rest_mempool;
+use super::mining as rest_mining;
+use super::network as rest_network;
+use super::node as rest_node;
+use super::rbac;
+use super::transactions;
+use super::types::{ApiError, ApiResponse, read_json_body, rest_error_failed, rest_error_invalid};
+use super::validation as rest_validation;
+use crate::rpc::control::ControlRpc;
+use crate::rpc::errors::HEIGHT_PARAM_REQUIRED_MSG;
+
+/// REST API Server
+#[derive(Clone)]
+pub struct RestApiServer {
+    addr: SocketAddr,
+    blockchain: Arc<blockchain::BlockchainRpc>,
+    network: Arc<network::NetworkRpc>,
+    mempool: Arc<mempool::MempoolRpc>,
+    mining: Arc<mining::MiningRpc>,
+    rawtx: Arc<rawtx::RawTxRpc>,
+    /// Node control RPC (uptime, stop, help, …)
+    control: Option<Arc<ControlRpc>>,
+    /// Authentication manager (optional)
+    auth_manager: Option<Arc<auth::RpcAuthManager>>,
+    /// Whether security headers are enabled
+    security_headers_enabled: bool,
+    /// Connection rate limiter (per-IP per minute)
+    connection_limiter: Option<Arc<tokio::sync::Mutex<ConnectionRateLimiter>>>,
+}
+
+impl RestApiServer {
+    /// Create a new REST API server
+    pub fn new(
+        addr: SocketAddr,
+        blockchain: Arc<blockchain::BlockchainRpc>,
+        network: Arc<network::NetworkRpc>,
+        mempool: Arc<mempool::MempoolRpc>,
+        mining: Arc<mining::MiningRpc>,
+        rawtx: Arc<rawtx::RawTxRpc>,
+    ) -> Self {
+        Self {
+            addr,
+            blockchain,
+            network,
+            mempool,
+            mining,
+            rawtx,
+            control: None,
+            auth_manager: None,
+            security_headers_enabled: true, // Enable security headers by default
+            connection_limiter: None,
+        }
+    }
+
+    /// Create a new REST API server with authentication
+    pub fn with_auth(
+        addr: SocketAddr,
+        blockchain: Arc<blockchain::BlockchainRpc>,
+        network: Arc<network::NetworkRpc>,
+        mempool: Arc<mempool::MempoolRpc>,
+        mining: Arc<mining::MiningRpc>,
+        rawtx: Arc<rawtx::RawTxRpc>,
+        auth_manager: Arc<auth::RpcAuthManager>,
+    ) -> Self {
+        Self {
+            addr,
+            blockchain,
+            network,
+            mempool,
+            mining,
+            rawtx,
+            control: None,
+            auth_manager: Some(auth_manager),
+            security_headers_enabled: true,
+            connection_limiter: None,
+        }
+    }
+
+    /// Set connection rate limiter
+    pub fn with_connection_limiter(
+        mut self,
+        limiter: Arc<tokio::sync::Mutex<ConnectionRateLimiter>>,
+    ) -> Self {
+        self.connection_limiter = Some(limiter);
+        self
+    }
+
+    /// Set control RPC for `/api/v1/node/*` endpoints.
+    pub fn with_control(mut self, control: Arc<ControlRpc>) -> Self {
+        self.control = Some(control);
+        self
+    }
+
+    /// Set authentication manager
+    pub fn set_auth_manager(mut self, auth_manager: Arc<auth::RpcAuthManager>) -> Self {
+        self.auth_manager = Some(auth_manager);
+        self
+    }
+
+    /// Enable or disable security headers
+    pub fn with_security_headers(mut self, enabled: bool) -> Self {
+        self.security_headers_enabled = enabled;
+        self
+    }
+
+    /// Start the REST API server
+    pub async fn start(&self) -> Result<()> {
+        let listener = TcpListener::bind(self.addr).await?;
+        info!("REST API server listening on {}", self.addr);
+
+        let server = Arc::new(self.clone());
+
+        loop {
+            match listener.accept().await {
+                Ok((stream, addr)) => {
+                    // Connection rate limit check
+                    if let Some(ref limiter) = server.connection_limiter {
+                        let mut guard = limiter.lock().await;
+                        if !guard.check_connection(addr.ip()) {
+                            debug!("REST API connection rejected (rate limit) from {}", addr);
+                            drop(stream);
+                            continue;
+                        }
+                    }
+
+                    debug!("New REST API connection from {}", addr);
+                    let server_clone = Arc::clone(&server);
+                    tokio::spawn(async move {
+                        let io = TokioIo::new(stream);
+                        let service = service_fn(move |req| {
+                            Self::handle_request(server_clone.clone(), req, addr)
+                        });
+                        if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
+                            debug!("REST API connection error: {}", e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    error!("Failed to accept REST API connection: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Handle HTTP request
+    async fn handle_request(
+        server: Arc<Self>,
+        req: Request<Incoming>,
+        addr: SocketAddr,
+    ) -> Result<Response<Full<Bytes>>, hyper::Error> {
+        let method = req.method().clone();
+        let uri = req.uri().clone();
+        let path = uri.path();
+
+        // Generate request ID for tracing
+        let request_id = new_request_id();
+
+        debug!(
+            "REST API {} {} from {} (request_id: {})",
+            method,
+            path,
+            addr,
+            &request_id[..8]
+        );
+
+        // Extract headers before consuming request body
+        let headers = req.headers().clone();
+
+        // Authenticate request if authentication is enabled
+        if let Some(ref auth_manager) = server.auth_manager {
+            let auth_result = auth_manager.authenticate_request(&headers, addr).await;
+
+            // Check if authentication failed
+            if let Some(error) = &auth_result.error {
+                warn!("REST API authentication failed from {}: {}", addr, error);
+                return Ok(Self::error_response_with_headers(
+                    server.security_headers_enabled,
+                    StatusCode::UNAUTHORIZED,
+                    "UNAUTHORIZED",
+                    error,
+                    None,
+                    request_id,
+                ));
+            }
+
+            // Check per-user rate limiting (for authenticated users)
+            if let Some(ref user_id) = auth_result.user_id {
+                if !auth_manager
+                    .check_rate_limit_with_endpoint(user_id, Some(addr), Some(path))
+                    .await
+                {
+                    warn!("REST API rate limit exceeded for user from {}", addr);
+                    return Ok(Self::error_response_with_headers(
+                        server.security_headers_enabled,
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "TOO_MANY_REQUESTS",
+                        "Rate limit exceeded",
+                        None,
+                        request_id,
+                    ));
+                }
+            } else {
+                // Unauthenticated request - check per-IP rate limit
+                if !auth_manager
+                    .check_ip_rate_limit_with_endpoint(addr, Some(path))
+                    .await
+                {
+                    return Ok(Self::error_response_with_headers(
+                        server.security_headers_enabled,
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "TOO_MANY_REQUESTS",
+                        "IP rate limit exceeded",
+                        None,
+                        request_id,
+                    ));
+                }
+            }
+
+            // Check per-endpoint rate limiting (stricter for write operations)
+            let endpoint = Self::get_endpoint_for_rate_limiting(path);
+            if !auth_manager.check_method_rate_limit(&endpoint).await {
+                warn!(
+                    "REST API endpoint rate limit exceeded: {} from {}",
+                    endpoint, addr
+                );
+                return Ok(Self::error_response_with_headers(
+                    server.security_headers_enabled,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "TOO_MANY_REQUESTS",
+                    &format!("Endpoint '{endpoint}' rate limit exceeded"),
+                    None,
+                    request_id,
+                ));
+            }
+
+            // RBAC: privileged routes mirror JSON-RPC admin_rpc_methods(); unmapped POST/DELETE fail closed.
+            if rbac::rest_requires_admin(&method, path) {
+                let caller_is_admin = match auth_result.user_id.as_ref() {
+                    Some(uid) => auth_manager.is_user_admin(uid).await,
+                    None => false,
+                };
+                if !caller_is_admin {
+                    warn!(
+                        "REST API admin check failed for {} {} from {}",
+                        method, path, addr
+                    );
+                    return Ok(Self::error_response_with_headers(
+                        server.security_headers_enabled,
+                        StatusCode::FORBIDDEN,
+                        "FORBIDDEN",
+                        "This endpoint requires admin privileges",
+                        None,
+                        request_id,
+                    ));
+                }
+            }
+        }
+
+        // Allow GET, POST, and DELETE (network admin)
+        if method != Method::GET && method != Method::POST && method != Method::DELETE {
+            return Ok(Self::error_response_with_headers(
+                server.security_headers_enabled,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "METHOD_NOT_ALLOWED",
+                "Only GET, POST, and DELETE methods are supported",
+                None,
+                request_id,
+            ));
+        }
+
+        // Route requests
+        let security_headers = server.security_headers_enabled;
+        let response = if path.starts_with("/api/v1/chain") {
+            Self::handle_chain_request(server, method, path, req, &uri, request_id).await
+        } else if path.starts_with("/api/v1/indexes") {
+            Self::handle_indexes_request(server, method, path, &uri, request_id).await
+        } else if path.starts_with("/api/v1/blocks") {
+            Self::handle_block_request(server, method, path, request_id).await
+        } else if path.starts_with("/api/v1/transactions") {
+            Self::handle_transaction_request(server, method, path, req, &uri, request_id).await
+        } else if path.starts_with("/api/v1/addresses") {
+            Self::handle_address_request(server, method, path, request_id).await
+        } else if path.starts_with("/api/v1/mempool") {
+            Self::handle_mempool_request(server, method, path, req, request_id).await
+        } else if path.starts_with("/api/v1/network") {
+            Self::handle_network_request(server, method, path, req, &uri, request_id).await
+        } else if path.starts_with("/api/v1/node") {
+            Self::handle_node_request(server, method, path, req, &uri, request_id).await
+        } else if path.starts_with("/api/v1/mining") {
+            Self::handle_mining_request(server, method, path, req, request_id).await
+        } else if path.starts_with("/api/v1/fees") {
+            Self::handle_fee_request(server, method, path, &uri, request_id).await
+        } else {
+            Self::error_response_with_headers(
+                server.security_headers_enabled,
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                &format!("Endpoint not found: {path}"),
+                None,
+                request_id,
+            )
+        };
+
+        // Response already has security headers added in individual handlers
+        Ok(response)
+    }
+
+    /// Get endpoint identifier for rate limiting
+    fn get_endpoint_for_rate_limiting(path: &str) -> String {
+        // Extract endpoint category for rate limiting
+        if path.starts_with("/api/v1/transactions") {
+            "rest_transactions".to_string()
+        } else if path.starts_with("/api/v1/payments")
+            || path.starts_with("/api/v1/vaults")
+            || path.starts_with("/api/v1/pools")
+        {
+            "rest_payments".to_string() // Write operations - stricter limits
+        } else if path.starts_with("/api/v1/addresses") {
+            "rest_addresses".to_string()
+        } else if path.starts_with("/api/v1/blocks") {
+            "rest_blocks".to_string()
+        } else if path.starts_with("/api/v1/mempool") {
+            "rest_mempool".to_string()
+        } else {
+            "rest_other".to_string()
+        }
+    }
+
+    /// Add security headers to response
+    fn add_security_headers(
+        mut response: Response<Full<Bytes>>,
+        enabled: bool,
+    ) -> Response<Full<Bytes>> {
+        if !enabled {
+            return response;
+        }
+
+        let headers = response.headers_mut();
+
+        // Prevent MIME type sniffing
+        headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
+
+        // Prevent clickjacking
+        headers.insert("X-Frame-Options", "DENY".parse().unwrap());
+
+        // XSS protection (legacy, but still useful)
+        headers.insert("X-XSS-Protection", "1; mode=block".parse().unwrap());
+
+        // Referrer policy
+        headers.insert(
+            "Referrer-Policy",
+            "strict-origin-when-cross-origin".parse().unwrap(),
+        );
+
+        // Content Security Policy (restrictive by default)
+        headers.insert(
+            "Content-Security-Policy",
+            "default-src 'self'".parse().unwrap(),
+        );
+
+        response
+    }
+
+    /// Handle chain-related requests
+    async fn handle_chain_request(
+        server: Arc<Self>,
+        method: Method,
+        path: &str,
+        req: Request<Incoming>,
+        uri: &Uri,
+        request_id: String,
+    ) -> Response<Full<Bytes>> {
+        let security_headers = server.security_headers_enabled;
+        match path {
+            "/api/v1/chain/tip" if method == Method::GET => {
+                match chain::get_chain_tip(&server.blockchain).await {
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("get chain tip", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            "/api/v1/chain/height" if method == Method::GET => {
+                match chain::get_chain_height(&server.blockchain).await {
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("get chain height", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            "/api/v1/chain/info" if method == Method::GET => {
+                match chain::get_chain_info(&server.blockchain).await {
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("get chain info", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            "/api/v1/chain/difficulty" if method == Method::GET => {
+                match chain::get_chain_difficulty(&server.blockchain).await {
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("get chain difficulty", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            "/api/v1/chain/utxo-set" if method == Method::GET => {
+                match chain::get_utxo_set_info(&server.blockchain).await {
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("get utxo set info", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            "/api/v1/chain/tips" if method == Method::GET => {
+                match chain::get_chain_tips(&server.blockchain).await {
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("get chain tips", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            "/api/v1/chain/tx-stats" if method == Method::GET => {
+                let nblocks = uri.query().and_then(|q| {
+                    q.split('&').find_map(|param| {
+                        let mut parts = param.split('=');
+                        if parts.next() == Some("nblocks") {
+                            parts.next()?.parse::<u64>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                });
+                match chain::get_chain_tx_stats(&server.blockchain, nblocks).await {
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("get chain tx stats", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            "/api/v1/chain/prune-info" if method == Method::GET => {
+                match chain::get_prune_info(&server.blockchain).await {
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("get prune info", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            "/api/v1/chain/verify" if method == Method::POST => {
+                let body = match read_json_body(req).await {
+                    Ok(Some(v)) => v,
+                    Ok(None) => json!({}),
+                    Err(e) => {
+                        return Self::error_response_with_headers(
+                            security_headers,
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "PAYLOAD_TOO_LARGE",
+                            &e,
+                            None,
+                            request_id,
+                        );
+                    }
+                };
+                let checklevel = body.get("checklevel").and_then(|v| v.as_u64());
+                let numblocks = body.get("numblocks").and_then(|v| v.as_u64());
+                match chain::verify_chain(&server.blockchain, checklevel, numblocks).await {
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("verify chain", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            "/api/v1/chain/prune" if method == Method::POST => {
+                let body = match read_json_body(req).await {
+                    Ok(Some(v)) => v,
+                    Ok(None) => {
+                        return Self::error_response_with_headers(
+                            security_headers,
+                            StatusCode::BAD_REQUEST,
+                            "BAD_REQUEST",
+                            "POST /api/v1/chain/prune requires JSON body with height",
+                            None,
+                            request_id,
+                        );
+                    }
+                    Err(e) => {
+                        return Self::error_response_with_headers(
+                            security_headers,
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "PAYLOAD_TOO_LARGE",
+                            &e,
+                            None,
+                            request_id,
+                        );
+                    }
+                };
+                let height = body
+                    .get("height")
+                    .and_then(|v| v.as_u64())
+                    .or_else(|| body.as_u64());
+                let height = match height {
+                    Some(h) => h,
+                    None => {
+                        return Self::error_response_with_headers(
+                            security_headers,
+                            StatusCode::BAD_REQUEST,
+                            "BAD_REQUEST",
+                            "POST /api/v1/chain/prune requires numeric height",
+                            None,
+                            request_id,
+                        );
+                    }
+                };
+                match chain::prune_blockchain(&server.blockchain, height).await {
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("prune blockchain", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            _ => Self::error_response_with_headers(
+                security_headers,
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                &format!("Chain endpoint not found: {path}"),
+                None,
+                request_id,
+            ),
+        }
+    }
+
+    async fn handle_indexes_request(
+        server: Arc<Self>,
+        method: Method,
+        path: &str,
+        uri: &Uri,
+        request_id: String,
+    ) -> Response<Full<Bytes>> {
+        let security_headers = server.security_headers_enabled;
+        if method != Method::GET {
+            return Self::error_response_with_headers(
+                security_headers,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "METHOD_NOT_ALLOWED",
+                "Only GET is supported for index endpoints",
+                None,
+                request_id,
+            );
+        }
+        if path != "/api/v1/indexes" {
+            return Self::error_response_with_headers(
+                security_headers,
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                &format!("Index endpoint not found: {path}"),
+                None,
+                request_id,
+            );
+        }
+        let index_name = uri.query().and_then(|q| {
+            q.split('&').find_map(|param| {
+                let mut parts = param.split('=');
+                if parts.next() == Some("name") {
+                    parts.next().map(String::from)
+                } else {
+                    None
+                }
+            })
+        });
+        match chain::get_index_info(&server.blockchain, index_name.as_deref()).await {
+            Ok(data) => Self::success_response_with_headers(data, request_id, security_headers),
+            Err(e) => Self::error_response_with_headers(
+                security_headers,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                &rest_error_failed("get index info", e),
+                None,
+                request_id,
+            ),
+        }
+    }
+
+    /// Handle block-related requests
+    async fn handle_block_request(
+        server: Arc<Self>,
+        method: Method,
+        path: &str,
+        request_id: String,
+    ) -> Response<Full<Bytes>> {
+        let security_headers = server.security_headers_enabled;
+
+        // Parse path: /api/v1/blocks/{hash} or /api/v1/blocks/{hash}/transactions or /api/v1/blocks/height/{height}
+        let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+        // Expected: ["api", "v1", "blocks", ...]
+        if path_parts.len() < 4
+            || path_parts[0] != "api"
+            || path_parts[1] != "v1"
+            || path_parts[2] != "blocks"
+        {
+            return Self::error_response_with_headers(
+                security_headers,
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Invalid block endpoint path",
+                None,
+                request_id.clone(),
+            );
+        }
+
+        match path_parts.get(3) {
+            Some(&"height") => {
+                // /api/v1/blocks/height/{height}
+                if let Some(height_str) = path_parts.get(4) {
+                    match height_str.parse::<u64>() {
+                        Ok(height) => {
+                            // Validate block height
+                            let validated_height =
+                                match rest_validation::validate_block_height(height) {
+                                    Ok(h) => h,
+                                    Err(e) => {
+                                        return Self::error_response_with_headers(
+                                            server.security_headers_enabled,
+                                            StatusCode::BAD_REQUEST,
+                                            "BAD_REQUEST",
+                                            &rest_error_invalid("block height", e),
+                                            None,
+                                            request_id,
+                                        );
+                                    }
+                                };
+                            match blocks::get_block_by_height(&server.blockchain, validated_height)
+                                .await
+                            {
+                                Ok(data) => Self::success_response_with_headers(
+                                    data,
+                                    request_id,
+                                    server.security_headers_enabled,
+                                ),
+                                Err(e) => Self::error_response_with_headers(
+                                    server.security_headers_enabled,
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "INTERNAL_ERROR",
+                                    &rest_error_failed("get block by height", e),
+                                    None,
+                                    request_id,
+                                ),
+                            }
+                        }
+                        Err(_) => Self::error_response_with_headers(
+                            server.security_headers_enabled,
+                            StatusCode::BAD_REQUEST,
+                            "BAD_REQUEST",
+                            "Invalid height parameter (must be a number)",
+                            None,
+                            request_id,
+                        ),
+                    }
+                } else {
+                    Self::error_response_with_headers(
+                        server.security_headers_enabled,
+                        StatusCode::BAD_REQUEST,
+                        "BAD_REQUEST",
+                        HEIGHT_PARAM_REQUIRED_MSG,
+                        None,
+                        request_id,
+                    )
+                }
+            }
+            Some(hash) => {
+                // Validate hash format
+                let validated_hash = match rest_validation::validate_hash_string(hash) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        return Self::error_response_with_headers(
+                            server.security_headers_enabled,
+                            StatusCode::BAD_REQUEST,
+                            "BAD_REQUEST",
+                            &rest_error_invalid("block hash", e),
+                            None,
+                            request_id,
+                        );
+                    }
+                };
+
+                // Check sub-resource under /api/v1/blocks/{hash}/...
+                if let Some(action) = path_parts.get(4) {
+                    match *action {
+                        "transactions" if method == Method::GET => {
+                            match blocks::get_block_transactions(
+                                &server.blockchain,
+                                &validated_hash,
+                            )
+                            .await
+                            {
+                                Ok(data) => Self::success_response_with_headers(
+                                    data,
+                                    request_id,
+                                    server.security_headers_enabled,
+                                ),
+                                Err(e) => Self::error_response_with_headers(
+                                    server.security_headers_enabled,
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "INTERNAL_ERROR",
+                                    &rest_error_failed("get block transactions", e),
+                                    None,
+                                    request_id,
+                                ),
+                            }
+                        }
+                        "header" if method == Method::GET => {
+                            let verbose = path_parts.get(5) == Some(&"verbose");
+                            match blocks::get_block_header(
+                                &server.blockchain,
+                                &validated_hash,
+                                verbose,
+                            )
+                            .await
+                            {
+                                Ok(data) => Self::success_response_with_headers(
+                                    data,
+                                    request_id,
+                                    server.security_headers_enabled,
+                                ),
+                                Err(e) => Self::error_response_with_headers(
+                                    server.security_headers_enabled,
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "INTERNAL_ERROR",
+                                    &rest_error_failed("get block header", e),
+                                    None,
+                                    request_id,
+                                ),
+                            }
+                        }
+                        "stats" if method == Method::GET => {
+                            match blocks::get_block_stats(&server.blockchain, &validated_hash).await
+                            {
+                                Ok(data) => Self::success_response_with_headers(
+                                    data,
+                                    request_id,
+                                    server.security_headers_enabled,
+                                ),
+                                Err(e) => Self::error_response_with_headers(
+                                    server.security_headers_enabled,
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "INTERNAL_ERROR",
+                                    &rest_error_failed("get block stats", e),
+                                    None,
+                                    request_id,
+                                ),
+                            }
+                        }
+                        "filter" if method == Method::GET => {
+                            let filtertype = path_parts.get(5).copied();
+                            match blocks::get_block_filter(
+                                &server.blockchain,
+                                &validated_hash,
+                                filtertype,
+                            )
+                            .await
+                            {
+                                Ok(data) => Self::success_response_with_headers(
+                                    data,
+                                    request_id,
+                                    server.security_headers_enabled,
+                                ),
+                                Err(e) => Self::error_response_with_headers(
+                                    server.security_headers_enabled,
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "INTERNAL_ERROR",
+                                    &rest_error_failed("get block filter", e),
+                                    None,
+                                    request_id,
+                                ),
+                            }
+                        }
+                        "invalidate" if method == Method::POST => {
+                            match blocks::invalidate_block(&server.blockchain, &validated_hash)
+                                .await
+                            {
+                                Ok(data) => Self::success_response_with_headers(
+                                    data,
+                                    request_id,
+                                    server.security_headers_enabled,
+                                ),
+                                Err(e) => Self::error_response_with_headers(
+                                    server.security_headers_enabled,
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "INTERNAL_ERROR",
+                                    &rest_error_failed("invalidate block", e),
+                                    None,
+                                    request_id,
+                                ),
+                            }
+                        }
+                        "reconsider" if method == Method::POST => {
+                            match blocks::reconsider_block(&server.blockchain, &validated_hash)
+                                .await
+                            {
+                                Ok(data) => Self::success_response_with_headers(
+                                    data,
+                                    request_id,
+                                    server.security_headers_enabled,
+                                ),
+                                Err(e) => Self::error_response_with_headers(
+                                    server.security_headers_enabled,
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "INTERNAL_ERROR",
+                                    &rest_error_failed("reconsider block", e),
+                                    None,
+                                    request_id,
+                                ),
+                            }
+                        }
+                        _ => Self::error_response_with_headers(
+                            server.security_headers_enabled,
+                            StatusCode::NOT_FOUND,
+                            "NOT_FOUND",
+                            &format!("Block sub-resource not found: {path}"),
+                            None,
+                            request_id,
+                        ),
+                    }
+                } else if method == Method::GET {
+                    // /api/v1/blocks/{hash}
+                    match blocks::get_block_by_hash(&server.blockchain, &validated_hash).await {
+                        Ok(data) => Self::success_response_with_headers(
+                            data,
+                            request_id,
+                            server.security_headers_enabled,
+                        ),
+                        Err(e) => Self::error_response_with_headers(
+                            server.security_headers_enabled,
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "INTERNAL_ERROR",
+                            &rest_error_failed("get block", e),
+                            None,
+                            request_id,
+                        ),
+                    }
+                } else {
+                    Self::error_response_with_headers(
+                        server.security_headers_enabled,
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        "METHOD_NOT_ALLOWED",
+                        "Unsupported method for block hash endpoint",
+                        None,
+                        request_id,
+                    )
+                }
+            }
+            None => Self::error_response_with_headers(
+                server.security_headers_enabled,
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Block hash or height required",
+                None,
+                request_id,
+            ),
+        }
+    }
+
+    /// Handle transaction-related requests
+    async fn handle_transaction_request(
+        server: Arc<Self>,
+        method: Method,
+        path: &str,
+        req: Request<Incoming>,
+        uri: &Uri,
+        request_id: String,
+    ) -> Response<Full<Bytes>> {
+        let security_headers = server.security_headers_enabled;
+        // Parse path: /api/v1/transactions/{txid} or /api/v1/transactions/{txid}/confirmations
+        let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+        // Expected: ["api", "v1", "transactions", ...]
+        if path_parts.len() < 4
+            || path_parts[0] != "api"
+            || path_parts[1] != "v1"
+            || path_parts[2] != "transactions"
+        {
+            return Self::error_response_with_headers(
+                security_headers,
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Invalid transaction endpoint path",
+                None,
+                request_id.clone(),
+            );
+        }
+
+        match method {
+            Method::GET => {
+                if let Some(txid) = path_parts.get(3) {
+                    // Validate transaction ID (hash format)
+                    let validated_txid = match rest_validation::validate_hash_string(txid) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            return Self::error_response_with_headers(
+                                server.security_headers_enabled,
+                                StatusCode::BAD_REQUEST,
+                                "BAD_REQUEST",
+                                &rest_error_invalid("transaction ID", e),
+                                None,
+                                request_id,
+                            );
+                        }
+                    };
+
+                    // Check if this is /api/v1/transactions/{txid}/confirmations
+                    if path_parts.get(4) == Some(&"confirmations") {
+                        match transactions::get_transaction_confirmations(
+                            &server.rawtx,
+                            &validated_txid,
+                        )
+                        .await
+                        {
+                            Ok(data) => Self::success_response_with_headers(
+                                data,
+                                request_id,
+                                server.security_headers_enabled,
+                            ),
+                            Err(e) => Self::error_response_with_headers(
+                                server.security_headers_enabled,
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "INTERNAL_ERROR",
+                                &rest_error_failed("get transaction confirmations", e),
+                                None,
+                                request_id,
+                            ),
+                        }
+                    } else if path_parts.get(4) == Some(&"outputs") {
+                        let n = match path_parts.get(5).and_then(|s| s.parse::<u32>().ok()) {
+                            Some(n) => n,
+                            None => {
+                                return Self::error_response_with_headers(
+                                    server.security_headers_enabled,
+                                    StatusCode::BAD_REQUEST,
+                                    "BAD_REQUEST",
+                                    "Output index required: /api/v1/transactions/{txid}/outputs/{n}",
+                                    None,
+                                    request_id,
+                                );
+                            }
+                        };
+                        let include_mempool = uri
+                            .query()
+                            .map(|q| {
+                                q.split('&').any(|param| {
+                                    param == "include_mempool=true"
+                                        || param.ends_with("=true")
+                                            && param.starts_with("include_mempool=")
+                                })
+                            })
+                            .unwrap_or(false);
+                        match transactions::get_transaction_output(
+                            &server.rawtx,
+                            &validated_txid,
+                            n,
+                            include_mempool,
+                        )
+                        .await
+                        {
+                            Ok(data) => Self::success_response_with_headers(
+                                data,
+                                request_id,
+                                server.security_headers_enabled,
+                            ),
+                            Err(e) => Self::error_response_with_headers(
+                                server.security_headers_enabled,
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "INTERNAL_ERROR",
+                                &rest_error_failed("get transaction output", e),
+                                None,
+                                request_id,
+                            ),
+                        }
+                    } else {
+                        // /api/v1/transactions/{txid}
+                        match transactions::get_transaction(&server.rawtx, &validated_txid).await {
+                            Ok(data) => Self::success_response_with_headers(
+                                data,
+                                request_id,
+                                server.security_headers_enabled,
+                            ),
+                            Err(e) => Self::error_response_with_headers(
+                                server.security_headers_enabled,
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "INTERNAL_ERROR",
+                                &rest_error_failed("get transaction", e),
+                                None,
+                                request_id,
+                            ),
+                        }
+                    }
+                } else {
+                    Self::error_response_with_headers(
+                        server.security_headers_enabled,
+                        StatusCode::BAD_REQUEST,
+                        "BAD_REQUEST",
+                        "Transaction ID required",
+                        None,
+                        request_id,
+                    )
+                }
+            }
+            Method::POST => {
+                // POST /api/v1/transactions/decode is handled before test/submit
+                if path_parts.get(3) == Some(&"decode") {
+                    let (_, body) = req.into_parts();
+                    let limited = Limited::new(body, crate::rpc::rest::types::MAX_REQUEST_SIZE);
+                    let body = match limited.collect().await {
+                        Ok(b) => b.to_bytes(),
+                        Err(e) => {
+                            return Self::error_response_with_headers(
+                                security_headers,
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "PAYLOAD_TOO_LARGE",
+                                &format!("Request body too large or read error: {e}"),
+                                None,
+                                request_id,
+                            );
+                        }
+                    };
+                    let hex = std::str::from_utf8(&body)
+                        .map(|s| s.trim().trim_matches('"'))
+                        .unwrap_or("");
+                    let validated_hex = match rest_validation::validate_transaction_hex(hex) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            return Self::error_response_with_headers(
+                                server.security_headers_enabled,
+                                StatusCode::BAD_REQUEST,
+                                "BAD_REQUEST",
+                                &rest_error_invalid("transaction hex", e),
+                                None,
+                                request_id,
+                            );
+                        }
+                    };
+                    match transactions::decode_transaction(&server.rawtx, &validated_hex).await {
+                        Ok(data) => Self::success_response_with_headers(
+                            data,
+                            request_id,
+                            server.security_headers_enabled,
+                        ),
+                        Err(e) => Self::error_response_with_headers(
+                            server.security_headers_enabled,
+                            StatusCode::BAD_REQUEST,
+                            "DECODE_FAILED",
+                            &format!("Decode failed: {e}"),
+                            None,
+                            request_id,
+                        ),
+                    }
+                } else if path_parts.get(3) == Some(&"create") {
+                    let body = match read_json_body(req).await {
+                        Ok(Some(v)) => v,
+                        Ok(None) => {
+                            return Self::error_response_with_headers(
+                                security_headers,
+                                StatusCode::BAD_REQUEST,
+                                "BAD_REQUEST",
+                                "POST /api/v1/transactions/create requires JSON body with inputs and outputs",
+                                None,
+                                request_id,
+                            );
+                        }
+                        Err(e) => {
+                            return Self::error_response_with_headers(
+                                security_headers,
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "PAYLOAD_TOO_LARGE",
+                                &e,
+                                None,
+                                request_id,
+                            );
+                        }
+                    };
+                    let inputs = match body.get("inputs") {
+                        Some(v) => v.clone(),
+                        None => {
+                            return Self::error_response_with_headers(
+                                security_headers,
+                                StatusCode::BAD_REQUEST,
+                                "BAD_REQUEST",
+                                "inputs field required",
+                                None,
+                                request_id,
+                            );
+                        }
+                    };
+                    let outputs = match body.get("outputs") {
+                        Some(v) => v.clone(),
+                        None => {
+                            return Self::error_response_with_headers(
+                                security_headers,
+                                StatusCode::BAD_REQUEST,
+                                "BAD_REQUEST",
+                                "outputs field required",
+                                None,
+                                request_id,
+                            );
+                        }
+                    };
+                    let locktime = body.get("locktime").and_then(|v| v.as_u64());
+                    let replaceable = body.get("replaceable").and_then(|v| v.as_bool());
+                    let version = body.get("version").and_then(|v| v.as_u64());
+                    match transactions::create_transaction(
+                        &server.rawtx,
+                        inputs,
+                        outputs,
+                        locktime,
+                        replaceable,
+                        version,
+                    )
+                    .await
+                    {
+                        Ok(data) => Self::success_response_with_headers(
+                            data,
+                            request_id,
+                            server.security_headers_enabled,
+                        ),
+                        Err(e) => Self::error_response_with_headers(
+                            server.security_headers_enabled,
+                            StatusCode::BAD_REQUEST,
+                            "CREATE_FAILED",
+                            &format!("Create transaction failed: {e}"),
+                            None,
+                            request_id,
+                        ),
+                    }
+                } else if path_parts.get(3) == Some(&"test") {
+                    let (_, body) = req.into_parts();
+                    let limited = Limited::new(body, crate::rpc::rest::types::MAX_REQUEST_SIZE);
+                    let body = match limited.collect().await {
+                        Ok(b) => b.to_bytes(),
+                        Err(e) => {
+                            return Self::error_response_with_headers(
+                                security_headers,
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "PAYLOAD_TOO_LARGE",
+                                &format!("Request body too large or read error: {e}"),
+                                None,
+                                request_id,
+                            );
+                        }
+                    };
+                    let hex = std::str::from_utf8(&body)
+                        .map(|s| s.trim().trim_matches('"'))
+                        .unwrap_or("");
+                    let validated_hex = match rest_validation::validate_transaction_hex(hex) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            return Self::error_response_with_headers(
+                                server.security_headers_enabled,
+                                StatusCode::BAD_REQUEST,
+                                "BAD_REQUEST",
+                                &rest_error_invalid("transaction hex", e),
+                                None,
+                                request_id,
+                            );
+                        }
+                    };
+                    match transactions::test_transaction(&server.rawtx, &validated_hex).await {
+                        Ok(data) => Self::success_response_with_headers(
+                            data,
+                            request_id,
+                            server.security_headers_enabled,
+                        ),
+                        Err(e) => Self::error_response_with_headers(
+                            server.security_headers_enabled,
+                            StatusCode::BAD_REQUEST,
+                            "TRANSACTION_REJECTED",
+                            &format!("Transaction test failed: {e}"),
+                            None,
+                            request_id,
+                        ),
+                    }
+                } else if path_parts.len() == 3 {
+                    // Read request body with 1MB limit
+                    let (_, body) = req.into_parts();
+                    let limited = Limited::new(body, crate::rpc::rest::types::MAX_REQUEST_SIZE);
+                    let body = match limited.collect().await {
+                        Ok(b) => b.to_bytes(),
+                        Err(e) => {
+                            return Self::error_response_with_headers(
+                                security_headers,
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "PAYLOAD_TOO_LARGE",
+                                &format!("Request body too large or read error: {e}"),
+                                None,
+                                request_id,
+                            );
+                        }
+                    };
+
+                    let hex = match std::str::from_utf8(&body) {
+                        Ok(s) => s.trim().trim_matches('"'), // Remove quotes if JSON string
+                        Err(_) => {
+                            // Try as raw hex
+                            std::str::from_utf8(&body).unwrap_or("")
+                        }
+                    };
+
+                    // Validate transaction hex
+                    let validated_hex = match rest_validation::validate_transaction_hex(hex) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            return Self::error_response_with_headers(
+                                server.security_headers_enabled,
+                                StatusCode::BAD_REQUEST,
+                                "BAD_REQUEST",
+                                &rest_error_invalid("transaction hex", e),
+                                None,
+                                request_id,
+                            );
+                        }
+                    };
+
+                    match transactions::submit_transaction(&server.rawtx, &validated_hex).await {
+                        Ok(data) => Self::success_response_with_headers(
+                            data,
+                            request_id,
+                            server.security_headers_enabled,
+                        ),
+                        Err(e) => Self::error_response_with_headers(
+                            server.security_headers_enabled,
+                            StatusCode::BAD_REQUEST,
+                            "TRANSACTION_REJECTED",
+                            &format!("Transaction rejected: {e}"),
+                            None,
+                            request_id,
+                        ),
+                    }
+                } else {
+                    Self::error_response_with_headers(
+                        server.security_headers_enabled,
+                        StatusCode::BAD_REQUEST,
+                        "BAD_REQUEST",
+                        "POST /api/v1/transactions expects transaction hex in body",
+                        None,
+                        request_id,
+                    )
+                }
+            }
+            _ => Self::error_response_with_headers(
+                server.security_headers_enabled,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "METHOD_NOT_ALLOWED",
+                "Only GET and POST methods are supported for transaction endpoints",
+                None,
+                request_id,
+            ),
+        }
+    }
+
+    /// Handle address-related requests
+    async fn handle_address_request(
+        server: Arc<Self>,
+        method: Method,
+        path: &str,
+        request_id: String,
+    ) -> Response<Full<Bytes>> {
+        let security_headers = server.security_headers_enabled;
+        if method != Method::GET {
+            return Self::error_response_with_headers(
+                security_headers,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "METHOD_NOT_ALLOWED",
+                "Only GET method is supported for address endpoints",
+                None,
+                request_id.clone(),
+            );
+        }
+
+        // Parse path: /api/v1/addresses/{address}/balance|transactions|utxos
+        let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+        // Expected: ["api", "v1", "addresses", {address}, {action}]
+        if path_parts.len() < 5
+            || path_parts[0] != "api"
+            || path_parts[1] != "v1"
+            || path_parts[2] != "addresses"
+        {
+            return Self::error_response(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Invalid address endpoint path",
+                None,
+                request_id.clone(),
+            );
+        }
+
+        let address = path_parts[3];
+
+        // Validate address format
+        let validated_address = match rest_validation::validate_address_string(address) {
+            Ok(a) => a,
+            Err(e) => {
+                return Self::error_response_with_headers(
+                    server.security_headers_enabled,
+                    StatusCode::BAD_REQUEST,
+                    "BAD_REQUEST",
+                    &rest_error_invalid("address", e),
+                    None,
+                    request_id,
+                );
+            }
+        };
+
+        let action = path_parts.get(4).copied().unwrap_or("");
+
+        match action {
+            "balance" => {
+                match addresses::get_address_balance(&server.blockchain, &validated_address).await {
+                    Ok(data) => Self::success_response_with_headers(
+                        data,
+                        request_id,
+                        server.security_headers_enabled,
+                    ),
+                    Err(e) => Self::error_response_with_headers(
+                        server.security_headers_enabled,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("get address balance", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            "transactions" => {
+                match addresses::get_address_transactions(&server.blockchain, &validated_address)
+                    .await
+                {
+                    Ok(data) => Self::success_response_with_headers(
+                        data,
+                        request_id,
+                        server.security_headers_enabled,
+                    ),
+                    Err(e) => Self::error_response_with_headers(
+                        server.security_headers_enabled,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("get address transactions", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            "utxos" => {
+                match addresses::get_address_utxos(&server.blockchain, &validated_address).await {
+                    Ok(data) => Self::success_response_with_headers(
+                        data,
+                        request_id,
+                        server.security_headers_enabled,
+                    ),
+                    Err(e) => Self::error_response_with_headers(
+                        server.security_headers_enabled,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("get address UTXOs", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            _ => Self::error_response_with_headers(
+                security_headers,
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                &format!(
+                    "Address action not found: {action}. Supported: balance, transactions, utxos"
+                ),
+                None,
+                request_id,
+            ),
+        }
+    }
+
+    /// Handle mempool-related requests
+    async fn handle_mempool_request(
+        server: Arc<Self>,
+        method: Method,
+        path: &str,
+        req: Request<Incoming>,
+        request_id: String,
+    ) -> Response<Full<Bytes>> {
+        let security_headers = server.security_headers_enabled;
+
+        let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+        if path_parts.len() < 3
+            || path_parts[0] != "api"
+            || path_parts[1] != "v1"
+            || path_parts[2] != "mempool"
+        {
+            return Self::error_response_with_headers(
+                security_headers,
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Invalid mempool endpoint path",
+                None,
+                request_id.clone(),
+            );
+        }
+
+        match path_parts.get(3) {
+            None if method == Method::GET => {
+                match rest_mempool::get_mempool(&server.mempool, false).await {
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("get mempool", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            Some(&"save") if method == Method::POST => {
+                match rest_mempool::save_mempool(&server.mempool).await {
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("save mempool", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            Some(&"transactions") => {
+                if let Some(txid) = path_parts.get(4) {
+                    let validated_txid = match rest_validation::validate_hash_string(txid) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            return Self::error_response_with_headers(
+                                security_headers,
+                                StatusCode::BAD_REQUEST,
+                                "BAD_REQUEST",
+                                &rest_error_invalid("transaction ID", e),
+                                None,
+                                request_id,
+                            );
+                        }
+                    };
+                    match path_parts.get(5) {
+                        Some(&"ancestors") if method == Method::GET => {
+                            match rest_mempool::get_mempool_ancestors(
+                                &server.mempool,
+                                &validated_txid,
+                                false,
+                            )
+                            .await
+                            {
+                                Ok(data) => Self::success_response_with_headers(
+                                    data,
+                                    request_id,
+                                    security_headers,
+                                ),
+                                Err(e) => Self::error_response_with_headers(
+                                    security_headers,
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "INTERNAL_ERROR",
+                                    &rest_error_failed("get mempool ancestors", e),
+                                    None,
+                                    request_id,
+                                ),
+                            }
+                        }
+                        Some(&"descendants") if method == Method::GET => {
+                            match rest_mempool::get_mempool_descendants(
+                                &server.mempool,
+                                &validated_txid,
+                                false,
+                            )
+                            .await
+                            {
+                                Ok(data) => Self::success_response_with_headers(
+                                    data,
+                                    request_id,
+                                    security_headers,
+                                ),
+                                Err(e) => Self::error_response_with_headers(
+                                    security_headers,
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "INTERNAL_ERROR",
+                                    &rest_error_failed("get mempool descendants", e),
+                                    None,
+                                    request_id,
+                                ),
+                            }
+                        }
+                        Some(&"priority") if method == Method::POST => {
+                            let body = match read_json_body(req).await {
+                                Ok(Some(v)) => v,
+                                Ok(None) => {
+                                    return Self::error_response_with_headers(
+                                        security_headers,
+                                        StatusCode::BAD_REQUEST,
+                                        "BAD_REQUEST",
+                                        "POST …/priority requires JSON body with fee_delta",
+                                        None,
+                                        request_id,
+                                    );
+                                }
+                                Err(e) => {
+                                    return Self::error_response_with_headers(
+                                        security_headers,
+                                        StatusCode::PAYLOAD_TOO_LARGE,
+                                        "PAYLOAD_TOO_LARGE",
+                                        &e,
+                                        None,
+                                        request_id,
+                                    );
+                                }
+                            };
+                            let fee_delta = body
+                                .get("fee_delta")
+                                .and_then(|v| v.as_i64())
+                                .or_else(|| body.as_i64());
+                            let fee_delta = match fee_delta {
+                                Some(d) => d,
+                                None => {
+                                    return Self::error_response_with_headers(
+                                        security_headers,
+                                        StatusCode::BAD_REQUEST,
+                                        "BAD_REQUEST",
+                                        "fee_delta (satoshis) required",
+                                        None,
+                                        request_id,
+                                    );
+                                }
+                            };
+                            match rest_mempool::prioritize_transaction(
+                                &server.mining,
+                                &validated_txid,
+                                fee_delta,
+                            )
+                            .await
+                            {
+                                Ok(data) => Self::success_response_with_headers(
+                                    data,
+                                    request_id,
+                                    security_headers,
+                                ),
+                                Err(e) => Self::error_response_with_headers(
+                                    security_headers,
+                                    StatusCode::BAD_REQUEST,
+                                    "PRIORITY_FAILED",
+                                    &format!("Prioritize transaction failed: {e}"),
+                                    None,
+                                    request_id,
+                                ),
+                            }
+                        }
+                        None if method == Method::GET => {
+                            match rest_mempool::get_mempool_transaction(
+                                &server.mempool,
+                                &validated_txid,
+                            )
+                            .await
+                            {
+                                Ok(data) => Self::success_response_with_headers(
+                                    data,
+                                    request_id,
+                                    security_headers,
+                                ),
+                                Err(e) => Self::error_response_with_headers(
+                                    security_headers,
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "INTERNAL_ERROR",
+                                    &rest_error_failed("get mempool transaction", e),
+                                    None,
+                                    request_id,
+                                ),
+                            }
+                        }
+                        _ => Self::error_response_with_headers(
+                            security_headers,
+                            StatusCode::NOT_FOUND,
+                            "NOT_FOUND",
+                            &format!("Mempool transaction endpoint not found: {path}"),
+                            None,
+                            request_id,
+                        ),
+                    }
+                } else {
+                    Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::BAD_REQUEST,
+                        "BAD_REQUEST",
+                        "Transaction ID required",
+                        None,
+                        request_id,
+                    )
+                }
+            }
+            Some(&"stats") if method == Method::GET => {
+                match rest_mempool::get_mempool_stats(&server.mempool).await {
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("get mempool stats", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            _ => Self::error_response_with_headers(
+                security_headers,
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                &format!("Mempool endpoint not found: {path}"),
+                None,
+                request_id,
+            ),
+        }
+    }
+
+    /// Handle network-related requests
+    async fn handle_network_request(
+        server: Arc<Self>,
+        method: Method,
+        path: &str,
+        req: Request<Incoming>,
+        uri: &Uri,
+        request_id: String,
+    ) -> Response<Full<Bytes>> {
+        let security_headers = server.security_headers_enabled;
+
+        let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+        if path_parts.len() < 4
+            || path_parts[0] != "api"
+            || path_parts[1] != "v1"
+            || path_parts[2] != "network"
+        {
+            return Self::error_response_with_headers(
+                security_headers,
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Invalid network endpoint path",
+                None,
+                request_id.clone(),
+            );
+        }
+
+        macro_rules! net_ok {
+            ($expr:expr) => {
+                match $expr {
+                    Ok(data) => {
+                        return Self::success_response_with_headers(
+                            data,
+                            request_id,
+                            security_headers,
+                        )
+                    }
+                    Err(e) => {
+                        return Self::error_response_with_headers(
+                            security_headers,
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "INTERNAL_ERROR",
+                            &rest_error_failed("network request", e),
+                            None,
+                            request_id,
+                        )
+                    }
+                }
+            };
+        }
+
+        match (
+            method.clone(),
+            path_parts.get(3).copied(),
+            path_parts.get(4).copied(),
+        ) {
+            (Method::GET, Some("info"), _) => {
+                net_ok!(rest_network::get_network_info(&server.network).await)
+            }
+            (Method::GET, Some("peers"), _) => {
+                net_ok!(rest_network::get_network_peers(&server.network).await)
+            }
+            (Method::GET, Some("connections"), Some("count")) => {
+                net_ok!(rest_network::get_connection_count(&server.network).await)
+            }
+            (Method::GET, Some("totals"), _) => {
+                net_ok!(rest_network::get_net_totals(&server.network).await)
+            }
+            (Method::GET, Some("nodes"), Some("addresses")) => {
+                let count = uri.query().and_then(|q| {
+                    q.split('&').find_map(|param| {
+                        let mut parts = param.split('=');
+                        if parts.next() == Some("count") {
+                            parts.next()?.parse::<u32>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                });
+                net_ok!(rest_network::get_node_addresses(&server.network, count).await)
+            }
+            (Method::GET, Some("nodes"), None) => {
+                let dns = uri.query().map(|q| q.contains("dns=true")).unwrap_or(false);
+                net_ok!(rest_network::get_added_node_info(&server.network, None, dns).await)
+            }
+            (Method::GET, Some("bans"), _) => {
+                net_ok!(rest_network::list_banned(&server.network).await)
+            }
+            (Method::POST, Some("ping"), _) => {
+                net_ok!(rest_network::ping_network(&server.network).await)
+            }
+            (Method::POST, Some("active"), _) => {
+                let body = match read_json_body(req).await {
+                    Ok(Some(v)) => v,
+                    Ok(None) => json!({}),
+                    Err(e) => {
+                        return Self::error_response_with_headers(
+                            security_headers,
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "PAYLOAD_TOO_LARGE",
+                            &e,
+                            None,
+                            request_id,
+                        );
+                    }
+                };
+                net_ok!(rest_network::set_network_active_body(&server.network, &body).await)
+            }
+            (Method::POST, Some("nodes"), None) => {
+                let body = match read_json_body(req).await {
+                    Ok(Some(v)) => v,
+                    _ => {
+                        return Self::error_response_with_headers(
+                            security_headers,
+                            StatusCode::BAD_REQUEST,
+                            "BAD_REQUEST",
+                            "POST /api/v1/network/nodes requires JSON body with address and command",
+                            None,
+                            request_id,
+                        );
+                    }
+                };
+                let address = body.get("address").and_then(|v| v.as_str()).unwrap_or("");
+                let command = body
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("add");
+                net_ok!(rest_network::add_node(&server.network, address, command).await)
+            }
+            (Method::POST, Some("bans"), _) => {
+                let body = match read_json_body(req).await {
+                    Ok(Some(v)) => v,
+                    _ => {
+                        return Self::error_response_with_headers(
+                            security_headers,
+                            StatusCode::BAD_REQUEST,
+                            "BAD_REQUEST",
+                            "POST /api/v1/network/bans requires JSON body",
+                            None,
+                            request_id,
+                        );
+                    }
+                };
+                let subnet = body.get("subnet").and_then(|v| v.as_str()).unwrap_or("");
+                let command = body
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("add");
+                let bantime = body.get("bantime").and_then(|v| v.as_u64());
+                let absolute = body.get("absolute").and_then(|v| v.as_bool());
+                net_ok!(
+                    rest_network::set_ban(&server.network, subnet, command, bantime, absolute)
+                        .await
+                )
+            }
+            (Method::DELETE, Some("nodes"), Some(address)) => {
+                net_ok!(rest_network::disconnect_node(&server.network, address).await)
+            }
+            (Method::DELETE, Some("bans"), _) => {
+                net_ok!(rest_network::clear_banned(&server.network).await)
+            }
+            _ => Self::error_response_with_headers(
+                security_headers,
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                &format!("Network endpoint not found: {path}"),
+                None,
+                request_id,
+            ),
+        }
+    }
+
+    async fn handle_node_request(
+        server: Arc<Self>,
+        method: Method,
+        path: &str,
+        req: Request<Incoming>,
+        uri: &Uri,
+        request_id: String,
+    ) -> Response<Full<Bytes>> {
+        let security_headers = server.security_headers_enabled;
+        let control = match &server.control {
+            Some(c) => c,
+            None => {
+                return Self::error_response_with_headers(
+                    security_headers,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "SERVICE_UNAVAILABLE",
+                    "Node control RPC not configured",
+                    None,
+                    request_id,
+                );
+            }
+        };
+
+        macro_rules! ctrl_ok {
+            ($expr:expr) => {
+                match $expr {
+                    Ok(data) => {
+                        return Self::success_response_with_headers(
+                            data,
+                            request_id,
+                            security_headers,
+                        )
+                    }
+                    Err(e) => {
+                        return Self::error_response_with_headers(
+                            security_headers,
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "INTERNAL_ERROR",
+                            &rest_error_failed("node control", e),
+                            None,
+                            request_id,
+                        )
+                    }
+                }
+            };
+        }
+
+        match (method, path) {
+            (Method::GET, "/api/v1/node/uptime") => {
+                ctrl_ok!(rest_node::get_uptime(control).await)
+            }
+            (Method::GET, "/api/v1/node/memory") => {
+                let mode = uri.query().and_then(|q| {
+                    q.split('&').find_map(|param| {
+                        let mut parts = param.split('=');
+                        if parts.next() == Some("mode") {
+                            parts.next().map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+                });
+                ctrl_ok!(rest_node::get_memory_info(control, mode.as_deref()).await)
+            }
+            (Method::GET, "/api/v1/node/rpc-info") => {
+                ctrl_ok!(rest_node::get_rpc_info(control).await)
+            }
+            (Method::GET, "/api/v1/node/help") => {
+                let command = uri.query().and_then(|q| {
+                    q.split('&').find_map(|param| {
+                        let mut parts = param.split('=');
+                        if parts.next() == Some("command") {
+                            parts.next().map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+                });
+                ctrl_ok!(rest_node::get_help(control, command.as_deref()).await)
+            }
+            (Method::GET, "/api/v1/node/logging") => {
+                ctrl_ok!(rest_node::get_logging(control).await)
+            }
+            (Method::POST, "/api/v1/node/stop") => {
+                ctrl_ok!(rest_node::stop_node(control).await)
+            }
+            (Method::POST, "/api/v1/node/logging") => {
+                let body = match read_json_body(req).await {
+                    Ok(v) => v.unwrap_or(json!({})),
+                    Err(e) => {
+                        return Self::error_response_with_headers(
+                            security_headers,
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "PAYLOAD_TOO_LARGE",
+                            &e,
+                            None,
+                            request_id,
+                        );
+                    }
+                };
+                let include = body.get("include").and_then(|v| v.as_array()).map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                });
+                let exclude = body.get("exclude").and_then(|v| v.as_array()).map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                });
+                ctrl_ok!(rest_node::set_logging(control, include, exclude).await)
+            }
+            _ => Self::error_response_with_headers(
+                security_headers,
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                &format!("Node endpoint not found: {path}"),
+                None,
+                request_id,
+            ),
+        }
+    }
+
+    async fn handle_mining_request(
+        server: Arc<Self>,
+        method: Method,
+        path: &str,
+        req: Request<Incoming>,
+        request_id: String,
+    ) -> Response<Full<Bytes>> {
+        let security_headers = server.security_headers_enabled;
+        match (method, path) {
+            (Method::GET, "/api/v1/mining/info") => {
+                match rest_mining::get_mining_info(&server.mining).await {
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("get mining info", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            (Method::GET, "/api/v1/mining/block-template") => {
+                match rest_mining::get_block_template(&server.mining, None, None).await {
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("get block template", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            (Method::POST, "/api/v1/mining/blocks") => {
+                let body = match read_json_body(req).await {
+                    Ok(Some(v)) => v,
+                    Ok(None) => json!(null),
+                    Err(e) => {
+                        return Self::error_response_with_headers(
+                            security_headers,
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "PAYLOAD_TOO_LARGE",
+                            &e,
+                            None,
+                            request_id,
+                        );
+                    }
+                };
+                let hex = body
+                    .as_str()
+                    .map(String::from)
+                    .or_else(|| body.get("hex").and_then(|v| v.as_str()).map(String::from))
+                    .unwrap_or_default();
+                match rest_mining::submit_block(&server.mining, &hex).await {
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::BAD_REQUEST,
+                        "BLOCK_REJECTED",
+                        &format!("Block rejected: {e}"),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            _ => Self::error_response_with_headers(
+                security_headers,
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                &format!("Mining endpoint not found: {path}"),
+                None,
+                request_id,
+            ),
+        }
+    }
+
+    /// Handle fee-related requests
+    async fn handle_fee_request(
+        server: Arc<Self>,
+        method: Method,
+        path: &str,
+        uri: &Uri,
+        request_id: String,
+    ) -> Response<Full<Bytes>> {
+        let security_headers = server.security_headers_enabled;
+        if method != Method::GET {
+            return Self::error_response_with_headers(
+                security_headers,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "METHOD_NOT_ALLOWED",
+                "Only GET method is supported for fee endpoints",
+                None,
+                request_id.clone(),
+            );
+        }
+
+        // Parse path: /api/v1/fees/estimate?blocks=N (optional query param)
+        let path_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+        if path_parts.len() < 4
+            || path_parts[0] != "api"
+            || path_parts[1] != "v1"
+            || path_parts[2] != "fees"
+        {
+            return Self::error_response_with_headers(
+                security_headers,
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Invalid fee endpoint path",
+                None,
+                request_id.clone(),
+            );
+        }
+
+        match path_parts.get(3) {
+            Some(&"estimate") => {
+                // Parse query parameters for target blocks
+                // Format: /api/v1/fees/estimate?blocks=6
+                let target_blocks = uri
+                    .query()
+                    .and_then(|q| {
+                        q.split('&').find_map(|param| {
+                            let mut parts = param.split('=');
+                            if parts.next() == Some("blocks") {
+                                parts.next().and_then(|v| v.parse::<u64>().ok())
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .unwrap_or(6); // Default to 6 blocks if not specified
+
+                if !(1..=1008).contains(&target_blocks) {
+                    return Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::BAD_REQUEST,
+                        "BAD_REQUEST",
+                        "blocks must be between 1 and 1008",
+                        None,
+                        request_id,
+                    );
+                }
+
+                match fees::get_fee_estimate(&server.mining, Some(target_blocks)).await {
+                    Ok(data) => {
+                        Self::success_response_with_headers(data, request_id, security_headers)
+                    }
+                    Err(e) => Self::error_response_with_headers(
+                        security_headers,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        &rest_error_failed("get fee estimate", e),
+                        None,
+                        request_id,
+                    ),
+                }
+            }
+            _ => Self::error_response_with_headers(
+                security_headers,
+                StatusCode::NOT_FOUND,
+                "NOT_FOUND",
+                &format!("Fee endpoint not found: {path}. Supported: estimate"),
+                None,
+                request_id,
+            ),
+        }
+    }
+
+    /// Create an error response
+    fn error_response(
+        status: StatusCode,
+        code: &str,
+        message: &str,
+        details: Option<serde_json::Value>,
+        request_id: String,
+    ) -> Response<Full<Bytes>> {
+        Self::error_response_with_headers(true, status, code, message, details, request_id)
+    }
+
+    /// Create an error response with security headers
+    fn error_response_with_headers(
+        security_headers_enabled: bool,
+        status: StatusCode,
+        code: &str,
+        message: &str,
+        details: Option<serde_json::Value>,
+        request_id: String,
+    ) -> Response<Full<Bytes>> {
+        let error = ApiError::new(code, message, details, None, Some(request_id.clone()));
+        let body = serde_json::to_string(&error).unwrap_or_else(|_| "{}".to_string());
+
+        let mut response = Response::builder()
+            .status(status)
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Full::new(Bytes::from(body)))
+            .unwrap_or_else(|_| {
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Full::new(Bytes::from(
+                        "{\"error\":\"Internal server error\"}",
+                    )))
+                    .expect("Fallback response should always succeed")
+            });
+
+        // Add security headers
+        if security_headers_enabled {
+            response = Self::add_security_headers(response, true);
+        }
+
+        response
+    }
+
+    /// Create a success response
+    fn success_response<T: serde::Serialize>(data: T, request_id: String) -> Response<Full<Bytes>> {
+        Self::success_response_with_headers(data, request_id, true)
+    }
+
+    /// Create a success response with security headers
+    fn success_response_with_headers<T: serde::Serialize>(
+        data: T,
+        request_id: String,
+        security_headers_enabled: bool,
+    ) -> Response<Full<Bytes>> {
+        let response = ApiResponse::success(
+            serde_json::to_value(data).unwrap_or(json!(null)),
+            Some(request_id),
+        );
+        let body = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+
+        let mut http_response = Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .header("Content-Length", body.len())
+            .body(Full::new(Bytes::from(body)))
+            .unwrap_or_else(|_| {
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Full::new(Bytes::from(
+                        "{\"error\":\"Internal server error\"}",
+                    )))
+                    .expect("Fallback response should always succeed")
+            });
+
+        // Add security headers
+        if security_headers_enabled {
+            http_response = Self::add_security_headers(http_response, true);
+        }
+
+        http_response
+    }
+}
+
+#[cfg(test)]
+mod fee_request_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn blocks_zero_is_a_bad_request() {
+        let server = Arc::new(RestApiServer::new(
+            "127.0.0.1:0".parse().unwrap(),
+            Arc::new(blockchain::BlockchainRpc::new()),
+            Arc::new(network::NetworkRpc::new()),
+            Arc::new(mempool::MempoolRpc::new()),
+            Arc::new(mining::MiningRpc::new()),
+            Arc::new(rawtx::RawTxRpc::new()),
+        ));
+        let uri: Uri = "/api/v1/fees/estimate?blocks=0".parse().unwrap();
+        let response = RestApiServer::handle_fee_request(
+            server,
+            Method::GET,
+            "/api/v1/fees/estimate",
+            &uri,
+            "req".to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("BAD_REQUEST"), "{text}");
+        assert!(!text.contains("INTERNAL_ERROR"), "{text}");
+    }
+}

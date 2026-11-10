@@ -1,0 +1,217 @@
+# BLVM node
+
+[![crates.io](https://img.shields.io/crates/v/blvm-node.svg)](https://crates.io/crates/blvm-node)
+[![docs.rs](https://docs.rs/blvm-node/badge.svg)](https://docs.rs/blvm-node)
+[![CI](https://github.com/BTCDecoded/blvm-node/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/BTCDecoded/blvm-node/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+
+Minimal Bitcoin node implementation using blvm-protocol for protocol abstraction and blvm-consensus for consensus decisions.
+
+> **📚 Comprehensive Documentation**: See [docs.btcdecoded.org/blvm](https://docs.btcdecoded.org/blvm/) (source repo: [blvm-docs](https://github.com/BTCDecoded/blvm-docs)).  
+> **For verified system status**: See [SYSTEM_STATUS.md](https://github.com/BTCDecoded/.github/blob/main/SYSTEM_STATUS.md) in the BTCDecoded organization repository.
+
+Provides a minimal Bitcoin node implementation using blvm-protocol for protocol abstraction and blvm-consensus for all consensus decisions. Adds only non-consensus infrastructure: storage, networking, RPC, and orchestration.
+
+## Architecture Position
+
+Tier 4 of the BLVM stack. Bitcoin Commons is the specification and the governance model. BLVM is one implementation of that spec.
+
+```
+1. blvm-spec (Orange Paper - mathematical foundation)
+2. blvm-consensus (pure math implementation)
+3. blvm-protocol (Bitcoin abstraction)
+4. blvm-node (full node implementation)
+5. blvm-sdk (developer toolkit)
+6. blvm-commons (governance enforcement)
+```
+
+## Design Principles
+
+1. **Zero Consensus Re-implementation**: All consensus logic from blvm-consensus
+2. **Protocol Abstraction**: Uses blvm-protocol for variant support
+3. **Pure Infrastructure**: Only adds storage, networking, RPC, orchestration
+4. **Production Ready**: Full Bitcoin node functionality
+
+## Features
+
+- **Consensus Integration**: All consensus logic from blvm-consensus
+- **Protocol Support**: Multiple variants (mainnet, testnet, regtest)
+- **RBF Support**: Configurable RBF modes (Disabled, Conservative, Standard, Aggressive)
+- **Mempool Policies**: Comprehensive mempool configuration with 5 eviction strategies
+- **Payment Processing**: CTV (CheckTemplateVerify) support for advanced payment flows
+- **Advanced Indexing**: Address and value range indexing for efficient queries
+- **RPC Interface**: JSON-RPC server with methods aligned to common Bitcoin node documentation
+- **Storage**: UTXO set management and chain state with multiple backends (redb, sled, rocksdb, heed3)
+- **Module System**: Process-isolated modules for optional features
+- **P2P Governance**: Governance message relay via P2P protocol
+
+See [Security](#security) for production considerations.
+
+### Storage Backends
+
+Supports multiple database backends via feature flags:
+
+- **heed3** (default `auto` backend): LMDB + rkyv UTXO encoding; zero-copy mmap reads on IBD hot paths (requires `liblmdb`)
+- **rocksdb**: High-performance database; reads common LevelDB/`blk*.dat` layouts; Core datadir migration
+- **redb**: Embedded database with ACID transactions
+- **sled**: Embedded key-value store (fallback)
+
+**heed3 (LMDB)** is the first choice when `database_backend = "auto"` in standard builds (default features include `heed3` and `rocksdb`). Use **`database_backend = "rocksdb"`** for an existing RocksDB datadir or Core LevelDB import.
+
+**RocksDB** (optional; still enabled by default for Core migration):
+- Automatic detection of common Bitcoin-style data directories
+- Direct access to raw block files (`blk*.dat`) where supported
+- Parsers for common on-disk chain formats
+
+Default binary builds enable **heed3** and **rocksdb**. heed3 requires `liblmdb`; RocksDB requires a working C++ toolchain; CI installs both where needed.
+
+To build with **redb** only (pure Rust, no `librocksdb-sys`):
+
+```bash
+cargo build --no-default-features --features "redb,production,sysinfo,nix,libc,governance,utxo-commitments,protocol-verification"
+```
+Omit `governance` if you do not need the HTTP client (Commons auto-detect uses `reqwest` via that feature). For Bitcoin-style **ZMQ PUB** notifications, load the **`blvm-zmq`** module (no longer a `blvm-node` feature flag).
+
+**Note**: RocksDB and erlay features are mutually exclusive due to dependency conflicts.
+
+### RBF and Mempool Policies
+
+Supports configurable RBF (Replace-By-Fee) modes and comprehensive mempool policies:
+
+- **RBF Modes**: Disabled, Conservative, Standard (default), Aggressive
+- **Mempool Policies**: Size limits, fee thresholds, eviction strategies, ancestor/descendant limits
+
+See the [Configuration Guide](docs/CONFIGURATION_GUIDE.md) for details:
+- [RBF Configuration](docs/RBF_CONFIGURATION.md) - Detailed RBF mode configuration
+- [Mempool Policies](docs/MEMPOOL_POLICIES.md) - Detailed mempool policy configuration
+
+### Protocol Variants
+
+Supports multiple Bitcoin protocol variants:
+
+- **Regtest** (default): Regression testing network for development
+- **Testnet3**: Bitcoin test network
+- **BitcoinV1**: Production Bitcoin mainnet
+
+```rust
+use blvm_node::{Node, NodeConfig};
+
+// Default: Regtest for safe development
+let config = NodeConfig::default();
+let node = Node::new(config)?;
+
+// Explicit testnet
+let mut config = NodeConfig::default();
+config.network = ProtocolVersion::Testnet3;
+let testnet_node = Node::new(config)?;
+```
+
+## Building
+
+### Quick Start
+
+```bash
+git clone https://github.com/BTCDecoded/blvm-node
+cd blvm-node
+cargo build --release
+```
+
+Cargo resolves **`blvm-consensus`** and other **`blvm-*`** dependencies from **crates.io** according to `Cargo.toml`. The **`[patch]`** flow below is only for **local sibling** development.
+
+### Local Development
+
+If you're developing both blvm-node and blvm-consensus:
+
+1. Clone both repos:
+   ```bash
+   git clone https://github.com/BTCDecoded/blvm-consensus
+   git clone https://github.com/BTCDecoded/blvm-node
+   ```
+
+2. Set up local override:
+   ```bash
+   cd blvm-node
+   mkdir -p .cargo
+   echo '[patch."https://github.com/BTCDecoded/blvm-consensus"]' > .cargo/config.toml
+   echo 'blvm-consensus = { path = "../blvm-consensus" }' >> .cargo/config.toml
+   ```
+
+3. Build:
+   ```bash
+   cargo build
+   ```
+
+Changes to blvm-consensus are now immediately reflected without git push.
+
+## Testing
+
+```bash
+# Run all tests
+cargo test
+
+# Run with verbose output
+cargo test -- --nocapture
+```
+
+## Usage
+
+### Running the node
+
+The node binary is `blvm`. The `blvm` crate builds it (`cargo build --release -p blvm` in that checkout). This crate's binaries are the config converter and the migrator. `cargo run` here does not start a node.
+
+```bash
+# From the blvm crate, after `cargo build --release -p blvm`:
+./target/release/blvm --network regtest
+./target/release/blvm --network testnet
+./target/release/blvm --network mainnet
+```
+
+For **release mainnet IBD**, use the **`blvm`** binary — [Mainnet initial sync](https://docs.btcdecoded.org/blvm/getting-started/mainnet-sync.html).
+
+### Programmatic Usage
+
+```rust
+use blvm_node::{Node, NodeConfig};
+
+// Default: Regtest for safe development
+let config = NodeConfig::default();
+let node = Node::new(config)?;
+
+// Start the node
+node.start().await?;
+```
+
+See [docs/](docs/) for detailed documentation including:
+- [Configuration Guide](docs/CONFIGURATION_GUIDE.md) - Complete configuration options
+- [Module System](modules/README.md) - Process-isolated module system
+- [RPC Reference](docs/RPC_REFERENCE.md) - JSON-RPC API documentation
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for security policies, **[Deployment posture](https://docs.btcdecoded.org/blvm/security/deployment-posture.html)** for operator exposure guidance, and [BTCDecoded Security Policy](https://github.com/BTCDecoded/.github/blob/main/SECURITY.md) for organization-wide guidelines.
+
+Additional hardening required for production mainnet use.
+
+## Dependencies
+
+**Monorepo vs crates.io:** In-tree builds use **path** dependencies for `blvm-protocol`, `blvm-consensus`, `blvm-muhash`, and optional `blvm-spec-lock`. From [crates.io](https://crates.io/crates/blvm-node):
+
+```toml
+[dependencies]
+blvm-node = ">=0.1, <1"
+```
+
+- **blvm-consensus**: All consensus logic (via `blvm-protocol` or direct optional dep)
+- **tokio**: Async runtime for networking
+- **serde**: Serialization
+- **anyhow/thiserror**: Error handling
+- **tracing**: Logging
+- **clap**: CLI interface
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the [BTCDecoded Contribution Guide](https://github.com/BTCDecoded/.github/blob/main/CONTRIBUTING.md).
+
+## License
+
+MIT License - see LICENSE file for details.

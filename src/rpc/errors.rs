@@ -1,0 +1,573 @@
+//! RPC Error Types
+//!
+//! Standard-compatible JSON-RPC error codes and error handling
+
+use serde_json::{Value, json};
+use std::fmt;
+
+/// User-facing message when an RPC or operation requires storage and it is not initialized.
+/// Use for RPC errors and JSON "note"/"warnings" so wording stays consistent.
+pub const STORAGE_NOT_AVAILABLE_MSG: &str =
+    "Storage not available. This operation requires storage to be initialized.";
+
+/// Standard "not found" and required-param messages (single place for wording/i18n).
+pub const BLOCK_NOT_FOUND_MSG: &str = "Block not found";
+pub const TX_NOT_FOUND_MSG: &str = "Transaction not found";
+pub const HEIGHT_PARAM_REQUIRED_MSG: &str = "Height parameter required";
+pub const BLOCK_HASH_PARAM_REQUIRED_MSG: &str = "Block hash parameter required";
+/// Tip block not found (e.g. when resolving chain tip for mining/difficulty).
+pub const TIP_BLOCK_NOT_FOUND_MSG: &str = "Tip block not found";
+
+/// Sentinel error for "block not found". Handlers return this via anyhow so the server
+/// can downcast and convert to `RpcError::block_not_found()` (code -5) instead of generic internal error.
+#[derive(Debug)]
+pub struct BlockNotFoundError(pub String);
+
+impl BlockNotFoundError {
+    pub fn new(context: impl Into<String>) -> Self {
+        Self(context.into())
+    }
+}
+
+impl std::fmt::Display for BlockNotFoundError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_empty() {
+            write!(f, "{BLOCK_NOT_FOUND_MSG}")
+        } else {
+            write!(f, "{}: {}", BLOCK_NOT_FOUND_MSG, self.0)
+        }
+    }
+}
+
+impl std::error::Error for BlockNotFoundError {}
+
+/// Convert blockchain handler anyhow::Error to RpcError; downcasts BlockNotFoundError to code -5.
+pub fn rpc_error_from_blockchain_result(e: anyhow::Error) -> RpcError {
+    if let Some(b) = e.downcast_ref::<BlockNotFoundError>() {
+        RpcError::block_not_found(&b.0)
+    } else if let Some(rpc) = e.downcast_ref::<RpcError>() {
+        rpc.clone()
+    } else {
+        RpcError::internal_error(e.to_string())
+    }
+}
+
+/// JSON-RPC error codes (standard compatible)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RpcErrorCode {
+    /// Parse error (-32700)
+    ParseError,
+    /// Invalid request (-32600)
+    InvalidRequest,
+    /// Method not found (-32601)
+    MethodNotFound,
+    /// Invalid params (-32602)
+    InvalidParams,
+    /// Internal error (-32603)
+    InternalError,
+    /// Server error (reserved -32000 to -32099)
+    ServerError(i32),
+    /// Protocol-specific errors
+    /// A spendable output of this transaction is already a coin (-27)
+    TxAlreadyInChain,
+    /// Transaction rejected (-25)
+    TxRejected,
+    /// Policy reject, including a mempool duplicate (-26)
+    VerifyRejected,
+    /// Missing or spent inputs (-25)
+    TxMissingInputs,
+    /// Transaction already in mempool (-26)
+    TxAlreadyInMempool,
+    /// Block not found (-5)
+    BlockNotFound,
+    /// Transaction not found (-5)
+    TxNotFound,
+    /// UTXO not found (-5)
+    UtxoNotFound,
+}
+
+impl RpcErrorCode {
+    /// Get numeric error code
+    pub fn code(&self) -> i32 {
+        match self {
+            RpcErrorCode::ParseError => -32700,
+            RpcErrorCode::InvalidRequest => -32600,
+            RpcErrorCode::MethodNotFound => -32601,
+            RpcErrorCode::InvalidParams => -32602,
+            RpcErrorCode::InternalError => -32603,
+            RpcErrorCode::ServerError(code) => *code,
+            RpcErrorCode::TxAlreadyInChain => -27,
+            RpcErrorCode::TxRejected => -25,
+            RpcErrorCode::VerifyRejected => -26,
+            RpcErrorCode::TxMissingInputs => -25,
+            RpcErrorCode::TxAlreadyInMempool => -26,
+            RpcErrorCode::BlockNotFound => -5,
+            RpcErrorCode::TxNotFound => -5,
+            RpcErrorCode::UtxoNotFound => -5,
+        }
+    }
+
+    /// Get error message
+    pub fn message(&self) -> &'static str {
+        match self {
+            RpcErrorCode::ParseError => "Parse error",
+            RpcErrorCode::InvalidRequest => "Invalid Request",
+            RpcErrorCode::MethodNotFound => "Method not found",
+            RpcErrorCode::InvalidParams => "Invalid params",
+            RpcErrorCode::InternalError => "Internal error",
+            RpcErrorCode::ServerError(_) => "Server error",
+            RpcErrorCode::TxAlreadyInChain => "Transaction outputs already in utxo set",
+            RpcErrorCode::TxRejected => "Transaction rejected",
+            RpcErrorCode::VerifyRejected => "Transaction rejected",
+            RpcErrorCode::TxMissingInputs => "bad-txns-inputs-missingorspent",
+            RpcErrorCode::TxAlreadyInMempool => "txn-already-in-mempool",
+            RpcErrorCode::BlockNotFound => "Block not found",
+            RpcErrorCode::TxNotFound => "Transaction not found",
+            RpcErrorCode::UtxoNotFound => "No such UTXO",
+        }
+    }
+}
+
+/// RPC Error structure
+#[derive(Debug, Clone)]
+pub struct RpcError {
+    pub code: RpcErrorCode,
+    pub message: String,
+    pub data: Option<Value>,
+}
+
+impl RpcError {
+    /// Create a new RPC error
+    pub fn new(code: RpcErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    /// Create an error with additional data
+    pub fn with_data(code: RpcErrorCode, message: impl Into<String>, data: Value) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data: Some(data),
+        }
+    }
+
+    /// Parse error
+    pub fn parse_error(message: impl Into<String>) -> Self {
+        Self::new(RpcErrorCode::ParseError, message)
+    }
+
+    /// Invalid request
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        Self::new(RpcErrorCode::InvalidRequest, message)
+    }
+
+    /// Method not found
+    pub fn method_not_found(method: &str) -> Self {
+        Self::new(
+            RpcErrorCode::MethodNotFound,
+            format!("Method not found: {method}"),
+        )
+    }
+
+    /// Invalid params
+    pub fn invalid_params(message: impl Into<String>) -> Self {
+        Self::new(RpcErrorCode::InvalidParams, message)
+    }
+
+    /// Internal error
+    pub fn internal_error(message: impl Into<String>) -> Self {
+        Self::new(RpcErrorCode::InternalError, message)
+    }
+
+    /// Storage required but not available (use with require_storage() in handlers)
+    pub fn storage_not_available() -> Self {
+        Self::internal_error(STORAGE_NOT_AVAILABLE_MSG)
+    }
+
+    /// Block not found (with optional hash context)
+    pub fn block_not_found(hash: &str) -> Self {
+        Self::new(
+            RpcErrorCode::BlockNotFound,
+            if hash.is_empty() {
+                BLOCK_NOT_FOUND_MSG.to_string()
+            } else {
+                format!("{BLOCK_NOT_FOUND_MSG}: {hash}")
+            },
+        )
+    }
+
+    /// Transaction not found (with optional txid context)
+    pub fn tx_not_found(txid: &str) -> Self {
+        Self::new(
+            RpcErrorCode::TxNotFound,
+            if txid.is_empty() {
+                TX_NOT_FOUND_MSG.to_string()
+            } else {
+                format!("{TX_NOT_FOUND_MSG}: {txid}")
+            },
+        )
+    }
+
+    /// UTXO not found
+    pub fn utxo_not_found() -> Self {
+        Self::new(RpcErrorCode::UtxoNotFound, "No such UTXO")
+    }
+
+    /// Transaction already in mempool
+    pub fn tx_already_in_mempool(_txid: &str) -> Self {
+        Self::new(RpcErrorCode::TxAlreadyInMempool, "txn-already-in-mempool")
+    }
+
+    /// Transaction rejected
+    pub fn tx_rejected(reason: impl Into<String>) -> Self {
+        Self::new(RpcErrorCode::TxRejected, reason)
+    }
+
+    /// The RPC method exceeded `rpc_timeout_seconds`.
+    pub fn request_timeout() -> Self {
+        Self::new(RpcErrorCode::ServerError(-32099), "RPC request timed out")
+    }
+
+    /// Transaction rejected with detailed context
+    pub fn tx_rejected_with_context(
+        reason: impl Into<String>,
+        txid: Option<&str>,
+        rejection_code: Option<&str>,
+        details: Option<Value>,
+    ) -> Self {
+        let mut data = json!({});
+
+        if let Some(txid) = txid {
+            data["txid"] = json!(txid);
+        }
+
+        if let Some(code) = rejection_code {
+            data["rejection_code"] = json!(code);
+        }
+
+        if let Some(details) = details {
+            data["details"] = details;
+        }
+
+        Self::with_data(RpcErrorCode::TxRejected, reason, data)
+    }
+
+    /// Transaction rejected due to insufficient fee
+    pub fn tx_rejected_insufficient_fee(
+        txid: Option<&str>,
+        required_fee_rate: f64,
+        provided_fee_rate: f64,
+        required_fee: Option<u64>,
+        provided_fee: Option<u64>,
+    ) -> Self {
+        let mut data = json!({
+            "reason": "insufficient_fee",
+            "required_fee_rate": required_fee_rate,
+            "provided_fee_rate": provided_fee_rate,
+        });
+
+        if let Some(txid) = txid {
+            data["txid"] = json!(txid);
+        }
+
+        if let Some(required) = required_fee {
+            data["required_fee_satoshis"] = json!(required);
+        }
+
+        if let Some(provided) = provided_fee {
+            data["provided_fee_satoshis"] = json!(provided);
+        }
+
+        let mut suggestions = vec![
+            format!(
+                "Increase fee rate to at least {:.2} sat/vB",
+                required_fee_rate
+            ),
+            "Use estimatesmartfee to get current fee recommendations".to_string(),
+        ];
+
+        if let Some(required) = required_fee {
+            if let Some(provided) = provided_fee {
+                let shortfall = required.saturating_sub(provided);
+                suggestions.push(format!("Fee shortfall: {shortfall} satoshis"));
+            }
+        }
+
+        data["suggestions"] = json!(suggestions);
+
+        Self::with_data(
+            RpcErrorCode::TxRejected,
+            format!(
+                "Transaction rejected: insufficient fee (required: {required_fee_rate:.2} sat/vB, provided: {provided_fee_rate:.2} sat/vB)"
+            ),
+            data,
+        )
+    }
+
+    /// Invalid hash format error
+    pub fn invalid_hash_format(
+        hash: &str,
+        expected_length: Option<usize>,
+        reason: Option<&str>,
+    ) -> Self {
+        let mut data = json!({
+            "hash": hash,
+            "reason": reason.unwrap_or("Invalid hash format"),
+        });
+
+        if let Some(length) = expected_length {
+            data["expected_length"] = json!(length);
+            data["actual_length"] = json!(hash.len());
+        }
+
+        let mut suggestions = vec!["Hash must be a hexadecimal string".to_string()];
+        if let Some(length) = expected_length {
+            suggestions.push(format!(
+                "Hash must be exactly {} characters ({} bytes)",
+                length * 2,
+                length
+            ));
+        }
+        suggestions
+            .push("Use lowercase or uppercase hexadecimal characters (0-9, a-f, A-F)".to_string());
+
+        data["suggestions"] = json!(suggestions);
+
+        Self::with_data(
+            RpcErrorCode::InvalidParams,
+            format!(
+                "Invalid hash format: {}",
+                reason.unwrap_or("Invalid hexadecimal string")
+            ),
+            data,
+        )
+    }
+
+    /// Invalid address format error
+    pub fn invalid_address_format(
+        address: &str,
+        reason: Option<&str>,
+        expected_format: Option<&str>,
+    ) -> Self {
+        let mut data = json!({
+            "address": address,
+            "reason": reason.unwrap_or("Invalid address format"),
+        });
+
+        if let Some(format) = expected_format {
+            data["expected_format"] = json!(format);
+        }
+
+        let mut suggestions = vec![
+            "Address must be a valid Bitcoin address".to_string(),
+            "Supported formats: P2PKH (starts with '1'), P2SH (starts with '3'), Bech32 (starts with 'bc1')".to_string(),
+        ];
+
+        if let Some(format) = expected_format {
+            suggestions.push(format!("Expected format: {format}"));
+        }
+
+        data["suggestions"] = json!(suggestions);
+
+        Self::with_data(
+            RpcErrorCode::InvalidParams,
+            format!(
+                "Invalid address format: {}",
+                reason.unwrap_or("Invalid Bitcoin address")
+            ),
+            data,
+        )
+    }
+
+    /// Missing required parameter error
+    pub fn missing_parameter(param_name: &str, param_type: Option<&str>) -> Self {
+        let mut data = json!({
+            "parameter": param_name,
+        });
+
+        if let Some(ty) = param_type {
+            data["expected_type"] = json!(ty);
+        }
+
+        let mut suggestions = vec![format!("Provide the '{}' parameter", param_name)];
+        if let Some(ty) = param_type {
+            suggestions.push(format!("Parameter type should be: {ty}"));
+        }
+
+        data["suggestions"] = json!(suggestions);
+
+        Self::with_data(
+            RpcErrorCode::InvalidParams,
+            format!("Missing required parameter: {param_name}"),
+            data,
+        )
+    }
+
+    /// Block not found with context
+    pub fn block_not_found_with_context(
+        hash: &str,
+        suggestion: Option<&str>,
+        available_height: Option<u64>,
+    ) -> Self {
+        let mut data = json!({
+            "block_hash": hash,
+        });
+
+        if let Some(suggestion) = suggestion {
+            data["suggestion"] = json!(suggestion);
+        }
+
+        if let Some(height) = available_height {
+            data["available_height"] = json!(height);
+        }
+
+        Self::with_data(
+            RpcErrorCode::BlockNotFound,
+            format!("Block not found: {hash}"),
+            data,
+        )
+    }
+
+    /// Transaction not found with context
+    pub fn tx_not_found_with_context(
+        txid: &str,
+        in_mempool: bool,
+        suggestion: Option<&str>,
+    ) -> Self {
+        let mut data = json!({
+            "txid": txid,
+            "in_mempool": in_mempool,
+        });
+
+        if let Some(suggestion) = suggestion {
+            data["suggestion"] = json!(suggestion);
+        }
+
+        Self::with_data(
+            RpcErrorCode::TxNotFound,
+            format!("Transaction not found: {txid}"),
+            data,
+        )
+    }
+
+    /// Invalid params with detailed field information
+    pub fn invalid_params_with_fields(
+        message: impl Into<String>,
+        fields: Vec<(&str, &str)>,
+        suggestions: Option<Value>,
+    ) -> Self {
+        let mut data = json!({
+            "invalid_fields": fields
+                .iter()
+                .map(|(field, reason)| json!({
+                    "field": field,
+                    "reason": reason
+                }))
+                .collect::<Vec<_>>(),
+        });
+
+        if let Some(suggestions) = suggestions {
+            data["suggestions"] = suggestions;
+        }
+
+        Self::with_data(RpcErrorCode::InvalidParams, message, data)
+    }
+
+    /// Add suggestion to error
+    pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
+        let data = self.data.get_or_insert_with(|| json!({}));
+        data["suggestion"] = json!(suggestion.into());
+        self
+    }
+
+    /// Add context to error
+    pub fn with_context(mut self, context: Value) -> Self {
+        let data = self.data.get_or_insert_with(|| json!({}));
+        if let Some(obj) = data.as_object_mut() {
+            if let Some(ctx_obj) = context.as_object() {
+                for (k, v) in ctx_obj {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        self
+    }
+
+    /// Convert to JSON-RPC error response
+    pub fn to_json(&self, id: Option<Value>) -> Value {
+        let mut error = json!({
+            "code": self.code.code(),
+            "message": self.message,
+        });
+
+        if let Some(data) = &self.data {
+            error["data"] = data.clone();
+        } else {
+            error["message"] = json!(self.message.clone());
+        }
+
+        json!({
+            "jsonrpc": "2.0",
+            "error": error,
+            "id": id
+        })
+    }
+}
+
+impl fmt::Display for RpcError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RPC Error {}: {}", self.code.code(), self.message)
+    }
+}
+
+impl std::error::Error for RpcError {}
+
+/// Result type for RPC operations
+pub type RpcResult<T> = Result<T, RpcError>;
+
+/// Convert anyhow error to RPC error
+impl From<anyhow::Error> for RpcError {
+    fn from(err: anyhow::Error) -> Self {
+        RpcError::internal_error(err.to_string())
+    }
+}
+
+/// Convert consensus error to RPC error
+impl From<blvm_protocol::ConsensusError> for RpcError {
+    fn from(err: blvm_protocol::ConsensusError) -> Self {
+        RpcError::tx_rejected(format!("Consensus error: {err}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_codes() {
+        assert_eq!(RpcErrorCode::ParseError.code(), -32700);
+        assert_eq!(RpcErrorCode::MethodNotFound.code(), -32601);
+        assert_eq!(RpcErrorCode::BlockNotFound.code(), -5);
+    }
+
+    #[test]
+    fn test_error_creation() {
+        let err = RpcError::block_not_found("abc123");
+        assert_eq!(err.code.code(), -5);
+        assert!(err.message.contains("abc123"));
+    }
+
+    #[test]
+    fn test_error_to_json() {
+        let err = RpcError::method_not_found("test");
+        let json = err.to_json(Some(json!(1)));
+
+        assert_eq!(json["jsonrpc"], "2.0");
+        assert_eq!(json["error"]["code"], -32601);
+        assert_eq!(json["id"], 1);
+    }
+}

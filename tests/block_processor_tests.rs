@@ -1,0 +1,317 @@
+//! Tests for block processing and validation
+
+use blvm_node::node::block_processor::{
+    load_witnesses_for_block, parse_block_from_wire, prepare_block_validation_context,
+    store_block_with_context, store_block_with_context_and_index, validate_block_with_context,
+};
+use blvm_node::storage::Storage;
+use blvm_node::{Block, BlockHeader, UtxoSet};
+use blvm_protocol::{BitcoinProtocolEngine, ProtocolVersion, segwit::Witness};
+use std::sync::Arc;
+use tempfile::TempDir;
+
+fn create_test_block() -> Block {
+    Block {
+        header: BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [0u8; 32],
+            timestamp: 1231006505,
+            bits: 0x1d00ffff,
+            nonce: 0,
+        },
+        transactions: vec![].into_boxed_slice(),
+    }
+}
+
+fn create_empty_witnesses() -> Vec<Vec<Witness>> {
+    vec![]
+}
+
+fn create_test_witnesses() -> Vec<Vec<Witness>> {
+    // One transaction with one witness containing one stack item [0x01, 0x02, 0x03]
+    vec![vec![vec![vec![0x01, 0x02, 0x03]]]]
+}
+
+fn create_test_storage() -> (TempDir, Arc<Storage>) {
+    let temp_dir = TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp_dir.path()).unwrap());
+    (temp_dir, storage)
+}
+
+#[test]
+fn test_parse_block_from_wire_invalid_data() {
+    let invalid_data = b"invalid block data";
+    let result = parse_block_from_wire(invalid_data);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_store_block_with_context() {
+    let (_temp_dir, storage) = create_test_storage();
+    let block = create_test_block();
+    let witnesses = create_empty_witnesses();
+
+    let result = store_block_with_context(&storage.blocks(), &block, &witnesses, 0);
+    assert!(result.is_ok());
+
+    // Verify block was stored
+    let block_hash = storage.blocks().get_block_hash(&block);
+    let stored_block = storage.blocks().get_block(&block_hash).unwrap();
+    assert!(stored_block.is_some());
+}
+
+#[test]
+fn test_store_block_with_context_and_witnesses() {
+    let (_temp_dir, storage) = create_test_storage();
+    let block = create_test_block();
+    let witnesses = create_test_witnesses();
+
+    let result = store_block_with_context(&storage.blocks(), &block, &witnesses, 0);
+    assert!(result.is_ok());
+
+    // Verify witness was stored
+    let block_hash = storage.blocks().get_block_hash(&block);
+    let stored_witness = storage.blocks().get_witness(&block_hash).unwrap();
+    assert!(stored_witness.is_some());
+    assert!(!stored_witness.unwrap().is_empty());
+}
+
+#[test]
+fn test_store_block_with_context_and_index() {
+    let (_temp_dir, storage) = create_test_storage();
+    let block = create_test_block();
+    let witnesses = create_empty_witnesses();
+
+    let result = store_block_with_context_and_index(
+        &storage.blocks(),
+        Some(&storage),
+        &block,
+        &witnesses,
+        0,
+        true,
+    );
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_store_block_with_context_updates_height_index() {
+    let (_temp_dir, storage) = create_test_storage();
+    let block = create_test_block();
+    let witnesses = create_empty_witnesses();
+
+    let result = store_block_with_context(&storage.blocks(), &block, &witnesses, 100);
+    assert!(result.is_ok());
+
+    // Verify block was stored (height index update is internal)
+    let block_hash = storage.blocks().get_block_hash(&block);
+    let stored_block = storage.blocks().get_block(&block_hash).unwrap();
+    assert!(stored_block.is_some());
+}
+
+#[test]
+fn test_store_block_with_context_stores_recent_header() {
+    let (_temp_dir, storage) = create_test_storage();
+    let block = create_test_block();
+    let witnesses = create_empty_witnesses();
+
+    let result = store_block_with_context(&storage.blocks(), &block, &witnesses, 0);
+    assert!(result.is_ok());
+
+    // Verify recent header was stored
+    let recent_headers = storage.blocks().get_recent_headers(11).unwrap();
+    assert!(!recent_headers.is_empty());
+    assert_eq!(recent_headers[0].version, block.header.version);
+}
+
+#[test]
+fn test_prepare_block_validation_context() {
+    let (_temp_dir, storage) = create_test_storage();
+    let block = create_test_block();
+
+    // Store block first (witness blob stored separately for SegWit-era validation)
+    let witnesses = create_empty_witnesses();
+    store_block_with_context(&storage.blocks(), &block, &witnesses, 0).unwrap();
+    let block_hash = storage.blocks().get_block_hash(&block);
+    storage
+        .blocks()
+        .store_witness(&block_hash, &witnesses)
+        .unwrap();
+
+    // Prepare validation context
+    let (witnesses_result, recent_headers) =
+        prepare_block_validation_context(&storage.blocks(), &block, 0, ProtocolVersion::Regtest)
+            .unwrap();
+
+    // Should return witnesses (empty in this case)
+    assert_eq!(witnesses_result.len(), block.transactions.len());
+
+    // Should return recent headers if available
+    if let Some(headers) = recent_headers {
+        assert!(!headers.is_empty());
+    }
+}
+
+#[test]
+fn test_prepare_block_validation_context_with_no_headers() {
+    let (_temp_dir, storage) = create_test_storage();
+    let block = create_test_block();
+
+    // Without stored witnesses, regtest (SegWit active) fails closed.
+    let err =
+        prepare_block_validation_context(&storage.blocks(), &block, 0, ProtocolVersion::Regtest)
+            .unwrap_err();
+    assert!(
+        err.to_string().contains("missing witness data"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_load_witnesses_missing_post_segwit_fails_closed() {
+    let (_temp_dir, storage) = create_test_storage();
+    let block = create_test_block();
+    store_block_with_context(&storage.blocks(), &block, &[], 0).unwrap();
+
+    let err = load_witnesses_for_block(&storage.blocks(), &block, 0, ProtocolVersion::Regtest)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("missing witness data"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_validate_block_with_context() {
+    let (_temp_dir, storage) = create_test_storage();
+    let protocol = BitcoinProtocolEngine::new(ProtocolVersion::Regtest).unwrap();
+    let block = create_test_block();
+    let mut utxo_set = UtxoSet::default();
+    let witnesses = create_empty_witnesses();
+
+    // Store block first
+    store_block_with_context(&storage.blocks(), &block, &witnesses, 0).unwrap();
+
+    // Validate block
+    let result = validate_block_with_context(
+        &storage.blocks(),
+        &protocol,
+        &block,
+        &witnesses,
+        &mut utxo_set,
+        0,
+    );
+
+    // Validation should succeed for a valid empty block in regtest
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_store_block_with_context_multiple_blocks() {
+    let (_temp_dir, storage) = create_test_storage();
+    let witnesses = create_empty_witnesses();
+
+    // Store multiple blocks
+    let mut prev_hash = [0u8; 32];
+    for height in 0..5 {
+        let mut block = create_test_block();
+        if height > 0 {
+            block.header.prev_block_hash = prev_hash;
+        }
+
+        let result = store_block_with_context(&storage.blocks(), &block, &witnesses, height);
+        assert!(result.is_ok());
+
+        // Update prev_hash for next iteration
+        prev_hash = storage.blocks().get_block_hash(&block);
+    }
+
+    // Verify blocks were stored by checking block count
+    let block_count = storage.blocks().block_count().unwrap();
+    assert_eq!(block_count, 5);
+}
+
+#[test]
+fn test_store_block_with_context_empty_witnesses() {
+    let (_temp_dir, storage) = create_test_storage();
+    let block = create_test_block();
+    let empty_witnesses = create_empty_witnesses();
+
+    let result = store_block_with_context(&storage.blocks(), &block, &empty_witnesses, 0);
+    assert!(result.is_ok());
+
+    // Block should still be stored even without witnesses
+    let block_hash = storage.blocks().get_block_hash(&block);
+    let stored_block = storage.blocks().get_block(&block_hash).unwrap();
+    assert!(stored_block.is_some());
+}
+
+#[test]
+fn test_store_block_with_context_and_index_without_storage() {
+    let (_temp_dir, storage) = create_test_storage();
+    let block = create_test_block();
+    let witnesses = create_empty_witnesses();
+
+    // Pass None for storage (should still work, just won't index)
+    let result =
+        store_block_with_context_and_index(&storage.blocks(), None, &block, &witnesses, 0, true);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn side_block_does_not_replace_the_active_height() {
+    let (_temp_dir, storage) = create_test_storage();
+    let mut active = create_test_block();
+    active.header.nonce = 1;
+    let mut side = create_test_block();
+    side.header.nonce = 2;
+    let witnesses = create_empty_witnesses();
+    store_block_with_context_and_index(
+        &storage.blocks(),
+        Some(&storage),
+        &active,
+        &witnesses,
+        5,
+        true,
+    )
+    .unwrap();
+    let active_hash = storage.blocks().get_block_hash(&active);
+    store_block_with_context_and_index(
+        &storage.blocks(),
+        Some(&storage),
+        &side,
+        &witnesses,
+        5,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        storage.blocks().get_hash_by_height(5).unwrap().unwrap(),
+        active_hash
+    );
+    let side_hash = storage.blocks().get_block_hash(&side);
+    assert_eq!(
+        storage.blocks().get_height_by_hash(&side_hash).unwrap(),
+        Some(5)
+    );
+    let parent = storage
+        .blocks()
+        .get_header_at_height(5)
+        .unwrap()
+        .expect("active header");
+    assert_eq!(
+        blvm_consensus::block::block_header_hash(&parent),
+        active_hash
+    );
+    let mut child = create_test_block();
+    child.header.prev_block_hash = active_hash;
+    assert!(blvm_consensus::block::validate_prev_block_hash(
+        &child.header,
+        &parent
+    ));
+    storage.blocks().store_height(5, &side_hash).unwrap();
+    assert_eq!(
+        storage.blocks().get_hash_by_height(5).unwrap().unwrap(),
+        side_hash
+    );
+}

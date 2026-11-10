@@ -1,0 +1,145 @@
+# Quinn QUIC Transport Integration
+
+## Overview
+
+Quinn QUIC transport has been integrated as a standalone transport option alongside TCP and Iroh, providing direct QUIC connections without NAT traversal overhead.
+
+## Features
+
+- **Direct QUIC**: SocketAddr-based connections (like TCP) using QUIC protocol
+- **All Transport Combinations**: Support for TCP/Iroh/Quinn/IrohQuinn/TcpIroh/TcpQuinn/TcpIrohQuinn via bitflags
+- **Stratum V2 Support**: `quinn://` URL scheme for mining pool connections
+- **Protocol Adapter**: Uses bincode serialization (same as Iroh) for simplified wire format
+
+## Usage
+
+### Basic Transport Selection
+
+```rust
+use blvm_node::network::transport::TransportPreference;
+
+// Single transport
+let tcp_only = TransportPreference::TCP_ONLY;
+let quinn_only = TransportPreference::QUINN_ONLY;
+let iroh_only = TransportPreference::IROH_ONLY;
+
+// Combinations
+let tcp_quinn = TransportPreference::TCP | TransportPreference::QUINN;
+let all_transports = TransportPreference::ALL; // TCP | IROH | QUINN
+```
+
+### Network Manager
+
+```rust
+use blvm_node::network::{NetworkManager, transport::TransportPreference};
+
+let manager = NetworkManager::with_transport_preference(
+    listen_addr,
+    max_peers,
+    TransportPreference::TCP | TransportPreference::QUINN,
+);
+```
+
+### Stratum V2 (module)
+
+Mining pool / Stratum V2 transport lives in the **`blvm-stratum-v2`** module (configure **`pool_url`** / **`listen_addr`** there, or via `NodeAPI` transport helpers). The node no longer ships an in-process `StratumV2Client` stub here.
+
+## Transport Comparison
+
+| Feature | TCP | Quinn | Iroh |
+|---------|-----|-------|------|
+| Addressing | SocketAddr | SocketAddr | Public Key |
+| NAT Traversal | No | No | Yes (DERP) |
+| Encryption | No | Yes (QUIC) | Yes (QUIC) |
+| Overhead | Low | Medium | Higher |
+| Use Case | Bitcoin P2P | Direct servers | P2P with NAT |
+
+## Implementation Details
+
+### Quinn Transport (`quinn_transport.rs`)
+
+- Implements `Transport` trait
+- Uses QUIC unidirectional streams
+- Length-prefixed messages (4-byte big-endian)
+- Self-signed certificates for development (production needs proper certs)
+
+### Protocol Serialization
+
+Quinn uses bincode serialization (same as Iroh) for simplified wire format:
+- Converts `NetworkMessage` → `ProtocolMessage` → bincode bytes
+- More compact than JSON
+- Compatible with existing protocol adapter
+
+### Transport Preference System
+
+Uses `bitflags` for flexible combinations:
+- Individual flags: `TCP`, `IROH`, `QUINN`
+- Combine with bitwise OR: `TCP | QUINN`
+- Check with: `preference.allows_tcp()`, `preference.allows_quinn()`
+- Get list: `preference.enabled_transports()`
+
+## Testing
+
+Comprehensive test coverage includes:
+
+1. **Transport Tests** (`tests/integration/transport_tests.rs`)
+   - Transport preference combinations
+   - NetworkManager with Quinn
+   - Address conversions
+
+2. **Quinn Transport Tests** (`tests/quinn_transport_tests.rs`)
+   - Transport type verification
+   - Listen/accept functionality
+   - Address validation
+   - Connection structure
+
+Stratum / pool URL integration with QUIC or other transports is covered in **`blvm-stratum-v2`** (module config and `NodeAPI` paths), not in `blvm-node` integration tests.
+
+## Configuration
+
+### Cargo.toml
+
+```toml
+[features]
+quinn = ["dep:quinn", "dep:rcgen", "dep:rustls", "dep:h3", "dep:h3-quinn"]
+
+[dependencies]
+quinn = { version = "0.11", optional = true }
+rcgen = { version = "0.11", optional = true }
+rustls = { version = "0.23", optional = true }
+h3 = { version = "0.0.8", optional = true }
+h3-quinn = { version = "0.0.10", optional = true }
+bitflags = "2.4"
+```
+
+### Runtime Configuration
+
+```rust
+use blvm_node::config::{NodeConfig, TransportPreferenceConfig};
+
+let config = NodeConfig {
+    transport_preference: TransportPreferenceConfig::QuinnOnly,
+    // ...
+};
+```
+
+## Backward Compatibility
+
+All existing code continues to work:
+- `TransportPreference::TcpOnly` → `TransportPreference::TCP_ONLY`
+- `TransportPreference::IrohOnly` → `TransportPreference::IROH_ONLY`
+- `TransportPreference::Hybrid` → `TransportPreference::HYBRID`
+
+## Future Improvements
+
+1. **Certificate Verification**: Proper TLS certificate validation for production
+2. **Connection Pooling**: Reuse QUIC connections where appropriate
+3. **Performance Benchmarks**: Compare TCP vs Quinn vs Iroh
+4. **Connection Migration**: Leverage QUIC's connection migration features
+5. **Multi-stream Support**: Handle multiple QUIC streams per connection
+
+## See Also
+
+- [Transport Abstraction](transport/README_TRANSPORT_ABSTRACTION.md)
+- [QUIC RPC](QUIC_RPC.md) — Quinn RPC uses the same auth and rate-limit model as HTTP RPC
+

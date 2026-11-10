@@ -1,0 +1,374 @@
+//! Ban list sharing handlers (GetBanList, BanList).
+
+use crate::network::ban_list_merging::{
+    calculate_ban_list_hash, validate_ban_entry, verify_ban_list_hash,
+};
+use crate::network::network_manager::NetworkManager;
+use crate::network::protocol::{
+    BanEntry, BanListMessage, NetworkAddress, ProtocolMessage, ProtocolParser,
+};
+use crate::utils::current_timestamp;
+use anyhow::Result;
+use std::net::{IpAddr, SocketAddr};
+use tracing::{debug, warn};
+
+impl NetworkManager {
+    /// Handle GetBanList message - respond with ban list or hash
+    pub(crate) async fn handle_get_ban_list(
+        &self,
+        peer_addr: SocketAddr,
+        msg: crate::network::protocol::GetBanListMessage,
+    ) -> Result<()> {
+        debug!(
+            "GetBanList request from {}: full={}, min_duration={}",
+            peer_addr, msg.request_full, msg.min_ban_duration
+        );
+
+        let floor = self
+            .ban_list_sharing_config
+            .as_ref()
+            .map(|cfg| cfg.min_ban_duration_to_share)
+            .unwrap_or(0);
+        let min_duration = msg.min_ban_duration.max(floor);
+
+        let ban_list = self.ban_list().read().await;
+        let now = current_timestamp();
+
+        let mut ban_entries: Vec<BanEntry> = Vec::new();
+        for (addr, &unban_timestamp) in ban_list.iter() {
+            if unban_timestamp != u64::MAX && now >= unban_timestamp {
+                continue;
+            }
+
+            if min_duration > 0 {
+                let ban_duration = if unban_timestamp == u64::MAX {
+                    u64::MAX
+                } else {
+                    unban_timestamp.saturating_sub(now)
+                };
+                if ban_duration < min_duration {
+                    continue;
+                }
+            }
+
+            let ip_bytes = match addr.ip() {
+                std::net::IpAddr::V4(ipv4) => {
+                    let mut bytes = [0u8; 16];
+                    bytes[12..16].copy_from_slice(&ipv4.octets());
+                    bytes
+                }
+                std::net::IpAddr::V6(ipv6) => ipv6.octets(),
+            };
+
+            ban_entries.push(BanEntry {
+                addr: NetworkAddress {
+                    time: 0,
+                    services: 0,
+                    ip: ip_bytes,
+                    port: addr.port(),
+                },
+                unban_timestamp,
+                reason: Some("DoS protection".to_string()),
+            });
+        }
+
+        let ban_list_hash = calculate_ban_list_hash(&ban_entries);
+        let ban_entries_count = ban_entries.len();
+
+        let response = BanListMessage {
+            is_full: msg.request_full,
+            ban_list_hash,
+            ban_entries: if msg.request_full {
+                ban_entries
+            } else {
+                Vec::new()
+            },
+            timestamp: now,
+        };
+
+        let response_msg = ProtocolMessage::BanList(response);
+        let serialized = ProtocolParser::serialize_message(&response_msg)?;
+        self.send_to_peer(peer_addr, serialized).await?;
+
+        debug!(
+            "Sent BanList response to {}: {} entries",
+            peer_addr,
+            if msg.request_full {
+                ban_entries_count
+            } else {
+                0
+            }
+        );
+
+        Ok(())
+    }
+
+    /// Handle BanList message - merge received ban list
+    pub(crate) async fn handle_ban_list(
+        &self,
+        peer_addr: SocketAddr,
+        msg: crate::network::protocol::BanListMessage,
+    ) -> Result<()> {
+        debug!(
+            "BanList received from {}: full={}, {} entries",
+            peer_addr,
+            msg.is_full,
+            msg.ban_entries.len()
+        );
+
+        if let Err(e) = crate::network::replay_protection::ReplayProtection::validate_timestamp(
+            msg.timestamp as i64,
+            86400,
+        ) {
+            warn!(
+                "Replay protection: Invalid timestamp in BanList from {}: {}",
+                peer_addr, e
+            );
+            return Err(anyhow::anyhow!("Replay protection: {}", e));
+        }
+
+        if msg.is_full && !verify_ban_list_hash(&msg.ban_entries, &msg.ban_list_hash) {
+            warn!("Ban list hash verification failed from {}", peer_addr);
+            return self
+                .disconnect_for_protocol_violation(peer_addr, "ban list hash mismatch", false)
+                .await;
+        }
+
+        let sharing = self.ban_list_sharing_config.clone();
+        let trusted = sharing
+            .as_ref()
+            .is_some_and(|cfg| cfg.trusts_peer(&peer_addr));
+        if !trusted {
+            debug!(
+                "Ignoring ban list from untrusted peer {} (trusted_peers is empty or does not include this peer)",
+                peer_addr
+            );
+            return Ok(());
+        }
+        let max_duration = sharing
+            .as_ref()
+            .map(|cfg| cfg.max_accepted_ban_seconds)
+            .unwrap_or(7 * 24 * 3600);
+
+        if !msg.is_full {
+            debug!(
+                "Received hash-only ban list from {}, skipping merge",
+                peer_addr
+            );
+            return Ok(());
+        }
+
+        let mut ban_list = self.ban_list().write().await;
+        let mut merged_count = 0;
+
+        let now = crate::utils::current_timestamp();
+        for entry in &msg.ban_entries {
+            if !validate_ban_entry(entry) {
+                continue;
+            }
+            if entry.unban_timestamp == u64::MAX
+                || entry.unban_timestamp.saturating_sub(now) > max_duration
+            {
+                warn!(
+                    "Rejecting ban from {} with unban timestamp {} (permanent or past {}s)",
+                    peer_addr, entry.unban_timestamp, max_duration
+                );
+                continue;
+            }
+
+            let ip = if entry.addr.ip[0..12] == [0u8; 12] {
+                let ipv4_bytes = &entry.addr.ip[12..16];
+                IpAddr::V4(std::net::Ipv4Addr::new(
+                    ipv4_bytes[0],
+                    ipv4_bytes[1],
+                    ipv4_bytes[2],
+                    ipv4_bytes[3],
+                ))
+            } else {
+                let mut ipv6_bytes = [0u8; 16];
+                ipv6_bytes.copy_from_slice(&entry.addr.ip);
+                IpAddr::V6(std::net::Ipv6Addr::from(ipv6_bytes))
+            };
+
+            let socket_addr = SocketAddr::new(ip, 0);
+
+            match ban_list.get(&socket_addr) {
+                Some(&existing_timestamp) => {
+                    if existing_timestamp != u64::MAX && entry.unban_timestamp > existing_timestamp
+                    {
+                        ban_list.insert(socket_addr, entry.unban_timestamp);
+                        merged_count += 1;
+                    }
+                }
+                None => {
+                    ban_list.insert(socket_addr, entry.unban_timestamp);
+                    merged_count += 1;
+                }
+            }
+        }
+
+        debug!("Merged {} ban entries from {}", merged_count, peer_addr);
+        Ok(())
+    }
+}
+
+/// Send the current ban list to every connected peer.
+pub(crate) async fn broadcast_ban_list(
+    ban_list: &tokio::sync::RwLock<std::collections::HashMap<SocketAddr, u64>>,
+    peer_manager: &tokio::sync::Mutex<crate::network::peer_manager::PeerManager>,
+    min_duration: u64,
+) {
+    use crate::network::transport::TransportAddr;
+
+    let now = current_timestamp();
+    let entries = {
+        let guard = ban_list.read().await;
+        let mut ban_entries = Vec::new();
+        for (addr, &unban_timestamp) in guard.iter() {
+            if unban_timestamp != u64::MAX && now >= unban_timestamp {
+                continue;
+            }
+            if min_duration > 0 {
+                let ban_duration = if unban_timestamp == u64::MAX {
+                    u64::MAX
+                } else {
+                    unban_timestamp.saturating_sub(now)
+                };
+                if ban_duration < min_duration {
+                    continue;
+                }
+            }
+            let ip_bytes = match addr.ip() {
+                IpAddr::V4(ipv4) => {
+                    let mut bytes = [0u8; 16];
+                    bytes[12..16].copy_from_slice(&ipv4.octets());
+                    bytes
+                }
+                IpAddr::V6(ipv6) => ipv6.octets(),
+            };
+            ban_entries.push(BanEntry {
+                addr: NetworkAddress {
+                    time: 0,
+                    services: 0,
+                    ip: ip_bytes,
+                    port: addr.port(),
+                },
+                unban_timestamp,
+                reason: Some("DoS protection".to_string()),
+            });
+        }
+        ban_entries
+    };
+    let response = BanListMessage {
+        is_full: true,
+        ban_list_hash: calculate_ban_list_hash(&entries),
+        ban_entries: entries,
+        timestamp: now,
+    };
+    let Ok(wire) = ProtocolParser::serialize_message(&ProtocolMessage::BanList(response)) else {
+        return;
+    };
+    let peers = peer_manager.lock().await.peer_socket_addresses();
+    for addr in peers {
+        let sender = {
+            let pm = peer_manager.lock().await;
+            let transport = pm
+                .find_transport_addr_by_socket(addr)
+                .unwrap_or(TransportAddr::Tcp(addr));
+            pm.get_peer(&transport)
+                .filter(|peer| peer.is_connected())
+                .map(|peer| peer.send_tx.clone())
+        };
+        if let Some(sender) = sender {
+            let _ = sender.send(wire.clone());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::NetworkManager;
+    use crate::network::ban_list_merging::calculate_ban_list_hash;
+    use crate::network::protocol::{BanEntry, BanListMessage, NetworkAddress};
+    use crate::utils::current_timestamp;
+    use std::net::SocketAddr;
+
+    fn legacy_ban_entry(port: u16) -> BanEntry {
+        let mut ip = [0u8; 16];
+        ip[12..16].copy_from_slice(&[203, 0, 113, 1]);
+        BanEntry {
+            addr: NetworkAddress {
+                time: 0,
+                services: 0,
+                ip,
+                port,
+            },
+            unban_timestamp: current_timestamp() + 3600,
+            reason: Some("test".into()),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_ban_list_hash_only_skips_merge() {
+        let listen: SocketAddr = "127.0.0.1:18420".parse().unwrap();
+        let peer: SocketAddr = "127.0.0.1:18422".parse().unwrap();
+        let nm = NetworkManager::new(listen);
+        nm.handle_ban_list(
+            peer,
+            BanListMessage {
+                is_full: false,
+                ban_list_hash: [0u8; 32],
+                ban_entries: vec![],
+                timestamp: current_timestamp(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handle_ban_list_merges_valid_entry() {
+        let listen: SocketAddr = "127.0.0.1:18423".parse().unwrap();
+        let peer: SocketAddr = "127.0.0.1:18425".parse().unwrap();
+        let mut nm = NetworkManager::new(listen);
+        let entries = vec![legacy_ban_entry(8333)];
+        let hash = calculate_ban_list_hash(&entries);
+        nm.handle_ban_list(
+            peer,
+            BanListMessage {
+                is_full: true,
+                ban_list_hash: hash,
+                ban_entries: entries.clone(),
+                timestamp: current_timestamp(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            nm.ban_list().read().await.is_empty(),
+            "an untrusted peer must not install a ban"
+        );
+        nm.ban_list_sharing_config = Some(crate::config::BanListSharingConfig {
+            trusted_peers: vec![peer.to_string()],
+            ..crate::config::BanListSharingConfig::default()
+        });
+        nm.handle_ban_list(
+            peer,
+            BanListMessage {
+                is_full: true,
+                ban_list_hash: hash,
+                ban_entries: entries,
+                timestamp: current_timestamp(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            nm.ban_list()
+                .read()
+                .await
+                .contains_key(&"203.0.113.1:0".parse::<SocketAddr>().unwrap())
+        );
+    }
+}

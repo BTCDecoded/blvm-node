@@ -1,0 +1,75 @@
+//! Node-level smoke tests for BIP158 (implementation lives in `blvm-protocol`).
+
+use blvm_protocol::bip158::{build_block_filter, match_filter};
+use blvm_protocol::{OutPoint, Transaction, TransactionInput, TransactionOutput};
+
+#[test]
+fn test_build_block_filter_with_transactions() {
+    let tx1 = Transaction {
+        version: 1,
+        inputs: blvm_protocol::tx_inputs![],
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
+            value: 1000,
+            script_pubkey: vec![0x51], // OP_1
+        }],
+        lock_time: 0,
+    };
+
+    let tx2 = Transaction {
+        version: 1,
+        inputs: blvm_protocol::tx_inputs![],
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
+            value: 2000,
+            script_pubkey: vec![0x52], // OP_2
+        }],
+        lock_time: 0,
+    };
+
+    let filter = build_block_filter(&[0u8; 32], &[tx1, tx2], &[]).unwrap();
+    assert_eq!(filter.num_elements, 2);
+    assert!(!filter.filter_data.is_empty());
+}
+
+#[test]
+fn test_match_filter_positive() {
+    let tx = Transaction {
+        version: 1,
+        inputs: blvm_protocol::tx_inputs![],
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
+            value: 1000,
+            script_pubkey: vec![0x51, 0x52, 0x53], // OP_1 OP_2 OP_3
+        }],
+        lock_time: 0,
+    };
+
+    let filter = build_block_filter(&[0u8; 32], &[tx.clone()], &[]).unwrap();
+    assert!(match_filter(
+        &[0u8; 32],
+        &filter,
+        &tx.outputs[0].script_pubkey
+    ));
+}
+
+#[test]
+fn test_match_filter_with_previous_scripts() {
+    let tx = Transaction {
+        version: 1,
+        inputs: blvm_protocol::tx_inputs![TransactionInput {
+            prevout: OutPoint {
+                hash: [0u8; 32],
+                index: 0,
+            },
+            script_sig: vec![],
+            sequence: 0xffffffff,
+        }],
+        outputs: blvm_protocol::tx_outputs![TransactionOutput {
+            value: 1000,
+            script_pubkey: vec![0x51],
+        }],
+        lock_time: 0,
+    };
+
+    let prev_script = vec![0x54, 0x55]; // OP_4 OP_5
+    let filter = build_block_filter(&[0u8; 32], &[tx], &[prev_script]).unwrap();
+    assert!(filter.num_elements >= 1);
+}

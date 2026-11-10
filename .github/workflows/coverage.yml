@@ -1,0 +1,154 @@
+name: Coverage
+
+# Separate coverage workflow - runs independently from CI
+# Coverage is skipped by default in CI to keep PRs fast
+# This workflow only runs manually via workflow_dispatch
+on:
+  # Manual trigger for on-demand coverage (default: enabled)
+  workflow_dispatch:
+    inputs:
+      run_coverage:
+        description: 'Run coverage report'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  coverage:
+    name: Coverage Report
+    runs-on: [self-hosted, Linux, X64, builds]
+
+    # Only run if manually triggered with run_coverage=true
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_coverage == true
+    
+    steps:
+      - uses: actions/checkout@v6
+      
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+      - name: Cleanup any leftover dependency directories
+        run: |
+          # Remove any leftover dependency directories from previous jobs
+          if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
+          if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
+          # Also remove any .cargo/config.toml that might have been left behind
+          if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
+      
+      - name: Cache
+        run: |
+          CACHE_ROOT="${{ github.workspace }}/.build/runner-cache"
+          
+          # Cache key from Cargo.toml + toolchain (this checkout does not commit root Cargo.lock per .gitignore).
+          DEPS_KEY=$(sha256sum Cargo.toml | cut -d' ' -f1)
+          TOOLCHAIN=$(grep -E '^channel|rust-version' rust-toolchain.toml Cargo.toml 2>/dev/null | head -1 | sha256sum | cut -d' ' -f1 || echo "1.88.0")
+          CACHE_KEY="${DEPS_KEY}-${TOOLCHAIN}"
+          
+          CARGO_CACHE_DIR="$CACHE_ROOT/cargo/$CACHE_KEY"
+          TARGET_CACHE_DIR="$CACHE_ROOT/target/$CACHE_KEY"
+          
+          echo "CARGO_CACHE_DIR=$CARGO_CACHE_DIR" >> $GITHUB_ENV
+          echo "TARGET_CACHE_DIR=$TARGET_CACHE_DIR" >> $GITHUB_ENV
+      
+      - name: Isolate CARGO_HOME for this runner
+        run: |
+          mkdir -p "${RUNNER_TEMP}/cargo"
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
+
+      - name: Restore Cargo cache
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: restore
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+
+      - name: Install OpenSSL development headers (openssl-sys / native-tls)
+        run: |
+          if command -v apt-get >/dev/null 2>&1; then
+            bash scripts/apt-get-retry.sh update -qq
+            bash scripts/apt-get-retry.sh install -y -qq pkg-config libssl-dev
+          elif command -v pacman >/dev/null 2>&1; then
+            pacman -Qq openssl pkgconf >/dev/null 2>&1 || sudo pacman -Sy --noconfirm openssl pkgconf
+          fi
+      
+      - name: Run tests with coverage
+        id: coverage
+        run: |
+          # Ensure cargo bin is in PATH
+          export PATH="$HOME/.cargo/bin:$PATH"
+          
+          # Verify cargo is available
+          if ! command -v cargo &> /dev/null; then
+            echo "ERROR: cargo not found in PATH"
+            exit 1
+          fi
+          
+          # Install tarpaulin with error checking
+          if ! cargo install cargo-tarpaulin --version 0.27.0; then
+            echo "ERROR: Failed to install cargo-tarpaulin"
+            exit 1
+          fi
+          
+          # Run tests with coverage
+          # --jobs 2 limits parallelism to prevent OOM when compiling 63+ test executables
+          cargo tarpaulin --lib --bins --tests --out xml --output-dir coverage --skip-clean --timeout 120 --jobs 2
+          
+          # Extract coverage percentage from XML
+          if [ -f "coverage/cobertura.xml" ]; then
+            COVERAGE_PCT=$(grep -oP 'line-rate="\K[0-9.]+' coverage/cobertura.xml | head -1 | awk '{printf "%.2f", $1 * 100}')
+            echo "coverage_percent=$COVERAGE_PCT" >> $GITHUB_OUTPUT
+            echo "📊 Coverage: ${COVERAGE_PCT}%"
+            
+            # Warn if coverage is below 50%
+            if (( $(echo "$COVERAGE_PCT < 50" | bc -l) )); then
+              echo "⚠️  Coverage is below 50% - consider adding more tests"
+            fi
+          else
+            echo "coverage_percent=0.00" >> $GITHUB_OUTPUT
+            echo "⚠️  Coverage file not found"
+          fi
+      
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: coverage/cobertura.xml
+          flags: unittests
+          name: codecov-blvm-node
+          fail_ci_if_error: false
+      
+      - name: Save Cargo cache
+        if: always()
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: save
+
+      - name: Clean test binaries after coverage
+        if: always()
+        run: |
+          # Tarpaulin produces instrumented test binaries alongside coverage data.
+          # Remove them to avoid disk accumulation on self-hosted runners.
+          find . -path "./target/debug" -prune -o \
+            -path "./target" -maxdepth 2 -type f -executable \
+            ! -name "*.so" ! -name "*.rlib" ! -name "*.d" -delete 2>/dev/null || true
+          # Tarpaulin coverage workspace under target
+          rm -rf ./target/tarpaulin 2>/dev/null || true
+
+      - name: Coverage Summary
+        if: always()
+        run: |
+          echo "## Coverage Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Coverage**: ${{ steps.coverage.outputs.coverage_percent }}%" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Coverage report uploaded to Codecov." >> $GITHUB_STEP_SUMMARY
+

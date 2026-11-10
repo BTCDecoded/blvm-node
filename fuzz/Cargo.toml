@@ -1,0 +1,112 @@
+[package]
+name = "blvm-node-fuzz"
+version = "0.0.0"
+authors = ["BTCDecoded Team"]
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies.blvm-node]
+path = ".."
+default-features = false
+# Omit `rocksdb` so fuzz CI builds without a C++ toolchain (same pattern as stripped `cargo check`).
+features = [
+    "sysinfo",
+    "redb",
+    "nix",
+    "libc",
+    "production",
+    "governance",
+    "utxo-commitments",
+    "protocol-verification",
+]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bincode = "=1.3.3"
+# Version pins match blvm-node root; [patch.crates-io] is for local monorepo (CI strips fuzz + parent).
+blvm-protocol = { version = ">=0.1, <1" }
+
+serde_json = "=1.0.133"
+sha2 = "=0.10.9"
+smallvec = "=1.15.1"
+tempfile = "=3.8.1"
+tokio = { version = "=1.48.0", features = ["rt", "macros"] }
+
+# Prevent warnings in generated code
+[profile.release]
+opt-level = 3
+
+# Local monorepo: same blvm-* path overrides as blvm-node root (relative to fuzz/).
+[patch.crates-io]
+blvm-protocol = { path = "../../blvm-protocol" }
+blvm-consensus = { path = "../../blvm-consensus" }
+blvm-primitives = { path = "../../blvm-primitives" }
+blvm-spec-lock = { path = "../../blvm-spec-lock" }
+blvm-muhash = { path = "../../blvm-muhash" }
+
+[[bin]]
+name = "compact_block_reconstruction"
+path = "fuzz_targets/compact_block_reconstruction.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transport_aware_negotiation"
+path = "fuzz_targets/transport_aware_negotiation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol_message_parsing"
+path = "fuzz_targets/protocol_message_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mining_transaction_serialization"
+path = "fuzz_targets/mining_transaction_serialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mining_block_template"
+path = "fuzz_targets/mining_block_template.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "node_mempool_policy"
+path = "fuzz_targets/node_mempool_policy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "node_rpc_surface"
+path = "fuzz_targets/node_rpc_surface.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "node_p2p_allowed_frames"
+path = "fuzz_targets/node_p2p_allowed_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "node_payment"
+path = "fuzz_targets/node_payment.rs"
+test = false
+doc = false
+bench = false
+

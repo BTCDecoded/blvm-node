@@ -1,0 +1,2139 @@
+//! Block storage implementation
+//!
+//! Stores blocks by hash and maintains block index by height.
+
+use crate::storage::database::{Database, Tree};
+use anyhow::Result;
+use blvm_protocol::segwit::Witness;
+use blvm_protocol::{Block, BlockHeader, Hash};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+#[cfg(feature = "block-compression")]
+use zstd;
+
+/// Block metadata stored separately from block data for fast RPC lookups
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockMetadata {
+    pub n_tx: u32,
+    // Could add more metadata here: size, weight, etc.
+}
+
+/// W5/N1: LMDB `blocks` value magic for original P2P `block` message payload.
+/// Layout: `BLVW` ++ u32_le(len) ++ payload. Coexists with legacy bincode bodies.
+pub const WIRE_BODY_MAGIC: &[u8; 4] = b"BLVW";
+
+/// True when `data` is a W5 wire-bytes body blob (not bincode / not zstd).
+#[inline]
+pub fn is_wire_body_blob(data: &[u8]) -> bool {
+    data.len() >= 8 && data[..4] == WIRE_BODY_MAGIC[..]
+}
+
+/// Tag a P2P block payload for LMDB storage.
+pub fn encode_wire_body_blob(payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + payload.len());
+    out.extend_from_slice(WIRE_BODY_MAGIC);
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Slice the P2P payload out of a W5 wire-bytes blob.
+pub fn decode_wire_body_blob(data: &[u8]) -> Option<&[u8]> {
+    if !is_wire_body_blob(data) {
+        return None;
+    }
+    let len = u32::from_le_bytes(data[4..8].try_into().ok()?) as usize;
+    if data.len() < 8 + len {
+        return None;
+    }
+    Some(&data[8..8 + len])
+}
+
+fn output_scripts_of_block(block: &blvm_protocol::Block) -> Vec<Vec<u8>> {
+    block
+        .transactions
+        .iter()
+        .flat_map(|tx| tx.outputs.iter().map(|output| output.script_pubkey.clone()))
+        .collect()
+}
+
+fn prev_hash_from_wire_header(payload: &[u8]) -> Result<[u8; 32]> {
+    if payload.len() < 36 {
+        return Err(anyhow::anyhow!("block header truncated"));
+    }
+    let mut prev = [0u8; 32];
+    prev.copy_from_slice(&payload[4..36]);
+    Ok(prev)
+}
+
+fn prev_hash_from_bincode_header(data: &[u8]) -> Result<[u8; 32]> {
+    if data.len() < 40 {
+        return Err(anyhow::anyhow!("bincode header truncated"));
+    }
+    let mut prev = [0u8; 32];
+    prev.copy_from_slice(&data[8..40]);
+    Ok(prev)
+}
+
+fn prev_hash_from_stored_body(data: &[u8]) -> Result<[u8; 32]> {
+    if let Some(payload) = decode_wire_body_blob(data) {
+        return prev_hash_from_wire_header(payload);
+    }
+    #[cfg(feature = "block-compression")]
+    if BlockStore::is_compressed(data) {
+        let decoded = crate::storage::zstd_limit::decode_bounded(data)
+            .map_err(|e| anyhow::anyhow!("Block decompression failed: {}", e))?;
+        return prev_hash_from_bincode_header(&decoded);
+    }
+    prev_hash_from_bincode_header(data)
+}
+
+/// Output scripts borrowed from `bytes`. The ranges index that buffer.
+#[derive(Default)]
+pub(crate) struct ScriptSpans {
+    bytes: Vec<u8>,
+    spans: Vec<(usize, usize)>,
+}
+
+impl ScriptSpans {
+    pub(crate) fn slices(&self) -> Vec<&[u8]> {
+        let mut out = Vec::with_capacity(self.spans.len());
+        self.push_slices(&mut out);
+        out
+    }
+
+    fn push_slices<'a>(&'a self, out: &mut Vec<&'a [u8]>) {
+        out.extend(
+            self.spans
+                .iter()
+                .map(|&(start, end)| &self.bytes[start..end]),
+        );
+    }
+}
+
+/// One pointer list for output scripts and spent scripts.
+pub(crate) fn output_and_spent_slices<'a>(
+    outputs: &'a ScriptSpans,
+    spent: &'a ScriptSpans,
+) -> Vec<&'a [u8]> {
+    let mut scripts = Vec::with_capacity(outputs.spans.len() + spent.spans.len());
+    outputs.push_slices(&mut scripts);
+    spent.push_slices(&mut scripts);
+    scripts
+}
+
+pub(crate) struct OutputScriptSpans {
+    pub(crate) scripts: ScriptSpans,
+    pub(crate) prev_hash: [u8; 32],
+}
+
+fn span_in(bytes: &[u8], script: &[u8]) -> Result<(usize, usize)> {
+    let start = (script.as_ptr() as usize)
+        .checked_sub(bytes.as_ptr() as usize)
+        .ok_or_else(|| anyhow::anyhow!("script is outside the stored body"))?;
+    let end = start
+        .checked_add(script.len())
+        .ok_or_else(|| anyhow::anyhow!("script span overflows"))?;
+    if end > bytes.len() {
+        return Err(anyhow::anyhow!("script is outside the stored body"));
+    }
+    Ok((start, end))
+}
+
+fn spans_in(bytes: &[u8], slices: &[&[u8]]) -> Result<Vec<(usize, usize)>> {
+    slices.iter().map(|script| span_in(bytes, script)).collect()
+}
+
+fn wire_output_spans(bytes: Vec<u8>) -> Result<OutputScriptSpans> {
+    let prev_hash = prev_hash_from_wire_header(&bytes)?;
+    let spans = {
+        let slices =
+            blvm_protocol::serialization::output_script_pubkey_slices_from_wire_block(&bytes)
+                .map_err(|e| anyhow::anyhow!("wire output scripts: {e}"))?;
+        spans_in(&bytes, &slices)?
+    };
+    Ok(OutputScriptSpans {
+        scripts: ScriptSpans { bytes, spans },
+        prev_hash,
+    })
+}
+
+fn output_spans(bytes: Vec<u8>) -> Result<OutputScriptSpans> {
+    if decode_wire_body_blob(&bytes).is_some() {
+        let prev_hash = prev_hash_from_stored_body(&bytes)?;
+        let spans = {
+            let payload = decode_wire_body_blob(&bytes).expect("wire body");
+            let slices =
+                blvm_protocol::serialization::output_script_pubkey_slices_from_wire_block(payload)
+                    .map_err(|e| anyhow::anyhow!("wire output scripts: {e}"))?;
+            spans_in(&bytes, &slices)?
+        };
+        return Ok(OutputScriptSpans {
+            scripts: ScriptSpans { bytes, spans },
+            prev_hash,
+        });
+    }
+    #[cfg(feature = "block-compression")]
+    if BlockStore::is_compressed(&bytes) {
+        let decoded = crate::storage::zstd_limit::decode_bounded(bytes.as_slice())
+            .map_err(|e| anyhow::anyhow!("Block decompression failed: {}", e))?;
+        return output_spans(decoded);
+    }
+    let prev_hash = prev_hash_from_bincode_header(&bytes)?;
+    let spans = {
+        let slices = output_scripts_from_bincode_block(&bytes)?;
+        spans_in(&bytes, &slices)?
+    };
+    Ok(OutputScriptSpans {
+        scripts: ScriptSpans { bytes, spans },
+        prev_hash,
+    })
+}
+
+fn spent_spans(bytes: Vec<u8>) -> Result<ScriptSpans> {
+    let spans = {
+        let slices = spent_scripts_from_undo_bytes(&bytes)?;
+        spans_in(&bytes, &slices)?
+    };
+    Ok(ScriptSpans { bytes, spans })
+}
+
+/// `bincode::serialize` of a `Block`: fixed little-endian lengths, struct field order.
+fn output_scripts_from_bincode_block(data: &[u8]) -> Result<Vec<&[u8]>> {
+    let mut cur = BinCursor { data, pos: 0 };
+    // BlockHeader: version i64, two hashes, timestamp, bits, nonce.
+    cur.skip(8 + 32 + 32 + 8 + 8 + 8)?;
+    let tx_count = cur.seq_len()?;
+    let mut scripts = Vec::new();
+    for _ in 0..tx_count {
+        cur.skip(8)?; // version
+        let input_count = cur.seq_len()?;
+        for _ in 0..input_count {
+            cur.skip(32 + 4 + 8)?; // prevout hash, index, sequence
+            let script_len = cur.u64()?;
+            cur.skip(script_len)?;
+        }
+        let output_count = cur.seq_len()?;
+        for _ in 0..output_count {
+            cur.skip(8)?; // value
+            let script_len = cur.u64()?;
+            scripts.push(cur.take_slice(script_len)?);
+        }
+        cur.skip(8)?; // lock_time
+    }
+    Ok(scripts)
+}
+
+struct BinCursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> BinCursor<'a> {
+    fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.pos)
+    }
+
+    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or_else(|| anyhow::anyhow!("bincode block truncated"))?;
+        if end > self.data.len() {
+            return Err(anyhow::anyhow!("bincode block truncated"));
+        }
+        let slice = &self.data[self.pos..end];
+        self.pos = end;
+        Ok(slice)
+    }
+
+    fn u64(&mut self) -> Result<u64> {
+        let bytes = self.take(8)?;
+        Ok(u64::from_le_bytes(bytes.try_into().expect("8 bytes")))
+    }
+
+    /// `bincode::serialize` writes `Option` as one byte, 0 or 1.
+    fn option_present(&mut self) -> Result<bool> {
+        match self.take(1)?[0] {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(anyhow::anyhow!("bincode option tag")),
+        }
+    }
+
+    fn skip(&mut self, n: u64) -> Result<()> {
+        let n = usize::try_from(n).map_err(|_| anyhow::anyhow!("bincode length overflows"))?;
+        self.take(n).map(|_| ())
+    }
+
+    fn seq_len(&mut self) -> Result<usize> {
+        let n = usize::try_from(self.u64()?)
+            .map_err(|_| anyhow::anyhow!("bincode length overflows"))?;
+        if n > self.remaining() {
+            return Err(anyhow::anyhow!("bincode sequence exceeds body"));
+        }
+        Ok(n)
+    }
+
+    fn take_slice(&mut self, n: u64) -> Result<&'a [u8]> {
+        let n = usize::try_from(n).map_err(|_| anyhow::anyhow!("bincode length overflows"))?;
+        self.take(n)
+    }
+}
+
+/// Previous `scriptPubKey`s from a `bincode::serialize` of `BlockUndoLog`.
+///
+/// Each entry is outpoint, optional previous UTXO, optional new UTXO.
+/// Only the previous script is borrowed.
+fn spent_scripts_from_undo_bytes(data: &[u8]) -> Result<Vec<&[u8]>> {
+    let mut cur = BinCursor { data, pos: 0 };
+    let n = cur.seq_len()?;
+    let mut scripts = Vec::new();
+    for _ in 0..n {
+        cur.skip(32 + 4)?;
+        if cur.option_present()? {
+            cur.skip(8)?;
+            let script_len = cur.u64()?;
+            scripts.push(cur.take_slice(script_len)?);
+            cur.skip(8 + 1)?;
+        }
+        if cur.option_present()? {
+            cur.skip(8)?;
+            let script_len = cur.u64()?;
+            cur.skip(script_len)?;
+            cur.skip(8 + 1)?;
+        }
+    }
+    Ok(scripts)
+}
+
+/// Row key length when block body / header / witness / metadata are stored with a known height.
+/// Prefix is big-endian height so IBD batch writes are sorted for LSM backends.
+pub const BLOCK_HEIGHT_ROW_KEY_LEN: usize = 40;
+
+/// `height_be (8) || block_hash (32)` — lexicographic order follows chain height.
+#[inline]
+pub fn block_height_row_key(height: u64, block_hash: &Hash) -> [u8; BLOCK_HEIGHT_ROW_KEY_LEN] {
+    let mut k = [0u8; BLOCK_HEIGHT_ROW_KEY_LEN];
+    k[..8].copy_from_slice(&height.to_be_bytes());
+    k[8..].copy_from_slice(block_hash.as_slice());
+    k
+}
+
+/// Block storage manager
+pub struct BlockStore {
+    #[allow(dead_code)]
+    db: Arc<dyn Database>,
+    blocks: Arc<dyn Tree>,
+    headers: Arc<dyn Tree>,
+    height_index: Arc<dyn Tree>,   // height → hash
+    hash_to_height: Arc<dyn Tree>, // hash → height (reverse index for O(1) lookup)
+    witnesses: Arc<dyn Tree>,
+    recent_headers: Arc<dyn Tree>, // For median time-past: stores last 11+ headers by height
+    block_metadata: Arc<dyn Tree>, // hash → BlockMetadata (for fast TX count lookup)
+    block_undo: Arc<dyn Tree>,
+    #[cfg(feature = "block-compression")]
+    block_compression_enabled: bool,
+    #[cfg(feature = "block-compression")]
+    block_compression_level: u32,
+    #[cfg(feature = "witness-compression")]
+    witness_compression_enabled: bool,
+    #[cfg(feature = "witness-compression")]
+    witness_compression_level: u32,
+    /// Optional block file reader for fallback reading
+    #[cfg(feature = "rocksdb")]
+    bitcoin_core_reader: Option<Arc<crate::storage::bitcoin_core_blocks::BitcoinCoreBlockReader>>,
+}
+
+impl Clone for BlockStore {
+    fn clone(&self) -> Self {
+        Self {
+            db: Arc::clone(&self.db),
+            blocks: Arc::clone(&self.blocks),
+            headers: Arc::clone(&self.headers),
+            height_index: Arc::clone(&self.height_index),
+            hash_to_height: Arc::clone(&self.hash_to_height),
+            witnesses: Arc::clone(&self.witnesses),
+            recent_headers: Arc::clone(&self.recent_headers),
+            block_metadata: Arc::clone(&self.block_metadata),
+            block_undo: Arc::clone(&self.block_undo),
+            #[cfg(feature = "block-compression")]
+            block_compression_enabled: self.block_compression_enabled,
+            #[cfg(feature = "block-compression")]
+            block_compression_level: self.block_compression_level,
+            #[cfg(feature = "witness-compression")]
+            witness_compression_enabled: self.witness_compression_enabled,
+            #[cfg(feature = "witness-compression")]
+            witness_compression_level: self.witness_compression_level,
+            #[cfg(feature = "rocksdb")]
+            bitcoin_core_reader: self.bitcoin_core_reader.clone(),
+        }
+    }
+}
+
+impl BlockStore {
+    /// Network of the attached Bitcoin Core block-file reader, if any (rocksdb only).
+    #[cfg(feature = "rocksdb")]
+    pub fn bitcoin_core_reader_network(
+        &self,
+    ) -> Option<crate::storage::bitcoin_detection::CoreDataNetwork> {
+        self.bitcoin_core_reader.as_ref().map(|r| r.network())
+    }
+
+    /// Create a new block store
+    pub fn new(db: Arc<dyn Database>) -> Result<Self> {
+        Self::new_with_compression(
+            db,
+            #[cfg(feature = "block-compression")]
+            false, // Default: compression disabled unless explicitly enabled
+            #[cfg(feature = "block-compression")]
+            3, // Default compression level
+            #[cfg(feature = "witness-compression")]
+            false,
+            #[cfg(feature = "witness-compression")]
+            2,
+        )
+    }
+
+    /// Create a new block store with optional Bitcoin Core block file reader (rocksdb only)
+    #[cfg(feature = "rocksdb")]
+    pub fn new_with_bitcoin_core_reader(
+        db: Arc<dyn Database>,
+        block_reader: Option<Arc<crate::storage::bitcoin_core_blocks::BitcoinCoreBlockReader>>,
+    ) -> Result<Self> {
+        Self::new_with_compression_and_reader(
+            db,
+            #[cfg(feature = "block-compression")]
+            false,
+            #[cfg(feature = "block-compression")]
+            3,
+            #[cfg(feature = "witness-compression")]
+            false,
+            #[cfg(feature = "witness-compression")]
+            2,
+            block_reader,
+        )
+    }
+
+    /// Create a new block store with compression settings
+    pub fn new_with_compression(
+        db: Arc<dyn Database>,
+        #[cfg(feature = "block-compression")] block_compression_enabled: bool,
+        #[cfg(feature = "block-compression")] block_compression_level: u32,
+        #[cfg(feature = "witness-compression")] witness_compression_enabled: bool,
+        #[cfg(feature = "witness-compression")] witness_compression_level: u32,
+    ) -> Result<Self> {
+        Self::new_with_compression_and_reader(
+            db,
+            #[cfg(feature = "block-compression")]
+            block_compression_enabled,
+            #[cfg(feature = "block-compression")]
+            block_compression_level,
+            #[cfg(feature = "witness-compression")]
+            witness_compression_enabled,
+            #[cfg(feature = "witness-compression")]
+            witness_compression_level,
+            #[cfg(feature = "rocksdb")]
+            None,
+        )
+    }
+
+    /// Create a new block store with compression settings and optional block file reader
+    #[cfg(feature = "rocksdb")]
+    pub fn new_with_compression_and_bitcoin_core_reader(
+        db: Arc<dyn Database>,
+        #[cfg(feature = "block-compression")] block_compression_enabled: bool,
+        #[cfg(feature = "block-compression")] block_compression_level: u32,
+        #[cfg(feature = "witness-compression")] witness_compression_enabled: bool,
+        #[cfg(feature = "witness-compression")] witness_compression_level: u32,
+        block_reader: Option<Arc<crate::storage::bitcoin_core_blocks::BitcoinCoreBlockReader>>,
+    ) -> Result<Self> {
+        Self::new_with_compression_and_reader(
+            db,
+            #[cfg(feature = "block-compression")]
+            block_compression_enabled,
+            #[cfg(feature = "block-compression")]
+            block_compression_level,
+            #[cfg(feature = "witness-compression")]
+            witness_compression_enabled,
+            #[cfg(feature = "witness-compression")]
+            witness_compression_level,
+            block_reader,
+        )
+    }
+
+    /// Create a new block store with compression settings and optional block file reader
+    fn new_with_compression_and_reader(
+        db: Arc<dyn Database>,
+        #[cfg(feature = "block-compression")] block_compression_enabled: bool,
+        #[cfg(feature = "block-compression")] block_compression_level: u32,
+        #[cfg(feature = "witness-compression")] witness_compression_enabled: bool,
+        #[cfg(feature = "witness-compression")] witness_compression_level: u32,
+        #[cfg(feature = "rocksdb")] bitcoin_core_reader: Option<
+            Arc<crate::storage::bitcoin_core_blocks::BitcoinCoreBlockReader>,
+        >,
+    ) -> Result<Self> {
+        let blocks = Arc::from(db.open_tree("blocks")?);
+        let headers = Arc::from(db.open_tree("headers")?);
+        let height_index = Arc::from(db.open_tree("height_index")?);
+        let hash_to_height = Arc::from(db.open_tree("hash_to_height")?);
+        let witnesses = Arc::from(db.open_tree("witnesses")?);
+        let recent_headers = Arc::from(db.open_tree("recent_headers")?);
+        let block_metadata = Arc::from(db.open_tree("block_metadata")?);
+        let block_undo = Arc::from(db.open_tree("block_undo")?);
+
+        Ok(Self {
+            db,
+            blocks,
+            headers,
+            height_index,
+            hash_to_height,
+            witnesses,
+            recent_headers,
+            block_metadata,
+            block_undo,
+            #[cfg(feature = "block-compression")]
+            block_compression_enabled,
+            #[cfg(feature = "block-compression")]
+            block_compression_level,
+            #[cfg(feature = "witness-compression")]
+            witness_compression_enabled,
+            #[cfg(feature = "witness-compression")]
+            witness_compression_level,
+            #[cfg(feature = "rocksdb")]
+            bitcoin_core_reader,
+        })
+    }
+
+    /// Store a block
+    pub fn store_block(&self, block: &Block) -> Result<()> {
+        let block_hash = self.block_hash(block);
+        let block_data = bincode::serialize(block)?;
+
+        // Compress block data if compression is enabled
+        #[cfg(feature = "block-compression")]
+        let data_to_store = if self.block_compression_enabled {
+            zstd::encode_all(&block_data[..], self.block_compression_level as i32)
+                .map_err(|e| anyhow::anyhow!("Block compression failed: {}", e))?
+        } else {
+            block_data
+        };
+
+        #[cfg(not(feature = "block-compression"))]
+        let data_to_store = block_data;
+
+        let header_data = bincode::serialize(&block.header)?;
+        let metadata = BlockMetadata {
+            n_tx: block.transactions.len() as u32,
+        };
+        let metadata_data = bincode::serialize(&metadata)?;
+        crate::storage::database::commit_keyed(&[
+            (
+                self.blocks.as_ref(),
+                block_hash.as_slice(),
+                Some(data_to_store.as_slice()),
+            ),
+            (
+                self.headers.as_ref(),
+                block_hash.as_slice(),
+                Some(header_data.as_slice()),
+            ),
+            (
+                self.block_metadata.as_ref(),
+                block_hash.as_slice(),
+                Some(metadata_data.as_slice()),
+            ),
+        ])?;
+
+        // Store header for median time-past calculation
+        // We'll need height passed separately, so this will be called after store_height
+        // For now, just store the header - height will be set via store_recent_header
+
+        Ok(())
+    }
+
+    /// W5/N1: store original P2P `block` payload (includes witnesses) under height row key.
+    ///
+    /// Does **not** write a separate witness tree row — inject loads witnesses from the blob.
+    /// Header/metadata indexes stay bincode for cheap lookups.
+    pub fn store_block_wire_bytes(
+        &self,
+        block: &Block,
+        height: u64,
+        wire_payload: &[u8],
+    ) -> Result<()> {
+        let block_hash = self.block_hash(block);
+        let row_key = block_height_row_key(height, &block_hash);
+        let data_to_store = encode_wire_body_blob(wire_payload);
+        let header_data = bincode::serialize(&block.header)?;
+        let metadata = BlockMetadata {
+            n_tx: block.transactions.len() as u32,
+        };
+        let metadata_data = bincode::serialize(&metadata)?;
+        let height_bytes = height.to_be_bytes();
+        let mut ops = vec![
+            (
+                self.blocks.as_ref(),
+                row_key.as_slice(),
+                Some(data_to_store.as_slice()),
+            ),
+            (
+                self.headers.as_ref(),
+                row_key.as_slice(),
+                Some(header_data.as_slice()),
+            ),
+            (
+                self.block_metadata.as_ref(),
+                row_key.as_slice(),
+                Some(metadata_data.as_slice()),
+            ),
+            (
+                self.hash_to_height.as_ref(),
+                block_hash.as_slice(),
+                Some(height_bytes.as_slice()),
+            ),
+            (
+                self.height_index.as_ref(),
+                height_bytes.as_slice(),
+                Some(block_hash.as_slice()),
+            ),
+            (
+                self.recent_headers.as_ref(),
+                height_bytes.as_slice(),
+                Some(header_data.as_slice()),
+            ),
+        ];
+        let remove_bytes = height.saturating_sub(12).to_be_bytes();
+        if height > 11 {
+            ops.push((
+                self.recent_headers.as_ref(),
+                remove_bytes.as_slice(),
+                None,
+            ));
+        }
+        crate::storage::database::commit_keyed(&ops)
+    }
+
+    /// Store a block with witness data and height
+    pub fn store_block_with_witness(
+        &self,
+        block: &Block,
+        witnesses: &[Vec<Witness>], // CRITICAL FIX: Changed from &[Witness] to &[Vec<Witness>]
+        height: u64,
+    ) -> Result<()> {
+        let block_hash = self.block_hash(block);
+        let row_key = block_height_row_key(height, &block_hash);
+
+        let block_data = bincode::serialize(block)?;
+
+        #[cfg(feature = "block-compression")]
+        let data_to_store = if self.block_compression_enabled {
+            zstd::encode_all(&block_data[..], self.block_compression_level as i32)
+                .map_err(|e| anyhow::anyhow!("Block compression failed: {}", e))?
+        } else {
+            block_data
+        };
+
+        #[cfg(not(feature = "block-compression"))]
+        let data_to_store = block_data;
+
+        let header_data = bincode::serialize(&block.header)?;
+        let metadata = BlockMetadata {
+            n_tx: block.transactions.len() as u32,
+        };
+        let metadata_data = bincode::serialize(&metadata)?;
+        let witness_blob = if !witnesses.is_empty() {
+            let witness_data = bincode::serialize(witnesses)?;
+
+            #[cfg(feature = "witness-compression")]
+            let blob = if self.witness_compression_enabled {
+                zstd::encode_all(&witness_data[..], self.witness_compression_level as i32)
+                    .map_err(|e| anyhow::anyhow!("Witness compression failed: {}", e))?
+            } else {
+                witness_data
+            };
+
+            #[cfg(not(feature = "witness-compression"))]
+            let blob = witness_data;
+
+            Some(blob)
+        } else {
+            None
+        };
+
+        // S0: one LMDB txn (blocks+headers+meta+witness+recent) instead of 5
+        // Tree::insert commits. Select-loop GAP_PERSIST was ~200ms/block on cold home LVM.
+        #[cfg(feature = "heed3")]
+        {
+            let _ = "IBD_S0_PERSIST_ONE_TXN";
+            if self.try_ibd_flush_heed3_unified(
+                &[0],
+                &[height],
+                &[block_hash],
+                &[data_to_store.clone()],
+                &[Arc::new(header_data.clone())],
+                &[witness_blob.clone()],
+                &[metadata_data.clone()],
+                &[(height, header_data.clone())],
+            )? {
+                return Ok(());
+            }
+        }
+
+        self.blocks.insert(row_key.as_slice(), &data_to_store)?;
+        self.headers.insert(row_key.as_slice(), &header_data)?;
+        self.block_metadata
+            .insert(row_key.as_slice(), &metadata_data)?;
+        if let Some(ref witness_blob) = witness_blob {
+            self.witnesses.insert(row_key.as_slice(), witness_blob)?;
+        }
+        self.store_recent_header(height, &block.header)?;
+
+        Ok(())
+    }
+
+    /// R-348: store many IBD bodies in **one** LMDB write txn (blocks + headers + meta +
+    /// witness + recent). Same encoding as [`Self::store_block_with_witness`]; falls back to
+    /// per-block stores when the backend is not heed3. R-347 measured the per-block inline
+    /// persist at 4–8 ms/block from 300k with the writer lock over 100 % busy
+    /// (`persist_share` 1.07 / 1.26); batching cuts commits ~N×.
+    pub fn store_blocks_with_witness_batch(
+        &self,
+        items: &[(&Block, &[Vec<Witness>], u64)],
+    ) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        #[cfg(feature = "heed3")]
+        {
+            let n = items.len();
+            let mut flush_order = Vec::with_capacity(n);
+            let mut heights = Vec::with_capacity(n);
+            let mut hashes = Vec::with_capacity(n);
+            let mut bodies = Vec::with_capacity(n);
+            let mut headers = Vec::with_capacity(n);
+            let mut witness_blobs = Vec::with_capacity(n);
+            let mut metas = Vec::with_capacity(n);
+            let mut recent = Vec::with_capacity(n);
+            for (i, (block, witnesses, height)) in items.iter().enumerate() {
+                let block_hash = self.block_hash(block);
+                let block_data = bincode::serialize(block)?;
+                #[cfg(feature = "block-compression")]
+                let block_data = if self.block_compression_enabled {
+                    zstd::encode_all(&block_data[..], self.block_compression_level as i32)
+                        .map_err(|e| anyhow::anyhow!("Block compression failed: {}", e))?
+                } else {
+                    block_data
+                };
+                let header_data = bincode::serialize(&block.header)?;
+                let metadata_data = bincode::serialize(&BlockMetadata {
+                    n_tx: block.transactions.len() as u32,
+                })?;
+                let witness_blob = if !witnesses.is_empty() {
+                    let witness_data = bincode::serialize(witnesses)?;
+                    #[cfg(feature = "witness-compression")]
+                    let witness_data = if self.witness_compression_enabled {
+                        zstd::encode_all(&witness_data[..], self.witness_compression_level as i32)
+                            .map_err(|e| anyhow::anyhow!("Witness compression failed: {}", e))?
+                    } else {
+                        witness_data
+                    };
+                    Some(witness_data)
+                } else {
+                    None
+                };
+                flush_order.push(i);
+                heights.push(*height);
+                hashes.push(block_hash);
+                bodies.push(block_data);
+                headers.push(Arc::new(header_data.clone()));
+                witness_blobs.push(witness_blob);
+                metas.push(metadata_data);
+                recent.push((*height, header_data));
+            }
+            if self.try_ibd_flush_heed3_unified(
+                &flush_order,
+                &heights,
+                &hashes,
+                &bodies,
+                &headers,
+                &witness_blobs,
+                &metas,
+                &recent,
+            )? {
+                return Ok(());
+            }
+        }
+        for (block, witnesses, height) in items {
+            self.store_block_with_witness(block, witnesses, *height)?;
+        }
+        Ok(())
+    }
+
+    /// True when a witness blob exists at the height row key or legacy hash-only key.
+    pub fn has_witness_blob(&self, block_hash: &Hash) -> Result<bool> {
+        if let Some(h) = self.get_height_by_hash(block_hash)? {
+            let k = block_height_row_key(h, block_hash);
+            if self.witnesses.get(&k)?.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(self.witnesses.get(block_hash.as_slice())?.is_some())
+    }
+
+    /// Store witness at the IBD row key (`height || hash`). Prefer this when height is known.
+    pub fn store_witness_at_height(
+        &self,
+        block_hash: &Hash,
+        height: u64,
+        witness: &[Vec<Witness>],
+    ) -> Result<()> {
+        let row_key = block_height_row_key(height, block_hash);
+        let witness_data = bincode::serialize(witness)?;
+
+        #[cfg(feature = "witness-compression")]
+        let data_to_store = if self.witness_compression_enabled {
+            zstd::encode_all(&witness_data[..], self.witness_compression_level as i32)
+                .map_err(|e| anyhow::anyhow!("Witness compression failed: {}", e))?
+        } else {
+            witness_data
+        };
+
+        #[cfg(not(feature = "witness-compression"))]
+        let data_to_store = witness_data;
+
+        self.witnesses.insert(row_key.as_slice(), &data_to_store)?;
+        Ok(())
+    }
+
+    /// Store witness data for a block
+    pub fn store_witness(&self, block_hash: &Hash, witness: &[Vec<Witness>]) -> Result<()> {
+        // CRITICAL FIX: Changed from &[Witness] to &[Vec<Witness>]
+        // witnesses is now Vec<Vec<Witness>> where each Vec<Witness> is for one transaction
+        // and each Witness is for one input
+        let witness_data = bincode::serialize(witness)?;
+
+        // Compress witness data if compression is enabled
+        #[cfg(feature = "witness-compression")]
+        let data_to_store = if self.witness_compression_enabled {
+            zstd::encode_all(&witness_data[..], self.witness_compression_level as i32)
+                .map_err(|e| anyhow::anyhow!("Witness compression failed: {}", e))?
+        } else {
+            witness_data
+        };
+
+        #[cfg(not(feature = "witness-compression"))]
+        let data_to_store = witness_data;
+
+        self.witnesses
+            .insert(block_hash.as_slice(), &data_to_store)?;
+        Ok(())
+    }
+
+    /// Get witness data for a block
+    // CRITICAL FIX: Changed return type from Option<Vec<Witness>> to Option<Vec<Vec<Witness>>>
+    ///
+    /// W5: when no witness tree row exists but the body is a wire blob, return witnesses
+    /// parsed from that payload (single wire deser).
+    pub fn get_witness(&self, block_hash: &Hash) -> Result<Option<Vec<Vec<Witness>>>> {
+        if let Some(h) = self.get_height_by_hash(block_hash)? {
+            let k = block_height_row_key(h, block_hash);
+            if let Some(data) = self.witnesses.get(&k)? {
+                #[cfg(feature = "witness-compression")]
+                let witness_data = if Self::is_compressed(&data) {
+                    crate::storage::zstd_limit::decode_bounded(&data[..])
+                        .map_err(|e| anyhow::anyhow!("Witness decompression failed: {}", e))?
+                } else {
+                    data
+                };
+
+                #[cfg(not(feature = "witness-compression"))]
+                let witness_data = data;
+
+                let witnesses: Vec<Vec<Witness>> = bincode::deserialize(&witness_data)?;
+                return Ok(Some(witnesses));
+            }
+            // W5 wire body embeds witnesses — no separate tree row.
+            if let Some(body) = self.blocks.get(&k)? {
+                if let Some(payload) = decode_wire_body_blob(&body) {
+                    let (_, witnesses) =
+                        blvm_protocol::serialization::deserialize_block_with_witnesses(payload)
+                            .map_err(|e| anyhow::anyhow!("wire witness deserialize: {e}"))?;
+                    return Ok(Some(witnesses));
+                }
+            }
+        }
+        if let Some(data) = self.witnesses.get(block_hash.as_slice())? {
+            // Decompress if data is compressed (auto-detect via zstd magic bytes)
+            #[cfg(feature = "witness-compression")]
+            let witness_data = if Self::is_compressed(&data) {
+                crate::storage::zstd_limit::decode_bounded(&data[..])
+                    .map_err(|e| anyhow::anyhow!("Witness decompression failed: {}", e))?
+            } else {
+                data
+            };
+
+            #[cfg(not(feature = "witness-compression"))]
+            let witness_data = data;
+
+            let witnesses: Vec<Vec<Witness>> = bincode::deserialize(&witness_data)?;
+            Ok(Some(witnesses))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Store recent headers for median time-past calculation
+    /// Maintains a sliding window of the last 11+ headers by height
+    pub fn store_recent_header(&self, height: u64, header: &BlockHeader) -> Result<()> {
+        let height_bytes = height.to_be_bytes();
+        let header_data = bincode::serialize(header)?;
+        let mut batch = self.recent_headers.batch()?;
+        batch.put(&height_bytes, &header_data);
+        if height > 11 {
+            batch.delete(&(height - 12).to_be_bytes());
+        }
+        batch.commit()?;
+        Ok(())
+    }
+
+    /// Batch-update recent headers for MTP (one `commit_no_wal` / one txn vs per-height inserts).
+    /// Preserves the same put/delete semantics as repeated [`store_recent_header`](Self::store_recent_header).
+    pub fn store_recent_headers_ibd_batch(&self, entries: &[(u64, &BlockHeader)]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut batch = self.recent_headers.batch()?;
+        for &(height, header) in entries {
+            let height_bytes = height.to_be_bytes();
+            let header_data = bincode::serialize(header)?;
+            batch.put(&height_bytes, &header_data);
+            if height > 11 {
+                let remove_bytes = (height - 12).to_be_bytes();
+                batch.delete(&remove_bytes);
+            }
+        }
+        batch.commit_no_wal()?;
+        Ok(())
+    }
+
+    /// RocksDB-only: one cross-CF `WriteBatch` for IBD flush. Returns `Ok(true)` if this DB is RocksDB
+    /// and the write succeeded; `Ok(false)` to fall back to per-tree batches (other backends).
+    #[cfg(feature = "rocksdb")]
+    pub(crate) fn try_ibd_flush_rocksdb_unified(
+        &self,
+        flush_order: &[usize],
+        heights: &[u64],
+        block_hashes: &[Hash],
+        block_data: &[Vec<u8>],
+        header_data: &[Arc<Vec<u8>>],
+        witness_blobs: &[Option<Vec<u8>>],
+        metadata_blobs: &[Vec<u8>],
+        recent_entries: &[(u64, Vec<u8>)],
+    ) -> Result<bool> {
+        use crate::storage::database::rocksdb_impl::RocksDBDatabase;
+
+        let Some(rocks) = self.db.as_ref().as_any().downcast_ref::<RocksDBDatabase>() else {
+            return Ok(false);
+        };
+        rocks.write_ibd_blockstore_flush_no_wal(
+            flush_order,
+            heights,
+            block_hashes,
+            block_data,
+            header_data,
+            witness_blobs,
+            metadata_blobs,
+            recent_entries,
+        )?;
+        Ok(true)
+    }
+
+    /// Redb-only: one write transaction for all blockstore tables + recent headers (same semantics as
+    /// the per-tree path in `parallel_ibd`). Returns `Ok(true)` when `db` is Redb and the write
+    /// succeeded; `Ok(false)` to use the legacy multi-batch path.
+    #[cfg(feature = "redb")]
+    pub(crate) fn try_ibd_flush_redb_unified(
+        &self,
+        flush_order: &[usize],
+        heights: &[u64],
+        block_hashes: &[Hash],
+        block_data: &[Vec<u8>],
+        header_data: &[Arc<Vec<u8>>],
+        witness_blobs: &[Option<Vec<u8>>],
+        metadata_blobs: &[Vec<u8>],
+        recent_entries: &[(u64, Vec<u8>)],
+    ) -> Result<bool> {
+        use crate::storage::database::redb_impl::RedbDatabase;
+
+        let Some(redb) = self.db.as_ref().as_any().downcast_ref::<RedbDatabase>() else {
+            return Ok(false);
+        };
+        redb.write_ibd_blockstore_flush_no_wal(
+            flush_order,
+            heights,
+            block_hashes,
+            block_data,
+            header_data,
+            witness_blobs,
+            metadata_blobs,
+            recent_entries,
+        )?;
+        Ok(true)
+    }
+
+    /// heed3 / LMDB: one write transaction for all blockstore sub-DBs + recent headers.
+    #[cfg(feature = "heed3")]
+    pub(crate) fn try_ibd_flush_heed3_unified(
+        &self,
+        flush_order: &[usize],
+        heights: &[u64],
+        block_hashes: &[Hash],
+        block_data: &[Vec<u8>],
+        header_data: &[Arc<Vec<u8>>],
+        witness_blobs: &[Option<Vec<u8>>],
+        metadata_blobs: &[Vec<u8>],
+        recent_entries: &[(u64, Vec<u8>)],
+    ) -> Result<bool> {
+        use crate::storage::database::Heed3Database;
+
+        let Some(heed) = self.db.as_ref().as_any().downcast_ref::<Heed3Database>() else {
+            return Ok(false);
+        };
+        heed.write_ibd_blockstore_flush_no_wal(
+            flush_order,
+            heights,
+            block_hashes,
+            block_data,
+            header_data,
+            witness_blobs,
+            metadata_blobs,
+            recent_entries,
+        )?;
+        Ok(true)
+    }
+
+    /// Get recent headers for median time-past calculation (BIP113)
+    /// Returns up to `count` most recent headers, ordered from oldest to newest
+    pub fn get_recent_headers(&self, count: usize) -> Result<Vec<BlockHeader>> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(mut height) = self.highest_stored_height()? else {
+            return Ok(Vec::new());
+        };
+        let mut headers = Vec::with_capacity(count.min(height as usize + 1));
+        for _ in 0..count {
+            let height_bytes = height.to_be_bytes();
+            if let Some(data) = self.recent_headers.get(&height_bytes)? {
+                if let Ok(header) = bincode::deserialize::<BlockHeader>(&data) {
+                    headers.push(header);
+                }
+            }
+            if height == 0 {
+                break;
+            }
+            height -= 1;
+        }
+        headers.reverse();
+        Ok(headers)
+    }
+
+    /// Get a stored header by block height.
+    ///
+    /// Resolves via the durable height index → headers tree. Do **not** use the
+    /// `recent_headers` sliding window here: that only retains ~12 tip heights, so
+    /// gap-resume MTP seeding (e.g. start at 880001 with tip at 957k) would miss
+    /// parents and fall back to tip timestamps → H05 "Invalid block header"
+    /// (live 2026-07-13: Seeded 4 recent headers before 880001, then fail).
+    pub fn get_header_at_height(&self, height: u64) -> Result<Option<BlockHeader>> {
+        let Some(hash) = self.get_hash_by_height(height)? else {
+            return Ok(None);
+        };
+        self.get_header(&hash)
+    }
+
+    /// Median time of the block at `height` (up to 11 headers ending at that block).
+    ///
+    /// Missing any header in the window returns `None` so a time-based relative
+    /// lock is rejected instead of measured from the wrong block.
+    pub fn median_time_at_height(&self, height: u64) -> Result<Option<u64>> {
+        let start = height.saturating_sub(10);
+        let mut headers = Vec::with_capacity(11);
+        for h in start..=height {
+            match self.get_header_at_height(h)? {
+                Some(header) => headers.push(header),
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(blvm_protocol::bip113::get_median_time_past(&headers)))
+    }
+
+    /// Lookup used by block connection for time-based relative locks.
+    pub fn sequence_prev_mtp_lookup(
+        &self,
+    ) -> std::sync::Arc<dyn Fn(u64) -> Option<u64> + Send + Sync> {
+        let store = self.clone();
+        std::sync::Arc::new(move |height| store.median_time_at_height(height).ok().flatten())
+    }
+
+    /// Compact bits and timestamp of the header at `height`, for required-work checks.
+    pub fn difficulty_ancestor_lookup(&self) -> blvm_consensus::block::DifficultyAncestor {
+        let store = self.clone();
+        std::sync::Arc::new(move |height| {
+            store
+                .get_header_at_height(height)
+                .ok()
+                .flatten()
+                .map(|header| (header.bits, header.timestamp))
+        })
+    }
+
+    /// Oldest-to-newest headers ending at `end_height`, at most `count` blocks.
+    ///
+    /// Stops at the first missing header so the slice stays a contiguous suffix
+    /// of the chain. Callers that compute required work index it by height.
+    pub fn headers_back_from(&self, end_height: u64, count: usize) -> Result<Vec<BlockHeader>> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let start = end_height.saturating_sub(count as u64 - 1);
+        let mut rev = Vec::with_capacity(count.min((end_height - start) as usize + 1));
+        for height in (start..=end_height).rev() {
+            match self.get_header_at_height(height)? {
+                Some(header) => rev.push(header),
+                None => break,
+            }
+        }
+        rev.reverse();
+        Ok(rev)
+    }
+
+    /// Headers for BIP113 MTP immediately before `before_height` (oldest→newest, ≤11).
+    ///
+    /// Prefer this over [`get_recent_headers`] when validating at a height far below tip.
+    pub fn headers_before_height_for_mtp(&self, before_height: u64) -> Result<Vec<BlockHeader>> {
+        if before_height == 0 {
+            return Ok(Vec::new());
+        }
+        let lo = before_height.saturating_sub(11);
+        let mut headers = Vec::with_capacity(11);
+        for h in lo..before_height {
+            if let Some(header) = self.get_header_at_height(h)? {
+                headers.push(header);
+            }
+        }
+        Ok(headers)
+    }
+
+    /// Decode a `blocks` tree value: W5 wire blob, optional zstd, or legacy bincode.
+    pub(crate) fn decode_block_blob(data: &[u8]) -> Result<Block> {
+        if let Some(payload) = decode_wire_body_blob(data) {
+            let (block, _) =
+                blvm_protocol::serialization::deserialize_block_with_witnesses(payload)
+                    .map_err(|e| anyhow::anyhow!("wire body deserialize: {e}"))?;
+            return Ok(block);
+        }
+        #[cfg(feature = "block-compression")]
+        let block_data = if Self::is_compressed(data) {
+            crate::storage::zstd_limit::decode_bounded(data)
+                .map_err(|e| anyhow::anyhow!("Block decompression failed: {}", e))?
+        } else {
+            data.to_vec()
+        };
+        #[cfg(not(feature = "block-compression"))]
+        let block_data = data;
+        // `block-compression` yields `Vec<u8>`; otherwise `&[u8]`.
+        #[cfg(feature = "block-compression")]
+        let block: Block = bincode::deserialize(block_data.as_ref())?;
+        #[cfg(not(feature = "block-compression"))]
+        let block: Block = bincode::deserialize(block_data)?;
+        Ok(block)
+    }
+
+    /// Fetch raw `blocks` tree bytes for `hash` (height row preferred).
+    /// `pub(crate)` for getdata W5 zero-copy framing (Mode T tip serve).
+    pub(crate) fn load_block_blob(&self, hash: &Hash) -> Result<Option<Vec<u8>>> {
+        if let Some(h) = self.get_height_by_hash(hash)? {
+            let k = block_height_row_key(h, hash);
+            if let Some(data) = self.blocks.get(&k)? {
+                return Ok(Some(data));
+            }
+        }
+        self.blocks.get(hash.as_slice())
+    }
+
+    /// W5: one wire deser when body is a wire blob; else bincode body + witness tree.
+    pub fn get_block_and_witnesses(
+        &self,
+        hash: &Hash,
+    ) -> Result<Option<(Block, Vec<Vec<Witness>>)>> {
+        let Some(data) = self.load_block_blob(hash)? else {
+            #[cfg(feature = "rocksdb")]
+            {
+                if let Some(reader) = &self.bitcoin_core_reader {
+                    if let Some(block) = reader.read_block(hash)? {
+                        let w = self.get_witness(hash)?.unwrap_or_default();
+                        return Ok(Some((block, w)));
+                    }
+                }
+            }
+            return Ok(None);
+        };
+        if let Some(payload) = decode_wire_body_blob(&data) {
+            let (block, witnesses) =
+                blvm_protocol::serialization::deserialize_block_with_witnesses(payload)
+                    .map_err(|e| anyhow::anyhow!("wire body deserialize: {e}"))?;
+            return Ok(Some((block, witnesses)));
+        }
+        let block = Self::decode_block_blob(&data)?;
+        let witnesses = self.get_witness(hash)?.unwrap_or_default();
+        Ok(Some((block, witnesses)))
+    }
+
+    /// Get a block by hash
+    ///
+    /// First tries to get the block from the database.
+    /// If not found and block files are available, falls back to reading from files.
+    pub fn get_block(&self, hash: &Hash) -> Result<Option<Block>> {
+        if let Some(data) = self.load_block_blob(hash)? {
+            return Ok(Some(Self::decode_block_blob(&data)?));
+        }
+        // Block not in database, try block files if available
+        #[cfg(feature = "rocksdb")]
+        {
+            if let Some(reader) = &self.bitcoin_core_reader {
+                return reader.read_block(hash);
+            }
+        }
+        Ok(None)
+    }
+
+    /// Output scripts and the parent block hash, from one read of the stored body.
+    ///
+    /// The scripts are slices of that body.
+    pub(crate) fn output_scripts_and_prev_hash(
+        &self,
+        hash: &Hash,
+    ) -> Result<Option<OutputScriptSpans>> {
+        if let Some(data) = self.load_block_blob(hash)? {
+            return Ok(Some(output_spans(data)?));
+        }
+        #[cfg(feature = "rocksdb")]
+        {
+            if let Some(reader) = &self.bitcoin_core_reader {
+                if let Some(bytes) = reader.read_block_payload(hash)? {
+                    return Ok(Some(wire_output_spans(bytes)?));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Check if data is compressed (zstd magic bytes: 0x28, 0xB5, 0x2F, 0xFD)
+    #[cfg(feature = "block-compression")]
+    fn is_compressed(data: &[u8]) -> bool {
+        data.len() >= 4 && data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD
+    }
+
+    /// Store a block header
+    pub fn store_header(&self, hash: &Hash, header: &BlockHeader) -> Result<()> {
+        let header_data = bincode::serialize(header)?;
+        self.headers.insert(hash.as_slice(), &header_data)?;
+        Ok(())
+    }
+
+    /// Get a block header by hash
+    pub fn get_header(&self, hash: &Hash) -> Result<Option<BlockHeader>> {
+        if let Some(h) = self.get_height_by_hash(hash)? {
+            let k = block_height_row_key(h, hash);
+            if let Some(data) = self.headers.get(&k)? {
+                let header: BlockHeader = bincode::deserialize(&data)?;
+                return Ok(Some(header));
+            }
+        }
+        if let Some(data) = self.headers.get(hash.as_slice())? {
+            let header: BlockHeader = bincode::deserialize(&data)?;
+            Ok(Some(header))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Store block height index
+    /// Maintains both height→hash and hash→height indices for O(1) lookups
+    pub fn store_height(&self, height: u64, hash: &Hash) -> Result<()> {
+        let height_bytes = height.to_be_bytes();
+        crate::storage::database::commit_keyed(&[
+            (
+                self.height_index.as_ref(),
+                height_bytes.as_slice(),
+                Some(hash.as_slice()),
+            ),
+            (
+                self.hash_to_height.as_ref(),
+                hash.as_slice(),
+                Some(height_bytes.as_slice()),
+            ),
+        ])
+    }
+
+    /// Record which height a block occupies without replacing the active chain's height entry.
+    pub fn store_hash_height(&self, height: u64, hash: &Hash) -> Result<()> {
+        let height_bytes = height.to_be_bytes();
+        self.hash_to_height.insert(hash.as_slice(), &height_bytes)?;
+        Ok(())
+    }
+
+    /// Store multiple headers and heights in a single batch operation
+    /// This is MUCH faster than individual inserts for IBD - uses atomic batch writes
+    pub fn store_headers_batch(&self, entries: &[(Hash, BlockHeader, u64)]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        // One LMDB transaction when the three trees share an environment.
+        // A failure there leaves every tree as it was.
+        let mut header_ops = Vec::new();
+        let mut height_ops = Vec::new();
+        let mut hash_ops = Vec::new();
+
+        // A height already claimed keeps that hash. The other header is stored
+        // and indexed by hash, and it does not become the active hash at that height.
+        let mut claimed: HashMap<u64, Hash> = HashMap::new();
+        for (hash, header, height) in entries {
+            let header_data = bincode::serialize(header)?;
+            let height_bytes = height.to_be_bytes();
+
+            header_ops.push((hash.to_vec(), header_data));
+            hash_ops.push((hash.to_vec(), height_bytes.to_vec()));
+            let active = match claimed.get(height) {
+                Some(hash) => Some(*hash),
+                None => self.get_hash_by_height(*height)?,
+            };
+            if active.is_none() || active.as_ref() == Some(hash) {
+                height_ops.push((height_bytes.to_vec(), hash.to_vec()));
+                claimed.insert(*height, *hash);
+            }
+        }
+
+        #[cfg(feature = "heed3")]
+        if let (Some(headers), Some(heights), Some(hashes)) = (
+            self.headers.as_heed3_tree(),
+            self.height_index.as_heed3_tree(),
+            self.hash_to_height.as_heed3_tree(),
+        ) {
+            return headers.commit_three_puts(&header_ops, heights, &height_ops, hashes, &hash_ops);
+        }
+
+        let mut headers_batch = self.headers.batch()?;
+        let mut heights_batch = self.height_index.batch()?;
+        let mut hash_to_height_batch = self.hash_to_height.batch()?;
+        for (key, value) in &header_ops {
+            headers_batch.put(key, value);
+        }
+        for (key, value) in &height_ops {
+            heights_batch.put(key, value);
+        }
+        for (key, value) in &hash_ops {
+            hash_to_height_batch.put(key, value);
+        }
+        headers_batch.commit()?;
+        heights_batch.commit()?;
+        hash_to_height_batch.commit()?;
+
+        Ok(())
+    }
+
+    /// Get block hash by height
+    pub fn get_hash_by_height(&self, height: u64) -> Result<Option<Hash>> {
+        let height_bytes = height.to_be_bytes();
+        if let Some(data) = self.height_index.get(&height_bytes)? {
+            if data.len() != 32 {
+                return Err(anyhow::anyhow!(
+                    "height index row for {height} is {} bytes",
+                    data.len()
+                ));
+            }
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&data);
+            Ok(Some(hash))
+        } else {
+            Ok(None)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_short_height_row(&self, height: u64) -> Result<()> {
+        self.height_index.insert(&height.to_be_bytes(), &[0x01])?;
+        Ok(())
+    }
+
+    /// Highest block height present in the height index (contiguous from genesis assumed for IBD).
+    ///
+    /// Used to recover `chain_info` when the `chain_info` table is missing or corrupted but
+    /// block data remains. Complexity: O(log N) `get_hash_by_height` probes.
+    pub fn highest_stored_height(&self) -> Result<Option<u64>> {
+        if self.get_hash_by_height(0)?.is_none() {
+            return Ok(None);
+        }
+        let mut lo = 0u64;
+        let mut hi = 1u64;
+        while self.get_hash_by_height(hi)?.is_some() {
+            lo = hi;
+            hi = hi.saturating_mul(2);
+            if hi > 2_000_000_000 {
+                break;
+            }
+        }
+        if self.get_hash_by_height(hi)?.is_some() {
+            return Ok(Some(hi));
+        }
+        while lo + 1 < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.get_hash_by_height(mid)?.is_some() {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        Ok(Some(lo))
+    }
+
+    /// First missing height when a later height is stored.
+    ///
+    /// [`highest_stored_height`] stays the contiguous prefix so IBD resume does not move.
+    pub fn stored_height_gap(&self) -> Result<Option<u64>> {
+        let contiguous = match self.highest_stored_height()? {
+            Some(height) => height,
+            None => {
+                let mut probe = 1u64;
+                let mut step = 1u64;
+                while probe < 2_000_000_000 {
+                    if self.get_hash_by_height(probe)?.is_some() {
+                        return Ok(Some(0));
+                    }
+                    probe = probe.saturating_add(step);
+                    step = step.saturating_mul(2);
+                }
+                return Ok(None);
+            }
+        };
+        let mut probe = contiguous.saturating_add(1);
+        let mut step = 1u64;
+        while probe < 2_000_000_000 {
+            if self.get_hash_by_height(probe)?.is_some() {
+                return Ok(Some(contiguous.saturating_add(1)));
+            }
+            probe = probe.saturating_add(step);
+            step = step.saturating_mul(2);
+        }
+        Ok(None)
+    }
+
+    /// Get block height by hash (reverse lookup)
+    /// Optimized: O(1) lookup using hash_to_height index instead of O(n) iteration
+    pub fn get_height_by_hash(&self, hash: &Hash) -> Result<Option<u64>> {
+        // Use reverse index for O(1) lookup instead of O(n) iteration
+        if let Some(data) = self.hash_to_height.get(hash.as_slice())? {
+            if data.len() != 8 {
+                return Err(anyhow::anyhow!(
+                    "hash-to-height row is {} bytes",
+                    data.len()
+                ));
+            }
+            let mut height_bytes_array = [0u8; 8];
+            height_bytes_array.copy_from_slice(&data);
+            return Ok(Some(u64::from_be_bytes(height_bytes_array)));
+        }
+        Ok(None)
+    }
+
+    /// Build a `headers` message payload for an incoming `getheaders` (BIP130-style chain walk).
+    ///
+    /// Finds the first locator hash that sits on this node's contiguous height index (main chain),
+    /// then returns up to `max_headers` headers starting at the **next** height. An empty locator
+    /// returns the header at `hash_stop` when that hash is indexed, and nothing when it is missing
+    /// or zero. Empty vec for a matched locator means the peer is already at our tip (or we share
+    /// no indexed ancestor).
+    pub fn build_headers_response(
+        &self,
+        locator: &[Hash],
+        hash_stop: &Hash,
+        max_headers: usize,
+    ) -> Result<Vec<BlockHeader>> {
+        let Some(tip_h) = self.highest_stored_height()? else {
+            return Ok(Vec::new());
+        };
+
+        // An empty locator is Core's null locator: the reply is the header at
+        // hash_stop when that hash is indexed, and empty when it is missing or zero.
+        if locator.is_empty() {
+            if hash_stop.iter().all(|&b| b == 0) {
+                return Ok(Vec::new());
+            }
+            let Some(height) = self.get_height_by_hash(hash_stop)? else {
+                return Ok(Vec::new());
+            };
+            if self.get_hash_by_height(height)? != Some(*hash_stop) {
+                return Ok(Vec::new());
+            }
+            return Ok(self.get_header(hash_stop)?.into_iter().collect());
+        }
+
+        let mut fork_h = None;
+        for hash in locator {
+            if let Some(h) = self.get_height_by_hash(hash)? {
+                if self.get_hash_by_height(h)? == Some(*hash) {
+                    fork_h = Some(h);
+                    break;
+                }
+            }
+        }
+
+        let Some(fork) = fork_h else {
+            return Ok(Vec::new());
+        };
+
+        // A matched locator starts at the next header.
+        let start = fork.saturating_add(1);
+        if start > tip_h {
+            return Ok(Vec::new());
+        }
+
+        let mut out = Vec::new();
+        let stop_all_zero = hash_stop.iter().all(|&b| b == 0);
+        let cap = max_headers.max(1);
+        // The next header has to extend the one before it. A height-index row
+        // whose prev is a different block (the live 157911 case) must not be
+        // sent: Bitcoin Core treats a non-continuous headers message as
+        // misbehavior and disconnects.
+        let mut expect = if start == 0 {
+            None
+        } else {
+            self.get_hash_by_height(start - 1)?
+        };
+
+        for height in start..=tip_h {
+            if out.len() >= cap {
+                break;
+            }
+            let Some(hash) = self.get_hash_by_height(height)? else {
+                break;
+            };
+            let Some(hdr) = self.get_header(&hash)? else {
+                break;
+            };
+            if let Some(prev) = expect {
+                if hdr.prev_block_hash != prev {
+                    break;
+                }
+            }
+            out.push(hdr);
+            expect = Some(hash);
+            if !stop_all_zero && hash == *hash_stop {
+                break;
+            }
+        }
+
+        Ok(out)
+    }
+
+    /// Get block metadata (TX count, etc.) without loading full block
+    pub fn get_block_metadata(&self, hash: &Hash) -> Result<Option<BlockMetadata>> {
+        if let Some(h) = self.get_height_by_hash(hash)? {
+            let k = block_height_row_key(h, hash);
+            if let Some(data) = self.block_metadata.get(&k)? {
+                let metadata: BlockMetadata = bincode::deserialize(&data)?;
+                return Ok(Some(metadata));
+            }
+        }
+        if let Some(data) = self.block_metadata.get(hash.as_slice())? {
+            let metadata: BlockMetadata = bincode::deserialize(&data)?;
+            Ok(Some(metadata))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get all blocks in a height range
+    pub fn get_blocks_by_height_range(&self, start: u64, end: u64) -> Result<Vec<Block>> {
+        let mut blocks = Vec::new();
+
+        for height in start..=end {
+            if let Some(hash) = self.get_hash_by_height(height)? {
+                if let Some(block) = self.get_block(&hash)? {
+                    blocks.push(block);
+                }
+            }
+        }
+
+        Ok(blocks)
+    }
+
+    /// Check if a block exists (body present in `blocks` tree)
+    pub fn has_block(&self, hash: &Hash) -> Result<bool> {
+        self.has_block_body(hash)
+    }
+
+    /// Get total number of blocks stored
+    pub fn block_count(&self) -> Result<usize> {
+        self.blocks.len()
+    }
+
+    /// Calculate block hash using proper Bitcoin double SHA256
+    /// Get the hash of a block
+    pub fn get_block_hash(&self, block: &Block) -> Hash {
+        self.block_hash(block)
+    }
+
+    #[inline]
+    fn block_hash(&self, block: &Block) -> Hash {
+        use crate::storage::hashing::double_sha256;
+
+        // OPTIMIZATION: Use stack-allocated array instead of heap Vec
+        // Serialize block header for hashing (80 bytes total)
+        // CRITICAL: Must use 4-byte types for version/timestamp/bits/nonce (Bitcoin wire format)
+        let mut header_data = [0u8; 80];
+        header_data[0..4].copy_from_slice(&(block.header.version as i32).to_le_bytes()); // 4 bytes
+        header_data[4..36].copy_from_slice(&block.header.prev_block_hash); // 32 bytes
+        header_data[36..68].copy_from_slice(&block.header.merkle_root); // 32 bytes
+        header_data[68..72].copy_from_slice(&(block.header.timestamp as u32).to_le_bytes()); // 4 bytes
+        header_data[72..76].copy_from_slice(&(block.header.bits as u32).to_le_bytes()); // 4 bytes
+        header_data[76..80].copy_from_slice(&(block.header.nonce as u32).to_le_bytes()); // 4 bytes
+
+        // Calculate Bitcoin double SHA256 hash
+        double_sha256(&header_data)
+    }
+
+    /// Remove block body (keep header for PoW verification)
+    pub fn remove_block_body(&self, hash: &Hash) -> Result<()> {
+        if let Some(h) = self.get_height_by_hash(hash)? {
+            let k = block_height_row_key(h, hash);
+            self.blocks.remove(&k)?;
+        }
+        self.blocks.remove(hash.as_slice())?;
+        Ok(())
+    }
+
+    /// Remove witness data for a block
+    pub fn remove_witness(&self, hash: &Hash) -> Result<()> {
+        if let Some(h) = self.get_height_by_hash(hash)? {
+            let k = block_height_row_key(h, hash);
+            self.witnesses.remove(&k)?;
+        }
+        self.witnesses.remove(hash.as_slice())?;
+        Ok(())
+    }
+
+    /// Drop the active hash at `height`. The header body stays. The height is no longer the header tip.
+    pub fn clear_height_index(&self, height: u64) -> Result<()> {
+        self.height_index.remove(&height.to_be_bytes())?;
+        Ok(())
+    }
+
+    /// Remove block by height (removes body, keeps header)
+    pub fn remove_block_by_height(&self, height: u64) -> Result<()> {
+        if let Some(hash) = self.get_hash_by_height(height)? {
+            self.remove_block_body(&hash)?;
+        }
+        Ok(())
+    }
+
+    /// Remove blocks in a height range (removes bodies, keeps headers)
+    pub fn remove_blocks_by_height_range(&self, start: u64, end: u64) -> Result<u64> {
+        let mut removed = 0;
+        for height in start..=end {
+            if self.remove_block_by_height(height).is_ok() {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Check if a block body exists (not just header)
+    pub fn has_block_body(&self, hash: &Hash) -> Result<bool> {
+        if let Some(h) = self.get_height_by_hash(hash)? {
+            let k = block_height_row_key(h, hash);
+            if self.blocks.contains_key(&k)? {
+                return Ok(true);
+            }
+        }
+        self.blocks.contains_key(hash.as_slice())
+    }
+
+    // ============================================================
+    // Tree accessors for batch operations
+    // ============================================================
+
+    /// Get reference to blocks tree for batch operations
+    pub fn blocks_tree(&self) -> Result<Arc<dyn Tree>> {
+        Ok(Arc::clone(&self.blocks))
+    }
+
+    /// Get reference to witnesses tree for batch operations
+    pub fn witnesses_tree(&self) -> Result<Arc<dyn Tree>> {
+        Ok(Arc::clone(&self.witnesses))
+    }
+
+    /// Get reference to height index tree for batch operations
+    pub fn height_tree(&self) -> Result<Arc<dyn Tree>> {
+        Ok(Arc::clone(&self.height_index))
+    }
+
+    /// Get reference to hash-to-height tree for batch operations
+    pub fn hash_to_height_tree(&self) -> Result<Arc<dyn Tree>> {
+        Ok(Arc::clone(&self.hash_to_height))
+    }
+
+    /// Get reference to headers tree for batch operations
+    pub fn headers_tree(&self) -> Result<Arc<dyn Tree>> {
+        Ok(Arc::clone(&self.headers))
+    }
+
+    /// Get reference to block metadata tree for batch operations
+    pub fn metadata_tree(&self) -> Result<Arc<dyn Tree>> {
+        Ok(Arc::clone(&self.block_metadata))
+    }
+
+    /// Persist connect undo when this hash has none.
+    ///
+    /// The validation skip path leaves the body on disk and drops the undo log.
+    /// A later reorg then cannot disconnect that block. An existing row is left
+    /// as it was: a second connect must not replace a real undo with an empty one.
+    #[cfg(feature = "production")]
+    pub fn store_undo_log_if_absent(
+        &self,
+        hash: &Hash,
+        undo: &blvm_consensus::reorganization::BlockUndoLog,
+    ) -> Result<bool> {
+        if self.get_undo_log(hash)?.is_some() {
+            return Ok(false);
+        }
+        self.store_undo_log(hash, undo)?;
+        Ok(true)
+    }
+
+    /// Persist connect undo for a block hash (required for disconnect on reorg).
+    #[cfg(feature = "production")]
+    pub fn store_undo_log(
+        &self,
+        hash: &Hash,
+        undo: &blvm_consensus::reorganization::BlockUndoLog,
+    ) -> Result<()> {
+        let data = bincode::serialize(undo)?;
+        self.block_undo.insert(hash.as_slice(), &data)?;
+        Ok(())
+    }
+
+    /// Write all undo logs for a chunk in a single batched write transaction.
+    ///
+    /// Each `Tree::insert` opens its own write transaction and calls `fdatasync` on commit.
+    /// Calling `store_undo_log` in a per-block loop produces N fdatasyncs per chunk (N = chunk
+    /// size, typically 50). On single-writer backends (LMDB/Heed3) this serialises with every
+    /// other IBD writer and dominates block-flush latency: 50 fsyncs × 8 chunks × 2 threads
+    /// ≈ 800 fsyncs per flush cycle at ~50–200 ms each = 40–160 s stall.
+    ///
+    /// Batching all chunk entries into one `commit_no_wal` reduces that to 1 fsync per chunk.
+    #[cfg(feature = "production")]
+    pub fn store_undo_logs_batch(
+        &self,
+        entries: &[(&Hash, &blvm_consensus::reorganization::BlockUndoLog)],
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut batch = self.block_undo.batch()?;
+        for (hash, undo) in entries {
+            let data = bincode::serialize(undo)?;
+            batch.put(hash.as_slice(), &data);
+        }
+        batch.commit_no_wal()?;
+        Ok(())
+    }
+
+    /// Store the basic-filter header for `hash`.
+    pub fn store_filter_header(&self, hash: &Hash, header: &[u8; 32]) -> Result<()> {
+        let mut key = Vec::with_capacity(36);
+        key.extend_from_slice(b"cfh:");
+        key.extend_from_slice(hash);
+        self.block_metadata.insert(&key, header)?;
+        Ok(())
+    }
+
+    /// Load the basic-filter header for `hash`.
+    pub fn get_filter_header(&self, hash: &Hash) -> Result<Option<[u8; 32]>> {
+        let mut key = Vec::with_capacity(36);
+        key.extend_from_slice(b"cfh:");
+        key.extend_from_slice(hash);
+        match self.block_metadata.get(&key)? {
+            Some(data) if data.len() == 32 => {
+                let mut out = [0u8; 32];
+                out.copy_from_slice(&data);
+                Ok(Some(out))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Previous output scripts from the stored undo record.
+    ///
+    /// The scripts are slices of that record.
+    #[cfg(feature = "production")]
+    pub(crate) fn spent_script_spans(&self, hash: &Hash) -> Result<ScriptSpans> {
+        match self.block_undo.get(hash.as_slice())? {
+            Some(data) => spent_spans(data),
+            None => Ok(ScriptSpans::default()),
+        }
+    }
+
+    /// Load connect undo for a block hash.
+    #[cfg(feature = "production")]
+    pub fn get_undo_log(
+        &self,
+        hash: &Hash,
+    ) -> Result<Option<blvm_consensus::reorganization::BlockUndoLog>> {
+        match self.block_undo.get(hash.as_slice())? {
+            Some(data) => Ok(Some(bincode::deserialize(&data)?)),
+            None => Ok(None),
+        }
+    }
+}
+
+#[cfg(test)]
+mod header_height_tests {
+    use super::*;
+    use crate::storage::database::{Database, create_database, default_backend};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    #[test]
+    fn bincode_output_scripts_match_the_decoded_block() {
+        use blvm_protocol::{Transaction, TransactionInput, TransactionOutput};
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [1; 32],
+                merkle_root: [2; 32],
+                timestamp: 1_231_006_505,
+                bits: 0x1d00_ffff,
+                nonce: 4,
+            },
+            transactions: vec![Transaction {
+                version: 1,
+                inputs: blvm_protocol::tx_inputs![TransactionInput {
+                    prevout: blvm_protocol::OutPoint {
+                        hash: [3; 32],
+                        index: 1,
+                    },
+                    sequence: 0xffff_fffe,
+                    script_sig: vec![0xaa, 0xbb, 0xcc],
+                }],
+                outputs: blvm_protocol::tx_outputs![
+                    TransactionOutput {
+                        value: 50,
+                        script_pubkey: vec![0x76, 0xa9],
+                    },
+                    TransactionOutput {
+                        value: 1,
+                        script_pubkey: vec![],
+                    },
+                ],
+                lock_time: 9,
+            }]
+            .into_boxed_slice(),
+        };
+        let bytes = bincode::serialize(&block).unwrap();
+        let scripts = output_scripts_from_bincode_block(&bytes).unwrap();
+        let decoded: Block = bincode::deserialize(&bytes).unwrap();
+        let owned = output_scripts_of_block(&decoded);
+        assert_eq!(scripts, owned.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        assert_eq!(scripts, vec![&[0x76, 0xa9][..], &[][..]]);
+        let held = output_spans(bytes.clone()).unwrap();
+        assert_eq!(held.scripts.slices(), scripts);
+        assert_eq!(held.prev_hash, block.header.prev_block_hash);
+        assert_eq!(
+            prev_hash_from_stored_body(&bytes).unwrap(),
+            block.header.prev_block_hash
+        );
+        let wire = blvm_protocol::serialization::serialize_block(&block);
+        let blob = encode_wire_body_blob(&wire);
+        let wire_held = output_spans(blob).unwrap();
+        assert_eq!(wire_held.scripts.slices(), scripts);
+        assert_eq!(wire_held.prev_hash, block.header.prev_block_hash);
+    }
+
+    #[test]
+    fn undo_spent_scripts_match_the_decoded_log() {
+        use blvm_consensus::reorganization::{BlockUndoLog, UndoEntry};
+        use blvm_protocol::{OutPoint, UTXO};
+        use std::sync::Arc;
+
+        let short = vec![0x51];
+        let long = vec![0xab; 40];
+        let created = vec![0x52];
+        let mut undo = BlockUndoLog::new();
+        undo.push(UndoEntry {
+            outpoint: OutPoint {
+                hash: [1; 32],
+                index: 0,
+            },
+            previous_utxo: Some(Arc::new(UTXO {
+                value: 10,
+                script_pubkey: short.clone().into(),
+                height: 3,
+                is_coinbase: false,
+            })),
+            new_utxo: None,
+        });
+        undo.push(UndoEntry {
+            outpoint: OutPoint {
+                hash: [2; 32],
+                index: 1,
+            },
+            previous_utxo: None,
+            new_utxo: Some(Arc::new(UTXO {
+                value: 11,
+                script_pubkey: created.into(),
+                height: 4,
+                is_coinbase: true,
+            })),
+        });
+        undo.push(UndoEntry {
+            outpoint: OutPoint {
+                hash: [3; 32],
+                index: 2,
+            },
+            previous_utxo: Some(Arc::new(UTXO {
+                value: 12,
+                script_pubkey: long.clone().into(),
+                height: 5,
+                is_coinbase: false,
+            })),
+            new_utxo: Some(Arc::new(UTXO {
+                value: 13,
+                script_pubkey: Vec::<u8>::new().into(),
+                height: 6,
+                is_coinbase: false,
+            })),
+        });
+        undo.push(UndoEntry {
+            outpoint: OutPoint {
+                hash: [4; 32],
+                index: 3,
+            },
+            previous_utxo: Some(Arc::new(UTXO {
+                value: 14,
+                script_pubkey: Vec::<u8>::new().into(),
+                height: 7,
+                is_coinbase: true,
+            })),
+            new_utxo: None,
+        });
+        let bytes = bincode::serialize(&undo).unwrap();
+        let scripts = spent_scripts_from_undo_bytes(&bytes).unwrap();
+        let decoded: BlockUndoLog = bincode::deserialize(&bytes).unwrap();
+        let from_decoded: Vec<Vec<u8>> = decoded
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .previous_utxo
+                    .as_ref()
+                    .map(|prev| prev.script_pubkey.as_ref().to_vec())
+            })
+            .collect();
+        assert_eq!(
+            scripts,
+            from_decoded.iter().map(Vec::as_slice).collect::<Vec<_>>()
+        );
+        assert_eq!(scripts, vec![short.as_slice(), long.as_slice(), &[][..]]);
+        let held = spent_spans(bytes.clone()).unwrap();
+        assert_eq!(held.slices(), scripts);
+        let empty = ScriptSpans::default();
+        let combined = output_and_spent_slices(&empty, &held);
+        assert_eq!(combined, scripts);
+    }
+
+    #[test]
+    fn later_hash_does_not_replace_the_height() {
+        let dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        let active = [1u8; 32];
+        let other = [2u8; 32];
+        store
+            .store_headers_batch(&[(active, BlockHeader::default(), 100)])
+            .unwrap();
+        store
+            .store_headers_batch(&[(other, BlockHeader::default(), 100)])
+            .unwrap();
+        assert_eq!(store.get_hash_by_height(100).unwrap(), Some(active));
+        assert_eq!(store.get_height_by_hash(&other).unwrap(), Some(100));
+        assert!(store.get_header(&other).unwrap().is_some());
+    }
+
+    #[test]
+    fn headers_response_stops_before_an_unlinked_height() {
+        let dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        let g = [4u8; 32];
+        let h1 = [1u8; 32];
+        let h2 = [2u8; 32];
+        let h3 = [9u8; 32];
+        let mut genesis = BlockHeader::default();
+        genesis.prev_block_hash = [0u8; 32];
+        let mut parent = BlockHeader::default();
+        parent.prev_block_hash = g;
+        let mut child = BlockHeader::default();
+        child.prev_block_hash = h1;
+        let mut unlinked = BlockHeader::default();
+        unlinked.prev_block_hash = [8u8; 32];
+        store
+            .store_headers_batch(&[
+                (g, genesis, 0),
+                (h1, parent, 1),
+                (h2, child, 2),
+                (h3, unlinked, 3),
+            ])
+            .unwrap();
+        let got = store.build_headers_response(&[h1], &[0u8; 32], 10).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].prev_block_hash, h1);
+        let none = store.build_headers_response(&[h2], &[0u8; 32], 10).unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn empty_locator_returns_only_the_hash_stop_header() {
+        let dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        let g = [4u8; 32];
+        let h1 = [1u8; 32];
+        let h2 = [2u8; 32];
+        let mut genesis = BlockHeader::default();
+        genesis.prev_block_hash = [0u8; 32];
+        genesis.timestamp = 10;
+        let mut parent = BlockHeader::default();
+        parent.prev_block_hash = g;
+        parent.timestamp = 20;
+        let mut child = BlockHeader::default();
+        child.prev_block_hash = h1;
+        child.timestamp = 30;
+        store
+            .store_headers_batch(&[(g, genesis, 0), (h1, parent, 1), (h2, child, 2)])
+            .unwrap();
+
+        let none = store.build_headers_response(&[], &[0u8; 32], 10).unwrap();
+        assert!(none.is_empty(), "zero hash_stop returns no headers");
+
+        let missing = [9u8; 32];
+        let absent = store.build_headers_response(&[], &missing, 10).unwrap();
+        assert!(absent.is_empty(), "a missing hash_stop returns no headers");
+
+        let one = store.build_headers_response(&[], &h2, 10).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].timestamp, 30);
+
+        let next = store.build_headers_response(&[h1], &[0u8; 32], 10).unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].timestamp, 30);
+    }
+
+    #[cfg(feature = "heed3")]
+    #[test]
+    fn a_failed_header_batch_leaves_all_three_trees() {
+        let dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        let kept = [1u8; 32];
+        store
+            .store_headers_batch(&[(kept, BlockHeader::default(), 7)])
+            .unwrap();
+
+        crate::storage::database::abort_next_three_put_commit(true);
+        let added = [2u8; 32];
+        let err = store
+            .store_headers_batch(&[(added, BlockHeader::default(), 8)])
+            .unwrap_err();
+        assert!(err.to_string().contains("aborted before commit"), "{err}");
+        assert_eq!(store.get_hash_by_height(7).unwrap(), Some(kept));
+        assert!(store.get_header(&kept).unwrap().is_some());
+        assert_eq!(store.get_height_by_hash(&kept).unwrap(), Some(7));
+        assert!(store.get_header(&added).unwrap().is_none());
+        assert!(store.get_height_by_hash(&added).unwrap().is_none());
+        assert!(store.get_hash_by_height(8).unwrap().is_none());
+    }
+
+    #[test]
+    fn tip_moved_down_is_not_the_header_tip() {
+        let dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        let h0 = [1u8; 32];
+        let h1 = [2u8; 32];
+        let h2 = [3u8; 32];
+        store
+            .store_headers_batch(&[
+                (h0, BlockHeader::default(), 0),
+                (h1, BlockHeader::default(), 1),
+                (h2, BlockHeader::default(), 2),
+            ])
+            .unwrap();
+        assert_eq!(store.highest_stored_height().unwrap(), Some(2));
+        store.clear_height_index(2).unwrap();
+        assert_eq!(store.highest_stored_height().unwrap(), Some(1));
+        assert!(store.get_hash_by_height(2).unwrap().is_none());
+        assert_eq!(store.get_height_by_hash(&h2).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn eleven_recent_headers_skip_the_height_index() {
+        let dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        for height in 0..=20u64 {
+            let mut hash = [0u8; 32];
+            hash[0] = height as u8;
+            store.store_height(height, &hash).unwrap();
+        }
+        for height in 10..=20u64 {
+            let mut header = BlockHeader::default();
+            header.timestamp = 1_600_000_000 + height;
+            store.store_recent_header(height, &header).unwrap();
+        }
+        let headers = store.get_recent_headers(11).unwrap();
+        assert_eq!(headers.len(), 11);
+        assert_eq!(headers[0].timestamp, 1_600_000_010);
+        assert_eq!(headers[10].timestamp, 1_600_000_020);
+    }
+
+    #[test]
+    fn short_hash_to_height_row_is_an_error() {
+        let dir = TempDir::new().unwrap();
+        let db: Arc<dyn Database> =
+            Arc::from(create_database(dir.path(), default_backend(), None).unwrap());
+        let store = BlockStore::new(db).unwrap();
+        let hash = [3u8; 32];
+        store
+            .hash_to_height_tree()
+            .unwrap()
+            .insert(hash.as_slice(), &[1, 2, 3])
+            .unwrap();
+        let err = store.get_height_by_hash(&hash).unwrap_err();
+        assert!(
+            err.to_string().contains("hash-to-height"),
+            "short row must not panic, got {err}"
+        );
+    }
+}

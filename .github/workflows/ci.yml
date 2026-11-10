@@ -1,0 +1,1796 @@
+name: CI
+
+# ci
+# chore: restart after moving container images off /mnt/data
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  release:
+    types: [published]
+  repository_dispatch:
+    types: [build-chain, upstream-changed, develop-chain]
+  # Manual runs use the same `skip_tests` input as blvm-consensus / blvm-protocol; commit
+  # [skip_tests], [skip_docs], [skip_verify], [skip_fuzz] on push.
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Skip test execution and coverage steps'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+  CARGO_INCREMENTAL: '0'
+  # The runner image has a distro rustc on PATH and no rustup. The installer
+  # refuses that unless this is set, which fails the job before compile.
+  RUSTUP_INIT_SKIP_PATH_CHECK: 'yes'
+  # Linker flags set per-run in setup (mold / working lld / default bfd). Do not hardcode -fuse-ld=lld:
+  # stale lld packages (e.g. libLLVM.so.19.1) break all builds on upgraded runners.
+  # Parent of per-run dirs: .../<run_id>/target and .../<run_id>/tmp.
+  # Prefer pointing the runner's workFolder at a large disk (e.g. /mnt/data/github-runner/<name>/_work)
+  # so github.workspace and this default path stay off root — then BLVM_RUNNER_BUILD_ROOT is optional.
+  # If workspace is still on a small volume, set repository (or org) variable BLVM_RUNNER_BUILD_ROOT
+  # to an absolute path on a large disk — CI and teardown use it.
+  #
+  # Isolation: BLVM_RUNNER_BUILD_ROOT must designate space used only for blvm-node CI on this host.
+  # Emergency disk steps remove sibling per-run directories under BLVM_RUNNER_DATA_ROOT; pointing this
+  # at a parent directory shared with unrelated workflows risks deleting other jobs' build trees.
+  BLVM_RUNNER_DATA_ROOT: ${{ vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace) }}
+  BLVM_BUILD_TARGET: ${{ format('{0}/{1}/target', vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace), github.run_id) }}
+  # Keep rustc/link temps on the same volume as target (system /tmp may be small or full).
+  TMPDIR: ${{ format('{0}/{1}/tmp', vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace), github.run_id) }}
+  TMP: ${{ format('{0}/{1}/tmp', vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace), github.run_id) }}
+  TEMP: ${{ format('{0}/{1}/tmp', vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace), github.run_id) }}
+
+jobs:
+  setup:
+    name: Setup
+    runs-on: [self-hosted, Linux, X64, builds]
+
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]')))
+    outputs:
+      cache-key: ${{ steps.setup-cache.outputs.cache-key }}
+      consensus-cache-key: ${{ steps.setup-cache.outputs.consensus-cache-key }}
+      protocol-cache-key: ${{ steps.setup-cache.outputs.protocol-cache-key }}
+      rustflags: ${{ steps.linker.outputs.rustflags }}
+    steps:
+      - name: Emergency pre-flight disk cleanup
+        run: |
+          echo "=== disk BEFORE cleanup ==="
+          df -h /
+          WORK="${{ github.workspace }}"
+          BUILD_ROOT="${BLVM_RUNNER_DATA_ROOT}"
+          RUN_ID="${{ github.run_id }}"
+          mkdir -p "$BUILD_ROOT/$RUN_ID/target" "$BUILD_ROOT/$RUN_ID/tmp"
+
+          avail_min_two() {
+            local w b
+            w=$(df -B1 "$1" 2>/dev/null | tail -1 | awk '{print $4}')
+            b=$(df -B1 "$2" 2>/dev/null | tail -1 | awk '{print $4}')
+            if [ -z "$w" ] && [ -z "$b" ]; then echo ""; return; fi
+            if [ -z "$w" ]; then echo "$b"; return; fi
+            if [ -z "$b" ]; then echo "$w"; return; fi
+            if [ "$w" -lt "$b" ]; then echo "$w"; else echo "$b"; fi
+          }
+
+          # Headroom vs the tighter of workspace (checkout) and build-root (target, temps).
+          AVAIL=$(avail_min_two "$WORK" "$BUILD_ROOT")
+          # blvm-node test builds need a lot of headroom for rustc temps + deps
+          MIN_FREE=$((28 * 1024 * 1024 * 1024))
+          CRIT_FREE=$((4 * 1024 * 1024 * 1024))
+
+          purge_siblings() {
+            if [ ! -d "$BUILD_ROOT" ]; then
+              return 0
+            fi
+            # Other runs share this runner: never delete a sibling touched in the last 60 min.
+            echo "=== Purging sibling run dirs idle >60 min (keeping $RUN_ID) ==="
+            find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
+              -not -name "$RUN_ID" \
+              -mmin +60 \
+              -exec rm -rf {} + 2>/dev/null || true
+          }
+
+          # Critical: disk almost full — drop other runs' idle trees so this run can proceed.
+          if [ -n "$AVAIL" ] && [ "$AVAIL" -lt "$CRIT_FREE" ]; then
+            echo "⚠️  CRITICAL: $AVAIL bytes free — evicting idle sibling per-run trees under $BUILD_ROOT"
+            purge_siblings
+          fi
+
+          if [ -n "$AVAIL" ] && [ "$AVAIL" -lt "$MIN_FREE" ]; then
+            echo "⚠️  Low disk: $AVAIL bytes free (min of $WORK vs $BUILD_ROOT FS) — aggressive prune of sibling run dirs"
+            purge_siblings
+          fi
+
+          # Time-based stale cleanup (shorter window so abandoned runs don't hoard disk).
+          if [ -d "$BUILD_ROOT" ]; then
+            find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
+              -not -name "$RUN_ID" \
+              -mmin +60 \
+              -exec rm -rf {} + 2>/dev/null || true
+            USED=$(du -sb "$BUILD_ROOT" 2>/dev/null | cut -f1 || echo 0)
+            # 35 GiB cap on total retained build junk for this repo
+            if [ "$USED" -gt $((35 * 1024 * 1024 * 1024)) ]; then
+              echo "⚠️  gh-blvm-node-build >35 GiB — evicting idle dirs except $RUN_ID"
+              purge_siblings
+            fi
+          fi
+
+          rm -rf "$WORK/.build/gh-fuzz-blvm-node" 2>/dev/null || true
+
+          AVAIL2=$(avail_min_two "$WORK" "$BUILD_ROOT")
+          if [ -n "$AVAIL2" ] && [ "$AVAIL2" -lt "$MIN_FREE" ]; then
+            echo "⚠️  Still low after prune ($AVAIL2 bytes) — second sibling purge"
+            purge_siblings
+          fi
+
+          echo "=== disk AFTER cleanup ==="
+          df -h /
+
+      - name: Disk check
+        uses: BTCDecoded/rust-ci/runner-disk-guard@main
+        with:
+          show-df: false
+
+      - name: Show disk usage (top 10 largest dirs)
+        if: always()
+        run: |
+          echo "=== df -h ==="
+          df -h /
+          echo ""
+          echo "=== Top 10 largest directories under / (excluding proc/sys/dev) ==="
+          du -x --max-depth=4 / 2>/dev/null \
+            | sort -rh \
+            | grep -v -e '^[0-9]*\s*/proc' -e '^[0-9]*\s*/sys' -e '^[0-9]*\s*/dev' \
+            | head -10 \
+            | awk '{printf "%-10s %s\n", $1, $2}'
+          echo ""
+          echo "=== /tmp usage ==="
+          du -sh /tmp/* 2>/dev/null | sort -rh | head -10
+          echo ""
+          echo "=== Runner cache ==="
+          du -sh ${{ github.workspace }}/.build/runner-cache 2>/dev/null || echo "(no runner-cache)"
+          echo "=== BLVM_RUNNER_DATA_ROOT (CARGO_TARGET_DIR parent) ==="
+          du -sh "${BLVM_RUNNER_DATA_ROOT}" 2>/dev/null || echo "(no BLVM_RUNNER_DATA_ROOT)"
+          du -sh ${{ github.workspace }}/.build/gh-blvm-node-build 2>/dev/null || echo "(no workspace .build/gh-blvm-node-build)"
+
+      - uses: actions/checkout@v6
+      
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+      - name: Checkout blvm-protocol dependency (for cache key generation)
+        uses: actions/checkout@v6
+        with:
+          repository: BTCDecoded/blvm-protocol
+          path: _temp-blvm-protocol
+      
+      - name: Checkout consensus (for cache key generation)
+        uses: actions/checkout@v6
+        with:
+          repository: BTCDecoded/blvm-consensus
+          path: _temp-blvm-consensus
+      
+      - name: Cache
+        id: setup-cache
+        run: |
+          CACHE_ROOT="${{ github.workspace }}/.build/runner-cache"
+          
+          # Cache keys from Cargo.toml + sibling manifests + toolchain (root Cargo.lock is not committed per .gitignore).
+          DEPS_KEY=$(sha256sum Cargo.toml | cut -d' ' -f1)
+          CONSENSUS_DEPS_KEY=$(sha256sum _temp-blvm-consensus/Cargo.toml | cut -d' ' -f1)
+          PROTOCOL_DEPS_KEY=$(sha256sum _temp-blvm-protocol/Cargo.toml | cut -d' ' -f1)
+          
+          # Include toolchain version in cache key
+          TOOLCHAIN=$(grep -E '^channel|rust-version' rust-toolchain.toml Cargo.toml 2>/dev/null | head -1 | sha256sum | cut -d' ' -f1 || echo "1.88.0")
+          
+          CACHE_KEY="${DEPS_KEY}-${TOOLCHAIN}"
+          CONSENSUS_CACHE_KEY="${CONSENSUS_DEPS_KEY}-${TOOLCHAIN}"
+          PROTOCOL_CACHE_KEY="${PROTOCOL_DEPS_KEY}-${TOOLCHAIN}"
+          
+          # Set up cache directories
+          CARGO_CACHE_DIR="$CACHE_ROOT/cargo/$CACHE_KEY"
+          TARGET_CACHE_DIR="$CACHE_ROOT/target/$CACHE_KEY"
+          CONSENSUS_TARGET_DIR="$CACHE_ROOT/blvm-consensus-target/$CONSENSUS_CACHE_KEY"
+          PROTOCOL_TARGET_DIR="$CACHE_ROOT/blvm-protocol-target/$PROTOCOL_CACHE_KEY"
+          
+          echo "CARGO_CACHE_DIR=$CARGO_CACHE_DIR" >> $GITHUB_ENV
+          echo "TARGET_CACHE_DIR=$TARGET_CACHE_DIR" >> $GITHUB_ENV
+          echo "CONSENSUS_TARGET_DIR=$CONSENSUS_TARGET_DIR" >> $GITHUB_ENV
+          echo "PROTOCOL_TARGET_DIR=$PROTOCOL_TARGET_DIR" >> $GITHUB_ENV
+          
+          echo "cache-key=$CACHE_KEY" >> $GITHUB_OUTPUT
+          echo "consensus-cache-key=$CONSENSUS_CACHE_KEY" >> $GITHUB_OUTPUT
+          echo "protocol-cache-key=$PROTOCOL_CACHE_KEY" >> $GITHUB_OUTPUT
+          
+          mkdir -p "$CARGO_CACHE_DIR"/{registry,git} "$TARGET_CACHE_DIR" "$CONSENSUS_TARGET_DIR" "$PROTOCOL_TARGET_DIR"
+      
+      - name: Cleanup temp dependencies
+        if: always()
+        run: |
+          # Remove temp directories to prevent them from being used by other jobs
+          rm -rf _temp-blvm-protocol _temp-blvm-consensus
+          # Also clean up any existing parent directory dependencies (from previous runs)
+          if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
+          if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
+          
+          echo "  - Main: ${CACHE_KEY:0:16}..."
+          echo "  - Consensus: ${CONSENSUS_CACHE_KEY:0:16}..."
+          echo "  - Protocol: ${PROTOCOL_CACHE_KEY:0:16}..."
+
+      # checkout@v4 defaults to git clean -ffdx, which removes ignored .build/ (including paths
+      # created in the emergency step above). Recreate before rustup mktemp under TMPDIR.
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+
+      - name: Configure linker (mold / lld / default)
+        id: linker
+        run: |
+          set -euo pipefail
+          RF=""
+          if command -v mold >/dev/null 2>&1 && mold --version >/dev/null 2>&1; then
+            RF="-C link-arg=-fuse-ld=mold"
+            echo "✅ Using mold linker"
+          elif command -v ld.lld >/dev/null 2>&1 && ld.lld --version >/dev/null 2>&1; then
+            RF="-C link-arg=-fuse-ld=lld"
+            echo "✅ Using lld linker"
+          else
+            echo "⚠️ mold/lld unavailable or broken (e.g. libLLVM.so mismatch); using default bfd linker"
+            if command -v pacman >/dev/null 2>&1; then
+              echo "Hint: on Arch runners: sudo pacman -S --needed lld llvm-libs"
+            fi
+          fi
+          echo "rustflags=$RF" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Test
+    needs: setup
+    runs-on: [self-hosted, Linux, X64, builds]
+    env:
+      RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
+      BLVM_SECP256K1_NO_GPU: "1"
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]'))) &&
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       !contains(github.event.head_commit.message, '[skip_tests]')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
+    steps:
+      - uses: actions/checkout@v6
+      
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Early disk cleanup (free cargo caches and sibling run dirs)
+        run: |
+          echo "=== Pre-test disk status ==="
+          df -h / || true
+          df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true
+          # Show /mnt/data if distinct volume (common self-hosted runner layout)
+          df -h /mnt/data 2>/dev/null || true
+
+          # RUNNER_TEMP is the per-runner-process temp used as CARGO_HOME by this workflow.
+          # Clean stale cargo registry/git before the heavy test build to avoid ENOSPC.
+          CARGO_TEMP="${RUNNER_TEMP}/cargo"
+          if [ -d "$CARGO_TEMP" ]; then
+            echo "=== Cleaning stale cargo registry/git in $CARGO_TEMP ==="
+            # Remove registry src cache (large unpacked crates) — will be re-fetched as needed
+            rm -rf "$CARGO_TEMP/registry/src" 2>/dev/null || true
+            # Remove old git checkouts (can grow unbounded across runs)
+            rm -rf "$CARGO_TEMP/git/checkouts" 2>/dev/null || true
+            # Prune registry cache entries not accessed in last 7 days
+            find "$CARGO_TEMP/registry/cache" -type f -atime +7 -delete 2>/dev/null || true
+          fi
+
+          # Clean sibling run dirs under BLVM_RUNNER_DATA_ROOT (same pattern as Setup and late cleanup).
+          BUILD_ROOT="${BLVM_RUNNER_DATA_ROOT}"
+          RUN_ID="${{ github.run_id }}"
+          if [ -d "$BUILD_ROOT" ]; then
+            echo "=== Purging sibling run dirs under $BUILD_ROOT idle >60 min (keeping $RUN_ID) ==="
+            find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
+              -not -name "$RUN_ID" \
+              -mmin +60 \
+              -exec rm -rf {} + 2>/dev/null || true
+          fi
+
+          # Clean runner-cache target dirs if they exist and are large
+          for CACHE_TARGET in "${{ github.workspace }}/.build/runner-cache/target" "/tmp/runner-cache/target"; do
+            if [ -d "$CACHE_TARGET" ]; then
+              SIZE=$(du -sb "$CACHE_TARGET" 2>/dev/null | cut -f1 || echo 0)
+              # If over 10GB, prune stale entries older than 60 minutes
+              if [ "$SIZE" -gt $((10 * 1024 * 1024 * 1024)) ]; then
+                echo "=== $CACHE_TARGET >10GB ($SIZE bytes) — pruning entries >60min old ==="
+                find "$CACHE_TARGET" -mindepth 1 -maxdepth 1 -type d -mmin +60 -exec rm -rf {} + 2>/dev/null || true
+              fi
+            fi
+          done
+
+          echo "=== Post-cleanup disk status ==="
+          df -h / || true
+          df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true
+          df -h /mnt/data 2>/dev/null || true
+
+      - name: Clean leftover path overrides
+        run: |
+          if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
+          if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
+          if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
+          # Stale ../blvm-spec breaks verify (e.g. F_FeeNonNeg missing after spec update).
+          if [ -d "../blvm-spec" ]; then rm -rf ../blvm-spec; fi
+          if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
+
+      - name: Checkout develop scripts (blvm)
+        if: github.ref == 'refs/heads/develop' || github.base_ref == 'develop'
+        uses: actions/checkout@v6
+        with:
+          repository: BTCDecoded/blvm
+          ref: ${{ github.ref_name == 'develop' && 'develop' || 'main' }}
+          path: _develop-blvm
+          fetch-depth: 1
+
+      - name: Resolve develop registry deps (test)
+        uses: ./_develop-blvm/.github/actions/develop-resolve-test
+        continue-on-error: true
+        if: github.ref == 'refs/heads/develop' || github.base_ref == 'develop'
+
+      - name: Isolate CARGO_HOME for this runner
+        # RUNNER_TEMP is set by the Actions runner to a per-runner-process temp dir.
+        # Using it as CARGO_HOME prevents parallel runner processes (org2, org2-03, …)
+        # that share the same OS user from racing on registry/src extractions.
+        run: |
+          mkdir -p "${RUNNER_TEMP}/cargo"
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
+
+      - name: Cache
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: bind-env
+          cache-key: ${{ needs.setup.outputs.cache-key }}
+
+      - name: Restore Cargo cache
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: restore
+
+      # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+      
+      - name: Install liblmdb (heed3 backend)
+        run: |
+          if pkg-config --exists lmdb 2>/dev/null; then
+            echo "✅ liblmdb already present."
+          elif command -v apt-get >/dev/null 2>&1; then
+            bash scripts/apt-get-retry.sh update -qq
+            bash scripts/apt-get-retry.sh install -y -qq liblmdb-dev
+          elif command -v pacman >/dev/null 2>&1; then
+            pacman -Qq lmdb >/dev/null 2>&1 || sudo pacman -Sy --noconfirm lmdb
+          else
+            echo "::warning::liblmdb not installed; heed3 tests may be skipped at compile time"
+          fi
+
+      - name: Run tests
+        run: cargo test
+
+      # `stratum-v2` is not in default features; compile and run library tests with Stratum code enabled.
+      - name: Run tests (stratum-v2 feature, lib)
+        run: cargo test --features stratum-v2 --lib
+
+      # `rocksdb` is not in default features but gates Bitcoin Core import / block-file
+      # reuse (src/storage/bitcoin_core_*, core_reuse_tests, tests/bitcoin_core_tests.rs,
+      # tests/core_drop_in_integration.rs). Without this step that code is never tested.
+      - name: Run tests (rocksdb feature)
+        run: cargo test --features rocksdb
+
+      # Redb and sled are optional backends. The default build is heed3 only.
+      - name: Run tests (redb and sled features)
+        run: cargo test --features redb,sled
+
+      - name: Dump disk usage on failure
+        if: failure()
+        run: |
+          echo "=== df -h (all relevant volumes) ==="
+          df -h /
+          df -h /mnt/data 2>/dev/null || true
+          df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true
+          df -h "${CARGO_HOME:-$HOME/.cargo}" 2>/dev/null || true
+          echo ""
+          echo "=== Key paths ==="
+          echo "RUNNER_TEMP=${RUNNER_TEMP:-<unset>}"
+          echo "CARGO_HOME=${CARGO_HOME:-<unset>}"
+          echo "BLVM_RUNNER_DATA_ROOT=${BLVM_RUNNER_DATA_ROOT:-<unset>}"
+          echo "BLVM_BUILD_TARGET=${BLVM_BUILD_TARGET:-<unset>}"
+          echo ""
+          echo "=== Size of key directories ==="
+          du -sh "${RUNNER_TEMP}/cargo" 2>/dev/null || echo "RUNNER_TEMP/cargo: (not found)"
+          du -sh "${CARGO_HOME:-$HOME/.cargo}" 2>/dev/null || echo "CARGO_HOME: (not found)"
+          du -sh "${BLVM_RUNNER_DATA_ROOT}" 2>/dev/null || echo "BLVM_RUNNER_DATA_ROOT: (not found)"
+          du -sh "${BLVM_BUILD_TARGET}" 2>/dev/null || echo "BLVM_BUILD_TARGET: (not found)"
+          echo ""
+          echo "=== Top 10 largest directories under / ==="
+          du -x --max-depth=4 / 2>/dev/null \
+            | sort -rh \
+            | grep -v -e '^[0-9]*\s*/proc' -e '^[0-9]*\s*/sys' -e '^[0-9]*\s*/dev' \
+            | head -10 \
+            | awk '{printf "%-10s %s\n", $1, $2}'
+          echo ""
+          echo "=== /tmp ==="
+          du -sh /tmp/* 2>/dev/null | sort -rh | head -10
+      
+      - name: Clean test binaries and stale run dirs
+        if: always()
+        run: |
+          # Remove test binary executables from this run (largest artifacts, not needed after test).
+          # Rlibs stay — they speed up future compilations via the cache.
+          TARGET="${{ env.BLVM_BUILD_TARGET }}"
+          if [ -d "$TARGET/debug" ]; then
+            find "$TARGET/debug" -maxdepth 1 -type f -executable ! -name "*.so" ! -name "*.rlib" ! -name "*.d" \
+              -delete 2>/dev/null || true
+          fi
+          # Remove other run dirs idle >60 min; younger ones may belong to a concurrent run on this runner.
+          find "${BLVM_RUNNER_DATA_ROOT}" -mindepth 1 -maxdepth 1 -type d \
+            -not -name "${{ github.run_id }}" \
+            -mmin +60 \
+            -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Save Cargo cache
+        if: always()
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: save
+
+      - name: Prune old runner caches
+        if: always()
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: prune
+
+  clippy:
+    name: Clippy
+    needs: setup
+    runs-on: [self-hosted, Linux, X64, builds]
+    env:
+      RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]'))) &&
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       !contains(github.event.head_commit.message, '[skip_tests]')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
+    steps:
+      - uses: actions/checkout@v6
+      
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Clean leftover path overrides
+        run: |
+          if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
+          if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
+          if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
+          # Stale ../blvm-spec breaks verify (e.g. F_FeeNonNeg missing after spec update).
+          if [ -d "../blvm-spec" ]; then rm -rf ../blvm-spec; fi
+          if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
+
+      - name: Install OpenSSL development headers (openssl-sys / native-tls)
+        run: |
+          if pkg-config --exists openssl 2>/dev/null || command -v openssl >/dev/null 2>&1; then
+            echo "✅ openssl already present."
+          elif command -v apt-get >/dev/null 2>&1; then
+            bash scripts/apt-get-retry.sh update -qq
+            bash scripts/apt-get-retry.sh install -y -qq pkg-config libssl-dev
+          elif command -v pacman >/dev/null 2>&1; then
+            pacman -Qq openssl pkgconf >/dev/null 2>&1 || sudo pacman -Sy --noconfirm openssl pkgconf
+          fi
+
+      - name: Isolate CARGO_HOME for this runner
+        # RUNNER_TEMP is set by the Actions runner to a per-runner-process temp dir.
+        # Using it as CARGO_HOME prevents parallel runner processes (org2, org2-03, …)
+        # that share the same OS user from racing on registry/src extractions.
+        run: |
+          mkdir -p "${RUNNER_TEMP}/cargo"
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
+
+      - name: Cache
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: bind-env
+          cache-key: ${{ needs.setup.outputs.cache-key }}
+          include-target: false
+
+      - name: Restore Cargo cache
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: restore
+
+      # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+      
+      - name: Run clippy
+        run: |
+          cargo clippy --lib --bins --examples -- -D warnings
+          # Integration tests: keep -D warnings but avoid per-test-crate #![allow] spam.
+          cargo clippy --tests -- \
+            -D warnings \
+            -A clippy::all \
+            -A unused \
+            -A unused-comparisons \
+            -A deprecated
+
+  verify:
+    name: Verify
+    needs: setup
+    runs-on: [self-hosted, Linux, X64]
+    env:
+      RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
+    timeout-minutes: 60
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]'))) &&
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       !contains(github.event.head_commit.message, '[skip_verify]')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
+    steps:
+      - uses: actions/checkout@v6
+      
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Clean leftover path overrides
+        run: |
+          if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
+          if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
+          if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
+          # Stale ../blvm-spec breaks verify (e.g. F_FeeNonNeg missing after spec update).
+          if [ -d "../blvm-spec" ]; then rm -rf ../blvm-spec; fi
+          if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
+
+      - name: Setup blvm-spec (Orange Paper for spec-lock verification)
+        uses: BTCDecoded/rust-ci/setup-blvm-spec@main
+
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+
+      # Deps → install tool → crates.io consensus src → dual **verify** (+ attestation env) in one blocking step.
+      - name: Verify
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+
+          pkg-config --exists z3 || { echo "❌ z3 not found; install it on the runner."; exit 1; }
+          command -v clang >/dev/null 2>&1 || { echo "❌ clang not found; install it on the runner."; exit 1; }
+          command -v jq >/dev/null 2>&1 || { echo "❌ jq not found; install it on the runner."; exit 1; }
+          pkg-config --exists openssl 2>/dev/null || command -v openssl >/dev/null 2>&1 || { echo "❌ openssl not found; install it on the runner."; exit 1; }
+          echo "✅ Z3 + clang + jq + openssl present."
+
+          # 0.1.48 check-drift exits on notation the Orange Paper does not spell the
+          # same way. 0.1.45 is the verifier that passed the consensus 0.1.73 release.
+          # The installed binary resolves the spec from BLVM_SPEC_DIR, not from --spec-path.
+          cargo install --force blvm-spec-lock --version 0.1.45 --locked --features z3
+
+          UA='BTCDecoded/blvm-node verify job (https://github.com/BTCDecoded/blvm-node)'
+          CONS_VER=$(curl -fsSL --retry 3 --retry-delay 2 -A "$UA" \
+            'https://crates.io/api/v1/crates/blvm-consensus' \
+            | jq -r '.crate.max_stable_version // .crate.max_version')
+          if [ -z "$CONS_VER" ] || [ "$CONS_VER" = "null" ]; then
+            echo "❌ Could not resolve blvm-consensus version from crates.io API"
+            exit 1
+          fi
+          echo "Using blvm-consensus $CONS_VER from crates.io"
+          mkdir -p "$GITHUB_WORKSPACE/_spec_verify"
+          curl -fsSL --retry 3 --retry-delay 2 -A "$UA" \
+            "https://crates.io/api/v1/crates/blvm-consensus/${CONS_VER}/download" \
+            | tar -xz -C "$GITHUB_WORKSPACE/_spec_verify"
+          CONS_PATH="$GITHUB_WORKSPACE/_spec_verify/blvm-consensus-${CONS_VER}"
+
+          echo "🔒 Running cargo-spec-lock verify on crates.io blvm-consensus (merged F_* + #[spec_locked])..."
+          SPEC_ARGS="--crate-path $CONS_PATH"
+          if [ -f "../blvm-spec/PROTOCOL.md" ] && [ -f "../blvm-spec/ARCHITECTURE.md" ]; then
+            SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/PROTOCOL.md ../blvm-spec/ARCHITECTURE.md"
+            echo "Using PROTOCOL.md + ARCHITECTURE.md for spec-derived contracts"
+          elif [ -f "../blvm-spec/THE_ORANGE_PAPER.md" ]; then
+            SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/THE_ORANGE_PAPER.md"
+            echo "Using THE_ORANGE_PAPER.md for spec-derived contracts"
+          else
+            echo "❌ No spec at ../blvm-spec (run setup-blvm-spec step)"
+            exit 1
+          fi
+          export BLVM_SPEC_DIR="$(cd ../blvm-spec && pwd)"
+          export SPEC_LOCK_STRICT=1
+          export SPEC_LOCK_Z3_TIMEOUT_SECS="${SPEC_LOCK_Z3_TIMEOUT_SECS:-120}"
+          cargo-spec-lock verify $SPEC_ARGS --timeout 120 --format human \
+            --json-out "$GITHUB_WORKSPACE/spec_lock_consensus_verify.json" \
+            2>&1 | tee "$GITHUB_WORKSPACE/spec_lock_consensus_output.txt"
+          EXIT_CODE=${PIPESTATUS[0]}
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ blvm-consensus spec-lock verification failed"
+            exit $EXIT_CODE
+          fi
+          echo "✅ blvm-consensus verification passed"
+
+          cd "$GITHUB_WORKSPACE"
+          echo "🔒 Running cargo-spec-lock verify on blvm-node (merged F_* + #[spec_locked])..."
+          SPEC_ARGS="--crate-path ."
+          if [ -f "../blvm-spec/PROTOCOL.md" ] && [ -f "../blvm-spec/ARCHITECTURE.md" ]; then
+            SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/PROTOCOL.md ../blvm-spec/ARCHITECTURE.md"
+          elif [ -f "../blvm-spec/THE_ORANGE_PAPER.md" ]; then
+            SPEC_ARGS="$SPEC_ARGS --spec-path ../blvm-spec/THE_ORANGE_PAPER.md"
+          else
+            echo "❌ No spec at ../blvm-spec"
+            exit 1
+          fi
+          cargo-spec-lock verify $SPEC_ARGS --timeout 120 --format human \
+            --json-out "$GITHUB_WORKSPACE/spec_lock_node_verify.json" \
+            2>&1 | tee "$GITHUB_WORKSPACE/spec_lock_node_output.txt"
+          EXIT_CODE=${PIPESTATUS[0]}
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ blvm-node spec-lock verification failed"
+            exit $EXIT_CODE
+          fi
+          echo "✅ blvm-node verification passed"
+
+          command -v jq >/dev/null 2>&1 || { echo "❌ jq required"; exit 1; }
+          test -s "$GITHUB_WORKSPACE/spec_lock_consensus_verify.json" || { echo "❌ spec_lock_consensus_verify.json missing after verify"; exit 1; }
+          test -s "$GITHUB_WORKSPACE/spec_lock_node_verify.json" || { echo "❌ spec_lock_node_verify.json missing after verify"; exit 1; }
+          CONSENSUS_FUNCS="$(jq -r '.summary.passed // 0' "$GITHUB_WORKSPACE/spec_lock_consensus_verify.json")"
+          NODE_FUNCS="$(jq -r '.summary.passed // 0' "$GITHUB_WORKSPACE/spec_lock_node_verify.json")"
+          TOTAL=$((CONSENSUS_FUNCS + NODE_FUNCS))
+          echo "spec_lock_consensus_functions=$CONSENSUS_FUNCS" >> $GITHUB_ENV
+          echo "spec_lock_node_functions=$NODE_FUNCS" >> $GITHUB_ENV
+          echo "spec_lock_total_functions=$TOTAL" >> $GITHUB_ENV
+          echo "spec_lock_verified=true" >> $GITHUB_ENV
+          HASH=$(sha256sum "$GITHUB_WORKSPACE/spec_lock_consensus_output.txt" "$GITHUB_WORKSPACE/spec_lock_node_output.txt" | sha256sum | cut -d' ' -f1)
+          echo "spec_lock_output_hash=$HASH" >> $GITHUB_ENV
+          echo "📋 Spec-lock: consensus=$CONSENSUS_FUNCS node=$NODE_FUNCS total=$TOTAL"
+      
+      - name: Upload spec-lock output for attestation
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v5
+        with:
+          name: spec-lock-attestation-data
+          path: |
+            spec_lock_consensus_output.txt
+            spec_lock_node_output.txt
+          retention-days: 90
+      
+      - name: Upload spec-lock verify JSON for attestation
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
+        uses: actions/upload-artifact@v5
+        with:
+          name: spec-lock-verify-json
+          path: |
+            spec_lock_consensus_verify.json
+            spec_lock_node_verify.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+  fmt:
+    name: Format
+    needs: setup
+    runs-on: [self-hosted, Linux, X64, builds]
+
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]'))) &&
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       !contains(github.event.head_commit.message, '[skip_tests]')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
+    steps:
+      - uses: actions/checkout@v6
+      
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+      
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  docs:
+    name: Docs
+    needs: setup
+    runs-on: [self-hosted, Linux, X64, builds]
+    env:
+      RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]'))) &&
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       !contains(github.event.head_commit.message, '[skip_docs]')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
+    steps:
+      - uses: actions/checkout@v6
+      
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Clean leftover path overrides
+        run: |
+          if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
+          if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
+          if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
+          # Stale ../blvm-spec breaks verify (e.g. F_FeeNonNeg missing after spec update).
+          if [ -d "../blvm-spec" ]; then rm -rf ../blvm-spec; fi
+          if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
+
+      - name: Install OpenSSL development headers (openssl-sys / native-tls)
+        run: |
+          if pkg-config --exists openssl 2>/dev/null || command -v openssl >/dev/null 2>&1; then
+            echo "✅ openssl already present."
+          elif command -v apt-get >/dev/null 2>&1; then
+            bash scripts/apt-get-retry.sh update -qq
+            bash scripts/apt-get-retry.sh install -y -qq pkg-config libssl-dev
+          elif command -v pacman >/dev/null 2>&1; then
+            pacman -Qq openssl pkgconf >/dev/null 2>&1 || sudo pacman -Sy --noconfirm openssl pkgconf
+          fi
+
+      - name: Isolate CARGO_HOME for this runner
+        # RUNNER_TEMP is set by the Actions runner to a per-runner-process temp dir.
+        # Using it as CARGO_HOME prevents parallel runner processes (org2, org2-03, …)
+        # that share the same OS user from racing on registry/src extractions.
+        run: |
+          mkdir -p "${RUNNER_TEMP}/cargo"
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
+
+      - name: Cache
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: bind-env
+          cache-key: ${{ needs.setup.outputs.cache-key }}
+          include-target: false
+
+      - name: Restore Cargo cache
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: restore
+
+      # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+      
+      - name: Docs
+        run: cargo doc --no-deps --document-private-items
+
+  security:
+    name: Security
+    needs: setup
+    runs-on: [self-hosted, Linux, X64, builds]
+    env:
+      RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]'))) &&
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       !contains(github.event.head_commit.message, '[skip_tests]')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
+    steps:
+      - uses: actions/checkout@v6
+      
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Install OpenSSL development headers (openssl-sys / native-tls)
+        run: |
+          if pkg-config --exists openssl 2>/dev/null || command -v openssl >/dev/null 2>&1; then
+            echo "✅ openssl already present."
+          elif command -v apt-get >/dev/null 2>&1; then
+            bash scripts/apt-get-retry.sh update -qq
+            bash scripts/apt-get-retry.sh install -y -qq pkg-config libssl-dev
+          elif command -v pacman >/dev/null 2>&1; then
+            pacman -Qq openssl pkgconf >/dev/null 2>&1 || sudo pacman -Sy --noconfirm openssl pkgconf
+          fi
+
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+      
+      - name: Install cargo-audit
+        run: |
+          # Ensure cargo bin is in PATH (fixes exit code 127)
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo install cargo-audit --version 0.22.1 --locked
+      
+      - name: Run security audit
+        run: |
+          # Ignores live only in `.cargo/audit.toml` (single source of truth). Temporary suppressions until
+          # upstream bumps; see Cargo.toml security note and docs/AUDIT_SUPPRESSIONS.md.
+          cargo audit
+
+  # Fuzz is skippable via `[skip_fuzz]` on push. Fuzz does not
+  # need `test` so `[skip_tests]` can still run libFuzzer.
+  fuzz:
+    name: Fuzz
+    needs: [setup]
+    runs-on: [self-hosted, Linux, X64, builds]
+    env:
+      RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
+    timeout-minutes: 30
+    if: |
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]'))) &&
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       !contains(github.event.head_commit.message, '[skip_fuzz]')) &&
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true')
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Early disk cleanup (free cargo caches and sibling run dirs)
+        run: |
+          echo "=== Pre-fuzz disk status ==="
+          df -h / || true
+          df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true
+          df -h /mnt/data 2>/dev/null || true
+
+          # RUNNER_TEMP is the per-runner-process temp used as CARGO_HOME by this workflow.
+          # Clean stale cargo registry/git before the heavy fuzz build to avoid ENOSPC.
+          CARGO_TEMP="${RUNNER_TEMP}/cargo"
+          if [ -d "$CARGO_TEMP" ]; then
+            echo "=== Cleaning stale cargo registry/git in $CARGO_TEMP ==="
+            rm -rf "$CARGO_TEMP/registry/src" 2>/dev/null || true
+            rm -rf "$CARGO_TEMP/git/checkouts" 2>/dev/null || true
+            find "$CARGO_TEMP/registry/cache" -type f -atime +7 -delete 2>/dev/null || true
+          fi
+
+          # Clean sibling run dirs under BLVM_RUNNER_DATA_ROOT (same pattern as Setup/Test).
+          BUILD_ROOT="${BLVM_RUNNER_DATA_ROOT}"
+          RUN_ID="${{ github.run_id }}"
+          if [ -d "$BUILD_ROOT" ]; then
+            echo "=== Purging sibling run dirs under $BUILD_ROOT idle >60 min (keeping $RUN_ID) ==="
+            find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
+              -not -name "$RUN_ID" \
+              -mmin +60 \
+              -exec rm -rf {} + 2>/dev/null || true
+          fi
+
+          # Clean runner-cache target dirs if bloated
+          for CACHE_TARGET in "${{ github.workspace }}/.build/runner-cache/target" "/tmp/runner-cache/target"; do
+            if [ -d "$CACHE_TARGET" ]; then
+              SIZE=$(du -sb "$CACHE_TARGET" 2>/dev/null | cut -f1 || echo 0)
+              if [ "$SIZE" -gt $((10 * 1024 * 1024 * 1024)) ]; then
+                echo "=== $CACHE_TARGET >10GB ($SIZE bytes) — pruning entries >60min old ==="
+                find "$CACHE_TARGET" -mindepth 1 -maxdepth 1 -type d -mmin +60 -exec rm -rf {} + 2>/dev/null || true
+              fi
+            fi
+          done
+
+          # Clean stale fuzz build artifacts from prior runs
+          rm -rf fuzz/target 2>/dev/null || true
+
+          echo "=== Post-cleanup disk status ==="
+          df -h / || true
+          df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true
+          df -h /mnt/data 2>/dev/null || true
+
+      - name: Cache
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: bind-env
+          cache-key: ${{ needs.setup.outputs.cache-key }}
+
+      - name: Restore Cargo cache
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: restore
+
+      # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+
+      - name: Install nightly and cargo-fuzz
+        run: |
+          set -euo pipefail
+          export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+          export PATH="${CARGO_HOME}/bin:${PATH}"
+
+          # Isolated self-hosted runners (zeus-workstation-2) can have nightly registered
+          # in rustup but the compiler binary missing after a partial/interrupted install.
+          NIGHTLY_RUSTC="${RUSTUP_HOME}/toolchains/nightly-x86_64-unknown-linux-gnu/bin/rustc"
+          ensure_nightly() {
+            if rustup toolchain list | grep -q '^nightly'; then
+              rustup toolchain uninstall nightly -y || true
+            fi
+            rustup toolchain install nightly --profile minimal
+            rustup component add rust-src --toolchain nightly || true
+          }
+          if [ ! -x "$NIGHTLY_RUSTC" ]; then
+            echo "⚠️  nightly rustc not executable at ${NIGHTLY_RUSTC} — reinstalling"
+            ensure_nightly
+          fi
+          if [ ! -x "$NIGHTLY_RUSTC" ]; then
+            echo "::error::nightly rustc still missing after reinstall"
+            rustup toolchain list -v
+            ls -la "${RUSTUP_HOME}/toolchains/" || true
+            exit 1
+          fi
+          rustc +nightly --version
+
+          # cargo-fuzz 0.13+ MSRV is rustc 1.91; project stable is 1.88. Install the
+          # subcommand with nightly (libFuzzer builds already use +nightly).
+          if ! command -v cargo-fuzz >/dev/null 2>&1; then
+            cargo +nightly install cargo-fuzz --locked
+          fi
+          cargo-fuzz --version
+
+      - name: Initialize corpus dirs
+        working-directory: fuzz
+        run: |
+          chmod +x init_corpus.sh
+          ./init_corpus.sh
+
+      # cargo-fuzz injects its own sancov + ASAN flags; clear the global RUSTFLAGS.
+      - name: Build fuzz binaries
+        working-directory: fuzz
+        env:
+          RUSTFLAGS: ''
+          BLVM_SECP256K1_NO_GPU: "1"
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo +nightly fuzz build
+
+      - name: Run all libFuzzer binaries in parallel
+        working-directory: fuzz
+        env:
+          ASAN_OPTIONS: detect_odr_violation=0
+        run: |
+          # Derive targets from what was actually built, not TARGETS.md.
+          # This avoids failures when TARGETS.md lists a target that didn't compile.
+          BINDIR="target/x86_64-unknown-linux-gnu/release"
+          mapfile -t bins < <(
+            grep -v '^#' TARGETS.md | grep -v '^$' | while read -r t; do
+              [ -x "$BINDIR/$t" ] && echo "$t" || echo "⚠️  skipping $t (binary not found)" >&2
+            done
+          )
+          if [ ${#bins[@]} -eq 0 ]; then
+            echo "❌ No fuzz binaries found in $BINDIR"; exit 1
+          fi
+          JOBS=$(nproc)
+          echo "Running ${#bins[@]} fuzz targets across $JOBS cores in parallel"
+          RUNSCRIPT=$(mktemp /tmp/fuzz-run-XXXXXX.sh)
+          cat > "$RUNSCRIPT" << 'SCRIPT'
+          #!/usr/bin/env bash
+          t=$1
+          bin="$PWD/target/x86_64-unknown-linux-gnu/release/$t"
+          echo "▶ $t"
+          timeout 210 "$bin" "corpus/$t" -- -max_total_time=60 -timeout=10 -max_len=100000 2>&1 | tail -3
+          echo "✓ $t"
+          SCRIPT
+          chmod +x "$RUNSCRIPT"
+          printf '%s\n' "${bins[@]}" | xargs -P"$JOBS" -I{} bash "$RUNSCRIPT" {}
+          EXIT=$?
+          rm -f "$RUNSCRIPT"
+          exit $EXIT
+
+      - name: Save Cargo cache
+        if: always()
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: save
+
+  build:
+    name: Build
+    needs:
+      - setup
+      - test
+      - clippy
+      - fmt
+      - docs
+      - security
+      - verify
+      - fuzz
+    runs-on: [self-hosted, Linux, X64, builds]
+
+    env:
+      # Use release-fast for PRs, branches — full release only for push to main
+      BLVM_FAST_BUILD: ${{ ((github.event_name != 'push' || github.ref != 'refs/heads/main') && (github.event_name != 'release')) && '1' || '' }}
+      RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
+    if: |
+      always() &&
+      needs.setup.result == 'success' &&
+      (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name != 'push' || github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]'))) &&
+      ((github.event_name == 'workflow_dispatch' && github.event.inputs.skip_tests == 'true') ||
+       ((needs.test.result == 'success' || needs.test.result == 'skipped') &&
+        (needs.clippy.result == 'success' || needs.clippy.result == 'skipped') &&
+        (needs.fmt.result == 'success' || needs.fmt.result == 'skipped') &&
+        (needs.docs.result == 'success' || needs.docs.result == 'skipped') &&
+        (needs.security.result == 'success' || needs.security.result == 'skipped'))) &&
+      (needs.verify.result == 'skipped' || needs.verify.result == 'success') &&
+      (needs.fuzz.result == 'success' || needs.fuzz.result == 'skipped')
+    steps:
+      - uses: actions/checkout@v6
+      
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Clean leftover path overrides
+        run: |
+          if [ -d "../blvm-protocol" ]; then rm -rf ../blvm-protocol; fi
+          if [ -d "../blvm-consensus" ]; then rm -rf ../blvm-consensus; fi
+          if [ -d "../blvm-spec-lock" ]; then rm -rf ../blvm-spec-lock; fi
+          # Stale ../blvm-spec breaks verify (e.g. F_FeeNonNeg missing after spec update).
+          if [ -d "../blvm-spec" ]; then rm -rf ../blvm-spec; fi
+          if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
+
+      - name: Isolate CARGO_HOME for this runner
+        # RUNNER_TEMP is set by the Actions runner to a per-runner-process temp dir.
+        # Using it as CARGO_HOME prevents parallel runner processes (org2, org2-03, …)
+        # that share the same OS user from racing on registry/src extractions.
+        run: |
+          mkdir -p "${RUNNER_TEMP}/cargo"
+          echo "CARGO_HOME=${RUNNER_TEMP}/cargo" >> "$GITHUB_ENV"
+
+      # Build runs last on a host that test/clippy/docs/fuzz may already have filled.
+      # Free space before restoring the target cache, and skip that restore when
+      # space is still short (run 39430830510 hit ENOSPC during restore + unpack).
+      - name: Low-disk guard before cache restore
+        id: disk
+        run: |
+          df -h / "${{ github.workspace }}" /mnt/data 2>/dev/null || true
+          CARGO_TEMP="${RUNNER_TEMP}/cargo"
+          if [ -d "$CARGO_TEMP" ]; then
+            rm -rf "$CARGO_TEMP/registry/src" "$CARGO_TEMP/git/checkouts" 2>/dev/null || true
+          fi
+          BUILD_ROOT="${BLVM_RUNNER_DATA_ROOT}"
+          RUN_ID="${{ github.run_id }}"
+          if [ -d "$BUILD_ROOT" ]; then
+            find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -type d \
+              -not -name "$RUN_ID" \
+              -mmin +60 \
+              -exec rm -rf {} + 2>/dev/null || true
+          fi
+          rm -rf fuzz/target 2>/dev/null || true
+          AVAIL=$(df -B1 "${{ github.workspace }}" | tail -1 | awk '{print $4}')
+          MIN_FREE=$((20 * 1024 * 1024 * 1024))
+          if [ -n "$AVAIL" ] && [ "$AVAIL" -lt "$MIN_FREE" ]; then
+            echo "::warning::Only $AVAIL bytes free; skipping target cache restore (cold build)"
+            echo "restore-target=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "restore-target=true" >> "$GITHUB_OUTPUT"
+          fi
+          df -h "${{ github.workspace }}" || true
+
+      - name: Prune runner caches
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: prune
+
+      - name: Cache
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: bind-env
+          cache-key: ${{ needs.setup.outputs.cache-key }}
+          include-target: ${{ steps.disk.outputs.restore-target }}
+
+      - name: Restore Cargo cache
+        uses: BTCDecoded/rust-ci/runner-cargo-cache@main
+        with:
+          operation: restore
+
+      # setup only mkdirs on its runner; other jobs may run on a different self-hosted host.
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+      
+      - name: Build
+        run: |
+          PROFILE_FLAG="--release"
+          [ -n "${BLVM_FAST_BUILD:-}" ] && PROFILE_FLAG="--profile release-fast"
+          cargo build $PROFILE_FLAG
+
+  release:
+    name: Release
+    needs: [setup, build, test, clippy, fmt, docs, security, verify, fuzz]
+    runs-on: [self-hosted, Linux, X64, builds]
+    env:
+      RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
+      (github.event.head_commit == null || 
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]') &&
+        !contains(github.event.head_commit.message, '[skip release]'))) &&
+      ((github.event_name == 'workflow_dispatch' && github.event.inputs.skip_tests == 'true') ||
+       ((needs.test.result == 'success' || needs.test.result == 'skipped') &&
+        (needs.clippy.result == 'success' || needs.clippy.result == 'skipped') &&
+        (needs.fmt.result == 'success' || needs.fmt.result == 'skipped') &&
+        (needs.docs.result == 'success' || needs.docs.result == 'skipped') &&
+        (needs.security.result == 'success' || needs.security.result == 'skipped') &&
+        (needs.verify.result == 'success' || needs.verify.result == 'skipped'))) &&
+      (needs.fuzz.result == 'success' || needs.fuzz.result == 'skipped')
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          # Release pushes tags with REPO_ACCESS_TOKEN. checkout@v6 otherwise
+          # persists GITHUB_TOKEN via http.extraheader / includeIf credentials,
+          # which overrides a URL-embedded token. GITHUB_TOKEN cannot hold
+          # workflows:write, so tag pushes fail (GH013) when the release range
+          # modified .github/workflows/*. See docs.github.com Apps "Choosing
+          # permissions" (Workflows for .github/workflows) and actions/checkout#162.
+          persist-credentials: false
+      
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Install OpenSSL development headers (openssl-sys / native-tls)
+        run: |
+          if pkg-config --exists openssl 2>/dev/null || command -v openssl >/dev/null 2>&1; then
+            echo "✅ openssl already present."
+          elif command -v apt-get >/dev/null 2>&1; then
+            bash scripts/apt-get-retry.sh update -qq
+            bash scripts/apt-get-retry.sh install -y -qq pkg-config libssl-dev
+          elif command -v pacman >/dev/null 2>&1; then
+            pacman -Qq openssl pkgconf >/dev/null 2>&1 || sudo pacman -Sy --noconfirm openssl pkgconf
+          fi
+
+      - name: Ensure per-run target/tmp dirs on this runner
+        run: mkdir -p "${BLVM_BUILD_TARGET}" "${TMPDIR}"
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+      
+      - name: Determine version
+        id: version
+        run: |
+          # Extract current version from [package] section
+          CURRENT=$(grep -A 10 '^\[package\]' Cargo.toml | grep '^version = ' | head -1 | sed -E 's/^version = "([^"]+)".*/\1/')
+          if [ -z "$CURRENT" ]; then
+            echo "❌ Could not determine current version from Cargo.toml"
+            grep -A 10 '^\[package\]' Cargo.toml | head -10
+            exit 1
+          fi
+          echo "Current version: ${CURRENT}"
+
+          if ! echo "$CURRENT" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "❌ Invalid version format: ${CURRENT} (expected X.Y.Z)"
+            exit 1
+          fi
+
+          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+          MINOR=$(echo "$CURRENT" | cut -d. -f2)
+          CURRENT_PATCH=$(echo "$CURRENT" | cut -d. -f3)
+          CRATE_NAME=$(grep -A 5 '^\[package\]' Cargo.toml | grep '^name = ' | head -1 | sed -E 's/^name = "([^"]+)".*/\1/')
+
+          # Fetch all published versions from crates.io in one call (fast, no compilation).
+          echo "Fetching published versions for ${CRATE_NAME} from crates.io..."
+          API_RESPONSE=$(curl -sf \
+            -H "User-Agent: blvm-node-ci/1.0 (github.com/BTCDecoded/blvm-node)" \
+            "https://crates.io/api/v1/crates/${CRATE_NAME}/versions" 2>/dev/null || echo "")
+
+          PUBLISHED_VERSIONS=""
+          if [ -n "$API_RESPONSE" ] && ! echo "$API_RESPONSE" | grep -q '"detail"'; then
+            if command -v jq &>/dev/null; then
+              PUBLISHED_VERSIONS=$(echo "$API_RESPONSE" | jq -r '.versions[].num' 2>/dev/null || echo "")
+            else
+              PUBLISHED_VERSIONS=$(echo "$API_RESPONSE" | grep -oE '"num":"[^"]+"' | sed 's/"num":"//;s/"//')
+            fi
+            echo "Found $(echo "$PUBLISHED_VERSIONS" | wc -l | tr -d ' ') published versions."
+          else
+            echo "⚠️  crates.io API unavailable or crate not yet published — assuming version is free."
+          fi
+
+          TAGGED_VERSIONS=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sed 's/^v//' | sed 's/-unverified$//')
+          USED_VERSIONS=$(printf '%s\n%s' "$TAGGED_VERSIONS" "$PUBLISHED_VERSIONS" | sort -u | grep -v '^$')
+          echo "All used versions (tag ∪ crates.io): $(echo "$USED_VERSIONS" | tr '\n' ' ')"
+          SAME_LINE_PATCHES=$(printf '%s\n' "$USED_VERSIONS" | grep -E "^${MAJOR}\\.${MINOR}\\.[0-9]+$" | cut -d. -f3 || true)
+          MAX_PATCH=$(printf '%s\n' $SAME_LINE_PATCHES "$CURRENT_PATCH" | grep -E '^[0-9]+$' | sort -n | tail -1)
+          [ -n "$MAX_PATCH" ] || MAX_PATCH="$CURRENT_PATCH"
+          PATCH=$((MAX_PATCH + 1))
+          VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          while echo "$USED_VERSIONS" | grep -qxF "$VERSION"; do
+            echo "⚠️  ${VERSION} already published or tagged, trying next patch..."
+            PATCH=$((PATCH + 1))
+            VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          done
+          echo "✅ Version ${VERSION} is available"
+
+          # -unverified when manual run skipped tests
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SKIP_TESTS="${{ github.event.inputs.skip_tests }}"
+          else
+            SKIP_TESTS="false"
+          fi
+
+          if [ "$SKIP_TESTS" = "true" ]; then
+            VERSION_TAG="v${VERSION}-unverified"
+            echo "⚠️  Releasing UNVERIFIED version: ${VERSION_TAG}"
+          else
+            VERSION_TAG="v${VERSION}"
+            echo "✅ Releasing version: ${VERSION_TAG}"
+          fi
+
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "version_tag=${VERSION_TAG}" >> $GITHUB_OUTPUT
+      
+      - name: Get latest blvm-protocol version from crates.io
+        id: protocol-version
+        run: |
+          PROTOCOL_VER=$(cargo search blvm-protocol --limit 1 2>/dev/null | head -1 | sed -E 's/^blvm-protocol = "([^"]+)".*/\1/' || echo "")
+          if [ -z "$PROTOCOL_VER" ]; then
+            echo "❌ blvm-protocol not found on crates.io. It must be published first."
+            exit 1
+          fi
+          echo "version=${PROTOCOL_VER}" >> $GITHUB_OUTPUT
+          echo "Using blvm-protocol version: ${PROTOCOL_VER}"
+      
+      - name: Prepare release Cargo.toml
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PROTOCOL_VER="${{ steps.protocol-version.outputs.version }}"
+          
+          # Bump [package] version in place. The awk approach is safer than sed for version lines
+          # because Cargo.toml has many dependency version pins that naive regexes would corrupt.
+          awk -v ver="$VERSION" '
+            /^\[package\]/ { in_package = 1; print; next }
+            /^\[/ { in_package = 0 }
+            in_package && /^version = / {
+              print "version = \"" ver "\""
+              next
+            }
+            { print }
+          ' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+          
+          # Verify the bump actually happened
+          ACTUAL_VER=$(grep -A 5 '^\[package\]' Cargo.toml | grep '^version = ' | head -1 | sed -E 's/^version = "([^"]+)".*/\1/')
+          if [ "$ACTUAL_VER" != "$VERSION" ]; then
+            echo "❌ Version bump failed: Cargo.toml has '$ACTUAL_VER', expected '$VERSION'"
+            grep -A 5 '^\[package\]' Cargo.toml
+            exit 1
+          fi
+          echo "✅ Cargo.toml version bumped to ${ACTUAL_VER}"
+          
+          # Update blvm-protocol dependency to use latest crates.io version
+          sed -i 's|blvm-protocol = { path = "\.\./blvm-protocol"[^}]*}|blvm-protocol = "'"${PROTOCOL_VER}"'"|g' Cargo.toml
+          sed -i 's|^blvm-protocol = "[^"]*"|blvm-protocol = "'"${PROTOCOL_VER}"'"|g' Cargo.toml
+          
+          # Also keep Cargo.toml.release as a copy for the smoke-test step
+          cp Cargo.toml Cargo.toml.release
+          
+          echo "Release Cargo.toml prepared:"
+          echo "  version: ${ACTUAL_VER}"
+          echo "  blvm-protocol: ${PROTOCOL_VER}"
+          echo ""
+          echo "Dependencies section:"
+          grep -A 2 "^\[dependencies\]" Cargo.toml | head -5
+          echo ""
+          echo "Patch section check:"
+          grep -A 5 "^\[patch\.crates-io\]" Cargo.toml || echo "  ✅ [patch.crates-io] removed - using published crates"
+      
+      # Manifest must parse before package/publish.
+      - name: Pre-release manifest smoke (crates.io Cargo.toml)
+        run: |
+          cargo metadata --format-version 1 --no-deps > /dev/null
+          echo "✅ Cargo.toml parses cleanly"
+      
+      - name: Check for crates.io token
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "⚠️  CARGO_REGISTRY_TOKEN not set, skipping crate publication"
+            echo "   Set CARGO_REGISTRY_TOKEN secret to enable crate publishing"
+            exit 0
+          fi
+      
+      - name: Configure cargo for crates.io
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        run: |
+          cargo login "${CARGO_REGISTRY_TOKEN}"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      
+      - name: Verify package
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        run: |
+          cargo package --list
+      
+      - name: Dry-run publish
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        run: |
+          cargo publish --dry-run --no-verify --allow-dirty
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      
+      - name: Check if version already exists
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        id: check-version
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          CRATE_NAME=$(grep -A 5 '^\[package\]' Cargo.toml | grep '^name = ' | head -1 | sed -E 's/^name = "([^"]+)".*/\1/')
+          echo "Checking if ${CRATE_NAME} v${VERSION} already exists on crates.io..."
+          API_RESPONSE=$(curl -sf \
+            -H "User-Agent: blvm-node-ci/1.0 (github.com/BTCDecoded/blvm-node)" \
+            "https://crates.io/api/v1/crates/${CRATE_NAME}/versions" 2>/dev/null || echo "")
+          if [ -n "$API_RESPONSE" ] && ! echo "$API_RESPONSE" | grep -q '"detail"'; then
+            if command -v jq &>/dev/null; then
+              EXISTS=$(echo "$API_RESPONSE" | jq -r ".versions[] | select(.num == \"${VERSION}\") | .num" | head -1)
+            else
+              EXISTS=$(echo "$API_RESPONSE" | grep -oE "\"num\":\"${VERSION}\"" | head -1)
+            fi
+            if [ -n "$EXISTS" ]; then
+              echo "exists=true" >> $GITHUB_OUTPUT
+              echo "⚠️  Version ${VERSION} already published for ${CRATE_NAME}"
+            else
+              echo "exists=false" >> $GITHUB_OUTPUT
+              echo "✅ Version ${VERSION} not yet published for ${CRATE_NAME}"
+            fi
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️  Could not reach crates.io API — assuming not yet published"
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      
+      - name: Publish to crates.io
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        id: publish
+        run: |
+          set +e
+          VERSION="${{ steps.version.outputs.version }}"
+          CRATE_NAME=$(grep -E '^name = ' Cargo.toml | sed -E 's/^name = "([^"]+)".*/\1/')
+          
+          # Fail if version already exists — the Determine version step should have picked a free one.
+          # A "skip" here means our API check was wrong (stale cache, pagination, etc.).
+          if [ "${{ steps.check-version.outputs.exists }}" = "true" ]; then
+            echo "❌ Version ${VERSION} already exists on crates.io — version determination picked a taken version"
+            echo "published=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo "Publishing ${CRATE_NAME} v${VERSION} to crates.io..."
+          # Final sanity: confirm Cargo.toml on disk actually has the bumped version
+          ACTUAL_VER=$(grep -A 5 '^\[package\]' Cargo.toml | grep '^version = ' | head -1 | sed -E 's/^version = "([^"]+)".*/\1/')
+          if [ "$ACTUAL_VER" != "$VERSION" ]; then
+            echo "❌ Cargo.toml version mismatch at publish time: got '$ACTUAL_VER', expected '$VERSION'"
+            echo "published=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          PUBLISH_OUTPUT=$(cargo publish --no-verify --allow-dirty --token "${CARGO_REGISTRY_TOKEN}" 2>&1)
+          PUBLISH_EXIT_CODE=$?
+          
+          if [ $PUBLISH_EXIT_CODE -eq 0 ]; then
+            echo "✅ Successfully published ${CRATE_NAME} v${VERSION}"
+            echo "published=true" >> $GITHUB_OUTPUT
+            echo "Waiting 30 seconds for crates.io to index..."
+            sleep 30
+          else
+            echo "❌ Failed to publish ${CRATE_NAME} v${VERSION}"
+            echo "Error output:"
+            echo "$PUBLISH_OUTPUT"
+            echo "published=false" >> $GITHUB_OUTPUT
+            # "already exists" here means our version check was wrong (stale API cache or
+            # a parallel run beat us) — treat it as a hard failure so the run is visible.
+            exit $PUBLISH_EXIT_CODE
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      
+      # Commit the [package] version bump back to main (same commit message as blvm-consensus).
+      # Only after a successful publish, and only the [package] version line: the release
+      # Cargo.toml on disk also has crates.io dependency pins and a stripped [patch.crates-io],
+      # which must not land on main. The working tree is left untouched (publish already ran).
+      - name: Commit Cargo.toml version bump
+        if: steps.publish.outputs.published == 'true'
+        env:
+          REPO_ACCESS_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git show HEAD:Cargo.toml | awk -v ver="$VERSION" '
+            /^\[package\]/ { in_package = 1; print; next }
+            /^\[/ { in_package = 0 }
+            in_package && /^version = / {
+              print "version = \"" ver "\""
+              next
+            }
+            { print }
+          ' > "${RUNNER_TEMP}/Cargo.toml.bump"
+          BLOB=$(git hash-object -w "${RUNNER_TEMP}/Cargo.toml.bump")
+          git update-index --cacheinfo "100644,${BLOB},Cargo.toml"
+
+          if git diff --cached --quiet; then
+            echo "No version change to commit in Cargo.toml"
+            exit 0
+          fi
+          git commit -m "Bump version to ${VERSION} for release [skip ci]" || true
+
+          if [ -n "${REPO_ACCESS_TOKEN}" ]; then
+            git config --local --unset-all 'http.https://github.com/.extraheader' 2>/dev/null || true
+            git remote set-url origin "https://x-access-token:${REPO_ACCESS_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+            git -c credential.helper= push origin HEAD:${{ github.ref }} || true
+          else
+            echo "⚠️  REPO_ACCESS_TOKEN not set, skipping push"
+          fi
+      
+      - name: Verify published crate is available
+        if: |
+          env.CARGO_REGISTRY_TOKEN != '' &&
+          steps.check-version.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          CRATE_NAME=$(grep -E '^name = ' Cargo.toml | sed -E 's/^name = "([^"]+)".*/\1/')
+          echo "Verifying ${CRATE_NAME} v${VERSION} is available on crates.io..."
+          
+          # Try to fetch the crate info
+          MAX_RETRIES=5
+          RETRY_COUNT=0
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            if cargo search "$CRATE_NAME" --limit 1 2>/dev/null | grep -q "v${VERSION}"; then
+              echo "✅ ${CRATE_NAME} v${VERSION} is now available on crates.io"
+              echo "📦 Crate page: https://crates.io/crates/${CRATE_NAME}/${VERSION}"
+              break
+            else
+              RETRY_COUNT=$((RETRY_COUNT + 1))
+              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                echo "⏳ Waiting for crates.io to index (attempt $RETRY_COUNT/$MAX_RETRIES)..."
+                sleep 10
+              else
+                echo "⚠️  ${CRATE_NAME} v${VERSION} not yet visible on crates.io (may take a few minutes)"
+              fi
+            fi
+          done
+      
+      - name: Download attestation artifacts
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
+        uses: actions/download-artifact@v5
+        with:
+          pattern: '*-attestation-data'
+          merge-multiple: true
+          path: attestation-data
+      
+      - name: Download spec-lock verify JSON (optional)
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v5
+        with:
+          name: spec-lock-verify-json
+          path: attestation-data
+      
+      - name: Collect build metadata for attestation
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
+        id: metadata
+        run: |
+          # Get toolchain versions
+          RUSTC_VERSION=$(rustc --version | cut -d' ' -f2)
+          CARGO_VERSION=$(cargo --version | cut -d' ' -f2)
+          
+          # Z3 version (blvm-spec-lock uses Z3)
+          Z3_VERSION="unknown"
+          if command -v z3 &> /dev/null; then
+            Z3_VERSION=$(z3 --version 2>&1 | head -1 || echo "unknown")
+          fi
+          
+          if [ -f Cargo.lock ]; then
+            CARGO_LOCK_HASH=$(sha256sum Cargo.lock | cut -d' ' -f1)
+          else
+            CARGO_LOCK_HASH=$(sha256sum Cargo.toml | cut -d' ' -f1)
+          fi
+          
+          # Check if debug assertions are enabled (check Cargo.toml or build flags)
+          DEBUG_ASSERTIONS="false"
+          if grep -q "debug-assertions = true" Cargo.toml 2>/dev/null; then
+            DEBUG_ASSERTIONS="true"
+          fi
+          
+          # Extract spec-lock data from artifacts
+          SPEC_LOCK_VERIFIED="false"
+          SPEC_LOCK_CONSENSUS_FUNCS="0"
+          SPEC_LOCK_NODE_FUNCS="0"
+          SPEC_LOCK_TOTAL="0"
+          SPEC_LOCK_OUTPUT_HASH=""
+          
+          if [ -f "attestation-data/spec_lock_consensus_output.txt" ] && [ -f "attestation-data/spec_lock_node_output.txt" ]; then
+            SPEC_LOCK_VERIFIED="true"
+            command -v jq >/dev/null 2>&1 || { echo "❌ jq required for release attestation"; exit 1; }
+            test -s "attestation-data/spec_lock_consensus_verify.json" || { echo "❌ attestation-data/spec_lock_consensus_verify.json missing"; exit 1; }
+            test -s "attestation-data/spec_lock_node_verify.json" || { echo "❌ attestation-data/spec_lock_node_verify.json missing"; exit 1; }
+            SPEC_LOCK_CONSENSUS_FUNCS=$(jq -r '.summary.passed // 0' attestation-data/spec_lock_consensus_verify.json)
+            SPEC_LOCK_NODE_FUNCS=$(jq -r '.summary.passed // 0' attestation-data/spec_lock_node_verify.json)
+            SPEC_LOCK_TOTAL=$((SPEC_LOCK_CONSENSUS_FUNCS + SPEC_LOCK_NODE_FUNCS))
+            SPEC_LOCK_OUTPUT_HASH=$(sha256sum attestation-data/spec_lock_consensus_output.txt attestation-data/spec_lock_node_output.txt | sha256sum | cut -d' ' -f1)
+          fi
+          
+          # Output all metadata (spec-lock verification)
+          echo "spec_lock_verified=$SPEC_LOCK_VERIFIED" >> $GITHUB_OUTPUT
+          echo "spec_lock_consensus_functions=$SPEC_LOCK_CONSENSUS_FUNCS" >> $GITHUB_OUTPUT
+          echo "spec_lock_node_functions=$SPEC_LOCK_NODE_FUNCS" >> $GITHUB_OUTPUT
+          echo "spec_lock_total_functions=$SPEC_LOCK_TOTAL" >> $GITHUB_OUTPUT
+          echo "spec_lock_output_hash=$SPEC_LOCK_OUTPUT_HASH" >> $GITHUB_OUTPUT
+          echo "debug_assertions_enabled=$DEBUG_ASSERTIONS" >> $GITHUB_OUTPUT
+          echo "rustc_version=$RUSTC_VERSION" >> $GITHUB_OUTPUT
+          echo "z3_version=$Z3_VERSION" >> $GITHUB_OUTPUT
+          echo "cargo_version=$CARGO_VERSION" >> $GITHUB_OUTPUT
+          echo "cargo_lock_hash=$CARGO_LOCK_HASH" >> $GITHUB_OUTPUT
+          
+          echo "📋 Build Metadata:"
+          echo "  Spec-lock verified: $SPEC_LOCK_VERIFIED"
+          echo "  Spec-lock consensus functions: $SPEC_LOCK_CONSENSUS_FUNCS"
+          echo "  Spec-lock node functions: $SPEC_LOCK_NODE_FUNCS"
+          echo "  Spec-lock total: $SPEC_LOCK_TOTAL"
+          echo "  Spec-lock output hash: $SPEC_LOCK_OUTPUT_HASH"
+          echo "  Debug assertions: $DEBUG_ASSERTIONS"
+          echo "  rustc version: $RUSTC_VERSION"
+          echo "  Z3 version: $Z3_VERSION"
+          echo "  cargo version: $CARGO_VERSION"
+          echo "  Cargo.lock hash: $CARGO_LOCK_HASH"
+      
+      - name: Create build attestation
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
+        id: attestation
+        run: |
+          # Create predicate JSON file
+          cat > predicate.json << EOF
+          {
+            "spec_lock_verified": ${{ steps.metadata.outputs.spec_lock_verified == 'true' && 'true' || 'false' }},
+            "spec_lock_total_functions": ${{ steps.metadata.outputs.spec_lock_total_functions }},
+            "spec_lock_output_hash": "${{ steps.metadata.outputs.spec_lock_output_hash }}",
+            "debug_assertions_enabled": ${{ steps.metadata.outputs.debug_assertions_enabled == 'true' && 'true' || 'false' }},
+            "rustc_version": "${{ steps.metadata.outputs.rustc_version }}",
+            "z3_version": "${{ steps.metadata.outputs.z3_version }}",
+            "cargo_version": "${{ steps.metadata.outputs.cargo_version }}",
+            "cargo_lock_hash": "${{ steps.metadata.outputs.cargo_lock_hash }}"
+          }
+          EOF
+          cat predicate.json
+      
+      - name: Upload build metadata
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: build-metadata
+          path: predicate.json
+          retention-days: 365
+      
+      - name: Attest build provenance
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.skip_tests != 'true' }}
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: "blvm-node"
+          subject-digest: "sha256:${{ steps.metadata.outputs.cargo_lock_hash }}"
+          push-to-registry: false
+          show-summary: true
+      
+      - name: Create git tag
+        env:
+          REPO_ACCESS_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
+        run: |
+          VERSION_TAG="${{ steps.version.outputs.version_tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${VERSION_TAG}" >/dev/null 2>&1; then
+            echo "⚠️  Tag ${VERSION_TAG} already exists on origin, skipping tag creation"
+            exit 0
+          fi
+
+          if [ -z "${REPO_ACCESS_TOKEN}" ]; then
+            echo "::error::REPO_ACCESS_TOKEN org secret not available — cannot push release tag"
+            exit 1
+          fi
+
+          # Drop any leftover Actions credentials so the URL token is what git sends.
+          git config --local --unset-all 'http.https://github.com/.extraheader' 2>/dev/null || true
+          git config --local --name-only --get-regexp '^includeIf\.gitdir:' 2>/dev/null | while read -r key; do
+            git config --local --unset-all "$key" 2>/dev/null || true
+          done || true
+
+          git remote set-url origin "https://x-access-token:${REPO_ACCESS_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git tag -a "$VERSION_TAG" -m "Release ${VERSION_TAG}"
+          if ! git -c credential.helper= push origin "$VERSION_TAG" 2>/tmp/tag-push.err; then
+            cat /tmp/tag-push.err >&2
+            if grep -qiE 'workflows permission|workflow scope' /tmp/tag-push.err; then
+              echo "::error::Tag push rejected: authenticating credential lacks Workflows permission, and this release range modified .github/workflows/. REST POST /git/refs does not bypass this (same App permission). Tag manually as a human: git fetch origin && git tag -a ${VERSION_TAG} ${{ github.sha }} -m 'Release ${VERSION_TAG}' && git push origin ${VERSION_TAG}. If REPO_ACCESS_TOKEN is a GitHub App installation token, grant that App Workflows: Read and write (Contents alone is not enough)."
+            else
+              echo "::error::Failed to push release tag ${VERSION_TAG}"
+            fi
+            exit 1
+          fi
+          echo "✅ Created and pushed tag ${VERSION_TAG}"
+      
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.version_tag }}
+          name: Release ${{ steps.version.outputs.version_tag }}
+          body: |
+            ## ${{ steps.version.outputs.version_tag }}
+            
+            Automated release of blvm-node.
+            
+            **Published to crates.io**: ${{ steps.publish.outputs.published == 'true' && '✅ Yes' || (steps.check-version.outputs.exists == 'true' && '⚠️  Already exists' || '❌ Failed or skipped') }}
+            
+            ### Changes
+            See [commit history](https://github.com/${{ github.repository }}/compare/${{ github.event.before }}...${{ github.sha }})
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-dev:
+    name: Publish develop (crates.io)
+    needs: [build, test, clippy, fmt, docs, security, verify, fuzz]
+    runs-on: [self-hosted, Linux, X64, builds]
+
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      (
+        (github.event_name == 'push' && github.ref == 'refs/heads/develop') ||
+        (github.event_name == 'repository_dispatch' && github.event.action == 'develop-chain')
+      ) &&
+      (github.event.head_commit == null ||
+       (!contains(github.event.head_commit.message, '[skip ci]') &&
+        !contains(github.event.head_commit.message, '[ci skip]') &&
+        !contains(github.event.head_commit.message, '[no ci]') &&
+        !contains(github.event.head_commit.message, '[skip release]') &&
+        !contains(github.event.head_commit.message, '[skip_publish_dev]'))) &&
+      ((github.event_name == 'workflow_dispatch' && github.event.inputs.skip_tests == 'true') ||
+       ((needs.test.result == 'success' || needs.test.result == 'skipped') &&
+        (needs.clippy.result == 'success' || needs.clippy.result == 'skipped') &&
+        (needs.fmt.result == 'success' || needs.fmt.result == 'skipped') &&
+        (needs.docs.result == 'success' || needs.docs.result == 'skipped') &&
+        (needs.security.result == 'success' || needs.security.result == 'skipped') &&
+        (needs.verify.result == 'success' || needs.verify.result == 'skipped') &&
+        (needs.fuzz.result == 'success' || needs.fuzz.result == 'skipped')))
+    outputs:
+      version: ${{ steps.dev_publish.outputs.version }}
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+
+      - name: Checkout develop scripts (blvm)
+        uses: actions/checkout@v6
+        with:
+          repository: BTCDecoded/blvm
+          ref: ${{ github.ref_name == 'develop' && 'develop' || 'main' }}
+          path: _develop-blvm
+          fetch-depth: 1
+
+      - name: Check for crates.io token
+        id: token
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            cargo login "${CARGO_REGISTRY_TOKEN}"
+          fi
+
+      - name: Publish develop pre-release
+        id: dev_publish
+        if: steps.token.outputs.skip != 'true'
+        run: |
+          chmod +x _develop-blvm/scripts/*.sh
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            V="${{ github.event.client_payload.version }}"
+          else
+            V=$(bash _develop-blvm/scripts/compute-develop-version.sh)
+          fi
+          echo "version=${V}" >> "$GITHUB_OUTPUT"
+          bash _develop-blvm/scripts/ci-publish-develop.sh \
+            --scripts-dir "${GITHUB_WORKSPACE}/_develop-blvm/scripts" \
+            --wait-for blvm-consensus,blvm-protocol \
+            "${V}"
+
+      - name: Dispatch develop-chain downstream
+        if: steps.token.outputs.skip != 'true' && steps.dev_publish.outputs.version != ''
+        env:
+          REPO_ACCESS_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
+          VERSION: ${{ steps.dev_publish.outputs.version }}
+        run: |
+          if [ -z "${REPO_ACCESS_TOKEN:-}" ]; then exit 0; fi
+          for REPO in blvm-sdk blvm; do
+            curl -sfSL -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${REPO_ACCESS_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/BTCDecoded/${REPO}/dispatches" \
+              -d "{\"event_type\":\"develop-chain\",\"client_payload\":{\"version\":\"${VERSION}\",\"source\":\"blvm-node\"}}" \
+              || echo "::warning::develop-chain dispatch to ${REPO} failed"
+          done
+
+  teardown:
+    name: Teardown (cleanup runner disk)
+    runs-on: [self-hosted, Linux, X64, builds]
+
+    if: always()
+    needs: [ test, clippy, verify, fmt, docs, security, fuzz, build]
+    steps:
+      - name: Delete current run target dir
+        run: |
+          RUN_DIR="${BLVM_RUNNER_DATA_ROOT}/${{ github.run_id }}"
+          if [ -d "$RUN_DIR" ]; then
+            echo "Removing $RUN_DIR ($(du -sh "$RUN_DIR" 2>/dev/null | cut -f1))"
+            rm -rf "$RUN_DIR"
+          fi
+          # Only this run's dir: concurrent runs on this runner still need theirs.
+          # Clean fuzz temp dir
+          rm -rf ${{ github.workspace }}/.build/gh-fuzz-blvm-node 2>/dev/null || true
+          echo "=== disk after teardown ==="
+          df -h /
+

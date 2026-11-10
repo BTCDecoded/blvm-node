@@ -1,0 +1,974 @@
+//! Address Database for Peer Discovery
+//!
+//! Manages a database of known peer addresses with freshness tracking,
+//! expiration, and filtering capabilities.
+//!
+//! Supports both SocketAddr-based addresses (TCP/Quinn) and Iroh NodeIds.
+
+use crate::network::protocol::NetworkAddress;
+use crate::utils::current_timestamp;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+
+#[cfg(feature = "iroh")]
+use iroh::PublicKey;
+
+/// Addresses older than this, and timestamp 0, are stored and not relayed.
+pub const ADDR_RELAY_HORIZON_SECS: u64 = 30 * 24 * 60 * 60;
+
+pub fn address_within_relay_horizon(time: u32) -> bool {
+    if time == 0 {
+        return false;
+    }
+    let now = current_timestamp();
+    let advertised = time as u64;
+    advertised <= now.saturating_add(10 * 60)
+        && now.saturating_sub(advertised) <= ADDR_RELAY_HORIZON_SECS
+}
+
+/// Address entry with metadata
+#[derive(Debug, Clone)]
+pub struct AddressEntry {
+    /// Network address
+    pub addr: NetworkAddress,
+    /// Unix timestamp when address was first seen
+    pub first_seen: u64,
+    /// Unix timestamp when address was last seen
+    pub last_seen: u64,
+    /// Service flags from version message
+    pub services: u64,
+    /// Number of times we've seen this address
+    pub seen_count: u32,
+}
+
+impl AddressEntry {
+    /// Create a new address entry
+    pub fn new(addr: NetworkAddress, services: u64) -> Self {
+        let now = current_timestamp();
+        Self {
+            addr,
+            first_seen: now,
+            last_seen: now,
+            services,
+            seen_count: 1,
+        }
+    }
+
+    /// Update last seen timestamp
+    pub fn update_seen(&mut self) {
+        self.last_seen = current_timestamp();
+        self.seen_count += 1;
+    }
+
+    /// Check if address is fresh (seen within expiration window)
+    pub fn is_fresh(&self, expiration_seconds: u64) -> bool {
+        let now = current_timestamp();
+        let advertised = self.addr.time as u64;
+        if self.addr.time == 0 || advertised > now.saturating_add(10 * 60) {
+            return false;
+        }
+        now.saturating_sub(self.last_seen) < expiration_seconds
+    }
+}
+
+/// Address database for peer discovery
+pub struct AddressDatabase {
+    /// Map from SocketAddr to AddressEntry (for TCP/Quinn)
+    addresses: HashMap<SocketAddr, AddressEntry>,
+    /// Map from Iroh PublicKey to AddressEntry (for Iroh peers)
+    #[cfg(feature = "iroh")]
+    iroh_addresses: HashMap<PublicKey, AddressEntry>,
+    /// Maximum number of addresses to store (total across both maps)
+    max_addresses: usize,
+    /// New and tried buckets used when choosing an outbound peer.
+    table: super::address_table::AddressTable,
+    /// Address expiration time in seconds (default: 24 hours)
+    expiration_seconds: u64,
+}
+
+impl AddressDatabase {
+    /// Create a new address database
+    pub fn new(max_addresses: usize) -> Self {
+        // Optimization: Pre-allocate HashMap with capacity to reduce rehashing
+        let capacity = (max_addresses * 4 / 3).next_power_of_two(); // 75% load factor
+        Self {
+            addresses: HashMap::with_capacity(capacity),
+            #[cfg(feature = "iroh")]
+            iroh_addresses: HashMap::with_capacity(capacity / 2), // Estimate 50% Iroh peers
+            max_addresses,
+            table: super::address_table::AddressTable::new(),
+            expiration_seconds: 24 * 60 * 60, // 24 hours default
+        }
+    }
+
+    /// Create with custom expiration
+    pub fn with_expiration(max_addresses: usize, expiration_seconds: u64) -> Self {
+        // Optimization: Pre-allocate HashMap with capacity to reduce rehashing
+        let capacity = (max_addresses * 4 / 3).next_power_of_two(); // 75% load factor
+        Self {
+            addresses: HashMap::with_capacity(capacity),
+            #[cfg(feature = "iroh")]
+            iroh_addresses: HashMap::with_capacity(capacity / 2), // Estimate 50% Iroh peers
+            max_addresses,
+            table: super::address_table::AddressTable::new(),
+            expiration_seconds,
+        }
+    }
+
+    /// Add or update an address.
+    ///
+    /// A new advertisement outside the relay horizon, including timestamp 0,
+    /// is stored with that time and is not marked as just seen. An update of a
+    /// stored socket outside the horizon leaves that entry unchanged. An update
+    /// inside the horizon writes the advertised time and refreshes `last_seen`.
+    pub fn add_address(&mut self, addr: NetworkAddress, services: u64) {
+        let refresh = address_within_relay_horizon(addr.time);
+        // Convert NetworkAddress to SocketAddr for key
+        let socket_addr = self.network_addr_to_socket(&addr);
+
+        match self.addresses.get_mut(&socket_addr) {
+            Some(entry) => {
+                // A time outside the relay horizon must not poison addr.time.
+                // is_fresh rejects 0 and a time past the horizon even when last_seen is recent.
+                if !refresh {
+                    return;
+                }
+                entry.addr.time = addr.time;
+                entry.update_seen();
+                if services != 0 {
+                    // Only OR-merge when the caller has concrete service information.
+                    entry.services |= services;
+                }
+                // When services==0 (e.g. from DNS seed re-discovery), do NOT merge:
+                // keep the existing value so previously-learned flags survive.
+            }
+            None => {
+                // Add new entry (evict old if needed)
+                // Use total_count() to respect max_addresses across both maps
+                if self.total_count() >= self.max_addresses {
+                    self.evict_oldest_unified();
+                }
+                let mut entry = AddressEntry::new(addr, services);
+                if !refresh {
+                    let advertised = entry.addr.time as u64;
+                    let received = current_timestamp();
+                    if entry.addr.time != 0 && advertised <= received {
+                        entry.first_seen = advertised;
+                        entry.last_seen = advertised;
+                    }
+                }
+                self.addresses.insert(socket_addr, entry);
+            }
+        }
+        self.place_socket_new(socket_addr);
+    }
+
+    /// Add an address from a DNS seed, resetting any persisted `NODE_NETWORK_LIMITED` flag
+    /// so that the peer gets a clean re-classification on next version handshake.
+    /// DNS seeds frequently return IPs that may have changed their prune state, and we
+    /// should not permanently bar them based on a single previous IBD session.
+    pub fn add_address_from_dns_seed(&mut self, addr: NetworkAddress) {
+        use blvm_protocol::service_flags::standard::NODE_NETWORK_LIMITED;
+        let socket_addr = self.network_addr_to_socket(&addr);
+        match self.addresses.get_mut(&socket_addr) {
+            Some(entry) => {
+                entry.update_seen();
+                // Clear the LIMITED flag — let the next version handshake re-classify.
+                entry.services &= !NODE_NETWORK_LIMITED;
+            }
+            None => {
+                if self.total_count() >= self.max_addresses {
+                    self.evict_oldest_unified();
+                }
+                self.addresses
+                    .insert(socket_addr, AddressEntry::new(addr, 0));
+            }
+        }
+        self.place_socket_new(socket_addr);
+    }
+
+    /// Add multiple addresses
+    pub fn add_addresses(&mut self, addresses: Vec<NetworkAddress>, services: u64) {
+        for addr in addresses {
+            self.add_address(addr, services);
+        }
+    }
+
+    /// Get fresh addresses (not expired)
+    pub fn get_fresh_addresses(&self, count: usize) -> Vec<NetworkAddress> {
+        // Collect entries with their addresses, avoiding repeated conversions
+        let mut fresh: Vec<_> = self
+            .addresses
+            .iter()
+            .filter(|(_, entry)| entry.is_fresh(self.expiration_seconds))
+            .map(|(_, entry)| (entry.last_seen, entry.addr.clone()))
+            .collect();
+
+        // Sort by last_seen in descending order (most recent first)
+        // Use sort_by with reverse to avoid double sort
+        fresh.sort_by(|a, b| b.0.cmp(&a.0));
+
+        // Extract addresses and take requested count
+        fresh
+            .into_iter()
+            .map(|(_, addr)| addr)
+            .take(count)
+            .collect()
+    }
+
+    /// Get all fresh addresses
+    pub fn get_all_fresh_addresses(&self) -> Vec<NetworkAddress> {
+        self.get_fresh_addresses(self.max_addresses)
+    }
+
+    /// Like `get_fresh_addresses` but biased for IBD: returns full-history peers
+    /// (advertises `NODE_NETWORK` — the "complete blockchain" flag) first, then
+    /// unknown-service peers (services == 0), then genuinely pruned peers last.
+    ///
+    /// Bitcoin Core 25+ advertises both `NODE_NETWORK` and `NODE_NETWORK_LIMITED`
+    /// simultaneously (BIP159 capability advertisement). These nodes ARE full-history
+    /// and must be classified as `full`, not `limited`. The authoritative check is
+    /// whether `NODE_NETWORK` (0x1) is set — consistent with `peer_manager.rs` and
+    /// `count_fresh_non_limited`.
+    ///
+    /// Within each group addresses are sorted by `last_seen` descending.
+    pub fn get_fresh_ibd_addresses(&self, count: usize) -> Vec<NetworkAddress> {
+        use blvm_protocol::service_flags::standard::NODE_NETWORK;
+
+        let mut full: Vec<_> = Vec::new();
+        let mut unknown: Vec<_> = Vec::new();
+        let mut limited: Vec<_> = Vec::new();
+
+        for (_, entry) in self.addresses.iter() {
+            if !entry.is_fresh(self.expiration_seconds) {
+                continue;
+            }
+            if entry.services == 0 {
+                unknown.push((entry.last_seen, entry.addr.clone()));
+            } else if (entry.services & NODE_NETWORK) != 0 {
+                // Explicitly advertises NODE_NETWORK — full-history archive node.
+                // Includes BC25+ nodes that also set NODE_NETWORK_LIMITED.
+                full.push((entry.last_seen, entry.addr.clone()));
+            } else {
+                // No NODE_NETWORK: genuinely pruned (NODE_NETWORK_LIMITED only).
+                limited.push((entry.last_seen, entry.addr.clone()));
+            }
+        }
+
+        full.sort_by(|a, b| b.0.cmp(&a.0));
+        unknown.sort_by(|a, b| b.0.cmp(&a.0));
+        limited.sort_by(|a, b| b.0.cmp(&a.0));
+
+        full.into_iter()
+            .chain(unknown)
+            .chain(limited)
+            .take(count)
+            .map(|(_, addr)| addr)
+            .collect()
+    }
+
+    /// Outbound pick. Both tables nonempty follows `pick_tried`. A terrible record is skipped.
+    pub fn select_outbound(&self, count: usize, pick_tried: bool) -> Vec<NetworkAddress> {
+        use super::address_table::{TableSide, choose_side};
+        use blvm_protocol::service_flags::standard::NODE_NETWORK;
+        let now = current_timestamp();
+        let usable = |addr: SocketAddr| !self.socket_is_terrible(addr, now);
+        let new_has = self.table.addrs(TableSide::New).into_iter().any(usable);
+        let tried_has = self.table.addrs(TableSide::Tried).into_iter().any(usable);
+        let Some(side) = choose_side(new_has, tried_has, pick_tried) else {
+            return Vec::new();
+        };
+        let mut full = Vec::new();
+        let mut unknown = Vec::new();
+        let mut limited = Vec::new();
+        for socket in self.table.addrs(side) {
+            if self.socket_is_terrible(socket, now) {
+                continue;
+            }
+            let Some(entry) = self.addresses.get(&socket) else {
+                continue;
+            };
+            let row = (entry.last_seen, entry.addr.clone());
+            if entry.services == 0 {
+                unknown.push(row);
+            } else if (entry.services & NODE_NETWORK) != 0 {
+                full.push(row);
+            } else {
+                limited.push(row);
+            }
+        }
+        full.sort_by(|a, b| b.0.cmp(&a.0));
+        unknown.sort_by(|a, b| b.0.cmp(&a.0));
+        limited.sort_by(|a, b| b.0.cmp(&a.0));
+        full.into_iter()
+            .chain(unknown)
+            .chain(limited)
+            .take(count)
+            .map(|(_, addr)| addr)
+            .collect()
+    }
+
+    pub fn promote_tried(&mut self, addr: SocketAddr) {
+        let now = current_timestamp();
+        self.table.note_attempt(addr, true);
+        let terrible = self.terrible_sockets(now);
+        self.table
+            .promote_tried(addr, |stored| terrible.contains(&stored));
+        self.table.remember_anchor(addr, now);
+    }
+
+    pub fn note_dial_failure(&mut self, addr: SocketAddr) {
+        self.table.note_attempt(addr, false);
+    }
+
+    pub fn anchors(&mut self) -> Vec<NetworkAddress> {
+        let now = current_timestamp();
+        self.table
+            .anchors(now)
+            .into_iter()
+            .filter_map(|socket| self.addresses.get(&socket).map(|entry| entry.addr.clone()))
+            .collect()
+    }
+
+    fn place_socket_new(&mut self, socket: SocketAddr) {
+        let now = current_timestamp();
+        let terrible = self.terrible_sockets(now);
+        self.table
+            .place_new(socket, |stored| terrible.contains(&stored));
+    }
+
+    fn terrible_sockets(&self, now: u64) -> std::collections::HashSet<SocketAddr> {
+        self.addresses
+            .keys()
+            .copied()
+            .filter(|addr| self.socket_is_terrible(*addr, now))
+            .collect()
+    }
+
+    fn socket_is_terrible(&self, addr: SocketAddr, now: u64) -> bool {
+        let Some(entry) = self.addresses.get(&addr) else {
+            return true;
+        };
+        let (failures, successes) = self.table.attempt_counts(addr);
+        super::address_table::is_terrible_record(
+            entry.last_seen,
+            entry.addr.time,
+            now,
+            failures,
+            successes,
+        )
+    }
+
+    /// Count how many fresh addresses are suitable for full-history IBD.
+    /// "Full-history" = explicitly advertises NODE_NETWORK (0x1) OR services unknown.
+    /// Modern Bitcoin Core 25+ sets both NODE_NETWORK and NODE_NETWORK_LIMITED; checking
+    /// only for absence of NODE_NETWORK_LIMITED would exclude all such archive nodes.
+    pub fn count_fresh_non_limited(&self) -> usize {
+        use blvm_protocol::service_flags::standard::NODE_NETWORK;
+        self.addresses
+            .values()
+            .filter(|e| {
+                e.is_fresh(self.expiration_seconds)
+                    && (e.services == 0 || (e.services & NODE_NETWORK) != 0)
+            })
+            .count()
+    }
+
+    /// Remove expired addresses
+    pub fn remove_expired(&mut self) -> usize {
+        let before = self.addresses.len();
+        self.addresses
+            .retain(|_, entry| entry.is_fresh(self.expiration_seconds));
+        before - self.addresses.len()
+    }
+
+    /// Remove an address
+    pub fn remove_address(&mut self, addr: &NetworkAddress) {
+        let socket_addr = self.network_addr_to_socket(addr);
+        self.addresses.remove(&socket_addr);
+        self.table.remove(socket_addr);
+    }
+
+    /// Overwrite (force-set) service flags on an existing entry identified by its `SocketAddr`.
+    ///
+    /// Used by the IBD path to write `NODE_NETWORK_LIMITED` onto a peer that has proven it cannot
+    /// serve historical blocks (consistent block-timeout failures), so that subsequent calls to
+    /// `get_fresh_addresses` / `peer_socket_addresses_for_ibd` exclude it.
+    pub fn set_services_by_socket(&mut self, addr: SocketAddr, services: u64) {
+        if let Some(entry) = self.addresses.get_mut(&addr) {
+            entry.services = services;
+        }
+    }
+
+    /// Return the stored service flags for a `SocketAddr`, or 0 if not in the database.
+    pub fn services_for_socket(&self, addr: SocketAddr) -> u64 {
+        self.addresses.get(&addr).map(|e| e.services).unwrap_or(0)
+    }
+
+    /// Check if address is banned
+    pub fn is_banned(&self, addr: &NetworkAddress, ban_list: &HashMap<SocketAddr, u64>) -> bool {
+        let socket_addr = self.network_addr_to_socket(addr);
+        let ban_key = SocketAddr::new(socket_addr.ip(), 0);
+        if let Some(unban_timestamp) = ban_list.get(&ban_key) {
+            let now = current_timestamp();
+            // Check if ban has expired
+            if *unban_timestamp == u64::MAX || now < *unban_timestamp {
+                return true; // Still banned
+            }
+        }
+        false
+    }
+
+    /// Check if address is local/private
+    pub fn is_local(&self, addr: &NetworkAddress) -> bool {
+        let socket = self.network_addr_to_socket(addr);
+        match socket.ip() {
+            IpAddr::V4(ipv4) => {
+                // Check for localhost, private ranges
+                ipv4.is_loopback()
+                    || ipv4.is_private()
+                    || ipv4.is_link_local()
+                    || ipv4.is_broadcast()
+            }
+            IpAddr::V6(ipv6) => {
+                // Check for localhost, unspecified, unique local, link-local, and multicast
+                // Note: is_unicast_link_local() is unstable, so we check manually
+                // Link-local addresses are in fe80::/10 range (fe80:: to febf::)
+                ipv6.is_loopback()
+                    || ipv6.is_unspecified()
+                    || (ipv6.octets()[0] == 0xfe && (ipv6.octets()[1] & 0xc0) == 0x80) // Link-local (fe80::/10)
+                    || ipv6.octets()[0] == 0xfc || ipv6.octets()[0] == 0xfd // Unique local (fc00::/7)
+                    || ipv6.octets()[0] == 0xff // Multicast (ff00::/8)
+            }
+        }
+    }
+
+    /// Filter addresses (exclude local, banned, already connected)
+    pub fn filter_addresses(
+        &self,
+        addresses: Vec<NetworkAddress>,
+        ban_list: &HashMap<SocketAddr, u64>,
+        connected_peers: &[SocketAddr],
+    ) -> Vec<NetworkAddress> {
+        addresses
+            .into_iter()
+            .filter(|addr| {
+                let socket = self.network_addr_to_socket(addr);
+                !self.is_local(addr)
+                    && !self.is_banned(addr, ban_list)
+                    && !connected_peers.contains(&socket)
+            })
+            .collect()
+    }
+
+    /// Add an Iroh PublicKey to the database
+    #[cfg(feature = "iroh")]
+    pub fn add_iroh_address(&mut self, public_key: PublicKey, services: u64) {
+        match self.iroh_addresses.get_mut(&public_key) {
+            Some(entry) => {
+                entry.update_seen();
+                entry.services |= services;
+            }
+            None => {
+                if self.total_count() >= self.max_addresses {
+                    self.evict_oldest_unified();
+                }
+                // Create a placeholder NetworkAddress for Iroh (not used, just for consistency)
+                let placeholder_addr = NetworkAddress {
+                    time: current_timestamp() as u32,
+                    services,
+                    ip: [0; 16],
+                    port: 0,
+                };
+                self.iroh_addresses
+                    .insert(public_key, AddressEntry::new(placeholder_addr, services));
+            }
+        }
+    }
+
+    /// Get fresh Iroh PublicKeys
+    #[cfg(feature = "iroh")]
+    pub fn get_fresh_iroh_addresses(&self, count: usize) -> Vec<PublicKey> {
+        // Collect entries with their node IDs, avoiding repeated map lookups
+        let mut fresh: Vec<_> = self
+            .iroh_addresses
+            .iter()
+            .filter(|(_, entry)| entry.is_fresh(self.expiration_seconds))
+            .map(|(public_key, entry)| (entry.last_seen, *public_key))
+            .collect();
+
+        // Sort by last_seen in descending order (most recent first)
+        fresh.sort_by(|a, b| b.0.cmp(&a.0));
+
+        // Extract node IDs and take requested count
+        fresh
+            .into_iter()
+            .map(|(_, public_key)| public_key)
+            .take(count)
+            .collect()
+    }
+
+    /// Get total address count (SocketAddr + Iroh)
+    pub fn total_count(&self) -> usize {
+        let socket_count = self.addresses.len();
+        #[cfg(feature = "iroh")]
+        {
+            socket_count + self.iroh_addresses.len()
+        }
+        #[cfg(not(feature = "iroh"))]
+        {
+            socket_count
+        }
+    }
+
+    /// Get address count (SocketAddr only, for backward compatibility)
+    pub fn len(&self) -> usize {
+        self.addresses.len()
+    }
+
+    /// Check if database is empty
+    pub fn is_empty(&self) -> bool {
+        #[cfg(feature = "iroh")]
+        {
+            self.addresses.is_empty() && self.iroh_addresses.is_empty()
+        }
+        #[cfg(not(feature = "iroh"))]
+        {
+            self.addresses.is_empty()
+        }
+    }
+
+    /// Evict oldest address across both maps (unified eviction)
+    ///
+    /// This ensures we respect max_addresses as a total limit across both
+    /// SocketAddr and Iroh address maps, not per-map limits.
+    fn evict_oldest_unified(&mut self) {
+        // Find oldest across both maps
+        let mut oldest_socket: Option<(SocketAddr, u64)> = None;
+
+        // Find oldest SocketAddr entry
+        if let Some((addr, entry)) = self
+            .addresses
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_seen)
+        {
+            oldest_socket = Some((*addr, entry.last_seen));
+        }
+
+        #[cfg(feature = "iroh")]
+        {
+            // Find oldest Iroh entry
+            let mut oldest_iroh: Option<(PublicKey, u64)> = None;
+            if let Some((public_key, entry)) = self
+                .iroh_addresses
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_seen)
+            {
+                oldest_iroh = Some((*public_key, entry.last_seen));
+            }
+
+            // Evict the oldest entry across both maps
+            match (oldest_socket, oldest_iroh) {
+                (Some((socket_addr, socket_time)), Some((iroh_id, iroh_time))) => {
+                    // Both maps have entries - evict the oldest
+                    if socket_time <= iroh_time {
+                        self.addresses.remove(&socket_addr);
+                        self.table.remove(socket_addr);
+                    } else {
+                        self.iroh_addresses.remove(&iroh_id);
+                    }
+                }
+                (Some((socket_addr, _)), None) => {
+                    // Only SocketAddr map has entries
+                    self.addresses.remove(&socket_addr);
+                    self.table.remove(socket_addr);
+                }
+                (None, Some((iroh_id, _))) => {
+                    // Only Iroh map has entries
+                    self.iroh_addresses.remove(&iroh_id);
+                }
+                (None, None) => {
+                    // Both maps empty - nothing to evict
+                }
+            }
+        }
+
+        #[cfg(not(feature = "iroh"))]
+        {
+            // Only SocketAddr map exists
+            if let Some((socket_addr, _)) = oldest_socket {
+                self.addresses.remove(&socket_addr);
+                self.table.remove(socket_addr);
+            }
+        }
+    }
+
+    /// Convert NetworkAddress to SocketAddr
+    ///
+    /// Note: This is public for use in NetworkManager when connecting to peers.
+    pub fn network_addr_to_socket(&self, addr: &NetworkAddress) -> SocketAddr {
+        // Convert IPv6 address bytes to SocketAddr
+        // NetworkAddress uses 16-byte IPv6 format
+        let ip = if addr.ip[0..12] == [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff] {
+            // IPv4-mapped IPv6 address
+            IpAddr::V4(std::net::Ipv4Addr::new(
+                addr.ip[12],
+                addr.ip[13],
+                addr.ip[14],
+                addr.ip[15],
+            ))
+        } else {
+            // Native IPv6
+            let segments = [
+                u16::from_be_bytes([addr.ip[0], addr.ip[1]]),
+                u16::from_be_bytes([addr.ip[2], addr.ip[3]]),
+                u16::from_be_bytes([addr.ip[4], addr.ip[5]]),
+                u16::from_be_bytes([addr.ip[6], addr.ip[7]]),
+                u16::from_be_bytes([addr.ip[8], addr.ip[9]]),
+                u16::from_be_bytes([addr.ip[10], addr.ip[11]]),
+                u16::from_be_bytes([addr.ip[12], addr.ip[13]]),
+                u16::from_be_bytes([addr.ip[14], addr.ip[15]]),
+            ];
+            IpAddr::V6(std::net::Ipv6Addr::new(
+                segments[0],
+                segments[1],
+                segments[2],
+                segments[3],
+                segments[4],
+                segments[5],
+                segments[6],
+                segments[7],
+            ))
+        };
+        SocketAddr::new(ip, addr.port)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    fn create_test_address(ip: &str, port: u16) -> NetworkAddress {
+        let socket = SocketAddr::new(ip.parse().unwrap(), port);
+        let ip_bytes = match socket.ip() {
+            IpAddr::V4(ipv4) => {
+                // IPv4-mapped IPv6 format
+                let mut bytes = [0u8; 16];
+                bytes[10] = 0xff;
+                bytes[11] = 0xff;
+                bytes[12..16].copy_from_slice(&ipv4.octets());
+                bytes
+            }
+            IpAddr::V6(ipv6) => ipv6.octets(),
+        };
+        NetworkAddress {
+            services: 0,
+            ip: ip_bytes,
+            port,
+            time: current_timestamp() as u32,
+        }
+    }
+
+    #[test]
+    fn outbound_selection_uses_the_table_and_drops_three_failures() {
+        let mut db = AddressDatabase::new(100);
+        let live = create_test_address("8.8.8.8", 8333);
+        let failed = create_test_address("1.2.3.4", 8333);
+        db.add_address(live.clone(), 1);
+        db.add_address(failed.clone(), 1);
+        let socket = db.network_addr_to_socket(&failed);
+        db.note_dial_failure(socket);
+        db.note_dial_failure(socket);
+        db.note_dial_failure(socket);
+        let picked = db.select_outbound(10, false);
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].port, live.port);
+        db.promote_tried(db.network_addr_to_socket(&live));
+        let from_tried = db.select_outbound(10, true);
+        assert_eq!(from_tried.len(), 1);
+        assert!(db.anchors().len() <= 2);
+    }
+
+    #[test]
+    fn test_address_database_creation() {
+        let db = AddressDatabase::new(100);
+        assert_eq!(db.len(), 0);
+        assert!(db.is_empty());
+    }
+
+    #[test]
+    fn test_add_address() {
+        let mut db = AddressDatabase::new(100);
+        let addr = create_test_address("192.168.1.1", 8333);
+        db.add_address(addr.clone(), 1);
+        assert_eq!(db.len(), 1);
+        assert!(!db.is_empty());
+    }
+
+    #[test]
+    fn test_add_duplicate_address() {
+        let mut db = AddressDatabase::new(100);
+        let addr = create_test_address("192.168.1.1", 8333);
+        db.add_address(addr.clone(), 1);
+        db.add_address(addr.clone(), 2);
+        assert_eq!(db.len(), 1); // Should still be 1
+    }
+
+    #[test]
+    fn test_get_fresh_addresses() {
+        let mut db = AddressDatabase::new(100);
+        let addr1 = create_test_address("192.168.1.1", 8333);
+        let addr2 = create_test_address("192.168.1.2", 8333);
+        db.add_address(addr1.clone(), 1);
+        db.add_address(addr2.clone(), 1);
+
+        let fresh = db.get_fresh_addresses(10);
+        assert_eq!(fresh.len(), 2);
+    }
+
+    #[test]
+    fn test_address_expiration() {
+        let mut db = AddressDatabase::with_expiration(100, 1); // 1 second expiration
+        let addr = create_test_address("192.168.1.1", 8333);
+        db.add_address(addr.clone(), 1);
+        assert_eq!(db.len(), 1);
+
+        // Wait for expiration
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        let fresh = db.get_fresh_addresses(10);
+        assert_eq!(fresh.len(), 0); // Should be expired
+    }
+
+    #[test]
+    fn test_remove_expired() {
+        let mut db = AddressDatabase::with_expiration(100, 1); // 1 second expiration
+        let addr1 = create_test_address("192.168.1.1", 8333);
+        let addr2 = create_test_address("192.168.1.2", 8333);
+        db.add_address(addr1.clone(), 1);
+        db.add_address(addr2.clone(), 1);
+        assert_eq!(db.len(), 2);
+
+        // Wait for expiration
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        let removed = db.remove_expired();
+        assert_eq!(removed, 2);
+        assert_eq!(db.len(), 0);
+    }
+
+    #[test]
+    fn test_is_local() {
+        let db = AddressDatabase::new(100);
+        let localhost = create_test_address("127.0.0.1", 8333);
+        let private = create_test_address("192.168.1.1", 8333);
+        let public = create_test_address("8.8.8.8", 8333);
+
+        assert!(db.is_local(&localhost));
+        assert!(db.is_local(&private));
+        assert!(!db.is_local(&public));
+    }
+
+    #[test]
+    fn test_is_local_ipv6() {
+        let db = AddressDatabase::new(100);
+
+        // IPv6 localhost
+        let ipv6_localhost = create_test_address("::1", 8333);
+        assert!(db.is_local(&ipv6_localhost));
+
+        // IPv6 unspecified
+        let ipv6_unspecified = create_test_address("::", 8333);
+        assert!(db.is_local(&ipv6_unspecified));
+
+        // IPv6 unique local (fc00::/7)
+        let ipv6_unique_local = create_test_address("fc00::1", 8333);
+        assert!(db.is_local(&ipv6_unique_local));
+
+        // IPv6 link-local (fe80::/10)
+        let ipv6_link_local = create_test_address("fe80::1", 8333);
+        assert!(db.is_local(&ipv6_link_local));
+
+        // IPv6 multicast (ff00::/8)
+        let ipv6_multicast = create_test_address("ff02::1", 8333);
+        assert!(db.is_local(&ipv6_multicast));
+
+        // IPv6 public address (should not be local)
+        let ipv6_public = create_test_address("2001:4860:4860::8888", 8333);
+        assert!(!db.is_local(&ipv6_public));
+    }
+
+    #[test]
+    fn test_is_banned() {
+        let db = AddressDatabase::new(100);
+        let addr = create_test_address("192.168.1.1", 8333);
+        let socket = SocketAddr::new("192.168.1.1".parse().unwrap(), 0);
+        let mut ban_list = HashMap::new();
+
+        // Not banned
+        assert!(!db.is_banned(&addr, &ban_list));
+
+        // Banned (permanent)
+        ban_list.insert(socket, u64::MAX);
+        assert!(db.is_banned(&addr, &ban_list));
+
+        // Banned (temporary, not expired)
+        ban_list.clear();
+        let future_time = crate::utils::current_timestamp() + 3600;
+        ban_list.insert(socket, future_time);
+        assert!(db.is_banned(&addr, &ban_list));
+
+        // Banned (expired)
+        ban_list.clear();
+        let past_time = crate::utils::current_timestamp().saturating_sub(3600);
+        ban_list.insert(socket, past_time);
+        assert!(!db.is_banned(&addr, &ban_list));
+    }
+
+    #[test]
+    fn test_filter_addresses() {
+        let db = AddressDatabase::new(100);
+        let local = create_test_address("127.0.0.1", 8333);
+        let banned = create_test_address("192.168.1.1", 8333);
+        let public = create_test_address("8.8.8.8", 8333);
+
+        let socket_banned = SocketAddr::new("192.168.1.1".parse().unwrap(), 0);
+        let socket_connected = SocketAddr::new("8.8.8.8".parse().unwrap(), 8333);
+        let mut ban_list = HashMap::new();
+        ban_list.insert(socket_banned, u64::MAX);
+        let connected_peers = vec![socket_connected];
+
+        let addresses = vec![local, banned, public];
+        let filtered = db.filter_addresses(addresses, &ban_list, &connected_peers);
+
+        // Should filter out local, banned, and connected
+        assert_eq!(filtered.len(), 0);
+    }
+
+    #[test]
+    fn test_eviction_when_full() {
+        let mut db = AddressDatabase::new(2); // Small capacity
+        let addr1 = create_test_address("192.168.1.1", 8333);
+        let addr2 = create_test_address("192.168.1.2", 8333);
+        let addr3 = create_test_address("192.168.1.3", 8333);
+
+        db.add_address(addr1.clone(), 1);
+        db.add_address(addr2.clone(), 1);
+        assert_eq!(db.len(), 2);
+
+        // Adding third should evict oldest
+        db.add_address(addr3.clone(), 1);
+        assert_eq!(db.len(), 2); // Should still be 2
+    }
+
+    #[cfg(feature = "iroh")]
+    #[test]
+    fn test_add_iroh_address() {
+        use getrandom::getrandom;
+        use iroh::SecretKey;
+        let mut db = AddressDatabase::new(100);
+
+        // Generate a valid Ed25519 key for testing using getrandom to avoid RNG version conflicts
+        let mut bytes = [0u8; 32];
+        getrandom(&mut bytes).unwrap();
+        let secret_key = SecretKey::from_bytes(&bytes);
+        let public_key = secret_key.public();
+
+        db.add_iroh_address(public_key, 1);
+        assert_eq!(db.total_count(), 1);
+
+        // Add same address again (should update, not duplicate)
+        db.add_iroh_address(public_key, 2);
+        assert_eq!(db.total_count(), 1);
+    }
+
+    #[cfg(feature = "iroh")]
+    #[test]
+    fn test_get_fresh_iroh_addresses() {
+        use getrandom::getrandom;
+        use iroh::SecretKey;
+        let mut db = AddressDatabase::new(100);
+
+        // Generate valid Ed25519 keys for testing using getrandom to avoid RNG version conflicts
+        let mut bytes1 = [0u8; 32];
+        let mut bytes2 = [0u8; 32];
+        getrandom(&mut bytes1).unwrap();
+        getrandom(&mut bytes2).unwrap();
+        let secret_key1 = SecretKey::from_bytes(&bytes1);
+        let secret_key2 = SecretKey::from_bytes(&bytes2);
+        let public_key1 = secret_key1.public();
+        let public_key2 = secret_key2.public();
+
+        db.add_iroh_address(public_key1, 1);
+        db.add_iroh_address(public_key2, 1);
+
+        let fresh = db.get_fresh_iroh_addresses(10);
+        assert_eq!(fresh.len(), 2);
+    }
+
+    #[cfg(feature = "iroh")]
+    #[test]
+    fn test_total_count_includes_iroh() {
+        use iroh::PublicKey;
+        let mut db = AddressDatabase::new(100);
+
+        // Add SocketAddr address
+        let addr = create_test_address("192.168.1.1", 8333);
+        db.add_address(addr, 1);
+        assert_eq!(db.total_count(), 1);
+
+        // Add Iroh address
+        let key_bytes = [0u8; 32];
+        let public_key = PublicKey::from_bytes(&key_bytes).unwrap();
+        db.add_iroh_address(public_key, 1);
+        assert_eq!(db.total_count(), 2);
+    }
+
+    #[test]
+    fn timestamp_zero_is_stored_and_not_handed_out() {
+        let mut db = AddressDatabase::new(10);
+        let mut addr = create_test_address("8.8.8.8", 8333);
+        addr.time = 0;
+        db.add_address(addr.clone(), 1);
+        let socket = db.network_addr_to_socket(&addr);
+        let stored = db.addresses.get(&socket).expect("stored");
+        assert_eq!(stored.addr.time, 0);
+        let handed = db.get_fresh_addresses(10);
+        assert!(handed.iter().all(|a| a.time != 0));
+    }
+
+    #[test]
+    fn future_address_timestamp_is_not_fresh() {
+        let mut db = AddressDatabase::new(10);
+        let current = create_test_address("1.2.3.4", 8333);
+        let mut future = create_test_address("5.6.7.8", 8333);
+        future.time = current_timestamp().saturating_add(365 * 24 * 60 * 60) as u32;
+        db.add_address(current.clone(), 1);
+        db.add_address(future.clone(), 1);
+        let fresh = db.get_fresh_addresses(10);
+        assert!(fresh.iter().any(|addr| addr.ip == current.ip));
+        assert!(fresh.iter().all(|addr| addr.ip != future.ip));
+        let stored = db
+            .addresses
+            .get(&db.network_addr_to_socket(&future))
+            .expect("stored");
+        assert!(stored.last_seen <= current_timestamp());
+        assert!(stored.last_seen + 5 >= current_timestamp());
+    }
+
+    #[test]
+    fn stale_update_does_not_poison_a_known_address() {
+        let mut db = AddressDatabase::new(10);
+        let addr = create_test_address("9.9.9.9", 8333);
+        db.add_address(addr.clone(), 1);
+        let socket = db.network_addr_to_socket(&addr);
+        let original_time = db.addresses.get(&socket).unwrap().addr.time;
+        let mut stale = addr.clone();
+        stale.time = 0;
+        db.add_address(stale, 1);
+        let stored = db.addresses.get(&socket).unwrap();
+        assert_eq!(stored.addr.time, original_time);
+        assert!(stored.is_fresh(60 * 60));
+    }
+}

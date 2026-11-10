@@ -1,0 +1,8 @@
+# Direct blvm_consensus:: imports in blvm-node/src — §1a layering plan inventory.
+# Gate: scripts/check-direct-consensus-imports.sh (path globs relative to blvm-node, first field per line).
+# Optional columns: symbol_or_use<TAB>reason
+#
+# As of 2026-04-18: no entries. All production code uses blvm_protocol facade / re-exports.
+# (Dev-dependencies may still pull blvm-consensus for tests; grep blvm-node/src only.)
+#
+# When adding a direct import, append a line and justify in the same commit.

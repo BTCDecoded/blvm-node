@@ -1,0 +1,454 @@
+//! Block Filter Service for BIP157/158
+//!
+//! Generates, caches, and serves compact block filters for light client support.
+//! Maintains filter header chain for efficient verification.
+
+use anyhow::{Result, anyhow};
+use blvm_protocol::bip157;
+use blvm_protocol::bip158::CompactBlockFilter;
+use blvm_protocol::{Block, BlockHeader, Hash};
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
+/// Block filter service for generating and serving BIP158 filters
+#[derive(Debug, Clone)]
+pub struct BlockFilterService {
+    /// Cache of filters by block hash
+    filters: Arc<RwLock<HashMap<Hash, CompactBlockFilter>>>,
+    /// Filter header chain (indexed by height)
+    filter_headers: Arc<RwLock<Vec<bip157::FilterHeader>>>,
+    /// Block hash to height mapping (for lookups)
+    block_hash_to_height: Arc<RwLock<HashMap<Hash, u32>>>,
+    /// Current chain height
+    current_height: Arc<RwLock<u32>>,
+}
+
+impl BlockFilterService {
+    /// Create a new block filter service
+    pub fn new() -> Self {
+        BlockFilterService {
+            filters: Arc::new(RwLock::new(HashMap::new())),
+            filter_headers: Arc::new(RwLock::new(Vec::new())),
+            block_hash_to_height: Arc::new(RwLock::new(HashMap::new())),
+            current_height: Arc::new(RwLock::new(0)),
+        }
+    }
+
+    /// Get filter for a block hash
+    pub fn get_filter(&self, block_hash: &Hash) -> Option<CompactBlockFilter> {
+        self.filters
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(block_hash)
+            .cloned()
+    }
+
+    /// Generate and cache filter for a block
+    ///
+    /// # Arguments
+    /// * `block` - The block to generate a filter for
+    /// * `previous_outpoint_scripts` - Scripts from UTXOs being spent by this block
+    /// * `height` - Block height
+    pub fn generate_and_cache_filter(
+        &self,
+        block: &Block,
+        previous_outpoint_scripts: &[Vec<u8>],
+        height: u32,
+    ) -> Result<CompactBlockFilter> {
+        let refs: Vec<&[u8]> = previous_outpoint_scripts
+            .iter()
+            .map(Vec::as_slice)
+            .collect();
+        self.generate_and_cache_filter_slices(block, &refs, height)
+    }
+
+    /// Same cache path as [`Self::generate_and_cache_filter`]. The spent scripts are borrowed.
+    pub fn generate_and_cache_filter_slices(
+        &self,
+        block: &Block,
+        previous_outpoint_scripts: &[&[u8]],
+        height: u32,
+    ) -> Result<CompactBlockFilter> {
+        let block_hash = self.calculate_block_hash(&block.header);
+        self.generate_and_cache_filter_at_hash(block, previous_outpoint_scripts, block_hash, height)
+    }
+
+    /// Same cache path as [`Self::generate_and_cache_filter_slices`] for a known block id.
+    pub(crate) fn generate_and_cache_filter_at_hash(
+        &self,
+        block: &Block,
+        previous_outpoint_scripts: &[&[u8]],
+        block_hash: Hash,
+        height: u32,
+    ) -> Result<CompactBlockFilter> {
+        let mut output_scripts = Vec::new();
+        for tx in &block.transactions {
+            for output in &tx.outputs {
+                output_scripts.push(output.script_pubkey.as_slice());
+            }
+        }
+        self.generate_and_cache_filter_for_scripts(
+            output_scripts,
+            previous_outpoint_scripts,
+            block_hash,
+            height,
+        )
+    }
+
+    /// Cache a filter built from output scripts that were read without a full block value.
+    pub(crate) fn generate_and_cache_filter_for_scripts<'a>(
+        &self,
+        output_scripts: Vec<&'a [u8]>,
+        previous_outpoint_scripts: &[&'a [u8]],
+        block_hash: Hash,
+        height: u32,
+    ) -> Result<CompactBlockFilter> {
+        let filter = blvm_protocol::bip158::build_block_filter_output_scripts(
+            &block_hash,
+            output_scripts,
+            previous_outpoint_scripts,
+        )
+        .map_err(|e| anyhow!("Failed to build filter: {}", e))?;
+
+        // Cache filter
+        self.filters
+            .write()
+            .unwrap()
+            .insert(block_hash, filter.clone());
+        self.block_hash_to_height
+            .write()
+            .unwrap()
+            .insert(block_hash, height);
+
+        // Update filter header chain
+        // Get previous header before acquiring write lock to avoid deadlock
+        let prev_header = if height > 0 {
+            self.filter_headers
+                .read()
+                .unwrap()
+                .get((height - 1) as usize)
+                .cloned()
+        } else {
+            None
+        };
+
+        let filter_header = bip157::FilterHeader::new(&filter, prev_header.as_ref());
+
+        // Extend filter header chain if needed
+        // Release read lock before acquiring write lock to avoid deadlock
+        let mut headers = self
+            .filter_headers
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let current_len = headers.len() as u32;
+        if height >= current_len {
+            headers.resize((height + 1) as usize, filter_header);
+        } else {
+            headers[height as usize] = filter_header;
+        }
+
+        // Update current height (avoid holding read and write locks simultaneously)
+        let current = *self
+            .current_height
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        *self
+            .current_height
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = height.max(current);
+
+        Ok(filter)
+    }
+
+    /// Get filter header at a specific height
+    pub fn get_filter_header(&self, height: u32) -> Option<bip157::FilterHeader> {
+        self.filter_headers
+            .read()
+            .unwrap()
+            .get(height as usize)
+            .cloned()
+    }
+
+    /// Get filter headers in a range
+    ///
+    /// # Arguments
+    /// * `start_height` - Start height (inclusive)
+    /// * `stop_hash` - Stop block hash
+    ///
+    /// # Returns
+    /// Vector of filter header hashes (header_hash() from FilterHeader)
+    pub fn get_filter_headers_range(
+        &self,
+        start_height: u32,
+        stop_hash: Hash,
+    ) -> Result<Vec<Hash>> {
+        let headers = self
+            .filter_headers
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let height_to_hash = self
+            .block_hash_to_height
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // Find stop height
+        let stop_height = height_to_hash
+            .get(&stop_hash)
+            .copied()
+            .ok_or_else(|| anyhow!("Stop hash not found"))?;
+
+        if start_height > stop_height {
+            return Err(anyhow!("Start height > stop height"));
+        }
+
+        let end = stop_height.min(start_height.saturating_add(1_999));
+        let mut header_hashes = Vec::new();
+        for height in start_height..=end {
+            if let Some(header) = headers.get(height as usize) {
+                header_hashes.push(header.header_hash());
+            }
+        }
+
+        Ok(header_hashes)
+    }
+
+    /// Get filter checkpoints (every 1000 blocks per BIP157)
+    ///
+    /// # Arguments
+    /// * `stop_hash` - Stop block hash
+    ///
+    /// # Returns
+    /// Vector of filter header hashes at checkpoint intervals
+    pub fn get_filter_checkpoints(&self, stop_hash: Hash) -> Result<Vec<Hash>> {
+        let height_to_hash = self
+            .block_hash_to_height
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let stop_height = height_to_hash
+            .get(&stop_hash)
+            .copied()
+            .ok_or_else(|| anyhow!("Stop hash not found"))?;
+
+        let headers = self
+            .filter_headers
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut checkpoints = Vec::new();
+
+        // Checkpoints every 1000 blocks (per BIP157)
+        let checkpoint_interval = 1000;
+
+        for height in (0..=stop_height).step_by(checkpoint_interval as usize) {
+            if let Some(header) = headers.get(height as usize) {
+                checkpoints.push(header.header_hash());
+            }
+        }
+
+        Ok(checkpoints)
+    }
+
+    /// Get previous filter header (for Cfheaders response)
+    pub fn get_prev_filter_header(&self, start_height: u32) -> Option<bip157::FilterHeader> {
+        if start_height == 0 {
+            return None;
+        }
+        self.filter_headers
+            .read()
+            .unwrap()
+            .get((start_height - 1) as usize)
+            .cloned()
+    }
+
+    /// Double-SHA256 of the 80-byte Bitcoin wire header (block id).
+    pub(crate) fn calculate_block_hash(&self, header: &BlockHeader) -> Hash {
+        use crate::storage::hashing::double_sha256;
+
+        let mut header_data = [0u8; 80];
+        header_data[0..4].copy_from_slice(&(header.version as i32).to_le_bytes());
+        header_data[4..36].copy_from_slice(&header.prev_block_hash);
+        header_data[36..68].copy_from_slice(&header.merkle_root);
+        header_data[68..72].copy_from_slice(&(header.timestamp as u32).to_le_bytes());
+        header_data[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());
+        header_data[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());
+        double_sha256(&header_data)
+    }
+
+    /// Get current chain height
+    pub fn current_height(&self) -> u32 {
+        *self
+            .current_height
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Remove filter for a pruned block (keeps filter header for verification)
+    ///
+    /// When a block is pruned, we can remove the filter data to save memory,
+    /// but we must keep the filter header for chain verification.
+    pub fn remove_filter_for_pruned_block(&self, block_hash: &Hash) -> Result<()> {
+        // Remove filter from cache
+        self.filters
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(block_hash);
+
+        // Note: We do NOT remove the filter header - it's required for verification
+        // The filter header chain must remain intact even after pruning
+
+        Ok(())
+    }
+
+    /// Check if a filter exists for a block
+    pub fn has_filter(&self, block_hash: &Hash) -> bool {
+        self.filters
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(block_hash)
+    }
+
+    /// Get all block hashes that have filters cached
+    pub fn get_cached_filter_hashes(&self) -> Vec<Hash> {
+        self.filters
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
+    }
+}
+
+impl Default for BlockFilterService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blvm_protocol::{Transaction, TransactionOutput};
+
+    fn sample_block(merkle_byte: u8, nonce: u64) -> Block {
+        Block {
+            header: BlockHeader {
+                version: 1,
+                prev_block_hash: [0u8; 32],
+                merkle_root: [merkle_byte; 32],
+                timestamp: 1_231_006_505,
+                bits: 0x0f00ffff,
+                nonce,
+            },
+            transactions: vec![Transaction {
+                version: 1,
+                inputs: blvm_protocol::tx_inputs![],
+                outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                    value: 0,
+                    script_pubkey: vec![0x51],
+                }],
+                lock_time: 0,
+            }]
+            .into_boxed_slice(),
+        }
+    }
+
+    #[test]
+    fn test_block_hash_matches_wire_header_buffer() {
+        use crate::storage::hashing::double_sha256;
+        let block = sample_block(0x11, 7);
+        let header = &block.header;
+        let mut header_data = Vec::with_capacity(80);
+        header_data.extend_from_slice(&(header.version as i32).to_le_bytes());
+        header_data.extend_from_slice(&header.prev_block_hash);
+        header_data.extend_from_slice(&header.merkle_root);
+        header_data.extend_from_slice(&(header.timestamp as u32).to_le_bytes());
+        header_data.extend_from_slice(&(header.bits as u32).to_le_bytes());
+        header_data.extend_from_slice(&(header.nonce as u32).to_le_bytes());
+        let service = BlockFilterService::new();
+        assert_eq!(
+            service.calculate_block_hash(header),
+            double_sha256(&header_data)
+        );
+    }
+
+    #[test]
+    fn test_cache_filter_at_known_hash_matches_generated_filter() {
+        let block = sample_block(0x21, 9);
+        let generated = BlockFilterService::new();
+        let supplied = BlockFilterService::new();
+        let hash = generated.calculate_block_hash(&block.header);
+        let left = generated
+            .generate_and_cache_filter_slices(&block, &[], 0)
+            .unwrap();
+        let right = supplied
+            .generate_and_cache_filter_at_hash(&block, &[], hash, 0)
+            .unwrap();
+        assert_eq!(left, right);
+        assert_eq!(generated.get_filter(&hash), Some(left));
+        assert_eq!(supplied.get_filter(&hash), Some(right));
+    }
+
+    #[test]
+    fn test_filter_service_creation() {
+        let service = BlockFilterService::new();
+        assert_eq!(service.current_height(), 0);
+    }
+
+    #[test]
+    fn test_get_filter_nonexistent() {
+        let service = BlockFilterService::new();
+        let hash = [0u8; 32];
+        assert!(service.get_filter(&hash).is_none());
+    }
+
+    #[test]
+    fn test_generate_cache_headers_and_checkpoints() {
+        let service = BlockFilterService::new();
+        let block0 = sample_block(0x01, 1);
+        let block1 = sample_block(0x02, 2);
+
+        service.generate_and_cache_filter(&block0, &[], 0).unwrap();
+        let hash0 = *service
+            .get_cached_filter_hashes()
+            .first()
+            .expect("first cached hash");
+        service.generate_and_cache_filter(&block1, &[], 1).unwrap();
+        let hash1 = service
+            .get_cached_filter_hashes()
+            .into_iter()
+            .find(|hash| hash != &hash0)
+            .expect("second cached hash");
+        assert_eq!(service.current_height(), 1);
+        assert_eq!(service.get_cached_filter_hashes().len(), 2);
+
+        let headers = service.get_filter_headers_range(0, hash1).unwrap();
+        assert_eq!(headers.len(), 2);
+
+        let checkpoints = service.get_filter_checkpoints(hash1).unwrap();
+        assert!(!checkpoints.is_empty());
+
+        assert!(service.get_filter_header(0).is_some());
+        assert!(service.get_prev_filter_header(1).is_some());
+        assert!(service.get_prev_filter_header(0).is_none());
+
+        service.remove_filter_for_pruned_block(&hash1).unwrap();
+        assert!(!service.has_filter(&hash1));
+        assert!(service.get_filter_header(1).is_some());
+    }
+
+    #[test]
+    fn test_filter_headers_range_errors() {
+        let service = BlockFilterService::new();
+        let block = sample_block(0x03, 3);
+        service.generate_and_cache_filter(&block, &[], 5).unwrap();
+        let hash = service.get_cached_filter_hashes()[0];
+
+        assert!(
+            service
+                .get_filter_headers_range(10, hash)
+                .unwrap_err()
+                .to_string()
+                .contains("Start height > stop height")
+        );
+        assert!(service.get_filter_checkpoints([0xee; 32]).is_err());
+    }
+}

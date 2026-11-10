@@ -1,0 +1,724 @@
+//! Network message dispatch for process_messages loop.
+//!
+//! Handles all NetworkMessage variants received from the peer channel.
+//! Extracted from network_manager.rs to reduce file size.
+
+use crate::module::ipc::protocol::EventPayload;
+use crate::module::traits::EventType;
+use crate::network::NetworkMessage;
+use crate::network::network_manager::NetworkManager;
+use crate::network::protocol::{NetworkAddress, ProtocolMessage, ProtocolParser};
+use crate::network::transport::TransportAddr;
+use crate::utils::{current_timestamp, ignore_error};
+use anyhow::Result;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tracing::{debug, info, warn};
+
+/// Publish a network event if an event publisher is configured. Logs at debug on failure.
+async fn publish_network_event_if_configured(
+    event_publisher: &Arc<
+        tokio::sync::Mutex<Option<Arc<crate::node::event_publisher::EventPublisher>>>,
+    >,
+    event_type: EventType,
+    payload: EventPayload,
+    log_context: &str,
+) {
+    let guard = event_publisher.lock().await;
+    if let Some(ref ep) = *guard {
+        ignore_error(|| ep.publish_event(event_type, payload), log_context).await;
+    }
+}
+
+async fn publish_peer_payment(
+    nm: &NetworkManager,
+    command: &str,
+    payload: Vec<u8>,
+    peer_addr: std::net::SocketAddr,
+) {
+    let event = EventPayload::PeerPayment {
+        command: command.to_string(),
+        payload,
+        peer_addr: peer_addr.to_string(),
+    };
+    publish_network_event_if_configured(
+        nm.event_publisher(),
+        EventType::PeerPayment,
+        event,
+        "Failed to publish PeerPayment",
+    )
+    .await;
+}
+
+/// Handle a single network message (full dispatch for process_messages loop)
+pub(crate) async fn handle_network_message(
+    nm: &NetworkManager,
+    message: NetworkMessage,
+) -> Result<()> {
+    match message {
+        NetworkMessage::PeerConnected(addr) => {
+            handle_peer_connected(nm, addr).await;
+        }
+        NetworkMessage::PeerDisconnected(addr) => {
+            handle_peer_disconnected(nm, addr).await;
+        }
+        NetworkMessage::RawMessageReceived(data, peer) => {
+            let peer_label = peer.clone();
+            ignore_error(
+                || nm.handle_incoming_identity(peer, data),
+                &format!("Error processing raw message from {peer_label}"),
+            )
+            .await;
+        }
+        NetworkMessage::BlockReceived(data) => {
+            nm.queue_block(data);
+        }
+        NetworkMessage::TransactionReceived(data) => {
+            if let Ok(ProtocolMessage::Tx(tx_msg)) = ProtocolParser::parse_message(&data) {
+                ignore_error(
+                    || {
+                        nm.submit_transaction_with_witness(
+                            tx_msg.transaction,
+                            Some(tx_msg.witnesses),
+                        )
+                    },
+                    "Error processing transaction",
+                )
+                .await;
+            }
+        }
+        NetworkMessage::InventoryReceived(data, peer_addr) => {
+            if let Err(e) = nm.handle_inventory_received(&data, peer_addr) {
+                debug!("Error processing inventory from {peer_addr}: {e}");
+            }
+            if let Err(e) = nm.process_announced_block_inventory(&data, peer_addr).await {
+                debug!("Block inv follow-up from {peer_addr}: {e}");
+            }
+        }
+        NetworkMessage::GetCfiltersReceived(data, peer_addr) => {
+            ignore_error(
+                || nm.handle_getcfilters_request(data, peer_addr),
+                &format!("Error handling GetCfilters from {peer_addr}"),
+            )
+            .await;
+        }
+        NetworkMessage::GetCfheadersReceived(data, peer_addr) => {
+            ignore_error(
+                || nm.handle_getcfheaders_request(data, peer_addr),
+                &format!("Error handling GetCfheaders from {peer_addr}"),
+            )
+            .await;
+        }
+        NetworkMessage::GetCfcheckptReceived(data, peer_addr) => {
+            ignore_error(
+                || nm.handle_getcfcheckpt_request(data, peer_addr),
+                &format!("Error handling GetCfcheckpt from {peer_addr}"),
+            )
+            .await;
+        }
+        NetworkMessage::PkgTxnReceived(data, peer_addr) => {
+            ignore_error(
+                || nm.handle_pkgtxn_request(data, peer_addr),
+                &format!("Error handling PkgTxn from {peer_addr}"),
+            )
+            .await;
+        }
+        NetworkMessage::SendPkgTxnReceived(_data, _peer_addr) => {
+            // SendPkgTxn is a notification - no response needed
+            debug!("SendPkgTxnReceived");
+        }
+        NetworkMessage::GetModuleReceived(data, peer_addr) => {
+            let protocol_msg = match ProtocolParser::parse_message(&data) {
+                Ok(ProtocolMessage::GetModule(msg)) => msg,
+                _ => {
+                    debug!("Invalid GetModule message from {}", peer_addr);
+                    return Ok(());
+                }
+            };
+            ignore_error(
+                || nm.handle_get_module(peer_addr, protocol_msg),
+                &format!("Error handling GetModule from {peer_addr}"),
+            )
+            .await;
+        }
+        NetworkMessage::ModuleReceived(data, _peer_addr) => {
+            if let Ok(ProtocolMessage::Module(msg)) = ProtocolParser::parse_message(&data) {
+                nm.complete_request(msg.request_id, data);
+            }
+        }
+        NetworkMessage::GetModuleByHashReceived(data, peer_addr) => {
+            let protocol_msg = match ProtocolParser::parse_message(&data) {
+                Ok(ProtocolMessage::GetModuleByHash(msg)) => msg,
+                _ => {
+                    debug!("Invalid GetModuleByHash message from {}", peer_addr);
+                    return Ok(());
+                }
+            };
+            ignore_error(
+                || nm.handle_get_module_by_hash(peer_addr, protocol_msg),
+                &format!("Error handling GetModuleByHash from {peer_addr}"),
+            )
+            .await;
+        }
+        NetworkMessage::ModuleByHashReceived(data, _peer_addr) => {
+            if let Ok(ProtocolMessage::ModuleByHash(msg)) = ProtocolParser::parse_message(&data) {
+                nm.complete_request(msg.request_id, data);
+            }
+        }
+        NetworkMessage::GetModuleListReceived(data, peer_addr) => {
+            let protocol_msg = match ProtocolParser::parse_message(&data) {
+                Ok(ProtocolMessage::GetModuleList(msg)) => msg,
+                _ => {
+                    debug!("Invalid GetModuleList message from {}", peer_addr);
+                    return Ok(());
+                }
+            };
+            ignore_error(
+                || nm.handle_get_module_list(peer_addr, protocol_msg),
+                &format!("Error handling GetModuleList from {peer_addr}"),
+            )
+            .await;
+        }
+        NetworkMessage::ModuleListReceived(_data, _peer_addr) => {
+            // ModuleList has no request_id; direct response, no completion needed
+            debug!("ModuleListReceived (no request matching)");
+        }
+        NetworkMessage::GetPaymentRequestReceived(data, peer_addr) => {
+            publish_peer_payment(nm, "getpaymentrequest", data, peer_addr).await;
+        }
+        NetworkMessage::PaymentReceived(data, peer_addr) => {
+            publish_peer_payment(nm, "payment", data, peer_addr).await;
+        }
+        NetworkMessage::PaymentRequestReceived(data, peer_addr) => {
+            publish_peer_payment(nm, "paymentrequest", data, peer_addr).await;
+        }
+        NetworkMessage::PaymentACKReceived(data, peer_addr) => {
+            publish_peer_payment(nm, "paymentack", data, peer_addr).await;
+        }
+        NetworkMessage::HeadersReceived(_data, _peer_addr) => {
+            // Headers are handled in wire_dispatch via complete_headers_request
+            debug!("HeadersReceived (unexpected in queue - normally handled in wire_dispatch)");
+        }
+        NetworkMessage::MeshPacketReceived(data, peer_addr) => {
+            let payload = EventPayload::MeshPacketReceived {
+                packet_data: data,
+                peer_addr: peer_addr.to_string(),
+            };
+            publish_network_event_if_configured(
+                nm.event_publisher(),
+                EventType::MeshPacketReceived,
+                payload,
+                "Failed to publish MeshPacketReceived",
+            )
+            .await;
+        }
+        #[cfg(feature = "stratum-v2")]
+        NetworkMessage::StratumV2MessageReceived(data, peer_addr) => {
+            let payload = EventPayload::StratumV2MessageReceived {
+                message_data: data,
+                peer_addr: peer_addr.to_string(),
+            };
+            publish_network_event_if_configured(
+                nm.event_publisher(),
+                EventType::StratumV2MessageReceived,
+                payload,
+                "Failed to publish StratumV2MessageReceived",
+            )
+            .await;
+        }
+        NetworkMessage::SettlementNotificationReceived(data, peer_addr) => {
+            publish_peer_payment(nm, "settlementnotification", data, peer_addr).await;
+        }
+        #[cfg(feature = "ctv")]
+        NetworkMessage::PaymentProofReceived(data, peer_addr) => {
+            publish_peer_payment(nm, "paymentproof", data, peer_addr).await;
+        }
+        #[cfg(feature = "ctv")]
+        NetworkMessage::SendPaymentProof(data, peer_addr) => {
+            ignore_error(
+                || nm.send_to_peer(peer_addr, data),
+                &format!("Error sending payment proof to {peer_addr}"),
+            )
+            .await;
+        }
+        #[cfg(feature = "utxo-commitments")]
+        NetworkMessage::UTXOSetReceived(data, _peer_addr) => {
+            if let Ok(ProtocolMessage::UTXOSet(msg)) = ProtocolParser::parse_message(&data) {
+                nm.complete_request(msg.request_id, data);
+            }
+        }
+        #[cfg(feature = "utxo-commitments")]
+        NetworkMessage::FilteredBlockReceived(data, _peer_addr) => {
+            if let Ok(ProtocolMessage::FilteredBlock(msg)) = ProtocolParser::parse_message(&data) {
+                nm.complete_request(msg.request_id, data);
+            }
+        }
+        #[cfg(feature = "utxo-commitments")]
+        NetworkMessage::GetUTXOSetReceived(data, peer_addr) => {
+            ignore_error(
+                || nm.handle_get_utxo_set_request(data, peer_addr),
+                &format!("Error handling GetUTXOSet from {peer_addr}"),
+            )
+            .await;
+        }
+        #[cfg(feature = "utxo-commitments")]
+        NetworkMessage::GetFilteredBlockReceived(data, peer_addr) => {
+            ignore_error(
+                || nm.handle_get_filtered_block_request(data, peer_addr),
+                &format!("Error handling GetFilteredBlock from {peer_addr}"),
+            )
+            .await;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_peer_connected(nm: &NetworkManager, addr: TransportAddr) {
+    info!("Peer connected: {:?}", addr);
+
+    let socket_addr = match &addr {
+        TransportAddr::Tcp(sock) => Some(*sock),
+        #[cfg(feature = "quinn")]
+        TransportAddr::Quinn(sock) => Some(*sock),
+        #[cfg(feature = "iroh")]
+        TransportAddr::Iroh(_) => None,
+    };
+
+    // The accept path already reserved this address in connections_per_ip.
+
+    {
+        // Send the Bitcoin P2P Version handshake to ALL transports (including Iroh).
+        // Iroh peers that speak Bitcoin-over-Iroh must still perform the version handshake;
+        // skipping it allows unauthenticated peers to skip protocol negotiation entirely.
+        let start_height = nm
+            .storage()
+            .as_ref()
+            .and_then(|s| s.chain().get_height().ok().flatten())
+            .unwrap_or(0) as i32;
+
+        let (addr_recv, addr_from) = if let Some(peer_socket) = socket_addr {
+            let peer_ip = match peer_socket.ip() {
+                std::net::IpAddr::V4(ip) => {
+                    let mut addr_bytes = [0u8; 16];
+                    addr_bytes[10] = 0xff;
+                    addr_bytes[11] = 0xff;
+                    addr_bytes[12..16].copy_from_slice(&ip.octets());
+                    addr_bytes
+                }
+                std::net::IpAddr::V6(ip) => ip.octets(),
+            };
+            (
+                NetworkAddress {
+                    time: 0,
+                    services: 0,
+                    ip: peer_ip,
+                    port: peer_socket.port(),
+                },
+                NetworkAddress {
+                    time: 0,
+                    services: 0,
+                    ip: [0u8; 16],
+                    port: 0,
+                },
+            )
+        } else {
+            // Non-TCP transport (e.g. Iroh): use zeroed addresses; the version
+            // handshake still conveys protocol version and services.
+            (
+                NetworkAddress {
+                    time: 0,
+                    services: 0,
+                    ip: [0u8; 16],
+                    port: 0,
+                },
+                NetworkAddress {
+                    time: 0,
+                    services: 0,
+                    ip: [0u8; 16],
+                    port: 0,
+                },
+            )
+        };
+
+        let version_msg = nm.create_version_message(
+            70015,
+            0,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64,
+            addr_recv,
+            addr_from,
+            rand::random::<u64>(),
+            format!("/Bitcoin Commons:{}/", env!("CARGO_PKG_VERSION")),
+            start_height,
+            true,
+        );
+
+        match ProtocolParser::serialize_message(&ProtocolMessage::Version(version_msg)) {
+            Ok(wire_msg) => {
+                if let Err(e) = nm.send_to_peer_by_transport(addr.clone(), wire_msg).await {
+                    warn!("Failed to send Version message to {:?}: {}", addr, e);
+                } else {
+                    info!("Sent Version message to {:?}", addr);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to serialize Version message for {:?}: {}", addr, e);
+            }
+        }
+    }
+
+    let event_publisher_guard = nm.event_publisher().lock().await;
+    if let Some(ref event_publisher) = *event_publisher_guard {
+        let addr_str = addr.to_string();
+        let transport_type = match &addr {
+            TransportAddr::Tcp(_) => "tcp",
+            #[cfg(feature = "quinn")]
+            TransportAddr::Quinn(_) => "quinn",
+            #[cfg(feature = "iroh")]
+            TransportAddr::Iroh(_) => "iroh",
+        };
+
+        let pm = nm.peer_manager_mutex().lock().await;
+        let (services, version) = if let Some(peer) = pm.get_peer(&addr) {
+            (peer.services(), peer.version())
+        } else {
+            (0, 0)
+        };
+        drop(pm);
+
+        let event_pub_clone = Arc::clone(event_publisher);
+        tokio::spawn(async move {
+            event_pub_clone
+                .publish_peer_connected(&addr_str, transport_type, services, version)
+                .await;
+        });
+    }
+}
+
+#[allow(irrefutable_let_patterns)] // TransportAddr is TCP-only without quinn/iroh features
+async fn handle_peer_disconnected(nm: &NetworkManager, addr: TransportAddr) {
+    info!("Peer disconnected: {:?}", addr);
+
+    let sock_opt: Option<std::net::SocketAddr> = match &addr {
+        TransportAddr::Tcp(s) => Some(*s),
+        #[cfg(feature = "quinn")]
+        TransportAddr::Quinn(s) => Some(*s),
+        #[cfg(feature = "iroh")]
+        TransportAddr::Iroh(_) => None,
+    };
+    let handshake_done = {
+        let pm = nm.peer_manager_mutex().lock().await;
+        pm.get_peer(&addr).is_some_and(|peer| peer.version() > 0)
+    };
+
+    nm.clear_companion_udp_peer_on_disconnect(&addr).await;
+
+    if let Some(sock) = sock_opt {
+        nm.revoke_high_bandwidth_peer(sock).await;
+    }
+
+    let mut pm = nm.peer_manager_mutex().lock().await;
+    if let Some(peer) = pm.get_peer_mut(&addr) {
+        peer.shutdown_connection();
+    }
+    pm.remove_peer(&addr);
+    drop(pm);
+
+    if let Some(sock) = sock_opt {
+        if !handshake_done {
+            crate::network::peer_connections::note_dial_failure(sock);
+        }
+    }
+
+    // Clean up per-connection state for this peer.
+    let sock_opt: Option<std::net::SocketAddr> = sock_opt;
+    if let Some(sock) = sock_opt {
+        nm.getaddr_responded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&sock);
+
+        // Remove per-peer rate limiter entries to prevent unbounded map growth
+        // on nodes with many transient peers.
+        nm.peer_tx_rate_limiters().lock().await.remove(&sock);
+        nm.peer_tx_byte_rate_limiters().lock().await.remove(&sock);
+        nm.peer_message_rates().lock().await.remove(&sock);
+        nm.inventory()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove_peer(&sock.to_string());
+        nm.tx_requests()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .forget_peer(sock);
+        nm.peer_states().write().await.remove(&sock);
+        nm.fill_high_bandwidth_slots().await;
+
+        // Decrement eclipse-prevention diversity counter for this peer's IP.
+        nm.remove_peer_diversity(sock.ip());
+
+        // Decrement per-IP connection count.
+        {
+            let mut per_ip = nm.connections_per_ip().lock().await;
+            if let Some(count) = per_ip.get_mut(&sock.ip()) {
+                if *count <= 1 {
+                    per_ip.remove(&sock.ip());
+                } else {
+                    *count -= 1;
+                }
+            }
+        }
+    }
+
+    // Enqueue TCP persistent peers for automatic reconnect (see `start_peer_reconnection_task`).
+    // The periodic task used to bail out when `current_peers >= min_peers`, so a LAN node could
+    // stay gone while many WAN peers kept the count high.
+    if let TransportAddr::Tcp(sock) = addr {
+        // R-243: same cancel as handshake PeerDisconnected. Without this, RST
+        // of the covering hero leaves GetData oneshots parked (R-242 @186264).
+        nm.cancel_pending_block_requests_for_disconnected_peer(sock)
+            .await;
+        crate::node::parallel_ibd::ibd_peer_gone(&sock.to_string());
+        let persistent = nm.get_persistent_peers().await;
+        if persistent.contains(&sock) {
+            let mut q = nm.peer_reconnection_queue().lock().await;
+            q.entry(sock).or_insert((0, current_timestamp(), 1.0));
+            info!(
+                "Persistent peer {} queued for automatic TCP reconnection",
+                sock
+            );
+        }
+    }
+
+    let event_publisher_guard = nm.event_publisher().lock().await;
+    if let Some(ref event_publisher) = *event_publisher_guard {
+        let addr_str = addr.to_string();
+        let event_pub_clone = Arc::clone(event_publisher);
+        tokio::spawn(async move {
+            event_pub_clone
+                .publish_peer_disconnected(&addr_str, "disconnected")
+                .await;
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::transport::TransportAddr;
+    use std::net::SocketAddr;
+
+    fn manager() -> NetworkManager {
+        let addr: SocketAddr = "127.0.0.1:18334".parse().unwrap();
+        NetworkManager::new(addr)
+    }
+
+    #[tokio::test]
+    async fn block_received_queues_block_for_run_loop() {
+        let nm = manager();
+        let payload = vec![0x01, 0x02, 0x03];
+        handle_network_message(&nm, NetworkMessage::BlockReceived(payload.clone()))
+            .await
+            .unwrap();
+        assert_eq!(nm.try_recv_block(), Some(payload));
+    }
+
+    #[tokio::test]
+    async fn inventory_and_pkgtxn_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18334".parse().unwrap();
+        let addr: SocketAddr = "127.0.0.1:18334".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::InventoryReceived(vec![], addr))
+            .await
+            .unwrap();
+        handle_network_message(&nm, NetworkMessage::SendPkgTxnReceived(vec![], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_connected_and_disconnected_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18335".parse().unwrap();
+        let transport = TransportAddr::Tcp(addr);
+        handle_network_message(&nm, NetworkMessage::PeerConnected(transport.clone()))
+            .await
+            .unwrap();
+        handle_network_message(&nm, NetworkMessage::PeerDisconnected(transport))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn transaction_received_invalid_wire_is_noop() {
+        let nm = manager();
+        handle_network_message(&nm, NetworkMessage::TransactionReceived(vec![0xff]))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn mesh_packet_received_without_publisher_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18334".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::MeshPacketReceived(vec![1, 2, 3], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn payment_ack_received_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18334".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::PaymentACKReceived(vec![], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn headers_and_settlement_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18336".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::HeadersReceived(vec![], addr))
+            .await
+            .unwrap();
+        handle_network_message(
+            &nm,
+            NetworkMessage::SettlementNotificationReceived(vec![], addr),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[cfg(feature = "utxo-commitments")]
+    #[tokio::test]
+    async fn utxo_commitment_messages_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18337".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::UTXOSetReceived(vec![], addr))
+            .await
+            .unwrap();
+        handle_network_message(&nm, NetworkMessage::FilteredBlockReceived(vec![], addr))
+            .await
+            .unwrap();
+        handle_network_message(&nm, NetworkMessage::GetUTXOSetReceived(vec![], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn payment_request_received_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18338".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::PaymentRequestReceived(vec![], addr))
+            .await
+            .unwrap();
+        handle_network_message(&nm, NetworkMessage::ModuleReceived(vec![], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn raw_message_received_invalid_wire_is_noop() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18339".parse().unwrap();
+        handle_network_message(
+            &nm,
+            NetworkMessage::RawMessageReceived(
+                vec![0xff],
+                crate::network::transport::PeerIdentity::Socket(addr),
+            ),
+        )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_module_list_invalid_wire_is_noop() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18341".parse().unwrap();
+        handle_network_message(
+            &nm,
+            NetworkMessage::GetModuleListReceived(vec![0xff, 0xee], addr),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_module_invalid_wire_is_noop() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18342".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::GetModuleReceived(vec![0xff], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_module_by_hash_invalid_wire_is_noop() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18343".parse().unwrap();
+        handle_network_message(
+            &nm,
+            NetworkMessage::GetModuleByHashReceived(vec![0xff], addr),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn module_list_invalid_wire_is_noop() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18344".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::ModuleListReceived(vec![0xff], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn bip157_filter_messages_invalid_wire_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18345".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::GetCfiltersReceived(vec![0xff], addr))
+            .await
+            .unwrap();
+        handle_network_message(&nm, NetworkMessage::GetCfheadersReceived(vec![0xff], addr))
+            .await
+            .unwrap();
+        handle_network_message(&nm, NetworkMessage::GetCfcheckptReceived(vec![0xff], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pkgtxn_and_payment_wire_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18346".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::PkgTxnReceived(vec![0xff], addr))
+            .await
+            .unwrap();
+        handle_network_message(
+            &nm,
+            NetworkMessage::GetPaymentRequestReceived(vec![0xff], addr),
+        )
+        .await
+        .unwrap();
+        handle_network_message(&nm, NetworkMessage::PaymentReceived(vec![0xff], addr))
+            .await
+            .unwrap();
+        handle_network_message(&nm, NetworkMessage::ModuleByHashReceived(vec![0xff], addr))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn module_by_hash_response_smoke() {
+        let nm = manager();
+        let addr: SocketAddr = "127.0.0.1:18347".parse().unwrap();
+        handle_network_message(&nm, NetworkMessage::ModuleByHashReceived(vec![], addr))
+            .await
+            .unwrap();
+    }
+}

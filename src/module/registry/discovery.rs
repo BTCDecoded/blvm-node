@@ -1,0 +1,231 @@
+//! Module discovery
+//!
+//! Scans module directories and discovers available modules.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use tracing::{debug, info, warn};
+
+use crate::module::registry::manifest::ModuleManifest;
+use crate::module::traits::ModuleError;
+use crate::module::validation::ManifestValidator;
+
+/// Discovered module information
+#[derive(Debug, Clone)]
+pub struct DiscoveredModule {
+    /// Module directory path
+    pub directory: PathBuf,
+    /// Module manifest
+    pub manifest: ModuleManifest,
+    /// Path to module binary
+    pub binary_path: PathBuf,
+}
+
+/// Module discovery scanner
+pub struct ModuleDiscovery {
+    /// Base directory to scan for modules
+    modules_dir: PathBuf,
+}
+
+impl ModuleDiscovery {
+    /// Create a new module discovery scanner
+    pub fn new<P: AsRef<Path>>(modules_dir: P) -> Self {
+        Self {
+            modules_dir: modules_dir.as_ref().to_path_buf(),
+        }
+    }
+
+    /// Discover all modules in the modules directory
+    pub fn discover_modules(&self) -> Result<Vec<DiscoveredModule>, ModuleError> {
+        info!("Discovering modules in {:?}", self.modules_dir);
+
+        if !self.modules_dir.exists() {
+            debug!(
+                "Modules directory does not exist, creating: {:?}",
+                self.modules_dir
+            );
+            fs::create_dir_all(&self.modules_dir)
+                .map_err(|e| ModuleError::op_err("Failed to create modules directory", e))?;
+            return Ok(Vec::new());
+        }
+
+        let mut modules = Vec::new();
+
+        // Scan directory for module subdirectories
+        let entries = fs::read_dir(&self.modules_dir)
+            .map_err(|e| ModuleError::op_err("Failed to read modules directory", e))?;
+
+        for entry in entries {
+            let entry =
+                entry.map_err(|e| ModuleError::op_err("Failed to read directory entry", e))?;
+
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            // Look for module.toml in this directory
+            let manifest_path = path.join("module.toml");
+            if !manifest_path.exists() {
+                debug!("No module.toml found in {:?}, skipping", path);
+                continue;
+            }
+
+            // Parse manifest
+            match ModuleManifest::from_file(&manifest_path) {
+                Ok(manifest) => {
+                    // Validate manifest
+                    let validator = ManifestValidator::new();
+                    match validator.validate(&manifest) {
+                        crate::module::validation::ValidationResult::Valid => {
+                            debug!("Manifest validated for module: {}", manifest.name);
+                        }
+                        crate::module::validation::ValidationResult::Invalid(errors) => {
+                            warn!(
+                                "Skipping module {}: manifest validation failed: {:?}",
+                                manifest.name, errors
+                            );
+                            continue;
+                        }
+                    }
+
+                    // Find module binary (skip this directory on error so one bad install
+                    // does not abort discovery for all modules).
+                    let binary_path = match self.find_module_binary(&path, &manifest.entry_point) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            warn!(
+                                "Skipping module directory {:?} (manifest name: {}): {}",
+                                path, manifest.name, e
+                            );
+                            continue;
+                        }
+                    };
+
+                    modules.push(DiscoveredModule {
+                        directory: path,
+                        manifest,
+                        binary_path,
+                    });
+                }
+                Err(e) => {
+                    warn!("Failed to parse manifest in {:?}: {}", path, e);
+                    continue;
+                }
+            }
+        }
+
+        info!("Discovered {} modules", modules.len());
+        Ok(modules)
+    }
+
+    /// Find module binary path
+    ///
+    /// Security: Validates resolved path stays within modules_dir to prevent path traversal
+    /// (e.g. entry_point = "../../../etc/passwd").
+    fn find_module_binary(
+        &self,
+        module_dir: &Path,
+        entry_point: &str,
+    ) -> Result<PathBuf, ModuleError> {
+        // Reject entry_point with path traversal components
+        if entry_point.contains("..") {
+            return Err(ModuleError::OperationError(format!(
+                "Invalid entry_point: path traversal not allowed (entry_point: {entry_point})"
+            )));
+        }
+
+        // Try different possible locations
+        let candidates = vec![
+            module_dir.join(entry_point),
+            module_dir.join("target").join("release").join(entry_point),
+            module_dir.join("target").join("debug").join(entry_point),
+            self.modules_dir.join(entry_point),
+        ];
+
+        let canonical_modules_dir = self.modules_dir.canonicalize().map_err(|e| {
+            ModuleError::OperationError(format!(
+                "Failed to canonicalize modules_dir {:?}: {e}",
+                self.modules_dir
+            ))
+        })?;
+
+        for candidate in candidates {
+            if candidate.exists() && candidate.is_file() {
+                // Security: Ensure resolved path stays within modules_dir (prevents path traversal)
+                let canonical_binary = candidate.canonicalize().map_err(|e| {
+                    ModuleError::OperationError(format!(
+                        "Failed to canonicalize binary path {candidate:?}: {e}"
+                    ))
+                })?;
+
+                if !canonical_binary.starts_with(&canonical_modules_dir) {
+                    warn!(
+                        "Rejected module binary outside modules_dir: {:?} (allowed: {:?})",
+                        canonical_binary, canonical_modules_dir
+                    );
+                    continue;
+                }
+
+                // Check if executable (on Unix) — skip for .wasm (loaded by wasmtime, not exec'd)
+                let is_wasm = candidate.extension().map(|e| e == "wasm").unwrap_or(false);
+                if is_wasm {
+                    return Ok(canonical_binary);
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(metadata) = candidate.metadata() {
+                        let perms = metadata.permissions();
+                        if perms.mode() & 0o111 != 0 {
+                            return Ok(canonical_binary);
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    return Ok(canonical_binary);
+                }
+            }
+        }
+
+        Err(ModuleError::ModuleNotFound(format!(
+            "Module binary not found for entry_point: {entry_point} in {module_dir:?}"
+        )))
+    }
+
+    /// Discover a specific module by name
+    pub fn discover_module(&self, module_name: &str) -> Result<DiscoveredModule, ModuleError> {
+        let module_dir = self.modules_dir.join(module_name);
+        let manifest_path = module_dir.join("module.toml");
+
+        if !manifest_path.exists() {
+            return Err(ModuleError::ModuleNotFound(format!(
+                "Module {module_name} not found (no module.toml in {module_dir:?})"
+            )));
+        }
+
+        let manifest = ModuleManifest::from_file(&manifest_path)?;
+
+        // Validate manifest
+        let validator = ManifestValidator::new();
+        match validator.validate(&manifest) {
+            crate::module::validation::ValidationResult::Valid => {
+                debug!("Manifest validated: {}", module_name);
+            }
+            crate::module::validation::ValidationResult::Invalid(errors) => {
+                return Err(ModuleError::OperationError(format!(
+                    "Manifest validation failed for module {module_name}: {errors:?}"
+                )));
+            }
+        }
+
+        let binary_path = self.find_module_binary(&module_dir, &manifest.entry_point)?;
+
+        Ok(DiscoveredModule {
+            directory: module_dir,
+            manifest,
+            binary_path,
+        })
+    }
+}

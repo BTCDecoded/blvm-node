@@ -1,0 +1,43 @@
+//! Convert Bitcoin Core config to blvm-node format.
+//!
+//! Used by `blvm config convert-core`.
+
+use anyhow::{Context, Result};
+use std::path::Path;
+
+use crate::config::{generate_toml_config, parse_bitcoin_conf};
+
+/// Run config convert-core: convert bitcoin.conf to config.toml.
+pub fn run_config_convert_core(input: &Path, output: &Path, verbose: bool) -> Result<()> {
+    if !input.exists() {
+        anyhow::bail!("Input file '{}' not found", input.display());
+    }
+
+    if verbose {
+        eprintln!("Reading Bitcoin Core config from: {}", input.display());
+    }
+
+    let bitcoin_config = parse_bitcoin_conf(input)
+        .with_context(|| format!("Failed to parse {}", input.display()))?;
+
+    if verbose {
+        eprintln!("Generating blvm-node config...");
+    }
+
+    let toml_config = generate_toml_config(&bitcoin_config, input);
+    crate::config::write_private_config(output, &toml_config)
+        .with_context(|| format!("Failed to write {}", output.display()))?;
+
+    println!("✓ Configuration converted successfully!");
+    for (key, value) in &bitcoin_config.unmapped {
+        println!("{}", crate::config::format_unmapped_comment(key, value));
+    }
+    println!("  Input:  {}", input.display());
+    println!("  Output: {}", output.display());
+    println!();
+    println!("Review the generated config:");
+    println!("  - storage.data_dir is the network-specific Core tree (chainstate/ + blocks/)");
+    println!("  - Some Core options still need manual mapping");
+
+    Ok(())
+}

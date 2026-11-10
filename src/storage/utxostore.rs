@@ -1,0 +1,694 @@
+//! UTXO set storage implementation
+//!
+//! Stores and manages the UTXO set for efficient transaction validation.
+
+use crate::storage::database::{Database, Tree};
+use anyhow::Result;
+use blvm_protocol::{OutPoint, UTXO, UtxoSet};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+#[cfg(feature = "utxo-compression")]
+use zstd;
+
+#[cfg(test)]
+thread_local! {
+    static GET_ALL_UTXOS_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_get_all_utxos_calls() {
+    GET_ALL_UTXOS_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn get_all_utxos_calls() -> u64 {
+    GET_ALL_UTXOS_CALLS.with(|calls| calls.get())
+}
+
+/// UTXO set storage manager
+pub struct UtxoStore {
+    #[allow(dead_code)]
+    db: Arc<dyn Database>,
+    utxos: Arc<dyn Tree>,
+    spent_outputs: Arc<dyn Tree>,
+    value_codec: crate::storage::utxo_value_codec::ValueCodec,
+    #[cfg(feature = "utxo-compression")]
+    compression_enabled: bool,
+    #[cfg(feature = "utxo-compression")]
+    compression_level: u32,
+}
+
+impl UtxoStore {
+    /// Create a new UTXO store
+    pub fn new(db: Arc<dyn Database>) -> Result<Self> {
+        Self::new_with_compression(
+            db,
+            #[cfg(feature = "utxo-compression")]
+            false, // Default: compression disabled unless explicitly enabled
+            #[cfg(feature = "utxo-compression")]
+            1, // Default compression level (fast)
+        )
+    }
+
+    /// Create a new UTXO store with compression settings
+    pub fn new_with_compression(
+        db: Arc<dyn Database>,
+        #[cfg(feature = "utxo-compression")] compression_enabled: bool,
+        #[cfg(feature = "utxo-compression")] compression_level: u32,
+    ) -> Result<Self> {
+        let utxos = Arc::from(db.open_tree("utxos")?);
+        let spent_outputs = Arc::from(db.open_tree("spent_outputs")?);
+        let value_codec = crate::storage::utxo_value_codec::ValueCodec::for_database(db.as_ref());
+
+        Ok(Self {
+            db,
+            utxos,
+            spent_outputs,
+            value_codec,
+            #[cfg(feature = "utxo-compression")]
+            compression_enabled,
+            #[cfg(feature = "utxo-compression")]
+            compression_level,
+        })
+    }
+
+    #[inline]
+    fn serialize_utxo(&self, utxo: &UTXO) -> Result<Vec<u8>> {
+        crate::storage::utxo_value_codec::encode_utxo_with_codec(self.value_codec, utxo)
+    }
+
+    #[inline]
+    pub(crate) fn value_codec(&self) -> crate::storage::utxo_value_codec::ValueCodec {
+        self.value_codec
+    }
+
+    #[inline]
+    fn deserialize_utxo_data(&self, bytes: &[u8]) -> Result<UTXO> {
+        crate::storage::utxo_value_codec::decode_utxo_with_codec(self.value_codec, bytes)
+    }
+
+    /// Store the entire UTXO set
+    ///
+    /// Performance optimization: Caches serialized UTXO bytes to avoid re-serialization
+    /// Performance optimization: Parallelizes serialization and caching for large UTXO sets
+    pub fn store_utxo_set(&self, utxo_set: &UtxoSet) -> Result<()> {
+        // Clear existing UTXOs
+        self.utxos.clear()?;
+
+        // Optimization: For large UTXO sets, parallelize serialization
+        #[cfg(feature = "production")]
+        {
+            use blvm_protocol::rayon::iter::IntoParallelRefIterator;
+            use blvm_protocol::rayon::prelude::*;
+
+            // Collect all UTXOs into vector for parallel processing
+            let utxos: Vec<_> = utxo_set.iter().collect();
+
+            // Parallelize serialization (but not database writes - they must be sequential)
+            let serialized_utxos: Vec<(Vec<u8>, Vec<u8>)> = utxos
+                .par_iter()
+                .map(|(outpoint, utxo)| {
+                    let key = self.outpoint_key(outpoint);
+                    let value = self.serialize_utxo(utxo.as_ref())?;
+                    Ok((key, value))
+                })
+                .collect::<Result<Vec<(Vec<u8>, Vec<u8>)>>>()?;
+
+            let mut batch = self.utxos.batch()?;
+            for (key, value) in serialized_utxos {
+                #[cfg(feature = "utxo-compression")]
+                let data_to_store = if self.compression_enabled {
+                    zstd::encode_all(&value[..], self.compression_level as i32)
+                        .map_err(|e| anyhow::anyhow!("UTXO compression failed: {}", e))?
+                } else {
+                    value
+                };
+
+                #[cfg(not(feature = "utxo-compression"))]
+                let data_to_store = value;
+
+                batch.put(&key, &data_to_store);
+            }
+            batch.commit()?;
+        }
+
+        #[cfg(not(feature = "production"))]
+        {
+            let mut pairs = Vec::new();
+            for (outpoint, utxo) in utxo_set {
+                let key = self.outpoint_key(outpoint);
+                let value = self.serialize_utxo(utxo.as_ref())?;
+                pairs.push((key, value));
+            }
+            let mut batch = self.utxos.batch()?;
+            for (key, value) in pairs {
+                #[cfg(feature = "utxo-compression")]
+                let data_to_store = if self.compression_enabled {
+                    zstd::encode_all(&value[..], self.compression_level as i32)
+                        .map_err(|e| anyhow::anyhow!("UTXO compression failed: {}", e))?
+                } else {
+                    value
+                };
+
+                #[cfg(not(feature = "utxo-compression"))]
+                let data_to_store = value;
+
+                batch.put(&key, &data_to_store);
+            }
+            batch.commit()?;
+        }
+
+        Ok(())
+    }
+
+    /// Load the entire UTXO set
+    pub fn load_utxo_set(&self) -> Result<UtxoSet> {
+        let mut utxo_set = UtxoSet::default();
+
+        for result in self.utxos.iter() {
+            let (key, value) = result?;
+            let outpoint = self.outpoint_from_key(&key)?;
+
+            // Decompress if data is compressed
+            #[cfg(feature = "utxo-compression")]
+            let utxo_data = if Self::is_compressed(&value) {
+                crate::storage::zstd_limit::decode_bounded(&value[..])
+                    .map_err(|e| anyhow::anyhow!("UTXO decompression failed: {}", e))?
+            } else {
+                value
+            };
+
+            #[cfg(not(feature = "utxo-compression"))]
+            let utxo_data = value;
+
+            let utxo: UTXO = self.deserialize_utxo_data(&utxo_data)?;
+            utxo_set.insert(outpoint, std::sync::Arc::new(utxo));
+        }
+
+        Ok(utxo_set)
+    }
+
+    /// Add a UTXO to the set
+    pub fn add_utxo(&self, outpoint: &OutPoint, utxo: &UTXO) -> Result<()> {
+        let key = self.outpoint_key(outpoint);
+        let value = self.serialize_utxo(utxo)?;
+
+        // Compress UTXO data if compression is enabled
+        #[cfg(feature = "utxo-compression")]
+        let data_to_store = if self.compression_enabled {
+            zstd::encode_all(&value[..], self.compression_level as i32)
+                .map_err(|e| anyhow::anyhow!("UTXO compression failed: {}", e))?
+        } else {
+            value
+        };
+
+        #[cfg(not(feature = "utxo-compression"))]
+        let data_to_store = value;
+
+        self.utxos.insert(&key, &data_to_store)?;
+        Ok(())
+    }
+
+    /// Remove a UTXO from the set
+    pub fn remove_utxo(&self, outpoint: &OutPoint) -> Result<()> {
+        let key = self.outpoint_key(outpoint);
+        let legacy = self.legacy_outpoint_key(outpoint);
+        crate::storage::database::commit_keyed(&[
+            (self.utxos.as_ref(), key.as_slice(), None),
+            (self.utxos.as_ref(), legacy.as_slice(), None),
+        ])
+    }
+
+    /// Get a UTXO by outpoint
+    pub fn get_utxo(&self, outpoint: &OutPoint) -> Result<Option<UTXO>> {
+        let key = self.outpoint_key(outpoint);
+
+        // heed3 zero-copy fast path: open a read txn, read the mmap'd value directly —
+        // skips the Vec<u8> allocation from Tree::get and the full rkyv deserialize pass.
+        // Not compatible with utxo-compression (rkyv + zstd don't co-exist).
+        #[cfg(all(feature = "heed3", not(feature = "utxo-compression")))]
+        if self.value_codec == crate::storage::utxo_value_codec::ValueCodec::Rkyv {
+            if let Some(heed3_tree) = self.utxos.as_heed3_tree() {
+                let rtxn = heed3_tree.env().read_txn()?;
+                let legacy = self.legacy_outpoint_key(outpoint);
+                let slices =
+                    heed3_tree.get_many_heed3(&[key.as_slice(), legacy.as_slice()], &rtxn)?;
+                return match slices.into_iter().flatten().next() {
+                    Some(bytes) => {
+                        let archived = crate::storage::rkyv_codec::access_utxo(bytes)?;
+                        Ok(Some(crate::storage::rkyv_codec::utxo_from_archived(
+                            archived,
+                        )))
+                    }
+                    None => Ok(None),
+                };
+            }
+        }
+
+        let legacy = self.legacy_outpoint_key(outpoint);
+        let data = if let Some(data) = self.utxos.get(&key)? {
+            data
+        } else if let Some(data) = self.utxos.get(&legacy)? {
+            data
+        } else {
+            return Ok(None);
+        };
+        // Decompress if data is compressed (auto-detect via zstd magic bytes)
+        #[cfg(feature = "utxo-compression")]
+        let utxo_data = if Self::is_compressed(&data) {
+            crate::storage::zstd_limit::decode_bounded(&data[..])
+                .map_err(|e| anyhow::anyhow!("UTXO decompression failed: {}", e))?
+        } else {
+            data
+        };
+
+        #[cfg(not(feature = "utxo-compression"))]
+        let utxo_data = data;
+
+        let utxo: UTXO = self.deserialize_utxo_data(&utxo_data)?;
+        Ok(Some(utxo))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_undecodable_utxo(&self, outpoint: &OutPoint) -> Result<()> {
+        let key = self.outpoint_key(outpoint);
+        self.utxos.insert(&key, b"not-a-utxo")?;
+        Ok(())
+    }
+
+    /// Check if data is compressed (zstd magic bytes: 0x28, 0xB5, 0x2F, 0xFD)
+    #[cfg(feature = "utxo-compression")]
+    fn is_compressed(data: &[u8]) -> bool {
+        data.len() >= 4 && data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD
+    }
+
+    /// Check if a UTXO exists
+    pub fn has_utxo(&self, outpoint: &OutPoint) -> Result<bool> {
+        let key = self.outpoint_key(outpoint);
+        self.utxos.contains_key(&key)
+    }
+
+    /// Mark an output as spent
+    pub fn mark_spent(&self, outpoint: &OutPoint) -> Result<()> {
+        let key = self.outpoint_key(outpoint);
+        self.spent_outputs.insert(&key, &[])?;
+        Ok(())
+    }
+
+    /// The chain-table tree this store already has open.
+    pub(crate) fn utxo_tree(&self) -> Arc<dyn Tree> {
+        Arc::clone(&self.utxos)
+    }
+
+    /// Get all UTXOs in the set
+    pub fn get_all_utxos(&self) -> Result<UtxoSet> {
+        #[cfg(test)]
+        GET_ALL_UTXOS_CALLS.with(|calls| calls.set(calls.get() + 1));
+        self.load_utxo_set()
+    }
+
+    /// Check if an output is spent
+    pub fn is_spent(&self, outpoint: &OutPoint) -> Result<bool> {
+        let key = self.outpoint_key(outpoint);
+        self.spent_outputs.contains_key(&key)
+    }
+
+    /// Get total number of UTXOs
+    pub fn utxo_count(&self) -> Result<usize> {
+        self.utxos.len()
+    }
+
+    /// Get total UTXO value. A value outside the money range is an error.
+    pub fn total_value(&self) -> Result<u64> {
+        let mut total = 0u128;
+
+        for result in self.utxos.iter() {
+            let (_, value) = result?;
+
+            // Decompress if data is compressed
+            #[cfg(feature = "utxo-compression")]
+            let utxo_data = if Self::is_compressed(&value) {
+                crate::storage::zstd_limit::decode_bounded(&value[..])
+                    .map_err(|e| anyhow::anyhow!("UTXO decompression failed: {}", e))?
+            } else {
+                value
+            };
+
+            #[cfg(not(feature = "utxo-compression"))]
+            let utxo_data = value;
+
+            let utxo: UTXO = self.deserialize_utxo_data(&utxo_data)?;
+            total = total.saturating_add(crate::storage::chainstate::utxo_money_total([
+                utxo.value,
+            ])?);
+        }
+
+        Ok(u64::try_from(total).unwrap_or(u64::MAX))
+    }
+
+    /// Convert outpoint to storage key
+    fn outpoint_key(&self, outpoint: &OutPoint) -> Vec<u8> {
+        let mut key = Vec::with_capacity(40);
+        key.extend_from_slice(&outpoint.hash);
+        // Always 8-byte big-endian vout so keys match outpoint_from_key (was 4-byte u32 → load failed).
+        key.extend_from_slice(&(outpoint.index as u64).to_be_bytes());
+        key
+    }
+
+    /// 32-byte txid plus a 4-byte big-endian vout. Readers still accept rows written this way.
+    fn legacy_outpoint_key(&self, outpoint: &OutPoint) -> [u8; 36] {
+        let mut key = [0u8; 36];
+        key[..32].copy_from_slice(&outpoint.hash);
+        key[32..].copy_from_slice(&outpoint.index.to_be_bytes());
+        key
+    }
+
+    /// Convert storage key to outpoint
+    fn outpoint_from_key(&self, key: &[u8]) -> Result<OutPoint> {
+        if key.len() < 36 {
+            return Err(anyhow::anyhow!("Invalid outpoint key length"));
+        }
+
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&key[0..32]);
+        let index = if key.len() >= 40 {
+            u64::from_be_bytes([
+                key[32], key[33], key[34], key[35], key[36], key[37], key[38], key[39],
+            ]) as u32
+        } else {
+            // Legacy keys: 32-byte txid + 4-byte vout
+            u32::from_be_bytes([key[32], key[33], key[34], key[35]])
+        };
+
+        Ok(OutPoint { hash, index })
+    }
+}
+
+/// Cached UTXO store with write-behind batching for IBD optimization
+///
+/// This wrapper adds:
+/// - In-memory LRU cache for hot UTXOs (5-10x lookup speedup)
+/// - Pending write buffer for batch commits (10-100x write speedup)
+///
+/// # Usage
+/// ```ignore
+/// let cached = CachedUtxoStore::new(utxo_store, 100_000);
+///
+/// // Operations work on cache
+/// cached.add(outpoint, utxo)?;
+/// cached.spend(&outpoint)?;
+/// let utxo = cached.get(&outpoint)?;
+///
+/// // Commit pending writes every N blocks
+/// cached.flush()?;
+/// ```
+#[cfg(feature = "production")]
+pub struct CachedUtxoStore {
+    /// Underlying persistent store
+    inner: UtxoStore,
+    /// Hot UTXO cache (LRU eviction)
+    cache: std::sync::RwLock<blvm_protocol::lru::LruCache<OutPoint, UTXO>>,
+    /// Pending writes: None = delete, Some = insert
+    pending: std::sync::Mutex<Vec<(OutPoint, Option<UTXO>)>>,
+    /// Statistics
+    stats: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(feature = "production")]
+impl CachedUtxoStore {
+    /// Create a new cached UTXO store
+    ///
+    /// # Arguments
+    /// * `inner` - The underlying persistent UTXO store
+    /// * `cache_size` - Maximum number of UTXOs to cache in memory
+    ///
+    /// Recommended cache sizes:
+    /// - IBD: 100,000 - 500,000 (covers most active UTXOs)
+    /// - Normal operation: 50,000 - 100,000
+    pub fn new(inner: UtxoStore, cache_size: usize) -> Self {
+        use std::num::NonZeroUsize;
+        Self {
+            inner,
+            cache: std::sync::RwLock::new(blvm_protocol::lru::LruCache::new(
+                NonZeroUsize::new(cache_size).unwrap_or(NonZeroUsize::new(100_000).unwrap()),
+            )),
+            pending: std::sync::Mutex::new(Vec::with_capacity(10_000)),
+            stats: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Get a UTXO by outpoint (cache-first)
+    pub fn get(&self, outpoint: &OutPoint) -> Result<Option<UTXO>> {
+        // Check cache first
+        {
+            let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(utxo) = cache.get(outpoint) {
+                self.stats
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed); // Cache hit
+                return Ok(Some(utxo.clone()));
+            }
+        }
+
+        // Cache miss - fetch from disk
+        if let Some(utxo) = self.inner.get_utxo(outpoint)? {
+            // Add to cache
+            let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
+            cache.put(*outpoint, utxo.clone());
+            return Ok(Some(utxo));
+        }
+
+        Ok(None)
+    }
+
+    /// Add a new UTXO (goes to cache and pending writes)
+    pub fn add(&self, outpoint: OutPoint, utxo: UTXO) -> Result<()> {
+        // Add to cache
+        {
+            let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
+            cache.put(outpoint, utxo.clone());
+        }
+
+        // Add to pending writes
+        {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pending.push((outpoint, Some(utxo)));
+        }
+
+        Ok(())
+    }
+
+    /// Spend a UTXO (removes from cache, adds delete to pending)
+    pub fn spend(&self, outpoint: &OutPoint) -> Result<Option<UTXO>> {
+        // Remove from cache
+        let utxo = {
+            let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
+            cache.pop(outpoint)
+        };
+
+        // If not in cache, try to get from disk (for return value)
+        let utxo = match utxo {
+            Some(u) => Some(u),
+            None => self.inner.get_utxo(outpoint)?,
+        };
+
+        // Add delete to pending writes
+        {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pending.push((*outpoint, None));
+        }
+
+        Ok(utxo)
+    }
+
+    /// Flush all pending writes to disk using batch writer
+    ///
+    /// This is the key performance optimization - instead of one commit per
+    /// UTXO change, we commit thousands of changes in a single transaction.
+    pub fn flush(&self) -> Result<usize> {
+        use crate::storage::database::BatchWriter;
+
+        let pending_ops = {
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *pending)
+        };
+
+        if pending_ops.is_empty() {
+            return Ok(0);
+        }
+
+        let count = pending_ops.len();
+
+        // Use batch writer for atomic commit
+        let mut batch = self.inner.utxos.batch()?;
+
+        for (outpoint, utxo_opt) in pending_ops {
+            let key = outpoint_to_key(&outpoint);
+
+            match utxo_opt {
+                Some(utxo) => {
+                    let value = crate::storage::utxo_value_codec::encode_utxo_with_codec(
+                        self.inner.value_codec(),
+                        &utxo,
+                    )
+                    .map_err(|e| anyhow::anyhow!("Failed to serialize UTXO: {}", e))?;
+                    batch.put(&key, &value);
+                }
+                None => {
+                    batch.delete(&key);
+                }
+            }
+        }
+
+        batch.commit()?;
+
+        Ok(count)
+    }
+
+    /// Get number of pending writes
+    pub fn pending_count(&self) -> usize {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Get cache statistics (hit count since creation)
+    pub fn cache_hits(&self) -> u64 {
+        self.stats.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Get the underlying UtxoStore (for operations not supported by cache)
+    pub fn inner(&self) -> &UtxoStore {
+        &self.inner
+    }
+}
+
+/// Helper function to convert OutPoint to storage key
+fn outpoint_to_key(outpoint: &OutPoint) -> Vec<u8> {
+    let mut key = Vec::with_capacity(40);
+    key.extend_from_slice(&outpoint.hash);
+    key.extend_from_slice(&outpoint.index.to_be_bytes());
+    key
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blvm_protocol::opcodes::OP_1;
+
+    #[test]
+    fn total_value_rejects_a_negative_value() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = crate::storage::Storage::new(temp.path()).unwrap();
+        let utxos = storage.utxos();
+        utxos
+            .add_utxo(
+                &OutPoint {
+                    hash: [1u8; 32],
+                    index: 0,
+                },
+                &UTXO {
+                    value: 50_000,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 0,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+        utxos
+            .add_utxo(
+                &OutPoint {
+                    hash: [9u8; 32],
+                    index: 0,
+                },
+                &UTXO {
+                    value: -1,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 0,
+                    is_coinbase: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(utxos.utxo_count().unwrap(), 2);
+        let err = utxos.total_value().unwrap_err();
+        assert!(
+            err.to_string().contains("outside the money range"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_second_output_of_the_same_txid_keeps_its_own_value() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = crate::storage::Storage::new(temp.path()).unwrap();
+        let utxos = storage.utxos();
+        let hash = [4u8; 32];
+        let write = |index: u32, value: i64| {
+            utxos
+                .add_utxo(
+                    &OutPoint { hash, index },
+                    &UTXO {
+                        value,
+                        script_pubkey: vec![OP_1].into(),
+                        height: 0,
+                        is_coinbase: false,
+                    },
+                )
+                .unwrap();
+        };
+        write(0, 111);
+        write(1, 222);
+        write(0, 333);
+        assert_eq!(
+            utxos
+                .get_utxo(&OutPoint { hash, index: 0 })
+                .unwrap()
+                .unwrap()
+                .value,
+            333
+        );
+        assert_eq!(
+            utxos
+                .get_utxo(&OutPoint { hash, index: 1 })
+                .unwrap()
+                .unwrap()
+                .value,
+            222
+        );
+    }
+
+    #[test]
+    fn two_outputs_do_not_keep_a_txid_cache_copy() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = crate::storage::Storage::new(temp.path()).unwrap();
+        let utxos = storage.utxos();
+        let hash = [6u8; 32];
+        for (index, value) in [(0u32, 40_000i64), (1, 49_000)] {
+            utxos
+                .add_utxo(
+                    &OutPoint { hash, index },
+                    &UTXO {
+                        value,
+                        script_pubkey: vec![OP_1].into(),
+                        height: 1,
+                        is_coinbase: false,
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            utxos
+                .get_utxo(&OutPoint { hash, index: 0 })
+                .unwrap()
+                .unwrap()
+                .value,
+            40_000
+        );
+        assert_eq!(
+            utxos
+                .get_utxo(&OutPoint { hash, index: 1 })
+                .unwrap()
+                .unwrap()
+                .value,
+            49_000
+        );
+    }
+}

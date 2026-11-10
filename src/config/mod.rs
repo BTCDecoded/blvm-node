@@ -1,0 +1,1704 @@
+//! Configuration management for blvm-node
+//!
+//! Handles configuration loading, validation, and transport selection.
+
+pub mod storage;
+pub use storage::*;
+
+pub mod bitcoin_core_convert;
+pub use bitcoin_core_convert::*;
+
+pub mod governance;
+pub use governance::*;
+
+pub mod rpc;
+pub use rpc::*;
+
+pub mod mempool;
+pub use mempool::*;
+
+pub mod ibd;
+pub use ibd::*;
+
+pub mod network;
+pub use network::*;
+
+use crate::network::transport::TransportPreference;
+use anyhow::{Context, Result};
+use serde::de::{Deserializer, Error, MapAccess, Visitor};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::net::SocketAddr;
+
+// TOML support for configuration files
+
+fn flatten_toml_to_string_map(value: &toml::Value) -> HashMap<String, String> {
+    use toml::Value;
+    let mut result = HashMap::new();
+    fn flatten(prefix: &str, v: &Value, out: &mut HashMap<String, String>) {
+        match v {
+            Value::String(s) => {
+                if !prefix.is_empty() {
+                    out.insert(prefix.to_string(), s.clone());
+                }
+            }
+            Value::Integer(i) => {
+                out.insert(prefix.to_string(), i.to_string());
+            }
+            Value::Float(f) => {
+                out.insert(prefix.to_string(), f.to_string());
+            }
+            Value::Boolean(b) => {
+                out.insert(prefix.to_string(), b.to_string());
+            }
+            Value::Array(arr) => {
+                let s: Vec<String> = arr
+                    .iter()
+                    .map(|x| match x {
+                        Value::String(s) => s.clone(),
+                        _ => x.to_string(),
+                    })
+                    .collect();
+                out.insert(prefix.to_string(), s.join(","));
+            }
+            Value::Table(t) => {
+                for (k, val) in t {
+                    let p = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{prefix}.{k}")
+                    };
+                    flatten(&p, val, out);
+                }
+            }
+            Value::Datetime(dt) => {
+                out.insert(prefix.to_string(), dt.to_string());
+            }
+        }
+    }
+    if let Value::Table(t) = value {
+        for (k, v) in t {
+            flatten(k, v, &mut result);
+        }
+    }
+    result
+}
+
+/// GitHub raw URL for the monorepo’s `registry/modules.json` (module name → `repo`; `module.toml` URL is conventional unless overridden).
+pub const DEFAULT_MODULE_REGISTRY_INDEX_URL: &str =
+    "https://raw.githubusercontent.com/BTCDecoded/blvm/main/registry/modules.json";
+
+/// Modules a fresh install enables and bootstrap-downloads when they are not on disk.
+pub fn default_enabled_modules() -> HashMap<String, String> {
+    [
+        ("blvm-miniscript", "0.1.*"),
+        ("blvm-zmq", "0.1.*"),
+        ("blvm-wallet-index", "0.1.*"),
+    ]
+    .into_iter()
+    .map(|(name, constraint)| (name.to_string(), constraint.to_string()))
+    .collect()
+}
+
+/// Loopback ZeroMQ binds for a fresh install. Wallet-index ports stay closed until configured.
+fn default_module_configs() -> HashMap<String, HashMap<String, String>> {
+    let zmq = [
+        ("hashblock", "tcp://127.0.0.1:28332"),
+        ("hashtx", "tcp://127.0.0.1:28333"),
+        ("rawblock", "tcp://127.0.0.1:28334"),
+        ("rawtx", "tcp://127.0.0.1:28335"),
+        ("sequence", "tcp://127.0.0.1:28336"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), value.to_string()))
+    .collect();
+    let mut configs = HashMap::new();
+    configs.insert("blvm-zmq".to_string(), zmq);
+    configs
+}
+
+fn default_module_registry_url() -> Option<String> {
+    Some(DEFAULT_MODULE_REGISTRY_INDEX_URL.to_string())
+}
+
+fn merge_enabled_modules_value(enabled_modules: &mut HashMap<String, String>, value: toml::Value) {
+    match value {
+        toml::Value::Array(arr) => {
+            for item in arr {
+                if let toml::Value::String(name) = item {
+                    enabled_modules.insert(name, "*".to_string());
+                }
+            }
+        }
+        toml::Value::Table(tbl) => {
+            for (name, constraint) in tbl {
+                if let toml::Value::String(constraint) = constraint {
+                    enabled_modules.insert(name, constraint);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn deserialize_module_config<'de, D>(deserializer: D) -> Result<ModuleConfig, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct ModuleConfigVisitor;
+    impl<'de> Visitor<'de> for ModuleConfigVisitor {
+        type Value = ModuleConfig;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("modules config table")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<ModuleConfig, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut enabled = true;
+            let mut modules_dir = "modules".to_string();
+            let mut data_dir = "data/modules".to_string();
+            let mut socket_dir = "data/modules/sockets".to_string();
+            let mut enabled_modules = default_enabled_modules();
+            let mut disabled_modules = Vec::new();
+            let mut registry_url = default_module_registry_url();
+            let mut module_configs = default_module_configs();
+            let mut watch_enabled = true;
+            let mut watch_auto_load = false;
+            let mut watch_auto_unload = false;
+            let mut module_database_backend: Option<String> = None;
+            let mut marketplace_fetch_enabled = false;
+            let mut allow_unsigned_modules = false;
+
+            while let Some(key) = map.next_key::<String>()? {
+                if MODULE_CONFIG_KNOWN_KEYS.contains(&key.as_str()) {
+                    match key.as_str() {
+                        "enabled" => enabled = map.next_value()?,
+                        "modules_dir" => modules_dir = map.next_value().unwrap_or(modules_dir),
+                        "data_dir" => data_dir = map.next_value().unwrap_or(data_dir),
+                        "socket_dir" => socket_dir = map.next_value().unwrap_or(socket_dir),
+                        "enabled_modules" => {
+                            // A present key replaces the baseline. An empty list is disk-only.
+                            let value: toml::Value =
+                                map.next_value().unwrap_or(toml::Value::Array(vec![]));
+                            enabled_modules.clear();
+                            merge_enabled_modules_value(&mut enabled_modules, value);
+                        }
+                        "disabled_modules" => {
+                            disabled_modules = map.next_value().unwrap_or_default()
+                        }
+                        "registry_url" => registry_url = map.next_value().unwrap_or_default(),
+                        "module_configs" => module_configs = map.next_value().unwrap_or_default(),
+                        "watch_enabled" => watch_enabled = map.next_value().unwrap_or(true),
+                        "watch_auto_load" => watch_auto_load = map.next_value().unwrap_or(false),
+                        "watch_auto_unload" => {
+                            watch_auto_unload = map.next_value().unwrap_or(false)
+                        }
+                        "module_database_backend" => {
+                            module_database_backend = map.next_value().unwrap_or_default()
+                        }
+                        "marketplace_fetch_enabled" => {
+                            marketplace_fetch_enabled = map.next_value().unwrap_or(false)
+                        }
+                        "allow_unsigned_modules" => {
+                            allow_unsigned_modules = map.next_value().unwrap_or(false)
+                        }
+                        _ => {
+                            let _: toml::Value = map.next_value()?;
+                        }
+                    }
+                } else {
+                    // `[modules.<name>]` table → per-module spawn overrides, or
+                    // `<name> = "0.1.*"` string → enabled module + version constraint.
+                    let value: toml::Value = map.next_value()?;
+                    match &value {
+                        toml::Value::String(version_constraint) => {
+                            enabled_modules.insert(key, version_constraint.clone());
+                        }
+                        toml::Value::Table(_) => {
+                            let mut flat = flatten_toml_to_string_map(&value);
+                            if let Some(version) = flat.remove("version") {
+                                enabled_modules.insert(key.clone(), version);
+                            }
+                            if !flat.is_empty() {
+                                module_configs.entry(key).or_default().extend(flat);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            let registry_url = registry_url.filter(|s| !s.trim().is_empty());
+
+            Ok(ModuleConfig {
+                enabled,
+                modules_dir,
+                data_dir,
+                socket_dir,
+                enabled_modules,
+                disabled_modules,
+                registry_url,
+                module_database_backend,
+                module_configs,
+                watch_enabled,
+                watch_auto_load,
+                watch_auto_unload,
+                marketplace_fetch_enabled,
+                allow_unsigned_modules,
+            })
+        }
+    }
+    deserializer.deserialize_map(ModuleConfigVisitor)
+}
+
+/// Known keys in [modules] section (not per-module config tables)
+const MODULE_CONFIG_KNOWN_KEYS: &[&str] = &[
+    "enabled",
+    "modules_dir",
+    "data_dir",
+    "socket_dir",
+    "enabled_modules",
+    "disabled_modules",
+    "registry_url",
+    "module_configs",
+    "watch_enabled",
+    "watch_auto_load",
+    "watch_auto_unload",
+    "module_database_backend",
+    "marketplace_fetch_enabled",
+    "allow_unsigned_modules",
+];
+
+/// Module system configuration
+#[derive(Debug, Clone, Serialize)]
+pub struct ModuleConfig {
+    /// Enable module system
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Directory containing module binaries
+    pub modules_dir: String,
+
+    /// Directory for module data (state, configs)
+    pub data_dir: String,
+
+    /// Directory for IPC sockets
+    pub socket_dir: String,
+
+    /// Enabled modules and optional version constraints.
+    ///
+    /// The baseline is `blvm-miniscript`, `blvm-zmq`, and `blvm-wallet-index` at `0.1.*`.
+    /// A `[modules]` table starts from that set. An inline `name = "0.1.*"` adds or replaces
+    /// one pin. A present `enabled_modules` key replaces the whole set; an empty list loads
+    /// only binaries already on disk. `disabled_modules` wins over a pin at load time.
+    ///
+    /// When a module also needs spawn overrides (`[modules.blvm-zmq]`), put the pin in that
+    /// table as `version = "0.1.*"` (inline `blvm-zmq = "…"` would conflict with the table).
+    ///
+    /// Legacy array form (`enabled_modules = ["name"]`) is supported with constraint `"*"`.
+    #[serde(default)]
+    pub enabled_modules: HashMap<String, String>,
+
+    /// Module names to never auto-load or bootstrap-download (opt-out). Matching is by manifest `name`.
+    #[serde(default)]
+    pub disabled_modules: Vec<String>,
+
+    /// Discovery index URL (`modules.json`) for bootstrap-download of missing `enabled_modules`.
+    /// If unset, falls back to `[modules.blvm-marketplace] registry_url` when present.
+    #[serde(default)]
+    pub registry_url: Option<String>,
+
+    /// Default storage engine hint for **module subprocess** KV (`{module_data}/db/`), passed as
+    /// `database_backend` / `MODULE_CONFIG_DATABASE_BACKEND`. Must be a backend that supports
+    /// dynamic `open_tree()` (**sled**); **rocksdb** / **redb** from the chain store are
+    /// not forwarded unchanged (see `module_subprocess_database_backend_preference`).
+    ///
+    /// When unset, the node picks **sled** for RocksDB/Redb chains and **heed3** when the chain
+    /// uses heed3. Set **`auto`** for the same mapping.
+    #[serde(default)]
+    pub module_database_backend: Option<String>,
+
+    /// Module-specific configuration overrides
+    #[serde(default)]
+    pub module_configs:
+        std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+
+    /// Enable file watcher for hot-reload on module.toml/config.toml change (requires module-watcher feature)
+    #[serde(default = "default_true")]
+    pub watch_enabled: bool,
+
+    /// When a new module appears (module.toml created), auto-load it
+    #[serde(default)]
+    pub watch_auto_load: bool,
+
+    /// When a module directory is removed, auto-unload it
+    #[serde(default)]
+    pub watch_auto_unload: bool,
+
+    /// When `loadmodule` cannot find a module locally, call **`blvm-marketplace`** via inter-module IPC to fetch it first (default: **false**).
+    #[serde(default = "default_false")]
+    pub marketplace_fetch_enabled: bool,
+
+    /// Load a module that has no signatures. Default is refuse.
+    #[serde(default = "default_false")]
+    pub allow_unsigned_modules: bool,
+}
+
+pub(crate) fn default_true() -> bool {
+    true
+}
+
+pub(crate) fn default_false() -> bool {
+    false
+}
+
+impl<'de> Deserialize<'de> for ModuleConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserialize_module_config(deserializer)
+    }
+}
+
+impl Default for ModuleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            modules_dir: "modules".to_string(),
+            data_dir: "data/modules".to_string(),
+            socket_dir: "data/modules/sockets".to_string(),
+            enabled_modules: default_enabled_modules(),
+            disabled_modules: Vec::new(),
+            registry_url: default_module_registry_url(),
+            module_database_backend: None,
+            module_configs: default_module_configs(),
+            watch_enabled: true,
+            watch_auto_load: false,
+            watch_auto_unload: false,
+            marketplace_fetch_enabled: false,
+            allow_unsigned_modules: false,
+        }
+    }
+}
+
+/// Network timing and connection behavior configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkTimingConfig {
+    /// Target number of outbound peers to connect to (desired connections; reference: 8-125).
+    /// Distinct from max_outbound_peers which is the PeerManager cap.
+    #[serde(
+        default = "default_target_peer_count",
+        rename = "target_peer_count",
+        alias = "target_outbound_peers"
+    )]
+    pub target_outbound_peers: usize,
+
+    /// Wait time before connecting to peers from database (after persistent peers)
+    #[serde(default = "default_peer_connection_delay")]
+    pub peer_connection_delay_seconds: u64,
+
+    /// Minimum interval between addr message broadcasts (prevents spam)
+    #[serde(default = "default_addr_relay_min_interval")]
+    pub addr_relay_min_interval_seconds: u64,
+
+    /// Maximum addresses to include in a single addr message
+    #[serde(default = "default_max_addresses_per_addr_message")]
+    pub max_addresses_per_addr_message: usize,
+
+    /// Maximum addresses to fetch from DNS seeds
+    #[serde(default = "default_max_addresses_from_dns")]
+    pub max_addresses_from_dns: usize,
+}
+
+fn default_target_peer_count() -> usize {
+    8
+}
+
+fn default_peer_connection_delay() -> u64 {
+    2
+}
+
+fn default_addr_relay_min_interval() -> u64 {
+    8640 // 2.4 hours
+}
+
+fn default_max_addresses_per_addr_message() -> usize {
+    1000
+}
+
+fn default_max_addresses_from_dns() -> usize {
+    100
+}
+
+impl Default for NetworkTimingConfig {
+    fn default() -> Self {
+        Self {
+            target_outbound_peers: 8,
+            peer_connection_delay_seconds: 2,
+            addr_relay_min_interval_seconds: 8640,
+            max_addresses_per_addr_message: 1000,
+            max_addresses_from_dns: 100,
+        }
+    }
+}
+
+/// Env value for `[network_timing].target_outbound_peers`.
+///
+/// `BLVM_NETWORK_TARGET_PEER_COUNT` wins when it is set, including `0`.
+/// Otherwise `BLVM_TARGET_OUTBOUND_PEERS` applies when the parsed value is
+/// greater than 0. The CLI write happens after this value is copied onto the
+/// field. The IBD roster does not read either name.
+pub fn target_peer_count_from_env(network: Option<&str>, alias: Option<&str>) -> Option<usize> {
+    if let Some(raw) = network {
+        return raw.trim().parse().ok();
+    }
+    alias
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|count| *count > 0)
+}
+
+impl NetworkTimingConfig {
+    /// TOML `target_peer_count`, default **8**.
+    ///
+    /// The binary writes `BLVM_NETWORK_TARGET_PEER_COUNT` or
+    /// `BLVM_TARGET_OUTBOUND_PEERS` onto this field before start. This method
+    /// does not read the environment.
+    pub fn effective_target_outbound_peers(&self) -> usize {
+        self.target_outbound_peers
+    }
+}
+
+/// Request timeout configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestTimeoutConfig {
+    /// Timeout for async request-response patterns (getheaders, getdata, etc.)
+    #[serde(default = "default_async_request_timeout")]
+    pub async_request_timeout_seconds: u64,
+
+    /// Timeout for UTXO commitment requests
+    #[serde(default = "default_utxo_commitment_timeout")]
+    pub utxo_commitment_request_timeout_seconds: u64,
+
+    /// Cleanup interval for expired pending requests
+    #[serde(default = "default_request_cleanup_interval")]
+    pub request_cleanup_interval_seconds: u64,
+
+    /// Maximum age for pending requests before cleanup
+    #[serde(default = "default_pending_request_max_age")]
+    pub pending_request_max_age_seconds: u64,
+
+    /// Timeout for storage operations (seconds)
+    #[serde(default = "default_storage_timeout")]
+    pub storage_timeout_seconds: u64,
+
+    /// Timeout for RPC operations (seconds)
+    #[serde(default = "default_rpc_timeout")]
+    pub rpc_timeout_seconds: u64,
+
+    /// Handshake timeout (Version/VerAck exchange)
+    #[serde(default = "default_handshake_timeout")]
+    pub handshake_timeout_secs: u64,
+
+    /// TCP connect timeout
+    #[serde(default = "default_connect_timeout")]
+    pub connect_timeout_secs: u64,
+}
+
+fn default_async_request_timeout() -> u64 {
+    300 // 5 minutes
+}
+
+fn default_utxo_commitment_timeout() -> u64 {
+    30
+}
+
+fn default_request_cleanup_interval() -> u64 {
+    60
+}
+
+fn default_pending_request_max_age() -> u64 {
+    300 // 5 minutes
+}
+
+fn default_storage_timeout() -> u64 {
+    10 // 10 seconds
+}
+
+fn default_rpc_timeout() -> u64 {
+    60 // 60 seconds
+}
+
+fn default_handshake_timeout() -> u64 {
+    10
+}
+
+fn default_connect_timeout() -> u64 {
+    10
+}
+
+impl Default for RequestTimeoutConfig {
+    fn default() -> Self {
+        Self {
+            async_request_timeout_seconds: 300,
+            utxo_commitment_request_timeout_seconds: 30,
+            request_cleanup_interval_seconds: 60,
+            pending_request_max_age_seconds: 300,
+            storage_timeout_seconds: 10,
+            rpc_timeout_seconds: 60,
+            handshake_timeout_secs: 10,
+            connect_timeout_secs: 10,
+        }
+    }
+}
+
+/// Module resource limits configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleResourceLimitsConfig {
+    /// Default CPU limit for modules (percentage, 0-100)
+    #[serde(default = "default_module_max_cpu_percent")]
+    pub default_max_cpu_percent: u32,
+
+    /// Default memory limit for modules (bytes)
+    #[serde(default = "default_module_max_memory_bytes")]
+    pub default_max_memory_bytes: u64,
+
+    /// Default file descriptor limit
+    #[serde(default = "default_module_max_file_descriptors")]
+    pub default_max_file_descriptors: u32,
+
+    /// Default child process limit
+    #[serde(default = "default_module_max_child_processes")]
+    pub default_max_child_processes: u32,
+
+    /// Module startup wait time (milliseconds)
+    #[serde(default = "default_module_startup_wait_millis")]
+    pub module_startup_wait_millis: u64,
+
+    /// Timeout for module socket to appear (seconds)
+    #[serde(default = "default_module_socket_timeout")]
+    pub module_socket_timeout_seconds: u64,
+
+    /// Interval between socket existence checks (milliseconds)
+    #[serde(default = "default_module_socket_check_interval")]
+    pub module_socket_check_interval_millis: u64,
+
+    /// Maximum attempts to check for socket
+    #[serde(default = "default_module_socket_max_attempts")]
+    pub module_socket_max_attempts: usize,
+}
+
+fn default_module_max_cpu_percent() -> u32 {
+    50
+}
+
+fn default_module_max_memory_bytes() -> u64 {
+    512 * 1024 * 1024 // 512 MB
+}
+
+fn default_module_max_file_descriptors() -> u32 {
+    256
+}
+
+fn default_module_max_child_processes() -> u32 {
+    10
+}
+
+fn default_module_startup_wait_millis() -> u64 {
+    100
+}
+
+fn default_module_socket_timeout() -> u64 {
+    5
+}
+
+fn default_module_socket_check_interval() -> u64 {
+    100
+}
+
+fn default_module_socket_max_attempts() -> usize {
+    50
+}
+
+impl Default for ModuleResourceLimitsConfig {
+    fn default() -> Self {
+        Self {
+            default_max_cpu_percent: 50,
+            default_max_memory_bytes: 512 * 1024 * 1024,
+            default_max_file_descriptors: 256,
+            default_max_child_processes: 10,
+            module_startup_wait_millis: 100,
+            module_socket_timeout_seconds: 5,
+            module_socket_check_interval_millis: 100,
+            module_socket_max_attempts: 50,
+        }
+    }
+}
+
+/// Protocol message limits (for constrained networks)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolLimitsConfig {
+    /// Message ceiling in bytes, including the 24-byte header. Default 4,000,024.
+    /// A larger value is lowered to that ceiling. A smaller value is kept, and the
+    /// reader still subtracts 24 before accepting a payload.
+    #[serde(default = "default_max_protocol_message_length")]
+    pub max_protocol_message_length: usize,
+
+    /// Maximum addresses in addr message. Default 1000.
+    #[serde(default = "default_max_addr_to_send")]
+    pub max_addr_to_send: usize,
+
+    /// Maximum inventory items in inv/getdata. Default 50000.
+    #[serde(default = "default_max_inv_sz")]
+    pub max_inv_sz: usize,
+
+    /// Maximum headers in headers message. Default 2000.
+    #[serde(default = "default_max_headers_results")]
+    pub max_headers_results: usize,
+}
+
+fn default_max_protocol_message_length() -> usize {
+    blvm_protocol::p2p_framing::MAX_PROTOCOL_MESSAGE_LENGTH
+}
+
+impl ProtocolLimitsConfig {
+    /// Lower `max_protocol_message_length` to the protocol ceiling. Smaller values stay.
+    pub fn clamp_message_ceiling(&mut self) {
+        self.max_protocol_message_length = crate::network::protocol::clamp_protocol_message_length(
+            self.max_protocol_message_length,
+        );
+    }
+}
+
+fn default_max_addr_to_send() -> usize {
+    1000
+}
+
+fn default_max_inv_sz() -> usize {
+    50000
+}
+
+fn default_max_headers_results() -> usize {
+    2000
+}
+
+/// A headers reply fills a batch only when the cap is a positive size.
+pub fn headers_batch_is_full(received: usize, max_headers_results: usize) -> bool {
+    max_headers_results > 0 && received % max_headers_results == 0
+}
+
+/// One header is inside the cap when the cap is zero.
+pub fn headers_message_exceeds_limit(len: usize, max_headers_results: usize) -> bool {
+    max_headers_results > 0 && len > max_headers_results
+}
+
+impl Default for ProtocolLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_protocol_message_length: default_max_protocol_message_length(),
+            max_addr_to_send: default_max_addr_to_send(),
+            max_inv_sz: default_max_inv_sz(),
+            max_headers_results: default_max_headers_results(),
+        }
+    }
+}
+
+/// Parse `-signetchallenge`-style hex script bytes for custom signet networks.
+pub fn parse_signet_challenge_hex(hex_str: &str) -> Result<Vec<u8>> {
+    let trimmed = hex_str.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let bytes =
+        hex::decode(trimmed).context("signet_challenge must be hex-encoded script bytes")?;
+    Ok(bytes)
+}
+
+/// Chain-work floor for script skipping. A zero field is the unset default, so this
+/// always returns the network constant. The value fits in `u128`; the high 16 bytes are zero.
+pub fn minimum_chain_work_for_network(network: &str) -> u128 {
+    match network.to_lowercase().as_str() {
+        "mainnet" | "bitcoinv1" => 0x1128750f82f4c366153a3a030,
+        "testnet" | "testnet3" => 0x17dde1c649f3708d14b6,
+        "testnet4" => 0x9a0fe15d0177d086304,
+        "signet" => 0xb463ea0a4b8,
+        "regtest" => 0,
+        _ => 0,
+    }
+}
+
+/// Seeded assume-valid height. Not Bitcoin Core's current `defaultAssumeValid` height.
+pub fn default_assume_valid_height_for_network(network: &str) -> u64 {
+    match network.to_lowercase().as_str() {
+        "mainnet" | "bitcoinv1" => 912_683,
+        "testnet" | "testnet3" => 4_550_000,
+        "testnet4" => 0,
+        "signet" => 267_665,
+        _ => 0,
+    }
+}
+
+/// True only when the hash stored at the assume-valid height is the configured pin.
+/// A missing row is not connected. The helper that skips scripts does not store this.
+pub fn assume_valid_pin_connected(hash_at_pin: Option<[u8; 32]>) -> bool {
+    match (blvm_consensus::config::get_assume_valid_hash(), hash_at_pin) {
+        (Some(expected), Some(found)) => expected == found,
+        _ => false,
+    }
+}
+
+/// Checked header hash for a seeded height. Display hex is the Bitcoin block id.
+/// Mainnet `912683` is `hash256` of the 80-byte header on the best chain in a
+/// local block index whose tip was `953236` (2026-11-02). The other networks
+/// have no checked header, so their hash stays unset.
+pub fn default_assume_valid_hash_for_network(network: &str) -> Option<[u8; 32]> {
+    let display = match network.to_lowercase().as_str() {
+        "mainnet" | "bitcoinv1" => {
+            "00000000000000000000611fd22f2df7c8fbd0688745c3a6c3bb5109cc2a12cb"
+        }
+        _ => return None,
+    };
+    assume_valid_hash_from_display_hex(display).ok()
+}
+
+/// Bitcoin display order (the 64-hex block id) reversed into the internal
+/// header-hash bytes `connect_block` compares. A 32-integer array is stored
+/// as written. `null` leaves the hash unset.
+fn deserialize_assume_valid_hash<'de, D>(deserializer: D) -> Result<Option<[u8; 32]>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Bytes([u8; 32]),
+        Hex(String),
+    }
+
+    let value = Option::<Repr>::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(Repr::Bytes(bytes)) => Ok(Some(bytes)),
+        Some(Repr::Hex(text)) => assume_valid_hash_from_display_hex(&text)
+            .map(Some)
+            .map_err(D::Error::custom),
+    }
+}
+
+/// Env height overrides the file height. The file hash stays. There is no hash env var.
+pub fn overlay_assume_valid(
+    env_height: Option<u64>,
+    file: Option<&BlockValidationNodeConfig>,
+) -> (u64, Option<[u8; 32]>) {
+    let mut height = env_height.unwrap_or(0);
+    let mut hash = None;
+    if let Some(file) = file {
+        if env_height.is_none() {
+            height = file.assume_valid_height;
+        }
+        hash = file.assume_valid_hash;
+    }
+    (height, hash)
+}
+
+pub fn assume_valid_hash_from_display_hex(text: &str) -> Result<[u8; 32], String> {
+    let trimmed = text.trim();
+    let hex_str = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    if hex_str.len() != 64 || !hex_str.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(
+            "assume_valid_hash must be a 64-character block hash or an array of 32 bytes"
+                .to_string(),
+        );
+    }
+    let mut bytes = hex::decode(hex_str).map_err(|err| err.to_string())?;
+    bytes.reverse();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+/// Block validation configuration (maps to blvm-consensus BlockValidationConfig)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockValidationNodeConfig {
+    /// Assume-valid height: blocks before this height skip signature verification (-assumevalid equivalent)
+    #[serde(default)]
+    pub assume_valid_height: u64,
+
+    /// Block hash at `assume_valid_height`. A 64-character Bitcoin block id is
+    /// stored in internal byte order. An array of 32 integers is stored as written.
+    #[serde(default, deserialize_with = "deserialize_assume_valid_hash")]
+    pub assume_valid_hash: Option<[u8; 32]>,
+}
+
+/// When `[modules]` is omitted from a config file, behave like `NodeConfig::default()` (subsystem on, auto-discover).
+fn default_modules_option() -> Option<ModuleConfig> {
+    Some(ModuleConfig::default())
+}
+
+/// Node configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NodeConfig {
+    /// Network listening address
+    pub listen_addr: Option<SocketAddr>,
+
+    /// Bind the P2P listeners. An omitted key stays true so existing files keep binding.
+    #[serde(default = "default_true")]
+    pub listen: bool,
+
+    /// RPC bind address. Absent means the network default chosen by the binary.
+    #[serde(default)]
+    pub rpc_addr: Option<SocketAddr>,
+
+    /// Block validation configuration (assume-valid height, etc.)
+    pub block_validation: Option<BlockValidationNodeConfig>,
+
+    /// AssumeUTXO: block hash of snapshot to load for fast sync (-assumeutxo=<blockhash>)
+    #[serde(default)]
+    pub assumeutxo_blockhash: Option<[u8; 32]>,
+
+    /// Transport preference
+    pub transport_preference: TransportPreferenceConfig,
+
+    /// Maximum outbound peers (PeerManager cap). Distinct from target_outbound_peers (desired connections).
+    #[serde(rename = "max_peers")]
+    pub max_outbound_peers: Option<usize>,
+
+    /// Protocol version
+    pub protocol_version: Option<String>,
+
+    /// Optional BIP325 signet challenge script override (hex). Default public signet when unset.
+    #[serde(default)]
+    pub signet_challenge: Option<String>,
+
+    /// Module system configuration. Omitted in a config file ⇒ `ModuleConfig::default()`
+    /// (the three default modules, bootstrap if missing).
+    #[serde(default = "default_modules_option")]
+    pub modules: Option<ModuleConfig>,
+
+    /// Stratum V2 mining configuration
+    #[cfg(feature = "stratum-v2")]
+    pub stratum_v2: Option<StratumV2Config>,
+
+    /// RPC server configuration (limits, etc.)
+    pub rpc: Option<RpcConfig>,
+
+    /// RPC authentication configuration
+    pub rpc_auth: Option<RpcAuthConfig>,
+
+    /// Ban list sharing configuration
+    pub ban_list_sharing: Option<BanListSharingConfig>,
+
+    /// Governance message relay configuration
+    #[cfg(feature = "governance")]
+    pub governance: Option<GovernanceConfig>,
+
+    /// Storage and pruning configuration
+    pub storage: Option<StorageConfig>,
+
+    /// Persistent peers (`host:port` or `ip:port`). A hostname is kept as written.
+    /// Dials use [`persistent_peer_sockets`], which keeps entries that are socket addresses.
+    #[serde(default)]
+    pub persistent_peers: Vec<String>,
+
+    /// Enable self-advertisement (send own address to peers)
+    #[serde(default = "default_true")]
+    pub enable_self_advertisement: bool,
+
+    /// DoS protection configuration
+    pub dos_protection: Option<DosProtectionConfig>,
+
+    /// IBD bandwidth protection configuration
+    pub ibd_protection: Option<IbdProtectionConfig>,
+
+    /// Parallel IBD download configuration (chunk_size, mode, prefetch, etc.)
+    pub ibd: Option<IbdConfig>,
+
+    /// Spam-specific peer banning configuration
+    pub spam_ban: Option<SpamBanConfig>,
+
+    /// Network relay configuration
+    pub relay: Option<RelayConfig>,
+
+    /// Advertise `NODE_COMPACT_FILTERS` and answer filter requests.
+    /// Default false. `--enable-bip158` sets this true.
+    #[serde(default = "default_false")]
+    pub serve_compact_filters: bool,
+
+    /// Address database configuration
+    pub address_database: Option<AddressDatabaseConfig>,
+
+    /// Dandelion++ privacy relay configuration
+    #[cfg(feature = "dandelion")]
+    pub dandelion: Option<DandelionConfig>,
+
+    /// Peer rate limiting configuration
+    pub peer_rate_limiting: Option<PeerRateLimitingConfig>,
+
+    /// Network timing and connection behavior
+    pub network_timing: Option<NetworkTimingConfig>,
+
+    /// Request timeout configuration
+    pub request_timeouts: Option<RequestTimeoutConfig>,
+
+    /// Protocol message limits (for constrained networks)
+    pub protocol_limits: Option<ProtocolLimitsConfig>,
+
+    /// Background task interval configuration (DoS cleanup, ban cleanup, ping, etc.)
+    pub background_tasks: Option<BackgroundTaskConfig>,
+
+    /// Replay protection for custom protocol messages (governance, ban list, etc.)
+    pub replay_protection: Option<ReplayProtectionConfig>,
+
+    /// Module resource limits configuration
+    pub module_resource_limits: Option<ModuleResourceLimitsConfig>,
+
+    /// Logging configuration
+    pub logging: Option<LoggingConfig>,
+
+    /// Mempool configuration
+    pub mempool: Option<MempoolPolicyConfig>,
+
+    /// RBF (Replace-By-Fee) configuration
+    pub rbf: Option<RbfConfig>,
+
+    /// REST API configuration
+    pub rest_api: Option<RestApiConfig>,
+}
+
+/// Transport preference configuration (serializable)
+///
+/// Note: This is a simplified enum for serialization. The actual TransportPreference
+/// uses bitflags for all combinations. Use From trait for conversion.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportPreferenceConfig {
+    /// TCP-only mode (Bitcoin P2P compatible, default)
+    TcpOnly,
+    /// Quinn-only mode (direct QUIC)
+    #[cfg(feature = "quinn")]
+    QuinnOnly,
+    /// Iroh-only mode (QUIC-based with NAT traversal)
+    #[cfg(feature = "iroh")]
+    IrohOnly,
+    /// Hybrid mode (TCP + Iroh)
+    #[cfg(feature = "iroh")]
+    Hybrid,
+    /// All transports (TCP + Quinn + Iroh)
+    #[cfg(all(feature = "quinn", feature = "iroh"))]
+    All,
+}
+
+impl Default for TransportPreferenceConfig {
+    fn default() -> Self {
+        Self::TcpOnly
+    }
+}
+
+impl From<TransportPreferenceConfig> for TransportPreference {
+    fn from(config: TransportPreferenceConfig) -> Self {
+        match config {
+            TransportPreferenceConfig::TcpOnly => TransportPreference::TCP_ONLY,
+            #[cfg(feature = "quinn")]
+            TransportPreferenceConfig::QuinnOnly => TransportPreference::QUINN_ONLY,
+            #[cfg(feature = "iroh")]
+            TransportPreferenceConfig::IrohOnly => TransportPreference::IROH_ONLY,
+            #[cfg(feature = "iroh")]
+            TransportPreferenceConfig::Hybrid => TransportPreference::hybrid(),
+            #[cfg(all(feature = "quinn", feature = "iroh"))]
+            TransportPreferenceConfig::All => TransportPreference::all_transports(),
+        }
+    }
+}
+
+impl Default for NodeConfig {
+    fn default() -> Self {
+        Self {
+            listen_addr: None,
+            listen: true,
+            rpc_addr: None,
+            block_validation: None,
+            assumeutxo_blockhash: None,
+            transport_preference: TransportPreferenceConfig::TcpOnly,
+            max_outbound_peers: Some(100),
+            protocol_version: None,
+            signet_challenge: None,
+            modules: Some(ModuleConfig::default()),
+            #[cfg(feature = "stratum-v2")]
+            stratum_v2: None,
+            rpc: None,
+            rpc_auth: None,
+            ban_list_sharing: None,
+            #[cfg(feature = "governance")]
+            governance: None,
+            storage: None,
+            persistent_peers: Vec::new(),
+            enable_self_advertisement: true,
+            dos_protection: None,
+            ibd_protection: None,
+            ibd: None,
+            relay: None,
+            serve_compact_filters: false,
+            address_database: None,
+            #[cfg(feature = "dandelion")]
+            dandelion: None,
+            peer_rate_limiting: None,
+            network_timing: None,
+            request_timeouts: None,
+            protocol_limits: None,
+            background_tasks: None,
+            replay_protection: None,
+            module_resource_limits: None,
+            spam_ban: None,
+            logging: None,
+            mempool: None,
+            rbf: None,
+            rest_api: None,
+        }
+    }
+}
+
+/// Expand leading `~` to home directory. A result that still contains `..` is
+/// left unexpanded so a later delete cannot walk out of the home directory.
+fn expand_tilde_path(s: &str) -> String {
+    let s = s.trim();
+    if s.is_empty() {
+        return s.to_string();
+    }
+    if s == "~" {
+        return dirs::home_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "~".to_string());
+    }
+    if let (Some(home), Some(rest)) = (
+        dirs::home_dir(),
+        s.strip_prefix("~/").or_else(|| s.strip_prefix("~\\")),
+    ) {
+        let joined = home.join(rest);
+        if joined
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            tracing::warn!("refusing tilde expansion that contains '..': {s}");
+            return s.to_string();
+        }
+        return joined.to_string_lossy().into_owned();
+    }
+    s.to_string()
+}
+
+/// True when `candidate` canonicalizes to `root` or to a file inside it.
+/// A missing final component is checked through its parent. A symlink that
+/// resolves outside `root` is outside.
+pub fn path_is_within(root: &std::path::Path, candidate: &std::path::Path) -> bool {
+    confined_pair(root, candidate).is_some()
+}
+
+/// True when `candidate` is inside `root` and is not `root` itself.
+pub fn path_is_strictly_within(root: &std::path::Path, candidate: &std::path::Path) -> bool {
+    confined_pair(root, candidate)
+        .is_some_and(|(root_abs, candidate_abs)| root_abs != candidate_abs)
+}
+
+fn confined_pair(
+    root: &std::path::Path,
+    candidate: &std::path::Path,
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let root_abs = root.canonicalize().ok()?;
+    let candidate_abs = canonicalize_for_confine(candidate)?;
+    candidate_abs
+        .starts_with(&root_abs)
+        .then_some((root_abs, candidate_abs))
+}
+
+fn canonicalize_for_confine(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    if let Ok(canonical) = path.canonicalize() {
+        return Some(canonical);
+    }
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty())?;
+    let name = path.file_name()?;
+    if name == ".." || name == "." {
+        return None;
+    }
+    Some(parent.canonicalize().ok()?.join(name))
+}
+
+/// Entries in `persistent_peers` that are already socket addresses.
+/// A hostname is left in the config and is not dialed from here.
+pub fn persistent_peer_sockets(peers: &[String]) -> Vec<SocketAddr> {
+    peers.iter().filter_map(|peer| peer.parse().ok()).collect()
+}
+
+impl NodeConfig {
+    /// Expand `~` to home directory in all path fields. Idempotent.
+    pub fn expand_paths(&mut self) {
+        if let Some(ref mut s) = self.storage {
+            s.data_dir = expand_tilde_path(&s.data_dir);
+        }
+        if let Some(ref mut m) = self.modules {
+            m.modules_dir = expand_tilde_path(&m.modules_dir);
+            m.data_dir = expand_tilde_path(&m.data_dir);
+            m.socket_dir = expand_tilde_path(&m.socket_dir);
+        }
+        if let Some(ref mut ibd) = self.ibd {
+            if let Some(ref d) = ibd.dump_dir {
+                ibd.dump_dir = Some(expand_tilde_path(d));
+            }
+            if let Some(ref d) = ibd.snapshot_dir {
+                ibd.snapshot_dir = Some(expand_tilde_path(d));
+            }
+        }
+        if let Some(ref mut mempool) = self.mempool {
+            mempool.mempool_persistence_path = expand_tilde_path(&mempool.mempool_persistence_path);
+        }
+    }
+
+    /// Load configuration from file (supports JSON and TOML)
+    pub fn from_file(path: &std::path::Path) -> anyhow::Result<Self> {
+        // Validate file permissions (warn if world-readable)
+        #[cfg(unix)]
+        {
+            let path_lossy_for_perm = path.to_string_lossy();
+            let is_example_config = path_lossy_for_perm.ends_with(".toml.example")
+                || path_lossy_for_perm.ends_with(".example");
+            if !is_example_config {
+                if let Ok(metadata) = std::fs::metadata(path) {
+                    use std::os::unix::fs::PermissionsExt;
+                    let permissions = metadata.permissions();
+                    let mode = permissions.mode();
+                    // Check if file is readable by others (group or world)
+                    if mode & 0o077 != 0 {
+                        tracing::warn!(
+                            "SECURITY WARNING: Configuration file {:?} is readable by others (mode: {:o}). \
+                             Consider setting permissions to 600 for security. \
+                             Run: chmod 600 {:?}",
+                            path,
+                            mode,
+                            path
+                        );
+                    }
+                }
+            }
+        }
+
+        let content = std::fs::read_to_string(path)?;
+        let path_lossy = path.to_string_lossy();
+        let is_toml = path.extension().and_then(|s| s.to_str()) == Some("toml")
+            || path_lossy.ends_with(".toml.example");
+
+        let mut config: NodeConfig = if is_toml {
+            toml::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {}", e))?
+        } else {
+            serde_json::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {}", e))?
+        };
+        config.expand_paths();
+        Ok(config)
+    }
+
+    /// Load configuration from JSON file
+    pub fn from_json_file(path: &std::path::Path) -> anyhow::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let mut config: NodeConfig = serde_json::from_str(&content)?;
+        config.expand_paths();
+        Ok(config)
+    }
+
+    /// Load configuration from TOML file
+    pub fn from_toml_file(path: &std::path::Path) -> anyhow::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let mut config: NodeConfig = toml::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {}", e))?;
+        config.expand_paths();
+        Ok(config)
+    }
+
+    /// Save configuration to JSON file
+    pub fn to_json_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let content = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    /// Save configuration to TOML file
+    pub fn to_toml_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize TOML config: {}", e))?;
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    /// Get transport preference
+    pub fn get_transport_preference(&self) -> TransportPreference {
+        self.transport_preference.into()
+    }
+
+    /// Auto-detect governance server and enable if available
+    ///
+    /// If `governance.commons_url` is set but `governance.enabled` is false,
+    /// this will check if the server responds to a health check and auto-enable governance.
+    #[cfg(feature = "governance")]
+    pub async fn auto_detect_governance(&mut self) -> Result<(), anyhow::Error> {
+        use reqwest::Client;
+        use tracing::{debug, info};
+
+        // Only auto-detect if governance config exists but is disabled
+        if let Some(ref mut gov_config) = self.governance {
+            if !gov_config.enabled {
+                if let Some(ref commons_url) = gov_config.commons_url {
+                    let client = Client::builder()
+                        .timeout(std::time::Duration::from_secs(5))
+                        .build()?;
+
+                    let health_url = format!("{commons_url}/internal/health");
+                    debug!("Auto-detecting governance server at {}", health_url);
+
+                    let mut request = client.get(&health_url);
+                    if let Some(key) = gov_config.resolved_api_key() {
+                        request =
+                            request.header(reqwest::header::AUTHORIZATION, format!("Bearer {key}"));
+                    }
+                    match request.send().await {
+                        Ok(response) if response.status().is_success() => {
+                            info!(
+                                "Governance server detected and responding at {}, auto-enabling governance",
+                                commons_url
+                            );
+                            gov_config.enabled = true;
+                        }
+                        Ok(response) => {
+                            debug!(
+                                "Governance server at {} responded with status {}, keeping governance disabled",
+                                commons_url,
+                                response.status()
+                            );
+                        }
+                        Err(e) => {
+                            debug!(
+                                "Governance server at {} not reachable: {}, keeping governance disabled",
+                                commons_url, e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl NodeConfig {
+    /// Validate configuration
+    pub fn validate(&self) -> anyhow::Result<()> {
+        // Validate pruning configuration
+        if let Some(ref storage) = self.storage {
+            if let Some(ref pruning) = storage.pruning {
+                pruning.validate()?;
+            }
+        }
+
+        if let Some(ref mempool) = self.mempool {
+            if mempool.mempool_expiry_hours.checked_mul(3600).is_none() {
+                anyhow::bail!(
+                    "mempool_expiry_hours {} does not fit in seconds",
+                    mempool.mempool_expiry_hours
+                );
+            }
+        }
+
+        if let Some(ref ibd) = self.ibd_protection {
+            for (name, gb) in [
+                (
+                    "max_bandwidth_per_peer_per_day_gb",
+                    ibd.max_bandwidth_per_peer_per_day_gb,
+                ),
+                (
+                    "max_bandwidth_per_peer_per_hour_gb",
+                    ibd.max_bandwidth_per_peer_per_hour_gb,
+                ),
+                (
+                    "max_bandwidth_per_ip_per_day_gb",
+                    ibd.max_bandwidth_per_ip_per_day_gb,
+                ),
+                (
+                    "max_bandwidth_per_ip_per_hour_gb",
+                    ibd.max_bandwidth_per_ip_per_hour_gb,
+                ),
+                (
+                    "max_bandwidth_per_subnet_per_day_gb",
+                    ibd.max_bandwidth_per_subnet_per_day_gb,
+                ),
+                (
+                    "max_bandwidth_per_subnet_per_hour_gb",
+                    ibd.max_bandwidth_per_subnet_per_hour_gb,
+                ),
+            ] {
+                if bandwidth_gb_to_bytes(gb).is_none() {
+                    anyhow::bail!("{name} {gb} does not fit in bytes");
+                }
+            }
+        }
+
+        if let Some(ref limits) = self.protocol_limits {
+            if limits.max_headers_results == 0 {
+                anyhow::bail!("max_headers_results must be greater than 0");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate security configuration and return warnings
+    ///
+    /// Checks for insecure configurations that could expose the node to unauthorized access.
+    /// Returns a list of warning messages that should be logged but don't prevent startup.
+    ///
+    /// # Arguments
+    /// * `rpc_addr` - The RPC server bind address
+    /// * `rest_api_addr` - Optional REST API server bind address
+    ///
+    /// # Returns
+    /// Vector of warning messages (empty if configuration is secure)
+    pub fn validate_security(
+        &self,
+        rpc_addr: SocketAddr,
+        rest_api_addr: Option<SocketAddr>,
+    ) -> Vec<String> {
+        let mut warnings = Vec::new();
+
+        // Helper to check if address is localhost
+        let is_localhost =
+            |addr: &SocketAddr| addr.ip().is_loopback() || addr.ip().to_string() == "127.0.0.1";
+
+        // Check RPC authentication
+        if let Some(ref rpc_auth) = self.rpc_auth {
+            if !rpc_auth.required {
+                // Check if binding to non-localhost
+                if !is_localhost(&rpc_addr) {
+                    warnings.push(format!(
+                        "SECURITY WARNING: RPC server is binding to {rpc_addr} (non-localhost) but authentication is not required. \
+                        This exposes your node to unauthorized access. Consider setting rpc_auth.required = true"
+                    ));
+                }
+            } else if rpc_auth.tokens.is_empty() && rpc_auth.certificates.is_empty() {
+                warnings.push(
+                    "SECURITY WARNING: RPC authentication is required but no tokens or certificates are configured. \
+                    RPC requests will be rejected. Add tokens or certificates to rpc_auth configuration."
+                        .to_string(),
+                );
+            }
+        } else {
+            // No auth config at all
+            if !is_localhost(&rpc_addr) {
+                warnings.push(format!(
+                    "SECURITY WARNING: RPC server is binding to {rpc_addr} (non-localhost) without authentication. \
+                    This exposes your node to unauthorized access. Consider configuring rpc_auth with required = true"
+                ));
+            }
+        }
+
+        // Check REST API authentication
+        if let Some(rest_addr) = rest_api_addr {
+            if !is_localhost(&rest_addr) {
+                if let Some(ref rpc_auth) = self.rpc_auth {
+                    if !rpc_auth.required {
+                        warnings.push(format!(
+                            "SECURITY WARNING: REST API is binding to {rest_addr} (non-localhost) but authentication is not required. \
+                            This exposes your node to unauthorized access. Consider setting rpc_auth.required = true"
+                        ));
+                    }
+                } else {
+                    warnings.push(format!(
+                        "SECURITY WARNING: REST API is binding to {rest_addr} (non-localhost) without authentication. \
+                        This exposes your node to unauthorized access. Consider configuring rpc_auth with required = true"
+                    ));
+                }
+            }
+        }
+
+        warnings
+    }
+
+    /// Maximum RPC/REST request body size in bytes.
+    /// ENV BLVM_RPC_MAX_REQUEST_SIZE_BYTES overrides config.
+    pub fn max_request_size_bytes(&self) -> usize {
+        crate::utils::env_int::<usize>("BLVM_RPC_MAX_REQUEST_SIZE_BYTES").unwrap_or_else(|| {
+            self.rpc
+                .as_ref()
+                .map(|r| r.max_request_size_bytes)
+                .unwrap_or(1_048_576)
+        })
+    }
+
+    /// Max RPC connections per IP per minute.
+    /// ENV BLVM_RPC_MAX_CONNECTIONS_PER_IP_PER_MINUTE overrides config.
+    pub fn max_connections_per_ip_per_minute(&self) -> u32 {
+        crate::utils::env_int::<u32>("BLVM_RPC_MAX_CONNECTIONS_PER_IP_PER_MINUTE").unwrap_or_else(
+            || {
+                self.rpc
+                    .as_ref()
+                    .map(|r| r.max_connections_per_ip_per_minute)
+                    .unwrap_or(10)
+            },
+        )
+    }
+
+    /// When auth disabled, still apply IP rate limiting.
+    /// ENV BLVM_RPC_RATE_LIMIT_WHEN_AUTH_DISABLED (true/1/yes/on) overrides config.
+    pub fn rpc_rate_limit_when_auth_disabled(&self) -> bool {
+        if std::env::var("BLVM_RPC_RATE_LIMIT_WHEN_AUTH_DISABLED").is_ok() {
+            crate::utils::env_bool("BLVM_RPC_RATE_LIMIT_WHEN_AUTH_DISABLED")
+        } else {
+            self.rpc
+                .as_ref()
+                .map(|r| r.rate_limit_when_auth_disabled)
+                .unwrap_or(true)
+        }
+    }
+
+    /// IP rate limit burst when auth disabled.
+    /// ENV BLVM_RPC_IP_RATE_LIMIT_BURST overrides config.
+    pub fn rpc_ip_rate_limit_burst(&self) -> u32 {
+        crate::utils::env_int::<u32>("BLVM_RPC_IP_RATE_LIMIT_BURST").unwrap_or_else(|| {
+            self.rpc
+                .as_ref()
+                .map(|r| r.ip_rate_limit_burst)
+                .unwrap_or(50)
+        })
+    }
+
+    /// IP rate limit per second when auth disabled.
+    /// ENV BLVM_RPC_IP_RATE_LIMIT_RATE overrides config.
+    pub fn rpc_ip_rate_limit_rate(&self) -> u32 {
+        crate::utils::env_int::<u32>("BLVM_RPC_IP_RATE_LIMIT_RATE")
+            .unwrap_or_else(|| self.rpc.as_ref().map(|r| r.ip_rate_limit_rate).unwrap_or(5))
+    }
+
+    /// Batch rate limit multiplier cap: min(batch_len, this) tokens consumed.
+    /// ENV BLVM_RPC_BATCH_RATE_MULTIPLIER_CAP overrides config.
+    pub fn rpc_batch_rate_multiplier_cap(&self) -> u32 {
+        crate::utils::env_int::<u32>("BLVM_RPC_BATCH_RATE_MULTIPLIER_CAP").unwrap_or_else(|| {
+            self.rpc
+                .as_ref()
+                .map(|r| r.batch_rate_multiplier_cap)
+                .unwrap_or(10)
+        })
+    }
+
+    /// Connection rate limit window in seconds.
+    /// ENV BLVM_RPC_CONNECTION_RATE_LIMIT_WINDOW_SECS overrides config.
+    pub fn rpc_connection_rate_limit_window_seconds(&self) -> u64 {
+        crate::utils::env_int::<u64>("BLVM_RPC_CONNECTION_RATE_LIMIT_WINDOW_SECS").unwrap_or_else(
+            || {
+                self.rpc
+                    .as_ref()
+                    .map(|r| r.connection_rate_limit_window_seconds)
+                    .unwrap_or(60)
+            },
+        )
+    }
+}
+
+/// ZMQ notification configuration
+/// Payment configuration (BIP70)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentConfig {
+    /// Enable P2P BIP70 (default: true)
+    #[serde(default = "default_true")]
+    pub p2p_enabled: bool,
+
+    /// Enable HTTP BIP70 (default: false, requires bip70-http feature)
+    #[serde(default = "default_false")]
+    pub http_enabled: bool,
+
+    /// Network (mainnet, testnet, regtest, signet) - defaults to mainnet
+    #[serde(default = "default_network")]
+    pub network: Option<String>,
+
+    /// Merchant private key for signing (optional, hex-encoded)
+    #[serde(default)]
+    pub merchant_key: Option<String>,
+
+    /// Node payment address/script for module downloads (optional)
+    /// Used when serving modules that require payment
+    #[serde(default)]
+    pub node_payment_address: Option<String>,
+
+    /// Payment request storage path
+    #[serde(default = "default_payment_store_path")]
+    pub payment_store_path: String,
+
+    /// Enable module payment integration (default: true)
+    #[serde(default = "default_true")]
+    pub module_payments_enabled: bool,
+
+    /// Minimum confirmations before payment is "safe for release" (default: 6)
+    /// Merchants should wait for this many confirmations before releasing high-value goods.
+    #[serde(default = "default_safe_confirmation_depth")]
+    pub safe_confirmation_depth: u32,
+
+    /// BIP-47 scan private key, 32 bytes hex. Absent means a payment code cannot be derived.
+    #[serde(default)]
+    pub bip47_scan_key: Option<String>,
+}
+
+fn default_safe_confirmation_depth() -> u32 {
+    6
+}
+
+fn default_payment_store_path() -> String {
+    "data/payments".to_string()
+}
+
+fn default_network() -> Option<String> {
+    Some("mainnet".to_string())
+}
+
+impl Default for PaymentConfig {
+    fn default() -> Self {
+        Self {
+            p2p_enabled: true,
+            http_enabled: false,
+            network: default_network(),
+            merchant_key: None,
+            node_payment_address: None,
+            payment_store_path: "data/payments".to_string(),
+            module_payments_enabled: true,
+            safe_confirmation_depth: default_safe_confirmation_depth(),
+            bip47_scan_key: None,
+        }
+    }
+}
+
+/// REST API configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RestApiConfig {
+    /// Enable REST API (default: false, requires rest-api feature)
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+
+    /// REST bind address. When unset, defaults to loopback port **8080** (mainnet RPC 8332), **18080** (testnet RPC 18332), or RPC port **+ 10000** (e.g. regtest **18443** → **28443**).
+    #[serde(default)]
+    pub listen_addr: Option<SocketAddr>,
+
+    /// Kept so an existing toml file still loads. The node no longer serves payment REST routes.
+    #[serde(default = "default_false")]
+    pub payment_endpoints_enabled: bool,
+}
+
+impl RestApiConfig {
+    /// Resolve REST bind address from config, using RPC address for host/port defaults.
+    pub fn resolve_bind_addr(&self, rpc_addr: SocketAddr) -> SocketAddr {
+        if let Some(addr) = self.listen_addr {
+            return addr;
+        }
+        let port = match rpc_addr.port() {
+            8332 => 8080,
+            18332 => 18080,
+            p => p.saturating_add(10_000),
+        };
+        let ip = if rpc_addr.ip().is_unspecified() {
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        } else {
+            rpc_addr.ip()
+        };
+        SocketAddr::new(ip, port)
+    }
+}
+
+/// Logging configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LoggingConfig {
+    /// Log level filter (e.g., "info", "debug", "blvm_node=debug,network=trace")
+    /// If not set, uses RUST_LOG environment variable or defaults to "info"
+    /// Config key "level" is accepted as alias for "filter" (e.g. level = "info")
+    #[serde(default, alias = "level")]
+    pub filter: Option<String>,
+
+    /// Enable JSON logging format (for log aggregation systems)
+    #[serde(default)]
+    pub json_format: bool,
+}
+
+#[cfg(test)]
+mod minimum_chain_work_tests {
+    use super::minimum_chain_work_for_network;
+    use blvm_consensus::pow::U256;
+
+    fn floor_equals_its_lift(network: &str, work: u128) {
+        let value = minimum_chain_work_for_network(network);
+        assert_eq!(value, work);
+        let lifted = U256::from_u128(value);
+        assert_eq!(lifted.low_u128(), value);
+        assert_eq!(lifted, U256::from_u128(value));
+        assert!(lifted.to_le_bytes()[16..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn each_network_floor_equals_its_u128_lift() {
+        floor_equals_its_lift("mainnet", 0x1128750f82f4c366153a3a030);
+        floor_equals_its_lift("bitcoinv1", 0x1128750f82f4c366153a3a030);
+        floor_equals_its_lift("testnet", 0x17dde1c649f3708d14b6);
+        floor_equals_its_lift("testnet3", 0x17dde1c649f3708d14b6);
+        floor_equals_its_lift("testnet4", 0x9a0fe15d0177d086304);
+        floor_equals_its_lift("signet", 0xb463ea0a4b8);
+        floor_equals_its_lift("regtest", 0);
+    }
+}
+
+#[cfg(test)]
+mod peer_count_tests {
+    use super::target_peer_count_from_env;
+    use crate::node::parallel_ibd::roster_target_from_raw;
+
+    #[test]
+    fn network_count_wins_and_alias_zero_is_unset() {
+        assert_eq!(target_peer_count_from_env(None, Some("8")), Some(8));
+        assert_eq!(target_peer_count_from_env(Some("4"), Some("8")), Some(4));
+        assert_eq!(target_peer_count_from_env(None, Some("0")), None);
+        assert_eq!(target_peer_count_from_env(Some("0"), Some("8")), Some(0));
+    }
+
+    #[test]
+    fn roster_unset_stays_96_without_the_outbound_alias() {
+        assert_eq!(roster_target_from_raw(None), Some(96));
+        assert_eq!(roster_target_from_raw(Some("0")), None);
+        assert_eq!(roster_target_from_raw(Some("150")), Some(100));
+    }
+
+    #[test]
+    fn target_peer_count_and_alias_both_yield_four() {
+        let from_rename: super::NetworkTimingConfig =
+            toml::from_str("target_peer_count = 4").unwrap();
+        assert_eq!(from_rename.effective_target_outbound_peers(), 4);
+        let from_alias: super::NetworkTimingConfig =
+            toml::from_str("target_outbound_peers = 4").unwrap();
+        assert_eq!(from_alias.effective_target_outbound_peers(), 4);
+    }
+}
+
+#[cfg(test)]
+mod payment_table_tests {
+    use super::NodeConfig;
+
+    #[test]
+    fn leftover_payment_table_still_parses() {
+        let config: NodeConfig = toml::from_str(
+            r#"
+            [payment]
+            merchant_key = "aa"
+            payment_store_path = "data/payments"
+            "#,
+        )
+        .expect("a leftover [payment] table is an ignored unknown table");
+        assert!(config.rest_api.is_none());
+    }
+}

@@ -1,0 +1,24 @@
+# Testnet IBD with incremental pruning (example NodeConfig).
+# Start with JSON-RPC bound explicitly, e.g.:
+#   blvm --config testnet-ibd-config.toml --rpc-addr 127.0.0.1:18332 --network testnet
+#
+# CLI/ENV `--network` / `BLVM_NETWORK` override `protocol_version` at runtime.
+
+listen_addr = "127.0.0.1:18333"
+transport_preference = "tcponly"
+
+[storage]
+data_dir = "~/.local/share/blvm-testnet"
+database_backend = "auto"
+
+[storage.pruning]
+mode = { type = "normal", keep_from_height = 0, min_recent_blocks = 144 }
+incremental_prune_during_ibd = true
+prune_window_size = 144
+min_blocks_for_incremental_prune = 288
+auto_prune = true
+auto_prune_interval = 144
+min_blocks_to_keep = 144
+
+[logging]
+level = "info"

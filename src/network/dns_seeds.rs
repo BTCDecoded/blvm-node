@@ -1,0 +1,221 @@
+//! DNS Seed Resolution for Peer Discovery
+//!
+//! Resolves Bitcoin DNS seeds to discover initial peer addresses.
+//! Based on the standard DNS seed mechanism.
+
+use crate::network::protocol::NetworkAddress;
+use std::net::{SocketAddr, ToSocketAddrs};
+use std::time::Duration;
+use tracing::{info, warn};
+
+/// Bitcoin DNS seeds (mainnet)
+/// These are well-known DNS servers that return Bitcoin node addresses
+pub const MAINNET_DNS_SEEDS: &[&str] = &[
+    "seed.bitcoin.sipa.be",
+    "dnsseed.bluematt.me",
+    "dnsseed.bitcoin.dashjr.org",
+    "seed.bitcoinstats.com",
+    "seed.bitcoin.jonasschnelli.ch",
+    "seed.btc.petertodd.org",
+    "seed.bitcoin.sprovoost.nl",
+    "dnsseed.emzy.de",
+    "seed.bitcoin.wiz.biz",
+];
+
+/// Fixed mainnet peers used when every DNS seed returns no addresses.
+/// Taken from Bitcoin Core `chainparams_seed_main` IPv4 entries (port 8333).
+pub const MAINNET_FIXED_SEEDS: &[&str] = &[
+    "2.121.116.198:8333",
+    "3.86.179.235:8333",
+    "4.2.51.251:8333",
+    "5.2.23.226:8333",
+    "5.2.222.125:8333",
+    "5.11.92.140:8333",
+    "5.35.15.93:8333",
+    "5.36.230.237:8333",
+];
+
+/// Bitcoin DNS seeds filtered for full-history (archive) nodes only.
+///
+/// These use the `x1.` subdomain prefix which instructs the DNS seeder to return
+/// only peers advertising `NODE_NETWORK` (service bit 0, value 1) — i.e. full archival
+/// nodes that keep the complete blockchain.  Pruned nodes advertise `NODE_NETWORK_LIMITED`
+/// (bit 10) instead and are excluded from these results.
+///
+/// Use these seeds specifically for IBD peer discovery when the standard seeds return
+/// only pruned peers that cannot serve historical blocks.
+pub const MAINNET_ARCHIVE_DNS_SEEDS: &[&str] = &[
+    "x1.seed.bitcoin.sipa.be",
+    "x1.dnsseed.bluematt.me",
+    "x1.seed.bitcoin.sprovoost.nl",
+    "x1.dnsseed.emzy.de",
+    "x1.seed.bitcoin.wiz.biz",
+];
+
+/// Testnet4 DNS seeds (BIP94).
+pub const TESTNET4_DNS_SEEDS: &[&str] = &[
+    "seed.testnet4.bitcoin.sprovoost.nl",
+    "seed.testnet4.wiz.biz",
+];
+
+/// Signet DNS seeds. Signet listens on port 38333.
+pub const SIGNET_DNS_SEEDS: &[&str] = &[
+    "seed.signet.bitcoin.sprovoost.nl",
+    "seed.signet.achownodes.xyz",
+];
+
+/// Testnet DNS seeds
+pub const TESTNET_DNS_SEEDS: &[&str] = &[
+    "testnet-seed.bitcoin.jonasschnelli.ch",
+    "seed.tbtc.petertodd.org",
+    "seed.testnet.bitcoin.sprovoost.nl",
+    "testnet-seed.bluematt.me",
+];
+
+/// Archive discovery for `network`. Mainnet uses the `x1.` full-history seeds.
+/// Other networks use their own seeds and P2P port. Testnet4 must not dial mainnet `:8333`.
+pub fn archive_seed_set(network: &str) -> (&'static [&'static str], u16) {
+    match network {
+        "testnet4" => (TESTNET4_DNS_SEEDS, 48333),
+        "testnet" => (TESTNET_DNS_SEEDS, 18333),
+        "signet" => (SIGNET_DNS_SEEDS, 38333),
+        "regtest" => (&[], 18444),
+        _ => (MAINNET_ARCHIVE_DNS_SEEDS, 8333),
+    }
+}
+
+/// Resolve DNS seeds to peer addresses
+pub async fn resolve_dns_seeds(
+    seeds: &[&str],
+    port: u16,
+    max_addresses: usize,
+) -> Vec<NetworkAddress> {
+    let mut addresses = Vec::new();
+
+    for seed in seeds {
+        match resolve_dns_seed(seed, port).await {
+            Ok(mut addrs) => {
+                info!("Resolved {} addresses from DNS seed: {}", addrs.len(), seed);
+                addresses.append(&mut addrs);
+                if addresses.len() >= max_addresses {
+                    break;
+                }
+            }
+            Err(e) => {
+                warn!("Failed to resolve DNS seed {}: {}", seed, e);
+            }
+        }
+    }
+
+    // Limit to max_addresses
+    addresses.truncate(max_addresses);
+    addresses
+}
+
+/// Fixed mainnet peers. Parsing an IP does not use DNS.
+pub fn fixed_mainnet_addresses() -> Vec<NetworkAddress> {
+    MAINNET_FIXED_SEEDS
+        .iter()
+        .filter_map(|seed| seed.parse::<SocketAddr>().ok())
+        .map(socket_addr_to_network_address)
+        .collect()
+}
+
+/// Resolve a single DNS seed
+async fn resolve_dns_seed(seed: &str, port: u16) -> Result<Vec<NetworkAddress>, String> {
+    // Use std::net::ToSocketAddrs which handles DNS resolution properly
+    // Format: "hostname:port" works with ToSocketAddrs
+    let hostname_with_port = format!("{seed}:{port}");
+
+    // Perform DNS lookup with timeout using tokio::task::spawn_blocking
+    // since ToSocketAddrs is blocking
+    let timeout = Duration::from_secs(5);
+    let hostname_clone = hostname_with_port.clone();
+    let socket_addrs = tokio::time::timeout(
+        timeout,
+        tokio::task::spawn_blocking(move || {
+            hostname_clone
+                .to_socket_addrs()
+                .map(|iter| iter.collect::<Vec<_>>())
+        }),
+    )
+    .await
+    .map_err(|_| format!("DNS lookup timeout for {seed}"))?
+    .map_err(|e| format!("DNS lookup task failed for {seed}: {e}"))?
+    .map_err(|e| format!("DNS lookup failed for {seed}: {e}"))?;
+
+    // Convert SocketAddr to NetworkAddress
+    let mut addresses = Vec::new();
+    for socket_addr in socket_addrs {
+        addresses.push(socket_addr_to_network_address(socket_addr));
+    }
+
+    Ok(addresses)
+}
+
+/// Convert SocketAddr to NetworkAddress
+fn socket_addr_to_network_address(socket_addr: SocketAddr) -> NetworkAddress {
+    use std::net::IpAddr;
+
+    let ip_bytes = match socket_addr.ip() {
+        IpAddr::V4(ipv4) => {
+            // IPv4-mapped IPv6 format
+            let mut bytes = [0u8; 16];
+            bytes[10] = 0xff;
+            bytes[11] = 0xff;
+            bytes[12..16].copy_from_slice(&ipv4.octets());
+            bytes
+        }
+        IpAddr::V6(ipv6) => ipv6.octets(),
+    };
+
+    NetworkAddress {
+        services: 0, // Will be updated when we connect
+        ip: ip_bytes,
+        port: socket_addr.port(),
+        time: crate::utils::current_timestamp() as u32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_socket_addr_to_network_address() {
+        let socket = SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            8333,
+        );
+        let addr = socket_addr_to_network_address(socket);
+        assert_eq!(addr.port, 8333);
+        // Check IPv4-mapped format
+        assert_eq!(addr.ip[10], 0xff);
+        assert_eq!(addr.ip[11], 0xff);
+        assert_eq!(addr.ip[12], 127);
+        assert_eq!(addr.ip[13], 0);
+        assert_eq!(addr.ip[14], 0);
+        assert_eq!(addr.ip[15], 1);
+    }
+
+    #[test]
+    fn fixed_mainnet_seeds_are_ipv4_port_8333() {
+        let addresses = fixed_mainnet_addresses();
+        assert_eq!(addresses.len(), MAINNET_FIXED_SEEDS.len());
+        assert_eq!(addresses[0].port, 8333);
+        assert_eq!(addresses[0].ip[12], 2);
+        assert_eq!(addresses[0].ip[13], 121);
+        assert_eq!(addresses[0].ip[14], 116);
+        assert_eq!(addresses[0].ip[15], 198);
+    }
+
+    #[test]
+    fn testnet4_archive_seeds_use_port_48333() {
+        let (seeds, port) = archive_seed_set("testnet4");
+        assert_eq!(port, 48333);
+        assert_eq!(seeds, TESTNET4_DNS_SEEDS);
+        let (main_seeds, main_port) = archive_seed_set("mainnet");
+        assert_eq!(main_port, 8333);
+        assert_eq!(main_seeds, MAINNET_ARCHIVE_DNS_SEEDS);
+    }
+}
