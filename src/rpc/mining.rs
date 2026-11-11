@@ -1356,7 +1356,15 @@ impl MiningRpc {
                 "submitblock: protocol engine is required to connect the block".to_string(),
             )
         })?;
-        let connect_height = tip_height.saturating_add(1);
+        let parent_height = storage
+            .blocks()
+            .get_height_by_hash(&parent_hash)
+            .map_err(|e| {
+                RpcError::internal_error(format!("submitblock: failed to read parent height: {e}"))
+            })?;
+        // A sibling's parent is stored and is not the tip. Connect one past
+        // that parent, not one past the current tip.
+        let connect_height = parent_height.unwrap_or(tip_height).saturating_add(1);
         let mut utxo = self.connect_utxos()?;
         let mut coord = SyncCoordinator::new();
         if let Some(ref mempool) = self.mempool {
