@@ -2166,7 +2166,17 @@ mod tests {
             .clone();
         storage.blocks().store_header(&parent, &genesis).unwrap();
         let mut sibling = block;
-        sibling.header.nonce = sibling.header.nonce.wrapping_add(1);
+        // Regtest's easiest target still rejects about half of the nonces.
+        // One past the mined nonce is not a header this node can store.
+        let mut met_target = false;
+        for _ in 0..200_000 {
+            sibling.header.nonce = sibling.header.nonce.wrapping_add(1);
+            if blvm_protocol::pow::check_proof_of_work(&sibling.header).unwrap_or(false) {
+                met_target = true;
+                break;
+            }
+        }
+        assert!(met_target, "sibling did not meet the regtest target");
         let bytes = serialize_block_with_witnesses(
             &sibling,
             &vec![vec![]; sibling.transactions.len()],
