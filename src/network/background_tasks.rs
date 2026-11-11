@@ -400,7 +400,7 @@ impl NetworkManager {
                     for (addr, peer) in pm.peers_mut().iter_mut() {
                         peer.record_ping_sent(nonce);
 
-                        if let Err(e) = peer.send_tx.send(wire_msg.clone()) {
+                        if let Err(e) = peer.send_tx.try_send(wire_msg.clone()) {
                             warn!("Failed to send ping to peer {:?}: {}", addr, e);
                         }
                     }

@@ -114,6 +114,12 @@ pub fn decode_pkgtxns(payload: &[u8]) -> Result<Vec<Vec<u8>>> {
     }
     let (count, mut pos) =
         read_compact_size(payload).ok_or_else(|| anyhow::anyhow!("pkgtxns truncated"))?;
+    // A consensus transaction is at least 10 bytes. Reject a count that cannot
+    // fit in the remaining payload before allocating.
+    let remaining = (payload.len() as u64).saturating_sub(pos as u64);
+    if count > remaining / 10 {
+        bail!("pkgtxns count exceeds payload");
+    }
     let mut transactions = Vec::with_capacity(count as usize);
     for _ in 0..count {
         let rest = payload
@@ -410,6 +416,9 @@ mod tests {
         assert_eq!(encode_pkgtxns(&[]).unwrap(), vec![0]);
         assert!(decode_pkgtxns(&[0, 0]).is_err());
         assert!(decode_pkgtxns(&[1]).is_err());
+        // 1000 transactions claimed, and no transaction bytes follow the count.
+        let err = decode_pkgtxns(&[0xfd, 0xe8, 0x03]).unwrap_err();
+        assert!(err.to_string().contains("count exceeds payload"));
 
         let mut too_many = vec![101u8];
         too_many.resize(1 + 101 * 32, 0);
