@@ -826,6 +826,41 @@ impl SyncCoordinator {
                     continue;
                 }
 
+                let meets_required_work = (|| {
+                    let stored_network = storage.chain().consensus_network().ok()?;
+                    let consensus_network = crate::network::header_work::network_for_header_work(
+                        Some(protocol.get_protocol_version()),
+                        stored_network,
+                    );
+                    let stored_at = |height: u64| {
+                        storage
+                            .blocks()
+                            .get_header_at_height(height)
+                            .ok()
+                            .flatten()
+                            .map(|header| (header.bits, header.timestamp))
+                    };
+                    let ancestor =
+                        crate::network::header_work::ancestor_seeing_pending(&[], &stored_at);
+                    Some(crate::network::header_work::header_meets_required_work(
+                        &block.header,
+                        connect_height,
+                        consensus_network,
+                        &ancestor,
+                    ))
+                })()
+                .unwrap_or(false);
+                if !meets_required_work {
+                    warn!(
+                        "side block at height {} does not meet required work; not stored",
+                        connect_height
+                    );
+                    if !stored_any {
+                        return Ok(false);
+                    }
+                    continue;
+                }
+
                 store_block_with_context_and_index(
                     blockstore,
                     Some(storage),

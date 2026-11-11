@@ -67,9 +67,9 @@ pub(crate) fn apply_disconnect_window(
     codec: ValueCodec,
     hashes_tip_first: &[Hash],
     muhash: Option<&mut blvm_muhash::MuHash3072>,
-) -> Result<()> {
+) -> Result<Vec<BlockUndoLog>> {
     if hashes_tip_first.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     if hashes_tip_first.len() > DISCONNECT_BODY_WINDOW {
         anyhow::bail!("disconnect window holds at most {DISCONNECT_BODY_WINDOW} bodies");
@@ -84,6 +84,21 @@ pub(crate) fn apply_disconnect_window(
     }
     let refs: Vec<&BlockUndoLog> = undos.iter().collect();
     commit_utxo_snapshot_delta(tree, codec, &refs, &[], None, muhash)?;
+    Ok(undos)
+}
+
+/// Write back coins a failed reorg already disconnected. `tip_first` is the order they were applied.
+pub(crate) fn restore_disconnected_coins(
+    tree: &dyn Tree,
+    codec: ValueCodec,
+    tip_first: &[BlockUndoLog],
+    muhash: Option<&mut blvm_muhash::MuHash3072>,
+) -> Result<()> {
+    if tip_first.is_empty() {
+        return Ok(());
+    }
+    let low_to_high: Vec<&BlockUndoLog> = tip_first.iter().rev().collect();
+    commit_utxo_snapshot_delta(tree, codec, &[], &low_to_high, None, muhash)?;
     Ok(())
 }
 
@@ -119,6 +134,8 @@ pub(crate) fn disconnect_body_windows<T>(tip_first: &[T]) -> Vec<&[T]> {
 
 /// Not an outpoint. Scanners that require a 40-byte key skip it.
 pub(crate) const SNAPSHOT_REORG_JOURNAL_KEY: &[u8] = b"blvm-reorg-journal";
+/// Pre-images of coins a disconnect batch removed. Startup restores them when the connect batch never committed.
+pub(crate) const SNAPSHOT_REORG_ROLLBACK_KEY: &[u8] = b"blvm-reorg-rollback";
 /// Running MuHash after this batch. Startup copies it into chainstate.
 pub(crate) const SNAPSHOT_MUHASH_KEY: &[u8] = b"blvm-muhash-running";
 
@@ -127,6 +144,74 @@ pub(crate) fn encode_reorg_journal(height: u64, tip: &Hash) -> Vec<u8> {
     bytes.extend_from_slice(&height.to_be_bytes());
     bytes.extend_from_slice(tip);
     bytes
+}
+
+fn encode_rollback(
+    prior_muhash: Option<&[u8]>,
+    coins: &HashMap<[u8; 40], Option<Vec<u8>>>,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    match prior_muhash {
+        Some(bytes) => {
+            out.push(1);
+            out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(bytes);
+        }
+        None => out.push(0),
+    }
+    out.extend_from_slice(&(coins.len() as u32).to_le_bytes());
+    for (key, value) in coins {
+        out.extend_from_slice(key);
+        match value {
+            None => out.push(0),
+            Some(bytes) => {
+                out.push(1);
+                out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                out.extend_from_slice(bytes);
+            }
+        }
+    }
+    out
+}
+
+fn decode_rollback(bytes: &[u8]) -> Option<(Option<Vec<u8>>, HashMap<[u8; 40], Option<Vec<u8>>>)> {
+    let mut index = 0usize;
+    let flag = *bytes.get(index)?;
+    index += 1;
+    let prior = if flag == 1 {
+        let len = u32::from_le_bytes(bytes.get(index..index + 4)?.try_into().ok()?) as usize;
+        index += 4;
+        let slice = bytes.get(index..index + len)?.to_vec();
+        index += len;
+        Some(slice)
+    } else if flag == 0 {
+        None
+    } else {
+        return None;
+    };
+    let count = u32::from_le_bytes(bytes.get(index..index + 4)?.try_into().ok()?) as usize;
+    index += 4;
+    let mut coins = HashMap::with_capacity(count);
+    for _ in 0..count {
+        let mut key = [0u8; 40];
+        key.copy_from_slice(bytes.get(index..index + 40)?);
+        index += 40;
+        let present = *bytes.get(index)?;
+        index += 1;
+        let value = if present == 1 {
+            let len = u32::from_le_bytes(bytes.get(index..index + 4)?.try_into().ok()?) as usize;
+            index += 4;
+            let slice = bytes.get(index..index + len)?.to_vec();
+            index += len;
+            Some(slice)
+        } else if present == 0 {
+            None
+        } else {
+            return None;
+        };
+        coins.insert(key, value);
+    }
+    Some((prior, coins))
 }
 
 pub(crate) fn parse_reorg_journal(bytes: &[u8]) -> Option<(u64, Hash)> {
@@ -176,6 +261,7 @@ pub(crate) fn commit_utxo_snapshot_delta(
         }
     }
     let count = net.len();
+    let prior_muhash = muhash.as_ref().map(|mh| mh.serialize_running_state());
     if let Some(mh) = muhash.as_mut() {
         for (key, value) in &net {
             let outpoint = crate::storage::disk_utxo::key_to_outpoint(key);
@@ -201,6 +287,32 @@ pub(crate) fn commit_utxo_snapshot_delta(
             SNAPSHOT_REORG_JOURNAL_KEY,
             &encode_reorg_journal(height, &tip),
         );
+    }
+    let pure_disconnect =
+        !disconnect_tip_first.is_empty() && connect_low_to_high.is_empty() && journal_tip.is_none();
+    if pure_disconnect {
+        let mut coins = HashMap::new();
+        let mut kept_muhash = None;
+        if let Some(existing) = tree.get(SNAPSHOT_REORG_ROLLBACK_KEY)? {
+            if let Some((prior, saved)) = decode_rollback(&existing) {
+                coins = saved;
+                kept_muhash = prior;
+            }
+        }
+        if kept_muhash.is_none() {
+            kept_muhash = prior_muhash.map(|bytes| bytes.to_vec());
+        }
+        for key in net.keys() {
+            if !coins.contains_key(key) {
+                coins.insert(*key, tree.get(key)?);
+            }
+        }
+        batch.put(
+            SNAPSHOT_REORG_ROLLBACK_KEY,
+            &encode_rollback(kept_muhash.as_deref(), &coins),
+        );
+    } else if !connect_low_to_high.is_empty() || journal_tip.is_some() {
+        batch.delete(SNAPSHOT_REORG_ROLLBACK_KEY);
     }
     let muhash_bytes = muhash.map(|mh| mh.serialize_running_state());
     if let Some(bytes) = muhash_bytes.as_ref() {
@@ -236,6 +348,36 @@ pub(crate) fn recover_snapshot_commit(storage: &Storage, blockstore: &BlockStore
     let Some((_, tree)) = storage.open_engine_resume_snapshot()? else {
         return Ok(());
     };
+    if let Some(raw) = tree.get(SNAPSHOT_REORG_ROLLBACK_KEY)? {
+        let connect_finished = tree.get(SNAPSHOT_REORG_JOURNAL_KEY)?.is_some();
+        if !connect_finished {
+            if let Some((prior_muhash, coins)) = decode_rollback(&raw) {
+                let mut batch = tree.batch()?;
+                for (key, value) in &coins {
+                    match value {
+                        None => batch.delete(key),
+                        Some(bytes) => batch.put(key, bytes),
+                    }
+                }
+                batch.delete(SNAPSHOT_REORG_ROLLBACK_KEY);
+                batch.delete(SNAPSHOT_MUHASH_KEY);
+                batch.commit()?;
+                if let Some(bytes) = prior_muhash {
+                    if bytes.len() == blvm_muhash::MUHASH_RUNNING_STATE_BYTES {
+                        let mut running = [0u8; blvm_muhash::MUHASH_RUNNING_STATE_BYTES];
+                        running.copy_from_slice(&bytes);
+                        storage
+                            .chain()
+                            .persist_ibd_utxo_muhash_running_only(&running)?;
+                    }
+                }
+            } else {
+                tree.remove(SNAPSHOT_REORG_ROLLBACK_KEY)?;
+            }
+        } else {
+            tree.remove(SNAPSHOT_REORG_ROLLBACK_KEY)?;
+        }
+    }
     if let Some(bytes) = tree.get(SNAPSHOT_MUHASH_KEY)? {
         if bytes.len() == blvm_muhash::MUHASH_RUNNING_STATE_BYTES {
             let mut running = [0u8; blvm_muhash::MUHASH_RUNNING_STATE_BYTES];
@@ -633,6 +775,7 @@ pub fn try_activate_heavier_fork(
     // Disk undo does not return the blocks it removed. Keep them so the
     // publisher and the mempool still see one entry per disconnected block.
     let mut disk_disconnected: Vec<Block> = Vec::new();
+    let mut disconnected_undos: Vec<BlockUndoLog> = Vec::new();
     let (current_chain, mut new_chain, consensus_height) = if let Some(tree) = &live_tree {
         let (active, candidate) =
             fork_hash_chains(storage, blockstore, &active_tip, candidate_tip)?;
@@ -648,13 +791,29 @@ pub fn try_activate_heavier_fork(
         tip_first.reverse();
         let codec = storage.utxo_value_codec();
         for window in disconnect_body_windows(&tip_first) {
-            apply_disconnect_window(
+            match apply_disconnect_window(
                 blockstore,
                 tree.as_ref(),
                 codec,
                 window,
                 live_muhash.as_mut(),
-            )?;
+            ) {
+                Ok(undos) => disconnected_undos.extend(undos),
+                Err(error) => {
+                    restore_disconnected_coins(
+                        tree.as_ref(),
+                        codec,
+                        &disconnected_undos,
+                        live_muhash.as_mut(),
+                    )?;
+                    if let Some(mh) = live_muhash.as_ref() {
+                        storage
+                            .chain()
+                            .persist_ibd_utxo_muhash_running_only(&mh.serialize_running_state())?;
+                    }
+                    return Err(error);
+                }
+            }
         }
         if let Some(mh) = live_muhash.as_ref() {
             storage
@@ -772,7 +931,7 @@ pub fn try_activate_heavier_fork(
         ctx
     };
 
-    let result = reorganize_chain_with_witnesses(
+    let reorg_result = reorganize_chain_with_witnesses(
         &new_chain,
         &new_witnesses,
         None,
@@ -786,11 +945,27 @@ pub fn try_activate_heavier_fork(
         current_timestamp(),
         network,
         Some(&mut connect_context),
-    )
-    .map_err(|e| {
-        *utxo_set = utxo_backup;
-        anyhow::anyhow!("reorganize_chain_with_witnesses: {e}")
-    })?;
+    );
+    let result = match reorg_result {
+        Ok(result) => result,
+        Err(error) => {
+            *utxo_set = utxo_backup;
+            if let Some(tree) = &live_tree {
+                restore_disconnected_coins(
+                    tree.as_ref(),
+                    storage.utxo_value_codec(),
+                    &disconnected_undos,
+                    live_muhash.as_mut(),
+                )?;
+                if let Some(mh) = live_muhash.as_ref() {
+                    storage
+                        .chain()
+                        .persist_ibd_utxo_muhash_running_only(&mh.serialize_running_state())?;
+                }
+            }
+            return Err(anyhow::anyhow!("reorganize_chain_with_witnesses: {error}"));
+        }
+    };
 
     *utxo_set = result.new_utxo_set;
 
@@ -1006,6 +1181,10 @@ mod snapshot_delta_tests {
         )
         .unwrap();
 
+        assert!(
+            tree.get(SNAPSHOT_REORG_ROLLBACK_KEY).unwrap().is_none(),
+            "a disconnect and connect in one batch leaves nothing to roll back"
+        );
         assert!(tree.get(&outpoint_to_key(&kept)).unwrap().is_some());
         assert!(tree.get(&outpoint_to_key(&spent)).unwrap().is_none());
         assert!(
@@ -1155,5 +1334,36 @@ mod snapshot_delta_tests {
         assert_eq!(height, 0);
         assert!(tree.get(SNAPSHOT_REORG_JOURNAL_KEY).unwrap().is_none());
         assert_eq!(storage.chain().get_engine_export_height().unwrap(), Some(0));
+    }
+
+    #[test]
+    fn a_disconnect_without_a_connect_is_restored_on_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        storage
+            .chain()
+            .set_ibd_utxo_canonical_tree("ibd_utxos")
+            .unwrap();
+        let tree = storage.open_tree("ibd_utxos").unwrap();
+        let codec = storage.utxo_value_codec();
+        let created = OutPoint {
+            hash: [9u8; 32],
+            index: 1,
+        };
+        let utxo = coin(50, 3);
+        let key = outpoint_to_key(&created);
+        tree.insert(&key, &encode_utxo_with_codec(codec, &utxo).unwrap())
+            .unwrap();
+        let disconnect = create_undo(created, utxo);
+        commit_utxo_snapshot_delta(tree.as_ref(), codec, &[&disconnect], &[], None, None).unwrap();
+        assert!(tree.get(&key).unwrap().is_none());
+        assert!(tree.get(SNAPSHOT_REORG_ROLLBACK_KEY).unwrap().is_some());
+
+        recover_snapshot_commit(&storage, storage.blocks().as_ref()).unwrap();
+        let restored = tree.get(&key).unwrap().expect("pre-image restored");
+        let restored = decode_utxo_with_codec(codec, &restored).unwrap();
+        assert_eq!(restored.value, 50);
+        assert_eq!(restored.height, 3);
+        assert!(tree.get(SNAPSHOT_REORG_ROLLBACK_KEY).unwrap().is_none());
     }
 }

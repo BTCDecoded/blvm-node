@@ -1481,7 +1481,7 @@ mod plan_wire_locks {
     struct Wired {
         manager: NetworkManager,
         peer: SocketAddr,
-        incoming: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+        incoming: tokio::sync::mpsc::Receiver<Vec<u8>>,
         storage: Arc<Storage>,
         mempool: Arc<MempoolManager>,
         _dir: tempfile::TempDir,
@@ -3032,7 +3032,7 @@ mod plan_wire_locks {
         assert_eq!(rate, 3_000);
     }
 
-    async fn next_feefilter(incoming: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> u64 {
+    async fn next_feefilter(incoming: &mut tokio::sync::mpsc::Receiver<Vec<u8>>) -> u64 {
         for _ in 0..4 {
             let bytes = incoming.recv().await.expect("handshake reply");
             if let Ok(ProtocolMessage::FeeFilter(msg)) = ProtocolParser::parse_message(&bytes) {
@@ -3310,7 +3310,7 @@ mod plan_wire_locks {
             .wtxid_relay
     }
 
-    async fn next_inv_type(incoming: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> u32 {
+    async fn next_inv_type(incoming: &mut tokio::sync::mpsc::Receiver<Vec<u8>>) -> u32 {
         let bytes = incoming.recv().await.expect("inventory");
         match ProtocolParser::parse_message(&bytes).unwrap() {
             ProtocolMessage::GetData(GetDataMessage { inventory })

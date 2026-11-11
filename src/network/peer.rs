@@ -12,6 +12,13 @@ use super::NetworkMessage;
 use super::transport::{TransportAddr, TransportConnection};
 use crate::utils::current_timestamp;
 
+/// Messages waiting on one peer's writer. A full queue returns an error.
+pub(crate) const MAX_PEER_OUTBOUND_MESSAGES: usize = 16;
+
+fn peer_outbound_channel() -> (mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>) {
+    mpsc::channel(MAX_PEER_OUTBOUND_MESSAGES)
+}
+
 /// Slot filled by an outbound dial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutboundRole {
@@ -27,7 +34,7 @@ pub struct Peer {
     addr: SocketAddr,
     transport_addr: TransportAddr, // Full transport address (may differ from SocketAddr for Iroh)
     message_tx: mpsc::UnboundedSender<NetworkMessage>,
-    pub(crate) send_tx: mpsc::UnboundedSender<Vec<u8>>, // Channel for sending messages
+    pub(crate) send_tx: mpsc::Sender<Vec<u8>>,
     /// Read loop for this connection. Aborting it drops the read half.
     read_task: Option<tokio::task::AbortHandle>,
     connected: bool,
@@ -198,9 +205,9 @@ impl Peer {
     }
 
     /// Same peer as [`Self::new_for_testing`], plus the channel `send_to_peer` writes.
-    pub(crate) fn pair_for_testing(addr: SocketAddr) -> (Self, mpsc::UnboundedReceiver<Vec<u8>>) {
+    pub(crate) fn pair_for_testing(addr: SocketAddr) -> (Self, mpsc::Receiver<Vec<u8>>) {
         let (message_tx, _) = mpsc::unbounded_channel();
-        let (send_tx, send_rx) = mpsc::unbounded_channel();
+        let (send_tx, send_rx) = peer_outbound_channel();
         let transport_addr = super::transport::TransportAddr::Tcp(addr);
         let now = current_timestamp();
 
@@ -251,7 +258,7 @@ impl Peer {
         message_tx: mpsc::UnboundedSender<NetworkMessage>,
     ) -> Self {
         // Create channel for sending messages
-        let (send_tx, send_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (send_tx, send_rx) = peer_outbound_channel();
 
         let transport_addr_clone = transport_addr.clone();
         let transport_addr_write = transport_addr.clone();
@@ -472,7 +479,7 @@ impl Peer {
         let (reader, writer) = tokio::io::split(stream);
 
         // Create channel for sending messages to the write task
-        let (send_tx, mut send_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (send_tx, send_rx) = peer_outbound_channel();
 
         let transport_addr_clone = transport_addr.clone();
         let transport_addr_write = transport_addr.clone();
@@ -700,7 +707,7 @@ impl Peer {
     pub async fn send_message(&self, message: Vec<u8>) -> Result<()> {
         let message_len = message.len();
         self.send_tx
-            .send(message)
+            .try_send(message)
             .map_err(|e| anyhow::anyhow!("Failed to send message to peer {}: {}", self.addr, e))?;
         debug!("Queued {} bytes for peer {}", message_len, self.addr);
         Ok(())
@@ -954,7 +961,7 @@ impl Peer {
         if let Some(task) = self.read_task.take() {
             task.abort();
         }
-        let (closed_tx, closed_rx) = mpsc::unbounded_channel();
+        let (closed_tx, closed_rx) = mpsc::channel(1);
         drop(closed_rx);
         drop(std::mem::replace(&mut self.send_tx, closed_tx));
         self.connected = false;
@@ -989,7 +996,7 @@ impl Peer {
 
 async fn run_peer_writer<W>(
     mut writer: W,
-    mut send_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut send_rx: mpsc::Receiver<Vec<u8>>,
     message_tx: mpsc::UnboundedSender<NetworkMessage>,
     addr: TransportAddr,
     #[cfg(feature = "bip324")] mut v2_send: Option<blvm_protocol::v2_transport::V2Send>,
@@ -1064,7 +1071,7 @@ mod write_error_tests {
 
     #[tokio::test]
     async fn write_error_removes_the_peer() {
-        let (send_tx, send_rx) = mpsc::unbounded_channel();
+        let (send_tx, send_rx) = super::peer_outbound_channel();
         let (message_tx, mut message_rx) = mpsc::unbounded_channel();
         let addr = TransportAddr::Tcp("127.0.0.1:8333".parse().unwrap());
         let writer = tokio::spawn(run_peer_writer(
@@ -1075,10 +1082,20 @@ mod write_error_tests {
             #[cfg(feature = "bip324")]
             None,
         ));
-        send_tx.send(vec![1, 2, 3]).unwrap();
+        send_tx.try_send(vec![1, 2, 3]).unwrap();
         let message = message_rx.recv().await;
         assert!(matches!(message, Some(NetworkMessage::PeerDisconnected(got)) if got == addr));
         writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn outbound_queue_rejects_the_message_past_the_cap() {
+        let (peer, _incoming) = super::Peer::pair_for_testing("127.0.0.1:1".parse().unwrap());
+        for _ in 0..super::MAX_PEER_OUTBOUND_MESSAGES {
+            peer.send_message(vec![1]).await.unwrap();
+        }
+        let error = peer.send_message(vec![1]).await.unwrap_err();
+        assert!(error.to_string().contains("Failed to send"));
     }
 }
 
