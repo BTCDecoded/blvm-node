@@ -2252,9 +2252,9 @@ impl NetworkManager {
             }
         }
 
-        // Send message without holding the lock (unbounded channel, so send won't block)
+        // The queue is bounded. A full peer is an error instead of an unbounded buffer.
         sender
-            .send(message)
+            .try_send(message)
             .map_err(|e| anyhow::anyhow!("Failed to send message to peer: {e}"))?;
 
         // Publish MessageSent event for module subscribers

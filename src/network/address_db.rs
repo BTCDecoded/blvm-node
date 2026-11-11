@@ -16,6 +16,26 @@ use iroh::PublicKey;
 /// Addresses older than this, and timestamp 0, are stored and not relayed.
 pub const ADDR_RELAY_HORIZON_SECS: u64 = 30 * 24 * 60 * 60;
 
+fn fresh_mix_key() -> u64 {
+    let mut bytes = [0u8; 8];
+    if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let _ = file.read_exact(&mut bytes);
+    }
+    let key = u64::from_le_bytes(bytes);
+    if key == 0 { 0xA5A5_5A5A_F00D } else { key }
+}
+
+fn rank_address(key: u64, addr: &NetworkAddress) -> u64 {
+    let mut hash = key;
+    for byte in format!("{addr:?}").bytes() {
+        hash = hash
+            .wrapping_mul(0x1000_0000_01b3)
+            .wrapping_add(u64::from(byte));
+    }
+    hash
+}
+
 pub fn address_within_relay_horizon(time: u32) -> bool {
     if time == 0 {
         return false;
@@ -84,6 +104,8 @@ pub struct AddressDatabase {
     table: super::address_table::AddressTable,
     /// Address expiration time in seconds (default: 24 hours)
     expiration_seconds: u64,
+    /// Mixes outbound and fresh-address order so a new advertisement is not preferred.
+    outbound_mix: u64,
 }
 
 impl AddressDatabase {
@@ -98,6 +120,7 @@ impl AddressDatabase {
             max_addresses,
             table: super::address_table::AddressTable::new(),
             expiration_seconds: 24 * 60 * 60, // 24 hours default
+            outbound_mix: fresh_mix_key(),
         }
     }
 
@@ -112,6 +135,7 @@ impl AddressDatabase {
             max_addresses,
             table: super::address_table::AddressTable::new(),
             expiration_seconds,
+            outbound_mix: fresh_mix_key(),
         }
     }
 
@@ -204,9 +228,9 @@ impl AddressDatabase {
             .map(|(_, entry)| (entry.last_seen, entry.addr.clone()))
             .collect();
 
-        // Sort by last_seen in descending order (most recent first)
-        // Use sort_by with reverse to avoid double sort
-        fresh.sort_by(|a, b| b.0.cmp(&a.0));
+        fresh.sort_by(|a, b| {
+            rank_address(self.outbound_mix, &a.1).cmp(&rank_address(self.outbound_mix, &b.1))
+        });
 
         // Extract addresses and take requested count
         fresh
@@ -231,7 +255,7 @@ impl AddressDatabase {
     /// whether `NODE_NETWORK` (0x1) is set — consistent with `peer_manager.rs` and
     /// `count_fresh_non_limited`.
     ///
-    /// Within each group addresses are sorted by `last_seen` descending.
+    /// Within each group the order is mixed per process, not newest-first.
     pub fn get_fresh_ibd_addresses(&self, count: usize) -> Vec<NetworkAddress> {
         use blvm_protocol::service_flags::standard::NODE_NETWORK;
 
@@ -255,9 +279,12 @@ impl AddressDatabase {
             }
         }
 
-        full.sort_by(|a, b| b.0.cmp(&a.0));
-        unknown.sort_by(|a, b| b.0.cmp(&a.0));
-        limited.sort_by(|a, b| b.0.cmp(&a.0));
+        let by_mix = |a: &(u64, NetworkAddress), b: &(u64, NetworkAddress)| {
+            rank_address(self.outbound_mix, &a.1).cmp(&rank_address(self.outbound_mix, &b.1))
+        };
+        full.sort_by(by_mix);
+        unknown.sort_by(by_mix);
+        limited.sort_by(by_mix);
 
         full.into_iter()
             .chain(unknown)
@@ -297,9 +324,12 @@ impl AddressDatabase {
                 limited.push(row);
             }
         }
-        full.sort_by(|a, b| b.0.cmp(&a.0));
-        unknown.sort_by(|a, b| b.0.cmp(&a.0));
-        limited.sort_by(|a, b| b.0.cmp(&a.0));
+        let by_mix = |a: &(u64, NetworkAddress), b: &(u64, NetworkAddress)| {
+            rank_address(self.outbound_mix, &a.1).cmp(&rank_address(self.outbound_mix, &b.1))
+        };
+        full.sort_by(by_mix);
+        unknown.sort_by(by_mix);
+        limited.sort_by(by_mix);
         full.into_iter()
             .chain(unknown)
             .chain(limited)
@@ -497,8 +527,16 @@ impl AddressDatabase {
             .map(|(public_key, entry)| (entry.last_seen, *public_key))
             .collect();
 
-        // Sort by last_seen in descending order (most recent first)
-        fresh.sort_by(|a, b| b.0.cmp(&a.0));
+        let rank = |key: &PublicKey| {
+            let mut hash = self.outbound_mix;
+            for byte in format!("{key:?}").bytes() {
+                hash = hash
+                    .wrapping_mul(0x1000_0000_01b3)
+                    .wrapping_add(u64::from(byte));
+            }
+            hash
+        };
+        fresh.sort_by(|a, b| rank(&a.1).cmp(&rank(&b.1)));
 
         // Extract node IDs and take requested count
         fresh
@@ -725,6 +763,21 @@ mod tests {
 
         let fresh = db.get_fresh_addresses(10);
         assert_eq!(fresh.len(), 2);
+    }
+
+    #[test]
+    fn fresh_addresses_follow_the_mix() {
+        let mut db = AddressDatabase::new(100);
+        let mut added = Vec::new();
+        for host in 1..=8 {
+            let addr = create_test_address(&format!("203.0.113.{host}"), 8333);
+            db.add_address(addr.clone(), 1);
+            added.push(addr);
+        }
+        added.sort_by(|left, right| {
+            rank_address(db.outbound_mix, left).cmp(&rank_address(db.outbound_mix, right))
+        });
+        assert_eq!(db.get_fresh_addresses(10), added);
     }
 
     #[test]

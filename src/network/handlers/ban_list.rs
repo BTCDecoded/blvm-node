@@ -295,7 +295,7 @@ pub(crate) async fn broadcast_ban_list(
                 .map(|peer| peer.send_tx.clone())
         };
         if let Some(sender) = sender {
-            let _ = sender.send(wire.clone());
+            let _ = sender.try_send(wire.clone());
             if let Some(ep) = event_publisher.lock().await.as_ref() {
                 let _ = ep
                     .publish_event(
