@@ -167,14 +167,14 @@ impl HttpBroker {
         #[cfg(not(feature = "module-http"))]
         {
             let _ = (content_type, timeout_ms, origin, authorization);
-            return Err(HttpBrokerError::new(
+            Err(HttpBrokerError::new(
                 Some(
                     parse_origin(url)
                         .map(|item| item.display())
                         .unwrap_or_default(),
                 ),
                 "http broker requires the module-http feature",
-            ));
+            ))
         }
         #[cfg(feature = "module-http")]
         {
@@ -215,24 +215,27 @@ impl HttpBroker {
         timeout_ms: u32,
     ) -> Result<Fetched, HttpBrokerError> {
         let allow = self.allow_list_for(module_id);
-        let mut current = url.to_string();
-        let mut redirects = 0u32;
-        loop {
+        #[cfg(not(feature = "module-http"))]
+        {
+            let current = url.to_string();
+            let redirects = 0u32;
             let origin = check_url(&current, &allow)?;
-            #[cfg(not(feature = "module-http"))]
-            {
-                let _ = (accept, timeout_ms, redirects, origin);
-                return Err(HttpBrokerError::new(
-                    Some(
-                        parse_origin(&current)
-                            .map(|o| o.display())
-                            .unwrap_or_default(),
-                    ),
-                    "http broker requires the module-http feature",
-                ));
-            }
-            #[cfg(feature = "module-http")]
-            {
+            let _ = (accept, timeout_ms, redirects, origin);
+            Err(HttpBrokerError::new(
+                Some(
+                    parse_origin(&current)
+                        .map(|o| o.display())
+                        .unwrap_or_default(),
+                ),
+                "http broker requires the module-http feature",
+            ))
+        }
+        #[cfg(feature = "module-http")]
+        {
+            let mut current = url.to_string();
+            let mut redirects = 0u32;
+            loop {
+                let origin = check_url(&current, &allow)?;
                 let response =
                     send_get(&self.policy, &current, &origin, accept, timeout_ms).await?;
                 if is_redirect(response.status) {
