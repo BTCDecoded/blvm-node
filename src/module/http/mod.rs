@@ -167,14 +167,14 @@ impl HttpBroker {
         #[cfg(not(feature = "module-http"))]
         {
             let _ = (content_type, timeout_ms, origin, authorization);
-            return Err(HttpBrokerError::new(
+            Err(HttpBrokerError::new(
                 Some(
                     parse_origin(url)
                         .map(|item| item.display())
                         .unwrap_or_default(),
                 ),
                 "http broker requires the module-http feature",
-            ));
+            ))
         }
         #[cfg(feature = "module-http")]
         {
@@ -215,24 +215,27 @@ impl HttpBroker {
         timeout_ms: u32,
     ) -> Result<Fetched, HttpBrokerError> {
         let allow = self.allow_list_for(module_id);
-        let mut current = url.to_string();
-        let mut redirects = 0u32;
-        loop {
+        #[cfg(not(feature = "module-http"))]
+        {
+            let current = url.to_string();
+            let redirects = 0u32;
             let origin = check_url(&current, &allow)?;
-            #[cfg(not(feature = "module-http"))]
-            {
-                let _ = (accept, timeout_ms, redirects, origin);
-                return Err(HttpBrokerError::new(
-                    Some(
-                        parse_origin(&current)
-                            .map(|o| o.display())
-                            .unwrap_or_default(),
-                    ),
-                    "http broker requires the module-http feature",
-                ));
-            }
-            #[cfg(feature = "module-http")]
-            {
+            let _ = (accept, timeout_ms, redirects, origin);
+            Err(HttpBrokerError::new(
+                Some(
+                    parse_origin(&current)
+                        .map(|o| o.display())
+                        .unwrap_or_default(),
+                ),
+                "http broker requires the module-http feature",
+            ))
+        }
+        #[cfg(feature = "module-http")]
+        {
+            let mut current = url.to_string();
+            let mut redirects = 0u32;
+            loop {
+                let origin = check_url(&current, &allow)?;
                 let response =
                     send_get(&self.policy, &current, &origin, accept, timeout_ms).await?;
                 if is_redirect(response.status) {
@@ -411,9 +414,17 @@ pub fn host_is_loopback_link_local_or_private(host: &str) -> bool {
 pub fn ip_is_loopback_link_local_or_private(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {
-            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+            let shared = ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 64;
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || shared
         }
         IpAddr::V6(ip) => {
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return ip_is_loopback_link_local_or_private(IpAddr::V4(v4));
+            }
             ip.is_loopback()
                 || ip.is_unicast_link_local()
                 || ip.is_unique_local()
@@ -469,7 +480,7 @@ async fn send_get(
     accept: Option<&str>,
     timeout_ms: u32,
 ) -> Result<Sent, HttpBrokerError> {
-    let ip = resolve_connect_address(origin).await?;
+    let ip = resolve_connect_address(policy, origin).await?;
     let timeout = Duration::from_millis(u64::from(capped_timeout_ms(timeout_ms)));
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -480,7 +491,9 @@ async fn send_get(
         })?;
         builder = builder.proxy(proxy);
     }
-    builder = builder.resolve(&origin.host, SocketAddr::new(ip, origin.port));
+    if let Some(ip) = ip {
+        builder = builder.resolve(&origin.host, SocketAddr::new(ip, origin.port));
+    }
     let client = builder.build().map_err(|err| {
         HttpBrokerError::new(Some(origin.display()), format!("http client: {err}"))
     })?;
@@ -546,7 +559,7 @@ async fn send_post(
     authorization: Option<&str>,
     timeout_ms: u32,
 ) -> Result<Sent, HttpBrokerError> {
-    let ip = resolve_connect_address(origin).await?;
+    let ip = resolve_connect_address(policy, origin).await?;
     let timeout = Duration::from_millis(u64::from(capped_timeout_ms(timeout_ms)));
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -557,7 +570,9 @@ async fn send_post(
         })?;
         builder = builder.proxy(proxy);
     }
-    builder = builder.resolve(&origin.host, SocketAddr::new(ip, origin.port));
+    if let Some(ip) = ip {
+        builder = builder.resolve(&origin.host, SocketAddr::new(ip, origin.port));
+    }
     let client = builder.build().map_err(|err| {
         HttpBrokerError::new(Some(origin.display()), format!("http client: {err}"))
     })?;
@@ -604,9 +619,45 @@ async fn send_post(
     })
 }
 
+/// True when the proxy resolves hostnames itself (`socks5h`, `socks4a`).
 #[cfg(feature = "module-http")]
-async fn resolve_connect_address(origin: &HttpOrigin) -> Result<IpAddr, HttpBrokerError> {
+fn proxy_resolves_hostnames(policy: &HttpPolicy) -> bool {
+    policy.proxy.as_deref().is_some_and(|proxy| {
+        let scheme = proxy.split_once("://").map_or("", |(scheme, _)| scheme);
+        scheme.eq_ignore_ascii_case("socks5h") || scheme.eq_ignore_ascii_case("socks4a")
+    })
+}
+
+/// Address to pin for the connection. `None` leaves the hostname to the proxy.
+/// A looked-up address must pass the same loopback/link-local/private rule as
+/// the listed host, and the client connects to that exact address.
+#[cfg(feature = "module-http")]
+async fn resolve_connect_address(
+    policy: &HttpPolicy,
+    origin: &HttpOrigin,
+) -> Result<Option<IpAddr>, HttpBrokerError> {
     if let Ok(ip) = origin.host.parse::<IpAddr>() {
+        return Ok(Some(ip));
+    }
+    if proxy_resolves_hostnames(policy) {
+        return Ok(None);
+    }
+    let ip = lookup_first(origin).await?;
+    if ip_is_loopback_link_local_or_private(ip)
+        && !host_is_loopback_link_local_or_private(&origin.host)
+    {
+        return Err(HttpBrokerError::new(
+            Some(origin.display()),
+            "private address refused",
+        ));
+    }
+    Ok(Some(ip))
+}
+
+#[cfg(feature = "module-http")]
+async fn lookup_first(origin: &HttpOrigin) -> Result<IpAddr, HttpBrokerError> {
+    #[cfg(test)]
+    if let Some(ip) = lookup_stub::take(&origin.host) {
         return Ok(ip);
     }
     let mut addrs = tokio::net::lookup_host((origin.host.as_str(), origin.port))
@@ -617,6 +668,36 @@ async fn resolve_connect_address(origin: &HttpOrigin) -> Result<IpAddr, HttpBrok
     addrs.next().map(|addr| addr.ip()).ok_or_else(|| {
         HttpBrokerError::new(Some(origin.display()), "dns lookup returned no address")
     })
+}
+
+/// Test-only lookup override, per thread, so tests never use live DNS.
+#[cfg(all(test, feature = "module-http"))]
+mod lookup_stub {
+    use std::cell::RefCell;
+    use std::net::IpAddr;
+
+    thread_local! {
+        static STUB: RefCell<Option<(String, IpAddr)>> = const { RefCell::new(None) };
+        static CALLS: RefCell<u32> = const { RefCell::new(0) };
+    }
+
+    pub fn set(host: &str, ip: IpAddr) {
+        STUB.with(|stub| *stub.borrow_mut() = Some((host.to_string(), ip)));
+    }
+
+    pub fn calls() -> u32 {
+        CALLS.with(|calls| *calls.borrow())
+    }
+
+    pub fn take(host: &str) -> Option<IpAddr> {
+        CALLS.with(|calls| *calls.borrow_mut() += 1);
+        STUB.with(|stub| {
+            stub.borrow()
+                .as_ref()
+                .filter(|(name, _)| name == host)
+                .map(|(_, ip)| *ip)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -655,6 +736,51 @@ mod tests {
     }
 
     #[test]
+    fn resolved_address_ranges() {
+        let internal = [
+            "127.0.0.1",
+            "169.254.169.254",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "0.0.0.0",
+            "100.64.0.1",
+            "100.127.255.254",
+            "::",
+            "::1",
+            "fe80::1",
+            "fc00::1",
+            "fd12::1",
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+            "::ffff:10.0.0.1",
+            "::ffff:100.64.0.1",
+        ];
+        for ip in internal {
+            assert!(
+                ip_is_loopback_link_local_or_private(ip.parse().unwrap()),
+                "{ip}"
+            );
+        }
+        for ip in [
+            "1.1.1.1",
+            "100.128.0.1",
+            "100.63.255.255",
+            "2606:4700::1111",
+            "::ffff:1.1.1.1",
+        ] {
+            assert!(
+                !ip_is_loopback_link_local_or_private(ip.parse().unwrap()),
+                "{ip}"
+            );
+        }
+        assert!(host_is_loopback_link_local_or_private("localhost"));
+        assert!(host_is_loopback_link_local_or_private("127.0.0.1"));
+        assert!(host_is_loopback_link_local_or_private("::ffff:127.0.0.1"));
+        assert!(!host_is_loopback_link_local_or_private("example.com"));
+    }
+
+    #[test]
     fn timeout_is_capped_at_the_design_limit() {
         assert_eq!(capped_timeout_ms(20_000), 15_000);
         assert_eq!(capped_timeout_ms(1000), 1000);
@@ -684,5 +810,110 @@ mod tests {
                 .message
                 .contains("in flight")
         );
+    }
+
+    #[cfg(feature = "module-http")]
+    mod resolve {
+        use super::super::*;
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        fn listener() -> (u16, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+            let hit = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&hit);
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let handle = std::thread::spawn(move || {
+                for _ in 0..10 {
+                    if let Ok((mut sock, _)) = listener.accept() {
+                        flag.store(true, Ordering::SeqCst);
+                        let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            });
+            (port, hit, handle)
+        }
+
+        fn broker(origin: &str, proxy: Option<&str>) -> HttpBroker {
+            let mut allow = HashMap::new();
+            allow.insert("mod".to_string(), vec![origin.to_string()]);
+            HttpBroker::new(HttpPolicy {
+                allow,
+                proxy: proxy.map(str::to_string),
+            })
+        }
+
+        #[tokio::test]
+        async fn listed_hostname_resolving_internal_is_refused() {
+            for ip in ["127.0.0.1", "169.254.169.254", "::ffff:127.0.0.1"] {
+                let (port, hit, handle) = listener();
+                let origin = format!("https://feeds.example:{port}");
+                lookup_stub::set("feeds.example", ip.parse().unwrap());
+                let err = broker(&origin, None)
+                    .execute("mod", &format!("{origin}/x"), None, 1000)
+                    .await
+                    .unwrap_err();
+                assert!(
+                    err.message.contains("private address"),
+                    "{ip}: {}",
+                    err.message
+                );
+                handle.join().unwrap();
+                assert!(!hit.load(Ordering::SeqCst), "{ip}");
+            }
+        }
+
+        #[tokio::test]
+        async fn listed_internal_literal_and_localhost_still_resolve() {
+            let origin = HttpOrigin {
+                scheme: "http".to_string(),
+                host: "localhost".to_string(),
+                port: 9,
+            };
+            lookup_stub::set("localhost", "127.0.0.1".parse().unwrap());
+            let ip = resolve_connect_address(&HttpPolicy::default(), &origin)
+                .await
+                .unwrap();
+            assert_eq!(ip, Some("127.0.0.1".parse().unwrap()));
+            let origin = HttpOrigin {
+                host: "10.1.2.3".to_string(),
+                ..origin
+            };
+            let ip = resolve_connect_address(&HttpPolicy::default(), &origin)
+                .await
+                .unwrap();
+            assert_eq!(ip, Some("10.1.2.3".parse().unwrap()));
+        }
+
+        #[tokio::test]
+        async fn hostname_proxy_skips_local_lookup() {
+            let origin = HttpOrigin {
+                scheme: "https".to_string(),
+                host: "feeds.example".to_string(),
+                port: 443,
+            };
+            lookup_stub::set("feeds.example", "127.0.0.1".parse().unwrap());
+            for proxy in ["socks5h://127.0.0.1:9050", "socks4a://127.0.0.1:9050"] {
+                let policy = HttpPolicy {
+                    allow: HashMap::new(),
+                    proxy: Some(proxy.to_string()),
+                };
+                let before = lookup_stub::calls();
+                let ip = resolve_connect_address(&policy, &origin).await.unwrap();
+                assert_eq!(ip, None, "{proxy}");
+                assert_eq!(lookup_stub::calls(), before, "{proxy}");
+            }
+            let policy = HttpPolicy {
+                allow: HashMap::new(),
+                proxy: Some("socks5://127.0.0.1:9050".to_string()),
+            };
+            let err = resolve_connect_address(&policy, &origin).await.unwrap_err();
+            assert!(err.message.contains("private address"));
+        }
     }
 }

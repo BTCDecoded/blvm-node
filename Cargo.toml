@@ -215,7 +215,6 @@ default = [
     "libc",
     "production",
     "governance",
-    "module-http",
     "utxo-commitments",
     "protocol-verification",
     "iroh",
@@ -262,6 +261,7 @@ bip324 = ["blvm-protocol/bip324"]
 # Governance (auto-detect Commons server, HTTP client)
 governance = ["dep:reqwest"]
 # Module outbound HTTP broker (design 19.2). Same reqwest build as governance.
+# Opt-in: not in default.
 module-http = ["dep:reqwest"]
 # Memory allocator optimization (mimalloc) - faster than default allocator
 # Disabled for Windows cross-compilation (mimalloc linking issues with MinGW)
@@ -451,6 +451,12 @@ path = "tools/migrate-bitcoin-core.rs"
 required-features = ["rocksdb"]
 
 # secp256k1 now direct path dep above; no patch needed
+
+# Broker acceptance tests need the opt-in `module-http` feature.
+[[test]]
+name = "module_http_broker_tests"
+path = "tests/module_http_broker_tests.rs"
+required-features = ["module-http"]
 
 # Coverage suites: explicit targets replace auto-discovery so CI skips them unless
 # `--features coverage-tests` (see COVERAGE_TEST_PLAN.md / tarpaulin gates).
