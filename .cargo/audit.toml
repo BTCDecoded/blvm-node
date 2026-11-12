@@ -19,27 +19,27 @@
 
 [advisories]
 ignore = [
-    # No patched hickory-proto 0.25 version; 0.26.2 is unaffected but not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    # No patched hickory-proto 0.25 version; 0.26.2 is unaffected but that version is not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
     "RUSTSEC-2026-0118",
-    # Patched in hickory-proto >=0.26.1; not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    # Patched in hickory-proto >=0.26.1; patched version not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
     "RUSTSEC-2026-0119",
-    # Patched in hickory-proto >=0.26.2; not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    # Patched in hickory-proto >=0.26.2; patched version not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
     "RUSTSEC-2026-0487",
-    # Patched in hickory-proto >=0.26.2; not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    # Patched in hickory-proto >=0.26.2; patched version not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
     "RUSTSEC-2026-0489",
-    # Patched in hickory-proto >=0.26.2; not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    # Patched in hickory-proto >=0.26.2; patched version not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
     "RUSTSEC-2026-0490",
-    # Patched in hickory-proto >=0.26.2; not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    # Patched in hickory-proto >=0.26.2; patched version not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
     "RUSTSEC-2026-0491",
-    # No patched hickory-proto version; 0.26.2 is unaffected but not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    # No patched hickory-proto version; 0.26.2 is unaffected but that version is not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
     "RUSTSEC-2026-0504",
-    # No patched hickory-proto version; 0.26.2 is unaffected but not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    # No patched hickory-proto version; 0.26.2 is unaffected but that version is not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
     "RUSTSEC-2026-0505",
-    # No patched hickory-proto version; 0.26.2 is unaffected but not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    # No patched hickory-proto version; 0.26.2 is unaffected but that version is not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
     "RUSTSEC-2026-0511",
-    # No patched hickory-proto version; 0.26.2 is unaffected but not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    # No patched hickory-proto version; 0.26.2 is unaffected but that version is not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
     "RUSTSEC-2026-0512",
-    # Patched in hickory-resolver >=0.26.2; not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    # Patched in hickory-resolver >=0.26.2; patched version not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
     "RUSTSEC-2026-0514",
     "RUSTSEC-2026-0338",
     "RUSTSEC-2026-0339",
