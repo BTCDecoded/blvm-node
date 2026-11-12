@@ -287,25 +287,26 @@ const MAX_STANDARD_TX_WEIGHT: u64 = 400_000;
 const MIN_STANDARD_TX_NONWITNESS_SIZE: usize = 65;
 
 /// A standard input's scriptSig is at most this many bytes.
+/// Used as the default for [`MempoolPolicyConfig::max_standard_script_size`].
 const MAX_STANDARD_SCRIPTSIG_SIZE: usize = 1_650;
 
 /// A standard `OP_RETURN` output is at most this many bytes.
 /// The budget is the standard transaction weight divided by four.
+/// Used as the default for [`MempoolPolicyConfig::max_op_return_size`].
 const MAX_STANDARD_OP_RETURN_SIZE: usize = (MAX_STANDARD_TX_WEIGHT / 4) as usize;
 
 /// True for a standard output script: P2PKH, P2SH, P2PK, a witness program, or an `OP_RETURN`.
 ///
 /// Version 0 is standard only at 20 or 32 bytes. Any other witness version, `OP_1`
 /// through `OP_16`, is standard for a direct push of 2–40 bytes. An `OP_RETURN`
-/// is standard up to [`MAX_STANDARD_OP_RETURN_SIZE`] bytes when every following
+/// is standard up to `max_op_return_size` bytes when every following
 /// byte is a push.
-fn output_script_is_standard(script: &[u8]) -> bool {
+fn output_script_is_standard(script: &[u8], max_op_return_size: usize) -> bool {
     if script.is_empty() {
         return false;
     }
     if script[0] == 0x6a {
-        return script.len() <= MAX_STANDARD_OP_RETURN_SIZE
-            && op_return_payload_is_push_only(script);
+        return script.len() <= max_op_return_size && op_return_payload_is_push_only(script);
     }
     if blvm_protocol::witness::is_any_witness_program(script)
         && !blvm_protocol::witness::is_invalid_v0_witness_program(script)
@@ -336,8 +337,23 @@ fn output_script_is_standard(script: &[u8]) -> bool {
 }
 
 /// A spent script Core's solver recognizes. A larger bare multisig is still that type.
-fn spent_script_is_standard(script: &[u8]) -> bool {
-    output_script_is_standard(script) || bare_multisig_within(script, 16)
+fn spent_script_is_standard(script: &[u8], max_op_return_size: usize) -> bool {
+    output_script_is_standard(script, max_op_return_size) || bare_multisig_within(script, 16)
+}
+
+fn op_return_output_count(tx: &blvm_protocol::Transaction) -> usize {
+    tx.outputs
+        .iter()
+        .filter(|output| output.script_pubkey.first() == Some(&0x6a))
+        .count()
+}
+
+fn op_return_count_exceeds_policy(
+    tx: &blvm_protocol::Transaction,
+    policy: &MempoolPolicyConfig,
+) -> bool {
+    let count = op_return_output_count(tx);
+    (policy.reject_multiple_op_return && count > 1) || count > policy.max_op_return_outputs as usize
 }
 
 /// Bare `OP_m <keys> OP_n OP_CHECKMULTISIG` with `1 <= m <= n <= 3`.
@@ -2322,7 +2338,7 @@ impl MempoolManager {
     /// the configured limits, and, when standardness is required, the version is
     /// 1 or 2, the weight,
     /// including `witnesses`, is at most 400,000, every scriptSig is push-only
-    /// and at most 1,650 bytes, and every output
+    /// and at most `max_standard_script_size` bytes (default 1,650), and every output
     /// script and spent script is standard, a pay-to-script-hash redeem has at
     /// most 15 signature operations, and the transaction has at most 2,500
     /// legacy signature operations. `Err` is the reject reason.
@@ -2340,13 +2356,13 @@ impl MempoolManager {
         {
             return Err("dust");
         }
-        let require_standard = self
+        let policy = self
             .policy_config
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|policy| policy.require_standard)
-            .unwrap_or(true);
+            .clone()
+            .unwrap_or_default();
+        let require_standard = policy.require_standard;
         if require_standard && !(1..=2).contains(&tx.version) {
             return Err("version");
         }
@@ -2354,18 +2370,20 @@ impl MempoolManager {
             return Err("tx-size");
         }
         if require_standard
-            && tx
-                .outputs
-                .iter()
-                .any(|output| !output_script_is_standard(output.script_pubkey.as_ref()))
+            && tx.outputs.iter().any(|output| {
+                !output_script_is_standard(output.script_pubkey.as_ref(), policy.max_op_return_size)
+            })
         {
             return Err("scriptpubkey");
+        }
+        if require_standard && op_return_count_exceeds_policy(tx, &policy) {
+            return Err("multi-op-return");
         }
         if require_standard
             && tx
                 .inputs
                 .iter()
-                .any(|input| input.script_sig.len() > MAX_STANDARD_SCRIPTSIG_SIZE)
+                .any(|input| input.script_sig.len() > policy.max_standard_script_size)
         {
             return Err("scriptsig-size");
         }
@@ -2402,9 +2420,9 @@ impl MempoolManager {
         }
         if require_standard
             && self.script_prevouts(tx, utxo_set).iter().any(|prevout| {
-                prevout
-                    .as_ref()
-                    .is_some_and(|prevout| !spent_script_is_standard(prevout.script.as_ref()))
+                prevout.as_ref().is_some_and(|prevout| {
+                    !spent_script_is_standard(prevout.script.as_ref(), policy.max_op_return_size)
+                })
             })
         {
             return Err("bad-txns-nonstandard-inputs");
@@ -2419,13 +2437,7 @@ impl MempoolManager {
             return Err("bad-txns-in-belowout");
         }
         let fee = self.calculate_transaction_fee(tx, utxo_set);
-        let rate = self
-            .policy_config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|policy| policy.min_relay_fee_rate)
-            .unwrap_or(100);
+        let rate = policy.min_relay_fee_rate;
         let vsize = self.admit_vsize(tx, witnesses, utxo_set).0;
         let required = (rate as u128).saturating_mul(vsize as u128).div_ceil(1000);
         let tx_hash = blvm_protocol::block::calculate_tx_id(tx);
@@ -2437,12 +2449,6 @@ impl MempoolManager {
         if !waived && (fee as u128) < required {
             return Err("min relay fee not met");
         }
-        let policy = self
-            .policy_config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .unwrap_or_default();
         if fee < policy.min_tx_fee {
             return Err("min relay fee not met");
         }
@@ -3100,14 +3106,26 @@ impl MempoolManager {
             return Ok(false);
         }
         if effective_policy.require_standard
-            && tx
-                .outputs
-                .iter()
-                .any(|output| !output_script_is_standard(output.script_pubkey.as_ref()))
+            && tx.outputs.iter().any(|output| {
+                !output_script_is_standard(
+                    output.script_pubkey.as_ref(),
+                    effective_policy.max_op_return_size,
+                )
+            })
         {
             warn!(
                 "Transaction {} rejected: non-standard output",
                 hex::encode(tx_hash)
+            );
+            return Ok(false);
+        }
+        if effective_policy.require_standard
+            && op_return_count_exceeds_policy(&tx, &effective_policy)
+        {
+            warn!(
+                "Transaction {} rejected: {} OP_RETURN outputs",
+                hex::encode(tx_hash),
+                op_return_output_count(&tx)
             );
             return Ok(false);
         }
@@ -3127,7 +3145,7 @@ impl MempoolManager {
             && tx
                 .inputs
                 .iter()
-                .any(|input| input.script_sig.len() > MAX_STANDARD_SCRIPTSIG_SIZE)
+                .any(|input| input.script_sig.len() > effective_policy.max_standard_script_size)
         {
             warn!(
                 "Transaction {} rejected: scriptSig is {} bytes",
@@ -3298,9 +3316,12 @@ impl MempoolManager {
                 .script_prevouts(&tx, &utxo_snapshot)
                 .iter()
                 .any(|prevout| {
-                    prevout
-                        .as_ref()
-                        .is_some_and(|prevout| !spent_script_is_standard(prevout.script.as_ref()))
+                    prevout.as_ref().is_some_and(|prevout| {
+                        !spent_script_is_standard(
+                            prevout.script.as_ref(),
+                            effective_policy.max_op_return_size,
+                        )
+                    })
                 })
         {
             warn!(

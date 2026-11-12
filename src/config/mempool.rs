@@ -262,6 +262,31 @@ pub struct MempoolPolicyConfig {
     /// Optional spam filter tuning when `reject_spam_in_mempool` is true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spam_filter: Option<SpamFilterConfigSerializable>,
+
+    /// Maximum length of a standard `OP_RETURN` output script, in bytes,
+    /// including the leading `OP_RETURN`. Default 100,000
+    /// (`MAX_STANDARD_TX_WEIGHT / 4`). This is the node's current limit, not
+    /// the primitives library default of 80.
+    #[serde(default = "default_max_op_return_size")]
+    pub max_op_return_size: usize,
+
+    /// Maximum number of `OP_RETURN` outputs in a standard transaction.
+    /// Default `u32::MAX` (no cap), matching the node's current admission
+    /// path, which does not limit how many `OP_RETURN` outputs a transaction
+    /// has. This is not the primitives library default of 1.
+    #[serde(default = "default_max_op_return_outputs")]
+    pub max_op_return_outputs: u32,
+
+    /// When true, a transaction with more than one `OP_RETURN` output is
+    /// non-standard. Default false, matching the node's current behavior.
+    #[serde(default = "default_reject_multiple_op_return")]
+    pub reject_multiple_op_return: bool,
+
+    /// Maximum length of a standard input `scriptSig`, in bytes. Default 1,650
+    /// (`MAX_STANDARD_SCRIPTSIG_SIZE`). This is not the primitives library
+    /// default of 200, which applies to a different check.
+    #[serde(default = "default_max_standard_script_size")]
+    pub max_standard_script_size: usize,
 }
 
 fn default_max_mempool_mb() -> u64 {
@@ -340,6 +365,22 @@ fn default_reject_spam_in_mempool() -> bool {
     false
 }
 
+fn default_max_op_return_size() -> usize {
+    (400_000 / 4) as usize
+}
+
+fn default_max_op_return_outputs() -> u32 {
+    u32::MAX
+}
+
+fn default_reject_multiple_op_return() -> bool {
+    false
+}
+
+fn default_max_standard_script_size() -> usize {
+    1_650
+}
+
 fn default_count_sigops() -> bool {
     true
 }
@@ -388,6 +429,10 @@ impl Default for MempoolPolicyConfig {
             require_standard: true,
             reject_spam_in_mempool: false,
             spam_filter: None,
+            max_op_return_size: (400_000 / 4) as usize,
+            max_op_return_outputs: u32::MAX,
+            reject_multiple_op_return: false,
+            max_standard_script_size: 1_650,
         }
     }
 }
@@ -439,5 +484,16 @@ mod overlay_tests {
         rbf.min_fee_bump_satoshis = 5_000;
         overlay_mempool_onto_consensus(&mut consensus, None, Some(&rbf));
         assert_eq!(consensus.rbf_fee_increment, 5_000);
+    }
+
+    #[test]
+    fn empty_mempool_table_uses_node_standardness_defaults() {
+        let policy: MempoolPolicyConfig = toml::from_str("").unwrap();
+        assert_eq!(policy.max_op_return_size, 100_000);
+        assert_eq!(policy.max_op_return_outputs, u32::MAX);
+        assert!(!policy.reject_multiple_op_return);
+        assert_eq!(policy.max_standard_script_size, 1_650);
+        assert!(policy.require_standard);
+        assert!(!policy.reject_spam_in_mempool);
     }
 }
