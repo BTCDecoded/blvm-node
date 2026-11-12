@@ -1383,6 +1383,155 @@ fn op_return_of_84_bytes_is_standard() {
 }
 
 #[test]
+fn configured_max_op_return_size_of_80_rejects_an_84_byte_op_return() {
+    let carrier = |payload: usize| {
+        let mut s = vec![0x6a, 0x4c, payload as u8];
+        s.extend(std::iter::repeat(0u8).take(payload));
+        s
+    };
+    let admit = |script: Vec<u8>| {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let mut tx = legacy_empty_script();
+        tx.inputs[0].script_sig = script_sig;
+        tx.outputs[0].value = 0;
+        tx.outputs[0].script_pubkey = script;
+        let mut policy = crate::config::MempoolPolicyConfig::default();
+        policy.max_op_return_size = 80;
+        let mempool = MempoolManager::new();
+        mempool.set_policy_config(Some(policy));
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+            prevout, 100_000,
+        ))));
+        mempool.add_transaction(tx).unwrap()
+    };
+    // carrier(77) is an 80-byte script; carrier(81) is 84 bytes, as in
+    // `op_return_of_84_bytes_is_standard`.
+    assert!(
+        admit(carrier(77)),
+        "an 80-byte OP_RETURN must still be admitted"
+    );
+    assert!(
+        !admit(carrier(81)),
+        "an 84-byte OP_RETURN must be rejected at 80"
+    );
+}
+
+#[test]
+fn empty_mempool_table_matches_current_standardness_limits() {
+    let config: crate::config::NodeConfig = toml::from_str("[mempool]\n").unwrap();
+    let policy = config
+        .mempool
+        .expect("an empty [mempool] table deserializes to Some");
+    assert_eq!(
+        policy.max_op_return_size,
+        super::MAX_STANDARD_OP_RETURN_SIZE
+    );
+    assert_eq!(policy.max_op_return_size, 100_000);
+    assert_eq!(
+        policy.max_standard_script_size,
+        super::MAX_STANDARD_SCRIPTSIG_SIZE
+    );
+    assert_eq!(policy.max_standard_script_size, 1_650);
+    assert!(!policy.reject_multiple_op_return);
+    assert_eq!(policy.max_op_return_outputs, u32::MAX);
+
+    // A 100,000-byte output is over the 400,000-weight standardness cap, so
+    // preview_accept would reject both sizes as tx-size. Exercise the
+    // OP_RETURN script check directly with the deserialized limit.
+    let op_return_of_len = |len: usize| {
+        let payload = len
+            .checked_sub(6)
+            .expect("script long enough for PUSHDATA4");
+        let mut script = vec![0x6a, 0x4e];
+        script.extend_from_slice(&(payload as u32).to_le_bytes());
+        script.extend(std::iter::repeat(0u8).take(payload));
+        assert_eq!(script.len(), len);
+        script
+    };
+    assert!(super::output_script_is_standard(
+        &op_return_of_len(100_000),
+        policy.max_op_return_size,
+    ));
+    assert!(!super::output_script_is_standard(
+        &op_return_of_len(100_001),
+        policy.max_op_return_size,
+    ));
+
+    let (prevout, base_sig) = p2sh_of_op_1();
+    let utxo = funded(prevout, 100_000);
+    let small_return = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+    let script_sig_of_len = |len: usize| {
+        let dummy = len
+            .checked_sub(5)
+            .expect("scriptSig long enough for PUSHDATA2 + redeem");
+        let mut script_sig = vec![0x4d];
+        script_sig.extend_from_slice(&(dummy as u16).to_le_bytes());
+        script_sig.extend(std::iter::repeat(0u8).take(dummy));
+        script_sig.extend_from_slice(&base_sig);
+        assert_eq!(script_sig.len(), len);
+        script_sig
+    };
+    let preview = |script_sig: Vec<u8>, extra_op_return: bool| {
+        let mut tx = legacy_empty_script();
+        tx.inputs[0].script_sig = script_sig;
+        tx.outputs[0].value = 0;
+        tx.outputs[0].script_pubkey = small_return.clone();
+        if extra_op_return {
+            tx.outputs.push(TransactionOutput {
+                value: 0,
+                script_pubkey: small_return.clone(),
+            });
+        }
+        let mempool = MempoolManager::new();
+        mempool.set_policy_config(Some(policy.clone()));
+        mempool.preview_accept(&tx, None, &utxo)
+    };
+
+    assert!(
+        preview(script_sig_of_len(1_650), false).is_ok(),
+        "a 1,650-byte scriptSig must be standard: {:?}",
+        preview(script_sig_of_len(1_650), false)
+    );
+    assert_eq!(
+        preview(script_sig_of_len(1_651), false),
+        Err("scriptsig-size")
+    );
+    assert!(
+        preview(base_sig.clone(), true).is_ok(),
+        "two OP_RETURN outputs must be admitted by default: {:?}",
+        preview(base_sig.clone(), true)
+    );
+}
+
+#[test]
+fn op_return_count_keys_can_reject_a_second_op_return() {
+    let admit = |mut policy: crate::config::MempoolPolicyConfig| {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let mut tx = legacy_empty_script();
+        tx.inputs[0].script_sig = script_sig;
+        tx.outputs[0].value = 0;
+        tx.outputs[0].script_pubkey = vec![0x6a, 0x03, 0x00, 0x00, 0x00];
+        tx.outputs.push(TransactionOutput {
+            value: 0,
+            script_pubkey: vec![0x6a, 0x03, 0x00, 0x00, 0x00],
+        });
+        let mempool = MempoolManager::new();
+        mempool.set_policy_config(Some(policy));
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+            prevout, 100_000,
+        ))));
+        mempool.add_transaction(tx).unwrap()
+    };
+    assert!(admit(crate::config::MempoolPolicyConfig::default()));
+    let mut by_flag = crate::config::MempoolPolicyConfig::default();
+    by_flag.reject_multiple_op_return = true;
+    assert!(!admit(by_flag));
+    let mut by_cap = crate::config::MempoolPolicyConfig::default();
+    by_cap.max_op_return_outputs = 1;
+    assert!(!admit(by_cap));
+}
+
+#[test]
 fn op_return_with_a_non_push_is_not_standard() {
     let admit = |script: Vec<u8>| {
         let (prevout, script_sig) = p2sh_of_op_1();
