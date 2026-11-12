@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use blvm_node::module::api::hub::ModuleApiHub;
 use blvm_node::module::api::NodeApiImpl;
+use blvm_node::module::api::hub::ModuleApiHub;
 use blvm_node::storage::Storage;
 
 #[tokio::test]
