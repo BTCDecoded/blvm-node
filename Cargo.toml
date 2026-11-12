@@ -204,7 +204,7 @@ windows-sys = { version = "=0.59", features = ["Win32_System_JobObjects", "Win32
 # When fixing “primary” edges (e.g. iroh upgrade), paste `cargo tree -i <crate>` for any remaining ignored IDs so reviewers see duplicate paths vs false positives.
 # Reconcile periodically: run audit without `.cargo/audit.toml`, use `cargo tree -i`, then trim ignores.
 # Advisory suppressions for CI: **only** `.cargo/audit.toml` (do not duplicate `--ignore` in workflows).
-# iroh 0.95 transitive stack: hickory-proto/resolver (DNS) may lag — see `.cargo/audit.toml` comments.
+# iroh 0.95.1 pulls hickory-proto/resolver 0.25.2 (`hickory-resolver ^0.25.1`). 0.26.2 does not unify with that range; see `.cargo/audit.toml`.
 
 [features]
 # Storage: `database_backend = "auto"` picks heed3 when the `heed3` feature is enabled

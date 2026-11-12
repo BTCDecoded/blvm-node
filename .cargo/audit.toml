@@ -2,17 +2,45 @@
 # CI runs plain `cargo audit` from this repo root so all ignores come from here.
 #
 # Reconcile when bumping iroh or hickory: run `cargo audit` and `cargo tree -i <crate>`.
-# Hickory 0.25 is only reached through iroh 0.95. There is no 0.25 patch for 0118
-# (fixed on the 0.26 line). 0119 is patched in hickory-proto >=0.26.1.
+# Hickory 0.25.2 is only reached through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+# `cargo update -p hickory-resolver --precise 0.26.2` does not resolve: 0.25 and 0.26
+# do not unify. CI also strips `[patch.crates-io]`, so a git/path override would not
+# appear in the Security job. The next iroh releases that can take hickory >=0.26.2
+# also require a rustc newer than the 1.88.0 pin (iroh 1.2+ lists MSRV 1.91).
+# 0118 has no 0.25 patch (fixed on the 0.26 line). 0119 is patched in
+# hickory-proto >=0.26.1. 0487, 0489, 0490, 0491, and 0514 are patched in
+# >=0.26.2 but that line is not reachable here. 0504, 0505, 0511, and 0512 have
+# no patched hickory-proto version (0.26.2 is listed as unaffected).
 # quinn-proto 0.11.15 still matches 0338 and 0340 (>=0.11.18) and 0339, 0341, 0342
 # (>=0.11.17). 0.11.19 does not resolve: rand 0.10 pulls chacha20 0.10, which
 # conflicts with iroh 0.95's chacha20 0.10.0-rc.2.
-# Exit for both stacks: an iroh bump, then drop these.
+# Exit for both stacks: an iroh bump (and, for hickory >=0.26.2, a rustc that
+# satisfies that iroh's MSRV), then drop these.
 
 [advisories]
 ignore = [
+    # No patched hickory-proto 0.25 version; 0.26.2 is unaffected but that version is not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
     "RUSTSEC-2026-0118",
+    # Patched in hickory-proto >=0.26.1; patched version not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
     "RUSTSEC-2026-0119",
+    # Patched in hickory-proto >=0.26.2; patched version not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    "RUSTSEC-2026-0487",
+    # Patched in hickory-proto >=0.26.2; patched version not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    "RUSTSEC-2026-0489",
+    # Patched in hickory-proto >=0.26.2; patched version not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    "RUSTSEC-2026-0490",
+    # Patched in hickory-proto >=0.26.2; patched version not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    "RUSTSEC-2026-0491",
+    # No patched hickory-proto version; 0.26.2 is unaffected but that version is not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    "RUSTSEC-2026-0504",
+    # No patched hickory-proto version; 0.26.2 is unaffected but that version is not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    "RUSTSEC-2026-0505",
+    # No patched hickory-proto version; 0.26.2 is unaffected but that version is not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    "RUSTSEC-2026-0511",
+    # No patched hickory-proto version; 0.26.2 is unaffected but that version is not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    "RUSTSEC-2026-0512",
+    # Patched in hickory-resolver >=0.26.2; patched version not reachable through iroh 0.95.1 (`hickory-resolver ^0.25.1`).
+    "RUSTSEC-2026-0514",
     "RUSTSEC-2026-0338",
     "RUSTSEC-2026-0339",
     "RUSTSEC-2026-0340",
