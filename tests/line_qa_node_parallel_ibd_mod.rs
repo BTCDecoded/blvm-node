@@ -12,9 +12,8 @@ async fn sync_parallel_rejects_an_empty_peer_list() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let db = create_database(dir.path(), default_backend(), None).expect("database");
     let blockstore = Arc::new(BlockStore::new(Arc::from(db)).expect("blockstore"));
-    let protocol = Arc::new(
-        BitcoinProtocolEngine::new(ProtocolVersion::Regtest).expect("protocol"),
-    );
+    let protocol =
+        Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).expect("protocol"));
     let ibd = Arc::new(ParallelIBD::new(ParallelIBDConfig::default()));
     let mut utxos = UtxoSet::default();
 
