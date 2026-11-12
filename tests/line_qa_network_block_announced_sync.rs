@@ -37,9 +37,8 @@ async fn announced_block_rejects_a_missing_peer() {
         .update_tip(&child, &next, 1)
         .expect("height 1");
 
-    let protocol = Arc::new(
-        BitcoinProtocolEngine::new(ProtocolVersion::Regtest).expect("protocol"),
-    );
+    let protocol =
+        Arc::new(BitcoinProtocolEngine::new(ProtocolVersion::Regtest).expect("protocol"));
     let manager = NetworkManager::new("127.0.0.1:0".parse().expect("addr")).with_dependencies(
         protocol,
         storage,
@@ -54,10 +53,7 @@ async fn announced_block_rejects_a_missing_peer() {
     .expect("inv");
     let peer = "127.0.0.1:8333".parse().expect("peer");
 
-    match manager
-        .process_announced_block_inventory(&wire, peer)
-        .await
-    {
+    match manager.process_announced_block_inventory(&wire, peer).await {
         Err(err) => {
             let message = err.to_string();
             assert!(
