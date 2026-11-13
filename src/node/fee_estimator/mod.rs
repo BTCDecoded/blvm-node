@@ -278,6 +278,14 @@ impl FeeEstimator {
             .counts
     }
 
+    /// Sequence published with the last connected block.
+    ///
+    /// `hook_counts().blocks` is not visible until this value has moved, so a
+    /// reader cannot observe a new block count against the previous table.
+    pub(crate) fn published_block_seq(&self) -> u64 {
+        self.block_seq.load(Ordering::Acquire)
+    }
+
     pub(crate) fn hook_events(&self) -> Vec<HookEvent> {
         self.inner
             .lock()
@@ -415,9 +423,12 @@ impl FeeEstimator {
             inner.events.push(HookEvent::Block { height: obs.height });
         }
         let accepted_blocks = inner.counts.blocks;
-        drop(inner);
+        // Move the published sequence before releasing `inner`. `hook_counts`
+        // takes that lock, so a reader cannot see the new block count while
+        // `table()` still considers the previous sequence current.
         self.block_seq.fetch_add(1, Ordering::AcqRel);
         self.generation.fetch_add(1, Ordering::AcqRel);
+        drop(inner);
         if let (Some(path), Some(line)) = (eval_path, eval_line) {
             self.schedule_eval_append(path, line);
         }
