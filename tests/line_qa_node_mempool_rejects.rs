@@ -10,7 +10,13 @@ fn p2pkh() -> Vec<u8> {
     script
 }
 
-fn tx(version: u64, script_sig: Vec<u8>, sequence: u64, lock_time: u64, script_pubkey: Vec<u8>) -> Transaction {
+fn tx(
+    version: u64,
+    script_sig: Vec<u8>,
+    sequence: u64,
+    lock_time: u64,
+    script_pubkey: Vec<u8>,
+) -> Transaction {
     Transaction {
         version,
         inputs: blvm_protocol::tx_inputs![TransactionInput {
