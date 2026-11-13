@@ -1498,7 +1498,7 @@ jobs:
             echo "No version change to commit in Cargo.toml"
             exit 0
           fi
-          git commit -m "Bump version to ${VERSION} for release [skip ci]" || true
+          git commit -m "Bump version to ${VERSION} for release [skip ci]"
 
           if [ -n "${REPO_ACCESS_TOKEN}" ]; then
             git config --local --unset-all 'http.https://github.com/.extraheader' 2>/dev/null || true
@@ -1524,11 +1524,13 @@ jobs:
                 if [ "${CODE}" = "201" ]; then
                   echo "Opened pull request for ${RELEASE_BRANCH}"
                 else
-                  echo "::warning::Version bump is on ${RELEASE_BRANCH} but the pull request was not opened (HTTP ${CODE})"
+                  echo "::error::Version bump is on ${RELEASE_BRANCH} but the pull request was not opened (HTTP ${CODE})"
+                  exit 1
                 fi
               fi
             else
-              echo "::warning::Could not push ${RELEASE_BRANCH}. main was not updated."
+              echo "::error::Could not push ${RELEASE_BRANCH}. main was not updated."
+              exit 1
             fi
           else
             echo "⚠️  REPO_ACCESS_TOKEN not set, skipping pull request"
