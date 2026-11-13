@@ -457,6 +457,9 @@ jobs:
 
       - name: Save Cargo cache
         if: always()
+        # The debug target is larger than the free space left for a second copy.
+        # A failed save must not fail the test job.
+        continue-on-error: true
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
           operation: save
