@@ -5,81 +5,32 @@ use std::path::Path;
 use tracing::debug;
 
 use crate::module::registry::manifest::ModuleManifest;
-use crate::module::security::signing::ModuleSigner;
 use crate::module::traits::ModuleError;
 
-/// Verify module signatures when the manifest declares a `[signatures]` section.
+/// Verify a declared binary hash. A `[signatures]` table is not a publisher.
+///
+/// The public keys live in the same manifest. Accepting them would let the
+/// module satisfy the signed-module gate with a key it just generated.
+/// `modules.allow_unsigned_modules` remains the operator switch for a module
+/// that has no signature section.
 pub fn verify_module_signatures(
     manifest: &ModuleManifest,
     binary_path: &Path,
 ) -> Result<(), ModuleError> {
-    let signer = ModuleSigner::new();
-
-    if let Some(_sig_section) = &manifest.signatures {
-        let manifest_path = binary_path
-            .parent()
-            .ok_or_else(|| ModuleError::CryptoError("Binary path has no parent".to_string()))?
-            .join("module.toml");
-
-        let manifest_content = std::fs::read_to_string(&manifest_path)
-            .map_err(|e| ModuleError::CryptoError(format!("Failed to read manifest file: {e}")))?;
-
-        let content_for_verification = manifest_content_without_signatures(&manifest_content)?;
-
-        let signatures = manifest.get_signatures();
-        let public_keys = manifest.get_public_keys();
-        let threshold = manifest.get_threshold().ok_or_else(|| {
-            ModuleError::CryptoError("Signature threshold not specified".to_string())
-        })?;
-
-        let valid = signer.verify_manifest(
-            content_for_verification.as_bytes(),
-            &signatures,
-            &public_keys,
-            threshold,
-        )?;
-
-        if !valid {
-            return Err(ModuleError::CryptoError(format!(
-                "Manifest signature verification failed for module {} (required {}-of-{})",
-                manifest.name, threshold.0, threshold.1
-            )));
-        }
-
-        debug!("Manifest signatures verified for module {}", manifest.name);
-    }
-
-    if let Some(binary_section) = &manifest.binary {
+    if let Some(expected_hash) = manifest
+        .binary
+        .as_ref()
+        .and_then(|section| section.hash.as_deref())
+    {
         if binary_path.exists() {
-            let binary_content = std::fs::read(binary_path)
-                .map_err(|e| ModuleError::CryptoError(format!("Failed to read binary: {e}")))?;
-
-            if let Some(expected_hash) = &binary_section.hash {
-                verify_stored_binary_hash(manifest, binary_path, expected_hash)?;
-            }
-
-            if manifest.signatures.is_some() {
-                let signatures = manifest.get_signatures();
-                let public_keys = manifest.get_public_keys();
-                let threshold = manifest.get_threshold().ok_or_else(|| {
-                    ModuleError::CryptoError("Signature threshold not specified".to_string())
-                })?;
-
-                let valid =
-                    signer.verify_binary(&binary_content, &signatures, &public_keys, threshold)?;
-
-                if !valid {
-                    return Err(ModuleError::CryptoError(format!(
-                        "Binary signature verification failed for module {} (required {}-of-{})",
-                        manifest.name, threshold.0, threshold.1
-                    )));
-                }
-
-                debug!("Binary signatures verified for module {}", manifest.name);
-            }
+            verify_stored_binary_hash(manifest, binary_path, expected_hash)?;
         }
     }
-
+    if manifest.signatures.is_some() {
+        return Err(ModuleError::CryptoError(
+            "module signature keys in the manifest are not a trust anchor".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -121,7 +72,8 @@ pub fn manifest_content_without_signatures(content: &str) -> Result<String, Modu
 
 #[cfg(test)]
 mod tests {
-    use super::manifest_content_without_signatures;
+    use super::{manifest_content_without_signatures, verify_module_signatures};
+    use std::path::Path;
 
     #[test]
     fn strips_signatures_table_and_preserves_other_sections() {
@@ -171,5 +123,29 @@ description = "# [signatures] not a section header"
     fn rejects_invalid_toml() {
         let err = manifest_content_without_signatures("name = [").unwrap_err();
         assert!(err.to_string().contains("Invalid manifest TOML"));
+    }
+
+    #[test]
+    fn embedded_signature_key_is_not_a_trust_anchor() {
+        use crate::module::registry::manifest::ModuleManifest;
+
+        let manifest: ModuleManifest = toml::from_str(
+            r#"
+name = "evil"
+version = "0.0.1"
+entry_point = "evil"
+
+[signatures]
+threshold = "1-of-1"
+
+[[signatures.maintainers]]
+name = "attacker"
+public_key = "02"
+signature = "00"
+"#,
+        )
+        .unwrap();
+        let err = verify_module_signatures(&manifest, Path::new("missing-binary")).unwrap_err();
+        assert!(err.to_string().contains("not a trust anchor"), "{err}");
     }
 }

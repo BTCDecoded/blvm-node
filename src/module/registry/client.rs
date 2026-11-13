@@ -13,7 +13,7 @@ use crate::module::registry::cache::{CachedModule, LocalCache};
 use crate::module::registry::cas::{ContentAddressableStorage, ModuleHash};
 use crate::module::registry::manifest::ModuleManifest;
 use crate::module::security::signing::ModuleSigner;
-use crate::module::traits::{ModuleError, module_error_msg};
+use crate::module::traits::{module_error_msg, ModuleError};
 
 /// Registry peer configuration (P2P-based)
 #[derive(Debug, Clone)]
@@ -52,6 +52,8 @@ pub struct ModuleRegistry {
     mirrors: Vec<RegistryMirror>,
     local_cache: Arc<RwLock<LocalCache>>,
     cas: Arc<RwLock<ContentAddressableStorage>>,
+    /// Kept so a later trust anchor can use the same verifier. Manifest keys are not that anchor.
+    #[allow(dead_code)]
     signer: ModuleSigner,
     cache_dir: PathBuf,
     /// Optional network manager for P2P fetching
@@ -484,28 +486,9 @@ impl ModuleRegistry {
     pub async fn verify_entry(&self, entry: &ModuleEntry) -> Result<(), ModuleError> {
         // 1. Verify manifest signatures if present
         if entry.manifest.has_signatures() {
-            let manifest_data = toml::to_string(&entry.manifest)
-                .map_err(|e| ModuleError::op_err("Failed to serialize manifest", e))?;
-
-            let signatures = entry.manifest.get_signatures();
-            let public_keys = entry.manifest.get_public_keys();
-            let threshold = entry.manifest.get_threshold().ok_or_else(|| {
-                ModuleError::CryptoError("Signature threshold not specified".to_string())
-            })?;
-
-            let valid = self.signer.verify_manifest(
-                manifest_data.as_bytes(),
-                &signatures,
-                &public_keys,
-                threshold,
-            )?;
-
-            if !valid {
-                return Err(ModuleError::CryptoError(format!(
-                    "Manifest signature verification failed for module {}",
-                    entry.name
-                )));
-            }
+            return Err(ModuleError::CryptoError(
+                "module signature keys in the manifest are not a trust anchor".to_string(),
+            ));
         }
 
         // 2. Verify manifest hash
