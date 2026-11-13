@@ -46,7 +46,7 @@ impl IrohTransport {
 
     /// Create with configurable max message length (for constrained networks).
     pub async fn with_max_message_length(max_message_length: usize) -> Result<Self> {
-        let endpoint = Endpoint::builder()
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
             .alpns(vec![IROH_ALPN.to_vec()])
             .bind()
             .await?;

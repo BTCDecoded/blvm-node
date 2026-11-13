@@ -967,8 +967,8 @@ jobs:
           fi
           rustc +nightly --version
 
-          # cargo-fuzz 0.13+ MSRV is rustc 1.91; project stable is 1.88. Install the
-          # subcommand with nightly (libFuzzer builds already use +nightly).
+          # cargo-fuzz 0.13+ MSRV is rustc 1.91, which is also the project stable.
+          # libFuzzer builds already use +nightly, so install the subcommand there too.
           if ! command -v cargo-fuzz >/dev/null 2>&1; then
             cargo +nightly install cargo-fuzz --locked
           fi

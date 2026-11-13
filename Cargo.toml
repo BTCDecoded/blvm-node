@@ -10,7 +10,7 @@ homepage = "https://btcdecoded.org"
 documentation = "https://docs.rs/blvm-node"
 keywords = ["bitcoin", "node", "blockchain", "cryptocurrency", "p2p"]
 categories = ["cryptography::cryptocurrencies", "network-programming"]
-rust-version = "1.85"
+rust-version = "1.91"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("governance", "erlay", "rayon", "wasm-modules", "ibd-dev", "spec-lock", "timer-cron"))'] }
@@ -71,7 +71,7 @@ tokio-util = { version = "=0.7.17", features = ["codec", "io"] }  # Updated for 
 futures = "=0.3.31"  # Updated for iroh 0.95 compatibility (requires ^0.3.31)
 # HTTP server - EXACT VERSIONS for security
 http = "=1.1.0"
-http-body-util = "=0.1.1"
+http-body-util = "=0.1.5"
 hyper = { version = "=1.8.0", features = ["server", "http1", "http2"] }  # Updated for iroh 0.95 compatibility (hyper-util 0.1.18 requires ^1.8.0)
 hyper-util = { version = "=0.1.18", features = ["server", "http1", "tokio"] }  # Updated for iroh 0.95 compatibility (requires ^0.1.11)
 
@@ -95,19 +95,14 @@ hex = "=0.4.3"
 siphasher = "=0.3"
 # bindgen (via librocksdb-sys) requires rustc-hash ^2.1; pin must match lockfile/resolver.
 rustc-hash = "=2.1.1"  # FxHashMap/FxHashSet for disk_utxo hot path (2-3× faster than SipHash)
-zeroize = { version = "=1.8.2", features = ["zeroize_derive"] }  # ^1.8 required by rustls (iroh); pin patch
+zeroize = { version = "=1.9.1", features = ["zeroize_derive"] }  # iroh-base 1.4.1 requires ^1.9
 
 # Network utilities — local IP detection is stdlib-only (UDP socket trick in lan_discovery.rs)
 constant_time_eq = "=0.3"  # Constant-time comparison for token authentication
 # RUSTSEC-2026-0009: iroh/rcgen transitive; force >=0.3.47 (crates.io ships 0.3.47+).
 time = { version = ">=0.3.47", default-features = false }
-# Pin ed25519 + pkcs8: iroh 0.95 → ed25519-dalek 3.0.0-pre.1 → ed25519 =3.0.0-rc.4
-# → pkcs8 ^0.11.0-rc.10. pkcs8 0.11.0 stable changed KeyMalformed to a tuple
-# variant which breaks ed25519-rc.4; pkcs8 0.11.0-rc.10 doesn't compile on
-# rustc ≥1.95. rc.11 is the only version in the range that compiles cleanly.
-# Remove both pins once iroh ships with a stable ed25519-dalek.
-ed25519 = "=3.0.0-rc.4"
-pkcs8 = "=0.11.0-rc.11"
+# iroh 1.4 uses stable ed25519-dalek 3.0.0 and pkcs8 0.11.0.
+# The 0.95-era rc.4 / rc.11 pins do not resolve next to that dalek.
 aes-gcm = "=0.10.3"  # Module encryption
 hkdf = "=0.12.4"  # Key derivation for module encryption
 
@@ -135,7 +130,7 @@ anyhow = "=1.0.104"
 thiserror = "=1.0.69"
 
 # Logging - EXACT VERSIONS for security
-tracing = "=0.1.41"  # Updated for iroh 0.95 compatibility (requires ^0.1.41)
+tracing = "=0.1.44"  # iroh-metrics 1.0.2 requires ^0.1.44
 tracing-subscriber = { version = "=0.3.20", features = ["env-filter"] }
 
 # CLI - EXACT VERSIONS for security
@@ -165,7 +160,7 @@ reqwest = { version = "=0.12", optional = true, default-features = false, featur
 # Cross-platform optional deps (top-level so Windows release builds match Linux defaults).
 zstd = { version = "=0.14", optional = true }
 notify = { version = "=6.1", optional = true }
-iroh = { version = "=0.95", optional = true }
+iroh = { version = "=1.0.0", optional = true }
 quinn = { version = "=0.11", optional = true }
 rcgen = { version = "=0.12", optional = true }
 rustls = { version = "=0.23", optional = true }
@@ -195,16 +190,9 @@ libc = { version = "=0.2", optional = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "=0.59", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation", "Win32_Security"] }
 
-# Security Note: Migrated from iroh-net 0.12 to iroh 0.95 to fix vulnerabilities in that stack:
-# - idna 0.4.0 (RUSTSEC-2024-0421) - addressed for the iroh upgrade path
-# - ring 0.16.20 (RUSTSEC-2025-0009) - addressed for the iroh upgrade path
-# - rsa 0.9.8 (RUSTSEC-2023-0071) - addressed for the iroh upgrade path
-# - paste 1.0.15 (unmaintained) - addressed for the iroh upgrade path
-# `cargo audit` may still report those (or other) IDs while another transitive edge pulls a flagged version.
-# When fixing “primary” edges (e.g. iroh upgrade), paste `cargo tree -i <crate>` for any remaining ignored IDs so reviewers see duplicate paths vs false positives.
-# Reconcile periodically: run audit without `.cargo/audit.toml`, use `cargo tree -i`, then trim ignores.
-# Advisory suppressions for CI: **only** `.cargo/audit.toml` (do not duplicate `--ignore` in workflows).
-# iroh 0.95 transitive stack: hickory-proto/resolver (DNS) may lag — see `.cargo/audit.toml` comments.
+# Iroh 1.0.0. Its hickory-proto is 0.26.3, which clears the 0.25 advisories
+# (RUSTSEC-2026-0118, 0119, and 0487 through 0514). Requires Rust 1.91.
+# Advisory suppressions for CI: **only** `.cargo/audit.toml`.
 
 [features]
 # Storage: `database_backend = "auto"` picks heed3 when the `heed3` feature is enabled
@@ -303,9 +291,8 @@ compression = ["block-compression", "utxo-compression", "witness-compression"]
 
 
 # Local monorepo: sibling paths override the blvm-* version pins above.
-# quinn-proto stays on crates.io 0.11.15. 0.11.19 (the fix for RUSTSEC-2026-0338
-# through 0342) depends on rand 0.10, whose chacha20 0.10 does not resolve next
-# to iroh 0.95's chacha20 0.10.0-rc.2. Exit: an iroh bump, then quinn-proto >=0.11.19.
+# The optional quinn feature still resolves quinn-proto 0.11.15. 0.11.19
+# (RUSTSEC-2026-0338 through 0342) does not resolve next to quinn 0.11.
 [patch.crates-io]
 blvm-protocol = { path = "../blvm-protocol" }
 blvm-consensus = { path = "../blvm-consensus" }

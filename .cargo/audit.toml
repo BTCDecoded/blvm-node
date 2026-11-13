@@ -1,18 +1,13 @@
 # cargo audit — single source of advisory suppressions for blvm-node.
 # CI runs plain `cargo audit` from this repo root so all ignores come from here.
 #
-# Reconcile when bumping iroh or hickory: run `cargo audit` and `cargo tree -i <crate>`.
-# Hickory 0.25 is only reached through iroh 0.95. There is no 0.25 patch for 0118
-# (fixed on the 0.26 line). 0119 is patched in hickory-proto >=0.26.1.
-# quinn-proto 0.11.15 still matches 0338 and 0340 (>=0.11.18) and 0339, 0341, 0342
-# (>=0.11.17). 0.11.19 does not resolve: rand 0.10 pulls chacha20 0.10, which
-# conflicts with iroh 0.95's chacha20 0.10.0-rc.2.
-# Exit for both stacks: an iroh bump, then drop these.
+# iroh 1.0.0 pulls hickory-proto 0.26.3, so the 0.25 advisories are gone.
+# quinn-proto 0.11.15 is still selected by the optional `quinn` feature.
+# 0.11.19 fixes RUSTSEC-2026-0338 through 0342, and it does not resolve next
+# to the quinn 0.11 crate this node pins. Those ignores stay until that bump.
 
 [advisories]
 ignore = [
-    "RUSTSEC-2026-0118",
-    "RUSTSEC-2026-0119",
     "RUSTSEC-2026-0338",
     "RUSTSEC-2026-0339",
     "RUSTSEC-2026-0340",
