@@ -26,6 +26,8 @@ pub use ibd::*;
 pub mod network;
 pub use network::*;
 
+pub mod hardened;
+
 use crate::network::transport::TransportPreference;
 use anyhow::{Context, Result};
 use serde::de::{Deserializer, Error, MapAccess, Visitor};
@@ -1253,13 +1255,27 @@ impl NodeConfig {
         let is_toml = path.extension().and_then(|s| s.to_str()) == Some("toml")
             || path_lossy.ends_with(".toml.example");
 
-        let mut config: NodeConfig = if is_toml {
-            toml::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {e}"))?
+        if is_toml {
+            Self::from_toml_str(&content)
         } else {
-            serde_json::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {e}"))?
-        };
+            Self::from_json_str(&content)
+        }
+    }
+
+    /// Parse a TOML document. A `minimal-hardened` profile rejects unknown keys.
+    pub fn from_toml_str(content: &str) -> anyhow::Result<Self> {
+        let mut config: NodeConfig = toml::from_str(content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {e}"))?;
+        hardened::apply_profile_gate(&config, content, true)?;
+        config.expand_paths();
+        Ok(config)
+    }
+
+    /// Parse a JSON document. A `minimal-hardened` profile rejects unknown keys.
+    pub fn from_json_str(content: &str) -> anyhow::Result<Self> {
+        let mut config: NodeConfig = serde_json::from_str(content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {e}"))?;
+        hardened::apply_profile_gate(&config, content, false)?;
         config.expand_paths();
         Ok(config)
     }
@@ -1267,18 +1283,13 @@ impl NodeConfig {
     /// Load configuration from JSON file
     pub fn from_json_file(path: &std::path::Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let mut config: NodeConfig = serde_json::from_str(&content)?;
-        config.expand_paths();
-        Ok(config)
+        Self::from_json_str(&content)
     }
 
     /// Load configuration from TOML file
     pub fn from_toml_file(path: &std::path::Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let mut config: NodeConfig = toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {e}"))?;
-        config.expand_paths();
-        Ok(config)
+        Self::from_toml_str(&content)
     }
 
     /// Save configuration to JSON file
