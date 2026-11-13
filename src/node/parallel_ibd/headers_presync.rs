@@ -86,6 +86,19 @@ impl HeadersPresync {
         self.phase != HeadersSyncPhase::Presync
     }
 
+    /// A resume already has chainwork for the parent. Counting only the new
+    /// headers leaves a short catch-up under the floor, so the assigner never starts.
+    pub(crate) fn release_if_prior_work_meets_floor(&mut self, prior: U256) -> bool {
+        if self.phase != HeadersSyncPhase::Presync {
+            return self.releases_assigner();
+        }
+        if prior >= self.minimum {
+            self.work = prior;
+            self.phase = HeadersSyncPhase::Final;
+        }
+        self.releases_assigner()
+    }
+
     pub(crate) fn note(&mut self, header: &BlockHeader) {
         self.accept(std::slice::from_ref(header), |_| {});
     }
@@ -192,6 +205,28 @@ mod tests {
         assert!(!sync.releases_assigner());
         let floor = crate::config::minimum_chain_work_for_network("mainnet");
         assert!(sync.work < U256::from_u128(floor));
+    }
+
+    #[test]
+    fn short_signet_catch_up_uses_stored_chainwork() {
+        let batch = vec![easy_header(); 8];
+        let mut fresh = HeadersPresync::new("signet");
+        let mut observed = 0usize;
+        fresh.accept(&batch, |headers| observed += headers.len());
+        assert_eq!(observed, 0);
+        assert!(!fresh.releases_assigner());
+
+        let floor = U256::from_u128(crate::config::minimum_chain_work_for_network("signet"));
+        let mut caught_up = HeadersPresync::new("signet");
+        assert!(caught_up.release_if_prior_work_meets_floor(floor));
+        let mut released = 0usize;
+        caught_up.accept(&batch, |headers| released += headers.len());
+        assert_eq!(released, 8);
+        assert!(caught_up.releases_assigner());
+
+        let mut below = HeadersPresync::new("signet");
+        assert!(!below.release_if_prior_work_meets_floor(U256::from_u128(1)));
+        assert!(!below.releases_assigner());
     }
 
     #[test]

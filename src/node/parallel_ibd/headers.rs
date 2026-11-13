@@ -623,6 +623,26 @@ pub(crate) async fn download_headers(
             start_height,
             hex::encode(last_hash)
         );
+        if !header_presync.releases_assigner() {
+            let prior = network
+                .storage()
+                .as_ref()
+                .and_then(|storage| storage.chain().get_chainwork(&last_hash).ok().flatten());
+            match prior {
+                Some(work) => {
+                    if header_presync.release_if_prior_work_meets_floor(work) {
+                        info!(
+                            "header pre-sync: stored chainwork at height {} meets the floor",
+                            start_height - 1
+                        );
+                    }
+                }
+                None => warn!(
+                    "header pre-sync: no stored chainwork at height {}; this batch must reach the floor on its own",
+                    start_height - 1
+                ),
+            }
+        }
     }
     // Genesis stores the local header and asks the peer for height 1. An empty
     // reply at that floor is no progress. A resume asks from `start_height`.
