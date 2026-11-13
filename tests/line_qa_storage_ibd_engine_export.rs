@@ -53,7 +53,8 @@ fn sync_tree_after_persist_returns_the_disk_error() {
         Err(err) => {
             let message = err.to_string();
             assert!(
-                message.contains("engine ckpt sync failed") && message.contains("disk flush refused"),
+                message.contains("engine ckpt sync failed")
+                    && message.contains("disk flush refused"),
                 "sync_tree_after_persist returned {message}"
             );
         }
