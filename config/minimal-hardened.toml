@@ -1,0 +1,70 @@
+# minimal-hardened
+#
+# Default deployment profile for the minimal audit-surface build, and an
+# opt-in profile for the full build. Consensus rules are not in this file.
+# Policy and exposure are. An unknown key is a startup error when
+# `profile = "minimal-hardened"`.
+
+profile = "minimal-hardened"
+protocol_version = "mainnet"
+
+# No inbound P2P. The listen address stays on loopback so flipping `listen`
+# later cannot bind a public interface by accident.
+listen = false
+listen_addr = "127.0.0.1:8333"
+
+# RPC is loopback-only. Authentication stays required. The operator supplies
+# the token out of band; this file has none.
+rpc_addr = "127.0.0.1:8332"
+
+enable_self_advertisement = false
+serve_compact_filters = false
+persistent_peers = []
+transport_preference = "tcponly"
+
+[rpc_auth]
+required = true
+
+[modules]
+enabled = false
+enabled_modules = []
+registry_url = ""
+marketplace_fetch_enabled = false
+allow_unsigned_modules = false
+watch_enabled = false
+watch_auto_load = false
+watch_auto_unload = false
+
+[network_timing]
+# Seed DNS is off until an operator turns it on. Bitcoin P2P to peers listed
+# in persistent_peers is the only outbound contact this file allows.
+max_addresses_from_dns = 0
+
+[ban_list_sharing]
+enabled = false
+share_mode = "disabled"
+
+[rest_api]
+enabled = false
+
+[relay]
+enable_block_relay = true
+enable_tx_relay = true
+enable_dandelion = false
+
+[fees]
+enabled = true
+estimator = "native"
+fallback = "native"
+allow_auto_override = []
+
+[logging]
+filter = "info"
+json_format = false
+
+[storage]
+auto_migrate_core = false
+
+[mempool]
+require_standard = true
+persist_mempool = false
