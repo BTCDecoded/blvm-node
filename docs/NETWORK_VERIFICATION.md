@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the spec-lock checks on Bitcoin P2P protocol message parsing, serialization, and processing. Functions are annotated with `#[spec_locked]` and Z3-checked by **blvm-spec-lock** (consensus code and Dandelion, Section 10.6). An annotation plus a green Z3 run is not a proof. This pass proves 13 consensus functions from the function body. The older counts are 93 of 224 and 34 of 34 ([`docs/VERIFICATION.md`](https://github.com/BTCDecoded/blvm-consensus/blob/main/docs/VERIFICATION.md)).
+This document describes the spec-lock checks on Bitcoin P2P protocol message parsing, serialization, and processing. Functions are annotated with `#[spec_locked]` and Z3-checked by **blvm-spec-lock** (consensus code and Dandelion, Section 10.6). A green Z3 run means the spec-lock prover and Z3 accepted that function's contract. This pass proves 13 consensus functions from the function body. The older counts are 93 of 224 and 34 of 34 ([`docs/VERIFICATION.md`](https://github.com/BTCDecoded/blvm-consensus/blob/main/docs/VERIFICATION.md)).
 
 ## Verification Status
 
