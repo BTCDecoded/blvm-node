@@ -1768,14 +1768,19 @@ fn decode_cfilter(payload: &[u8]) -> anyhow::Result<CfilterMessage> {
     let mut cursor = std::io::Cursor::new(&payload[33..]);
     let len = blvm_protocol::varint::read_varint(&mut cursor).map_err(|e| anyhow::anyhow!("{e}"))?
         as usize;
-    let start = 33 + cursor.position() as usize;
-    if payload.len() < start + len {
+    let start = 33usize
+        .checked_add(cursor.position() as usize)
+        .ok_or_else(|| anyhow::anyhow!("cfilter offset overflows"))?;
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| anyhow::anyhow!("cfilter length overflows"))?;
+    if payload.len() < end {
         anyhow::bail!("cfilter truncated");
     }
     Ok(CfilterMessage {
         filter_type: payload[0],
         block_hash,
-        filter_data: Arc::new(payload[start..start + len].to_vec()),
+        filter_data: Arc::new(payload[start..end].to_vec()),
         num_elements: 0,
     })
 }
@@ -2096,6 +2101,15 @@ mod tests {
             }
             other => panic!("expected cfilter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cfilter_length_does_not_overflow() {
+        let mut payload = vec![0u8; 33];
+        payload.push(0xff);
+        payload.extend_from_slice(&u64::MAX.to_le_bytes());
+        let err = super::decode_cfilter(&payload).expect_err("huge cfilter length");
+        assert!(err.to_string().contains("cfilter"), "{err}");
     }
 
     #[test]
