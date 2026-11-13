@@ -450,6 +450,7 @@ fn run_ibd_retire_loop_no_commitment(
     max_pending_ops_nominal: usize,
     max_pending_ops_last_adapt_ms: Arc<AtomicU64>,
     engine_mode: bool,
+    utxo_engine: Option<Arc<UtxoDatabase>>,
     durability_tx: Option<std::sync::mpsc::SyncSender<DurabilityRequest>>,
     // When non-zero: skip all LMDB durability writes while `h <= local_replay_no_lmdb_max`
     // (safe after a genesis restart where the LMDB UTXO store is empty).  A one-shot bulk

@@ -719,6 +719,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 let durability_tx = durability_tx_outer.clone();
                 let replay_transition_done = Arc::clone(&replay_transition_done_outer);
                 let replay_hydration_done = Arc::clone(&replay_hydration_done_outer);
+                let utxo_engine = utxo_engine.clone();
                 std::thread::Builder::new()
                     .name(format!("ibd-retire-{i}"))
                     .spawn(move || {
@@ -745,6 +746,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             max_pending_ops_nominal,
                             mpo_last,
                             engine_mode_for_retire,
+                            utxo_engine,
                             durability_tx,
                             local_replay_no_lmdb_max,
                             replay_transition_done,
