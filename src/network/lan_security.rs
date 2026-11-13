@@ -415,10 +415,10 @@ impl LanSecurityPolicy {
     /// Check if a peer is banned
     pub fn is_peer_banned(&self, addr: &SocketAddr) -> bool {
         // Check peer state
-        if let Some(state) = self.lan_peers.read().unwrap().get(addr) {
-            if state.is_banned() {
-                return true;
-            }
+        if let Some(state) = self.lan_peers.read().unwrap().get(addr)
+            && state.is_banned()
+        {
+            return true;
         }
 
         // Check persistent ban list
@@ -436,12 +436,12 @@ impl LanSecurityPolicy {
 
     /// Check if this height needs checkpoint validation
     pub fn needs_block_checkpoint(&self, height: u64) -> bool {
-        height > 0 && height % BLOCK_CHECKPOINT_INTERVAL == 0
+        height > 0 && height.is_multiple_of(BLOCK_CHECKPOINT_INTERVAL)
     }
 
     /// Check if this height needs header checkpoint validation
     pub fn needs_header_checkpoint(&self, height: u64) -> bool {
-        height > 0 && height % HEADER_CHECKPOINT_INTERVAL == 0
+        height > 0 && height.is_multiple_of(HEADER_CHECKPOINT_INTERVAL)
     }
 
     /// Remove a LAN peer
@@ -582,13 +582,13 @@ impl InternetCheckpointValidator {
     /// Check if a height needs validation
     #[inline]
     pub fn needs_validation(&self, height: u64) -> bool {
-        height > 0 && height % BLOCK_CHECKPOINT_INTERVAL == 0
+        height > 0 && height.is_multiple_of(BLOCK_CHECKPOINT_INTERVAL)
     }
 
     /// Check if this is a header checkpoint height
     #[inline]
     pub fn is_header_checkpoint(&self, height: u64) -> bool {
-        height > 0 && height % HEADER_CHECKPOINT_INTERVAL == 0
+        height > 0 && height.is_multiple_of(HEADER_CHECKPOINT_INTERVAL)
     }
 
     /// Get last validated height

@@ -690,7 +690,7 @@ fn default_max_headers_results() -> usize {
 
 /// A headers reply fills a batch only when the cap is a positive size.
 pub fn headers_batch_is_full(received: usize, max_headers_results: usize) -> bool {
-    max_headers_results > 0 && received % max_headers_results == 0
+    max_headers_results > 0 && received.is_multiple_of(max_headers_results)
 }
 
 /// One header is inside the cap when the cap is zero.
@@ -1033,8 +1033,10 @@ pub struct BrokerNetworkConfig {
 /// uses bitflags for all combinations. Use From trait for conversion.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum TransportPreferenceConfig {
     /// TCP-only mode (Bitcoin P2P compatible, default)
+    #[default]
     TcpOnly,
     /// Quinn-only mode (direct QUIC)
     #[cfg(feature = "quinn")]
@@ -1048,12 +1050,6 @@ pub enum TransportPreferenceConfig {
     /// All transports (TCP + Quinn + Iroh)
     #[cfg(all(feature = "quinn", feature = "iroh"))]
     All,
-}
-
-impl Default for TransportPreferenceConfig {
-    fn default() -> Self {
-        Self::TcpOnly
-    }
 }
 
 impl From<TransportPreferenceConfig> for TransportPreference {
@@ -1234,22 +1230,20 @@ impl NodeConfig {
             let path_lossy_for_perm = path.to_string_lossy();
             let is_example_config = path_lossy_for_perm.ends_with(".toml.example")
                 || path_lossy_for_perm.ends_with(".example");
-            if !is_example_config {
-                if let Ok(metadata) = std::fs::metadata(path) {
-                    use std::os::unix::fs::PermissionsExt;
-                    let permissions = metadata.permissions();
-                    let mode = permissions.mode();
-                    // Check if file is readable by others (group or world)
-                    if mode & 0o077 != 0 {
-                        tracing::warn!(
-                            "SECURITY WARNING: Configuration file {:?} is readable by others (mode: {:o}). \
+            if !is_example_config && let Ok(metadata) = std::fs::metadata(path) {
+                use std::os::unix::fs::PermissionsExt;
+                let permissions = metadata.permissions();
+                let mode = permissions.mode();
+                // Check if file is readable by others (group or world)
+                if mode & 0o077 != 0 {
+                    tracing::warn!(
+                        "SECURITY WARNING: Configuration file {:?} is readable by others (mode: {:o}). \
                              Consider setting permissions to 600 for security. \
                              Run: chmod 600 {:?}",
-                            path,
-                            mode,
-                            path
-                        );
-                    }
+                        path,
+                        mode,
+                        path
+                    );
                 }
             }
         }
@@ -1317,43 +1311,41 @@ impl NodeConfig {
         use tracing::{debug, info};
 
         // Only auto-detect if governance config exists but is disabled
-        if let Some(ref mut gov_config) = self.governance {
-            if !gov_config.enabled {
-                if let Some(ref commons_url) = gov_config.commons_url {
-                    let client = Client::builder()
-                        .timeout(std::time::Duration::from_secs(5))
-                        .build()?;
+        if let Some(ref mut gov_config) = self.governance
+            && !gov_config.enabled
+            && let Some(ref commons_url) = gov_config.commons_url
+        {
+            let client = Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()?;
 
-                    let health_url = format!("{commons_url}/internal/health");
-                    debug!("Auto-detecting governance server at {}", health_url);
+            let health_url = format!("{commons_url}/internal/health");
+            debug!("Auto-detecting governance server at {}", health_url);
 
-                    let mut request = client.get(&health_url);
-                    if let Some(key) = gov_config.resolved_api_key() {
-                        request =
-                            request.header(reqwest::header::AUTHORIZATION, format!("Bearer {key}"));
-                    }
-                    match request.send().await {
-                        Ok(response) if response.status().is_success() => {
-                            info!(
-                                "Governance server detected and responding at {}, auto-enabling governance",
-                                commons_url
-                            );
-                            gov_config.enabled = true;
-                        }
-                        Ok(response) => {
-                            debug!(
-                                "Governance server at {} responded with status {}, keeping governance disabled",
-                                commons_url,
-                                response.status()
-                            );
-                        }
-                        Err(e) => {
-                            debug!(
-                                "Governance server at {} not reachable: {}, keeping governance disabled",
-                                commons_url, e
-                            );
-                        }
-                    }
+            let mut request = client.get(&health_url);
+            if let Some(key) = gov_config.resolved_api_key() {
+                request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {key}"));
+            }
+            match request.send().await {
+                Ok(response) if response.status().is_success() => {
+                    info!(
+                        "Governance server detected and responding at {}, auto-enabling governance",
+                        commons_url
+                    );
+                    gov_config.enabled = true;
+                }
+                Ok(response) => {
+                    debug!(
+                        "Governance server at {} responded with status {}, keeping governance disabled",
+                        commons_url,
+                        response.status()
+                    );
+                }
+                Err(e) => {
+                    debug!(
+                        "Governance server at {} not reachable: {}, keeping governance disabled",
+                        commons_url, e
+                    );
                 }
             }
         }
@@ -1366,19 +1358,19 @@ impl NodeConfig {
     /// Validate configuration
     pub fn validate(&self) -> anyhow::Result<()> {
         // Validate pruning configuration
-        if let Some(ref storage) = self.storage {
-            if let Some(ref pruning) = storage.pruning {
-                pruning.validate()?;
-            }
+        if let Some(ref storage) = self.storage
+            && let Some(ref pruning) = storage.pruning
+        {
+            pruning.validate()?;
         }
 
-        if let Some(ref mempool) = self.mempool {
-            if mempool.mempool_expiry_hours.checked_mul(3600).is_none() {
-                anyhow::bail!(
-                    "mempool_expiry_hours {} does not fit in seconds",
-                    mempool.mempool_expiry_hours
-                );
-            }
+        if let Some(ref mempool) = self.mempool
+            && mempool.mempool_expiry_hours.checked_mul(3600).is_none()
+        {
+            anyhow::bail!(
+                "mempool_expiry_hours {} does not fit in seconds",
+                mempool.mempool_expiry_hours
+            );
         }
 
         if let Some(ref fees) = self.fees {
@@ -1418,10 +1410,10 @@ impl NodeConfig {
             }
         }
 
-        if let Some(ref limits) = self.protocol_limits {
-            if limits.max_headers_results == 0 {
-                anyhow::bail!("max_headers_results must be greater than 0");
-            }
+        if let Some(ref limits) = self.protocol_limits
+            && limits.max_headers_results == 0
+        {
+            anyhow::bail!("max_headers_results must be greater than 0");
         }
 
         Ok(())
@@ -1477,21 +1469,21 @@ impl NodeConfig {
         }
 
         // Check REST API authentication
-        if let Some(rest_addr) = rest_api_addr {
-            if !is_localhost(&rest_addr) {
-                if let Some(ref rpc_auth) = self.rpc_auth {
-                    if !rpc_auth.required {
-                        warnings.push(format!(
+        if let Some(rest_addr) = rest_api_addr
+            && !is_localhost(&rest_addr)
+        {
+            if let Some(ref rpc_auth) = self.rpc_auth {
+                if !rpc_auth.required {
+                    warnings.push(format!(
                             "SECURITY WARNING: REST API is binding to {rest_addr} (non-localhost) but authentication is not required. \
                             This exposes your node to unauthorized access. Consider setting rpc_auth.required = true"
                         ));
-                    }
-                } else {
-                    warnings.push(format!(
+                }
+            } else {
+                warnings.push(format!(
                         "SECURITY WARNING: REST API is binding to {rest_addr} (non-localhost) without authentication. \
                         This exposes your node to unauthorized access. Consider configuring rpc_auth with required = true"
                     ));
-                }
             }
         }
 

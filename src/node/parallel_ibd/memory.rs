@@ -1770,10 +1770,9 @@ impl MemoryGuard {
         if let Some(mb) = std::env::var("BLVM_UTXO_CACHE_MAX_MB")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
+            && mb > 0
         {
-            if mb > 0 {
-                utxo_cache_mb = utxo_cache_mb.min(mb);
-            }
+            utxo_cache_mb = utxo_cache_mb.min(mb);
         }
         utxo_cache_mb = utxo_cache_mb.min(envelope_cache_cap_mb.max(128));
         // Empirical ~1600 B/entry actual cost (DashMap table + Arc<UTXO> heap + mimalloc
@@ -1902,11 +1901,11 @@ impl MemoryGuard {
         // Backend-aware: heed3 uses smaller batches to avoid orchestrator stalls on LMDB writes.
         let mut storage_flush_interval =
             Self::storage_flush_interval_base(total_gb, ctx.storage_backend);
-        if let Ok(s) = std::env::var("BLVM_IBD_STORAGE_FLUSH_INTERVAL") {
-            if let Ok(n) = s.parse::<usize>() {
-                // Same bounds as chunk_size-style knobs: avoid tiny flushes or OOM-sized buffers.
-                storage_flush_interval = n.clamp(16, 4000);
-            }
+        if let Ok(s) = std::env::var("BLVM_IBD_STORAGE_FLUSH_INTERVAL")
+            && let Ok(n) = s.parse::<usize>()
+        {
+            // Same bounds as chunk_size-style knobs: avoid tiny flushes or OOM-sized buffers.
+            storage_flush_interval = n.clamp(16, 4000);
         }
 
         // Prefetch queue: scales with **spare** RAM at boot (pipeline depth without env).

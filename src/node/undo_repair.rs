@@ -186,7 +186,7 @@ async fn fetch_prevouts(
         blocks.store_block(&block)?;
         note_outputs(&block, height, wanted, found);
         fetched += 1;
-        if fetched % 500 == 0 {
+        if fetched.is_multiple_of(500) {
             info!("[UNDO_REPAIR] fetched {fetched} pruned bodies, still resolving prevouts");
         }
     }

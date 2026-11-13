@@ -732,11 +732,13 @@ impl MemoryRun {
             if e.is_add() {
                 // Peek at next entry: if it's a Delete at the same height, both cancel.
                 let next = slice.get(i + 1);
-                if let Some(n) = next {
-                    if n.key == *key && n.height == e.height && n.is_delete() {
-                        i += 2; // skip both (same-height create+spend)
-                        continue;
-                    }
+                if let Some(n) = next
+                    && n.key == *key
+                    && n.height == e.height
+                    && n.is_delete()
+                {
+                    i += 2; // skip both (same-height create+spend)
+                    continue;
                 }
                 result = Some(e.id);
                 break;
@@ -764,10 +766,10 @@ impl MemoryRun {
     pub fn batch_lookup(&self, keys: &[[u8; 36]], ids: &mut [OutputId], since: i32, before: i32) {
         debug_assert_eq!(keys.len(), ids.len());
         let lookup_one = |key: &[u8; 36], id: &mut OutputId| {
-            if *id == OutputId::MAX {
-                if let Some(found) = self.lookup_key(key, since, before) {
-                    *id = found; // real id or OUTPUT_ID_DELETED
-                }
+            if *id == OutputId::MAX
+                && let Some(found) = self.lookup_key(key, since, before)
+            {
+                *id = found; // real id or OUTPUT_ID_DELETED
             }
         };
         // Opt out: `BLVM_IBD_QUERY_RAYON=0` — serial lookup.
@@ -893,12 +895,14 @@ impl MemoryRun {
 
             if e.is_delete() {
                 // Case 1 (same-height): Add was already pushed to gc last.
-                if let Some(last) = gc.last() {
-                    if last.key == e.key && last.height == e.height && last.is_add() {
-                        // Same-height Add+Delete: always dead (spent in the same block).
-                        gc.pop();
-                        continue;
-                    }
+                if let Some(last) = gc.last()
+                    && last.key == e.key
+                    && last.height == e.height
+                    && last.is_add()
+                {
+                    // Same-height Add+Delete: always dead (spent in the same block).
+                    gc.pop();
+                    continue;
                 }
                 // Case 2 (cross-height): Add comes later. Stash this Delete.
                 pending_del = Some(e);

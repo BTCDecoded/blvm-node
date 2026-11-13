@@ -450,16 +450,15 @@ impl MiningRpc {
         };
 
         // Publish BlockTemplateUpdated for module subscribers
-        if let Some(ref ep) = self.event_publisher {
-            if let Some(tip_hash) = self
+        if let Some(ref ep) = self.event_publisher
+            && let Some(tip_hash) = self
                 .storage
                 .as_ref()
                 .and_then(|s| s.chain().get_tip_hash().ok().flatten())
-            {
-                let tx_count = template.transactions.len();
-                ep.publish_block_template_updated(&tip_hash, template_block_height, tx_count)
-                    .await;
-            }
+        {
+            let tx_count = template.transactions.len();
+            ep.publish_block_template_updated(&tip_hash, template_block_height, tx_count)
+                .await;
         }
 
         // 6. Convert to JSON-RPC format (BIP 22/23)
@@ -714,10 +713,10 @@ impl MiningRpc {
         // Get timestamps from blocks
         let mut timestamps = Vec::new();
         for height in start_height..=tip_height {
-            if let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height) {
-                if let Ok(Some(block)) = storage.blocks().get_block(&hash) {
-                    timestamps.push((height, block.header.timestamp));
-                }
+            if let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height)
+                && let Ok(Some(block)) = storage.blocks().get_block(&hash)
+            {
+                timestamps.push((height, block.header.timestamp));
             }
         }
 
@@ -789,14 +788,12 @@ impl MiningRpc {
 
     fn extract_coinbase_script(&self, params: &Value) -> Option<ByteString> {
         // Extract coinbase script from params if provided
-        if let Some(template_request) = params.get(0) {
-            if let Some(script) = template_request.get("coinbasetxn") {
-                if let Some(data) = script.get("data") {
-                    if let Some(hex_str) = data.as_str() {
-                        return hex::decode(hex_str).ok();
-                    }
-                }
-            }
+        if let Some(template_request) = params.get(0)
+            && let Some(script) = template_request.get("coinbasetxn")
+            && let Some(data) = script.get("data")
+            && let Some(hex_str) = data.as_str()
+        {
+            return hex::decode(hex_str).ok();
         }
         // Default: empty script. The template replaces a script that skips the height.
         Some(vec![])
@@ -816,13 +813,12 @@ impl MiningRpc {
     }
 
     fn extract_coinbase_address(&self, params: &Value) -> RpcResult<ByteString> {
-        if let Some(template_request) = params.get(0) {
-            if let Some(addr) = template_request.get("coinbaseaddress") {
-                if let Some(addr_str) = addr.as_str() {
-                    return address_string_to_script_pubkey(addr_str)
-                        .map_err(|e| RpcError::invalid_params(format!("coinbaseaddress: {e}")));
-                }
-            }
+        if let Some(template_request) = params.get(0)
+            && let Some(addr) = template_request.get("coinbaseaddress")
+            && let Some(addr_str) = addr.as_str()
+        {
+            return address_string_to_script_pubkey(addr_str)
+                .map_err(|e| RpcError::invalid_params(format!("coinbaseaddress: {e}")));
         }
         Ok(vec![])
     }
@@ -993,15 +989,12 @@ impl MiningRpc {
 
     fn get_min_time(&self, height: Natural) -> Natural {
         // BIP113: median of the 11 headers before this template, plus one.
-        if let Some(ref storage) = self.storage {
-            if height > 0 {
-                if let Ok(headers) = storage.blocks().headers_back_from(height - 1, 11) {
-                    if !headers.is_empty() {
-                        return blvm_protocol::bip113::get_median_time_past(&headers)
-                            .saturating_add(1);
-                    }
-                }
-            }
+        if let Some(ref storage) = self.storage
+            && height > 0
+            && let Ok(headers) = storage.blocks().headers_back_from(height - 1, 11)
+            && !headers.is_empty()
+        {
+            return blvm_protocol::bip113::get_median_time_past(&headers).saturating_add(1);
         }
         current_timestamp() as Natural
     }
@@ -1034,27 +1027,25 @@ impl MiningRpc {
         // Required-work checks read the parent from the blockstore, and the
         // median-time check reads `recent_headers`. `chain().initialize` writes
         // chain info only, so index genesis in both places before mining.
-        if let Ok(Some(info)) = storage.chain().load_chain_info() {
-            if info.height == 0 {
-                let blocks = storage.blocks();
-                if matches!(blocks.get_hash_by_height(0), Ok(None)) {
-                    blocks
-                        .store_header(&info.tip_hash, &info.tip_header)
-                        .map_err(|e| {
-                            RpcError::internal_error(format!(
-                                "generatetoaddress: index genesis: {e}"
-                            ))
-                        })?;
-                    blocks.store_height(0, &info.tip_hash).map_err(|e| {
-                        RpcError::internal_error(format!("generatetoaddress: index genesis: {e}"))
-                    })?;
-                }
+        if let Ok(Some(info)) = storage.chain().load_chain_info()
+            && info.height == 0
+        {
+            let blocks = storage.blocks();
+            if matches!(blocks.get_hash_by_height(0), Ok(None)) {
                 blocks
-                    .store_recent_header(0, &info.tip_header)
+                    .store_header(&info.tip_hash, &info.tip_header)
                     .map_err(|e| {
                         RpcError::internal_error(format!("generatetoaddress: index genesis: {e}"))
                     })?;
+                blocks.store_height(0, &info.tip_hash).map_err(|e| {
+                    RpcError::internal_error(format!("generatetoaddress: index genesis: {e}"))
+                })?;
             }
+            blocks
+                .store_recent_header(0, &info.tip_header)
+                .map_err(|e| {
+                    RpcError::internal_error(format!("generatetoaddress: index genesis: {e}"))
+                })?;
         }
 
         let nblocks = param_u64_required(params, 0, "generatetoaddress")?;
@@ -1408,10 +1399,10 @@ impl MiningRpc {
                 block: block.clone(),
                 witnesses: witnesses.clone(),
             });
-            if let Ok(framed) = ProtocolParser::serialize_message(&p2p_msg) {
-                if let Err(e) = nm.broadcast(framed).await {
-                    warn!("submitblock: P2P broadcast failed at height {connect_height}: {e}");
-                }
+            if let Ok(framed) = ProtocolParser::serialize_message(&p2p_msg)
+                && let Err(e) = nm.broadcast(framed).await
+            {
+                warn!("submitblock: P2P broadcast failed at height {connect_height}: {e}");
             }
         }
         let _ = block_bytes;
@@ -1461,12 +1452,12 @@ impl MiningRpc {
                 None,
             ));
         };
-        if let FeeRateChoice::Named(name) = &choice {
-            if !estimator.has_estimator(name) {
-                return Err(RpcError::invalid_params(format!(
-                    "Invalid fee_rate_estimator: {name}. Must be 'none', 'history', 'mempool', or a registered estimator"
-                )));
-            }
+        if let FeeRateChoice::Named(name) = &choice
+            && !estimator.has_estimator(name)
+        {
+            return Err(RpcError::invalid_params(format!(
+                "Invalid fee_rate_estimator: {name}. Must be 'none', 'history', 'mempool', or a registered estimator"
+            )));
         }
         let labels = estimator.estimator_labels();
         let selection = Some((labels.0.as_str(), labels.1.as_str(), labels.2));
@@ -1715,18 +1706,18 @@ pub(crate) fn mempool_witnesses_for_template(
         .iter()
         .map(|tx| {
             let txid = calculate_tx_id(tx);
-            if let Some(mp) = mempool {
-                if let Some(wits) = mp.get_transaction_witnesses(&txid) {
-                    if wits.len() != tx.inputs.len() {
-                        return Err(format!(
-                            "witness count {} != input count {} for tx {}",
-                            wits.len(),
-                            tx.inputs.len(),
-                            hex::encode(txid)
-                        ));
-                    }
-                    return Ok(Some(wits));
+            if let Some(mp) = mempool
+                && let Some(wits) = mp.get_transaction_witnesses(&txid)
+            {
+                if wits.len() != tx.inputs.len() {
+                    return Err(format!(
+                        "witness count {} != input count {} for tx {}",
+                        wits.len(),
+                        tx.inputs.len(),
+                        hex::encode(txid)
+                    ));
                 }
+                return Ok(Some(wits));
             }
             if spends_witness_utxo(tx, utxo_set) {
                 return Err(format!(

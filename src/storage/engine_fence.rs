@@ -31,20 +31,20 @@ pub fn engine_names_in_dependencies(toml: &str) -> Vec<&'static str> {
         if let Some((key, _)) = line.split_once('=') {
             note(&mut found, key.trim().trim_matches('"'));
         }
-        if let Some(after) = line.split("package").nth(1) {
-            if let Some(name) = after.split('"').nth(1) {
-                note(&mut found, name);
-            }
+        if let Some(after) = line.split("package").nth(1)
+            && let Some(name) = after.split('"').nth(1)
+        {
+            note(&mut found, name);
         }
     }
     found
 }
 
 fn note(found: &mut Vec<&'static str>, name: &str) {
-    if let Some(engine) = ENGINES.iter().copied().find(|engine| *engine == name) {
-        if !found.contains(&engine) {
-            found.push(engine);
-        }
+    if let Some(engine) = ENGINES.iter().copied().find(|engine| *engine == name)
+        && !found.contains(&engine)
+    {
+        found.push(engine);
     }
 }
 

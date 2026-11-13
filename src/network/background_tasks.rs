@@ -510,10 +510,10 @@ impl NetworkManager {
                         let ban_list_guard = ban_list.read().await;
                         if let Some(unban_timestamp) =
                             ban_list_guard.get(&std::net::SocketAddr::new(addr.ip(), 0))
+                            && *unban_timestamp != u64::MAX
+                            && now < *unban_timestamp
                         {
-                            if *unban_timestamp != u64::MAX && now < *unban_timestamp {
-                                continue;
-                            }
+                            continue;
                         }
                     }
 
@@ -532,10 +532,11 @@ impl NetworkManager {
                         queue.remove(addr);
                         continue;
                     }
-                    if *attempts >= 10 && persistent_set.contains(addr) {
-                        if let Some((att, _, _)) = queue.get_mut(addr) {
-                            *att = 0;
-                        }
+                    if *attempts >= 10
+                        && persistent_set.contains(addr)
+                        && let Some((att, _, _)) = queue.get_mut(addr)
+                    {
+                        *att = 0;
                     }
 
                     // At capacity, still try persistent peers (IBD / operator-configured) — same slot

@@ -103,7 +103,7 @@ impl HeadersPresync {
             self.held.push(header.clone());
             if self.phase == HeadersSyncPhase::Presync {
                 if self.params.commitment_period > 0
-                    && self.seen % self.params.commitment_period == 0
+                    && self.seen.is_multiple_of(self.params.commitment_period)
                 {
                     self.commitments.push(block_header_hash(header));
                     self.held.clear();

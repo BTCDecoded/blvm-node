@@ -212,11 +212,10 @@ fn run_ibd_retire_loop_with_commitment(
                 for dk in &delta_arc.deletions {
                     let op = blvm_protocol::utxo_overlay::utxo_deletion_key_to_outpoint(dk);
                     let key = outpoint_to_key(&op);
-                    if let Some(utxo) = store_r.get_for_commitment_removal(&key) {
-                        if let Err(e) = t.remove(&op, &utxo) {
+                    if let Some(utxo) = store_r.get_for_commitment_removal(&key)
+                        && let Err(e) = t.remove(&op, &utxo) {
                             warn!("IBD commitment: remove failed at height {}: {}", h, e);
                         }
-                    }
                 }
                 for (op, arc) in &delta_arc.additions {
                     if let Err(e) = t.insert(*op, arc.as_ref().clone()) {

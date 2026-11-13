@@ -852,11 +852,11 @@ impl MiningEngine {
                     block.header.nonce = nonce;
 
                     // Check proof of work using standalone function
-                    if let Ok(valid) = check_proof_of_work(&block.header) {
-                        if valid {
-                            let _ = tx.send(Ok((block, MiningResult::Success)));
-                            return;
-                        }
+                    if let Ok(valid) = check_proof_of_work(&block.header)
+                        && valid
+                    {
+                        let _ = tx.send(Ok((block, MiningResult::Success)));
+                        return;
                     }
                 }
 

@@ -155,14 +155,14 @@ impl ModuleLoader {
         manifest: &crate::module::registry::manifest::ModuleManifest,
         binary_path: &Path,
     ) -> Result<(), ModuleError> {
-        if let Some(bin) = &manifest.binary {
-            if let Some(h) = &bin.hash {
-                crate::module::validation::signature_verifier::verify_stored_binary_hash(
-                    manifest,
-                    binary_path,
-                    h,
-                )?;
-            }
+        if let Some(bin) = &manifest.binary
+            && let Some(h) = &bin.hash
+        {
+            crate::module::validation::signature_verifier::verify_stored_binary_hash(
+                manifest,
+                binary_path,
+                h,
+            )?;
         }
         Ok(())
     }
@@ -202,36 +202,36 @@ impl ModuleLoader {
         }
 
         // Try TOML first
-        if let Ok(contents) = std::fs::read_to_string(&config_path) {
-            if let Ok(config) = toml::from_str::<HashMap<String, toml::Value>>(&contents) {
-                // Convert TOML values to strings
-                let mut string_config = HashMap::new();
-                for (key, value) in config {
-                    let value_str = match value {
-                        toml::Value::String(s) => s,
-                        toml::Value::Integer(i) => i.to_string(),
-                        toml::Value::Float(f) => f.to_string(),
-                        toml::Value::Boolean(b) => b.to_string(),
-                        toml::Value::Array(arr) => arr
-                            .iter()
-                            .map(|v| v.to_string())
-                            .collect::<Vec<_>>()
-                            .join(","),
-                        toml::Value::Table(map) => {
-                            // Nested tables become dot-notation keys
-                            let mut result = Vec::new();
-                            for (subkey, subvalue) in map {
-                                result.push(format!("{key}.{subkey}"));
-                                result.push(subvalue.to_string());
-                            }
-                            result.join(",")
+        if let Ok(contents) = std::fs::read_to_string(&config_path)
+            && let Ok(config) = toml::from_str::<HashMap<String, toml::Value>>(&contents)
+        {
+            // Convert TOML values to strings
+            let mut string_config = HashMap::new();
+            for (key, value) in config {
+                let value_str = match value {
+                    toml::Value::String(s) => s,
+                    toml::Value::Integer(i) => i.to_string(),
+                    toml::Value::Float(f) => f.to_string(),
+                    toml::Value::Boolean(b) => b.to_string(),
+                    toml::Value::Array(arr) => arr
+                        .iter()
+                        .map(|v| v.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    toml::Value::Table(map) => {
+                        // Nested tables become dot-notation keys
+                        let mut result = Vec::new();
+                        for (subkey, subvalue) in map {
+                            result.push(format!("{key}.{subkey}"));
+                            result.push(subvalue.to_string());
                         }
-                        toml::Value::Datetime(dt) => dt.to_string(),
-                    };
-                    string_config.insert(key, value_str);
-                }
-                return Ok(string_config);
+                        result.join(",")
+                    }
+                    toml::Value::Datetime(dt) => dt.to_string(),
+                };
+                string_config.insert(key, value_str);
             }
+            return Ok(string_config);
         }
 
         // If TOML parsing failed, try simple key=value format

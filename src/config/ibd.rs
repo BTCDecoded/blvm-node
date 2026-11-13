@@ -243,10 +243,10 @@ pub fn ibd_serve_only() -> bool {
 /// flooded LMDB and is not wired. Sync-on-async (tc285) stays banned.
 pub fn getdata_serve_pipe_depth() -> usize {
     latch_env!(usize, {
-        if let Ok(v) = std::env::var("BLVM_GETDATA_SERVE_PIPE") {
-            if let Ok(n) = v.trim().parse::<usize>() {
-                return n.clamp(1, 8);
-            }
+        if let Ok(v) = std::env::var("BLVM_GETDATA_SERVE_PIPE")
+            && let Ok(n) = v.trim().parse::<usize>()
+        {
+            return n.clamp(1, 8);
         }
         if ibd_serve_only() { 4 } else { 1 }
     })
@@ -334,39 +334,35 @@ pub fn ibd_engine_durability_config(config: Option<&IbdConfig>) -> IbdEngineDura
         let v = v.trim();
         if v == "0" || v.eq_ignore_ascii_case("adaptive") {
             d.checkpoint_interval = None;
-        } else if let Ok(n) = v.parse::<i32>() {
-            if n > 0 {
-                d.checkpoint_interval = Some(n);
-            }
+        } else if let Ok(n) = v.parse::<i32>()
+            && n > 0
+        {
+            d.checkpoint_interval = Some(n);
         }
     }
-    if let Ok(v) = std::env::var("BLVM_IBD_CHECKPOINT_MIN_INTERVAL") {
-        if let Ok(n) = v.trim().parse::<i32>() {
-            if n > 0 {
-                d.checkpoint_min_interval = n;
-            }
-        }
+    if let Ok(v) = std::env::var("BLVM_IBD_CHECKPOINT_MIN_INTERVAL")
+        && let Ok(n) = v.trim().parse::<i32>()
+        && n > 0
+    {
+        d.checkpoint_min_interval = n;
     }
-    if let Ok(v) = std::env::var("BLVM_IBD_CHECKPOINT_MAX_INTERVAL") {
-        if let Ok(n) = v.trim().parse::<i32>() {
-            if n > 0 {
-                d.checkpoint_max_interval = n.max(d.checkpoint_min_interval);
-            }
-        }
+    if let Ok(v) = std::env::var("BLVM_IBD_CHECKPOINT_MAX_INTERVAL")
+        && let Ok(n) = v.trim().parse::<i32>()
+        && n > 0
+    {
+        d.checkpoint_max_interval = n.max(d.checkpoint_min_interval);
     }
-    if let Ok(v) = std::env::var("BLVM_IBD_CHECKPOINT_TARGET_SECS") {
-        if let Ok(n) = v.trim().parse::<u64>() {
-            if n > 0 {
-                d.checkpoint_target_secs = n;
-            }
-        }
+    if let Ok(v) = std::env::var("BLVM_IBD_CHECKPOINT_TARGET_SECS")
+        && let Ok(n) = v.trim().parse::<u64>()
+        && n > 0
+    {
+        d.checkpoint_target_secs = n;
     }
-    if let Ok(v) = std::env::var("BLVM_IBD_ENGINE_MUHASH_INTERVAL") {
-        if let Ok(n) = v.trim().parse::<u64>() {
-            if n > 0 {
-                d.muhash_persist_interval = n;
-            }
-        }
+    if let Ok(v) = std::env::var("BLVM_IBD_ENGINE_MUHASH_INTERVAL")
+        && let Ok(n) = v.trim().parse::<u64>()
+        && n > 0
+    {
+        d.muhash_persist_interval = n;
     }
     d
 }

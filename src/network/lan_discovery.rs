@@ -41,13 +41,13 @@ fn local_outbound_ipv4() -> Option<Ipv4Addr> {
 fn get_local_interfaces() -> Vec<(Ipv4Addr, Ipv4Addr)> {
     let mut interfaces = Vec::new();
 
-    if let Some(ipv4) = local_outbound_ipv4() {
-        if ipv4.is_private() {
-            // Assume /24 subnet (most common for home networks)
-            let mask = Ipv4Addr::new(255, 255, 255, 0);
-            interfaces.push((ipv4, mask));
-            info!("Detected local interface: {}/24", ipv4);
-        }
+    if let Some(ipv4) = local_outbound_ipv4()
+        && ipv4.is_private()
+    {
+        // Assume /24 subnet (most common for home networks)
+        let mask = Ipv4Addr::new(255, 255, 255, 0);
+        interfaces.push((ipv4, mask));
+        info!("Detected local interface: {}/24", ipv4);
     }
 
     // Also check for common Docker/VM bridge networks

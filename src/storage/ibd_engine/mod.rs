@@ -145,7 +145,7 @@ pub(crate) fn timed_age_runs_read<'a, T>(
 
 fn maybe_log_lock_timers() {
     let n = LOCK_TIMER_SAMPLES.fetch_add(1, Ordering::Relaxed) + 1;
-    if n % 4096 != 0 {
+    if !n.is_multiple_of(4096) {
         return;
     }
     let seg = LOCK_SEG_WAIT_NS.swap(0, Ordering::Relaxed);

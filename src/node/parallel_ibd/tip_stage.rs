@@ -76,14 +76,13 @@ fn credit_pre_roll_stamps(h: u64) {
     if let Some(&ms) = guard.getdata.get(&h) {
         let _ = GETDATA_MS.compare_exchange(0, ms, Ordering::Relaxed, Ordering::Relaxed);
     }
-    if let Some(&ms) = guard.body.get(&h) {
-        if BODY_MS
+    if let Some(&ms) = guard.body.get(&h)
+        && BODY_MS
             .compare_exchange(0, ms, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
-        {
-            AHEAD_FREEZE_SOFT.store(false, Ordering::Relaxed);
-            TIP_FAILOVER_ARMED.store(false, Ordering::Relaxed);
-        }
+    {
+        AHEAD_FREEZE_SOFT.store(false, Ordering::Relaxed);
+        TIP_FAILOVER_ARMED.store(false, Ordering::Relaxed);
     }
 }
 
@@ -1232,10 +1231,10 @@ pub(crate) fn tip_crawl_supply_healthy(next_height: u64) -> bool {
     if next_height == 0 || next_height <= body {
         return false;
     }
-    if let Some((ms, _)) = getdata_body_ewma_ms() {
-        if ms <= TIP_CRAWL_GD_HEALTHY_MS {
-            return true;
-        }
+    if let Some((ms, _)) = getdata_body_ewma_ms()
+        && ms <= TIP_CRAWL_GD_HEALTHY_MS
+    {
+        return true;
     }
     let last = LOCAL_STREAM_LAST_MS.load(Ordering::Relaxed);
     if last > 0 {

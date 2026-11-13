@@ -629,11 +629,10 @@ impl DiskIndex {
                                 p.remove(i);
                             }
                         }
-                        if let Ok(owned) = Arc::try_unwrap(run) {
-                            if let Err(e2) = disk.push_run_no_compact_sync(owned) {
+                        if let Ok(owned) = Arc::try_unwrap(run)
+                            && let Err(e2) = disk.push_run_no_compact_sync(owned) {
                                 tracing::error!("DiskIndex: async spill sync fallback failed: {e2:#}");
                             }
-                        }
                     }
                 }
                 disk.async_spill_busy.store(false, Ordering::Release);
@@ -734,10 +733,10 @@ impl DiskIndex {
         self.push_run_no_compact(run)?;
         // Sync path used by tests / non-compacter callers — keep blocking compact.
         // Async spill already kicks compact_oldest_async when the write finishes.
-        if !async_disk_spill_from_env() {
-            if let Err(e) = self.compact_oldest_if_needed() {
-                tracing::error!("DiskIndex: segment compaction failed: {e}");
-            }
+        if !async_disk_spill_from_env()
+            && let Err(e) = self.compact_oldest_if_needed()
+        {
+            tracing::error!("DiskIndex: segment compaction failed: {e}");
         }
         Ok(())
     }
@@ -1109,16 +1108,16 @@ impl DiskIndex {
         let result = self.run_fanin_and_stall_split();
         self.is_compacting.store(false, Ordering::Release);
         let compact_ms = t0.elapsed().as_millis() as u64;
-        if let Ok((passes, stall_alls)) = &result {
-            if *passes > 0 || *stall_alls > 0 {
-                tracing::info!(
-                    "DiskIndex: compact finished passes={} stall_all={} segs_now={} compact_ms={}",
-                    passes,
-                    stall_alls,
-                    self.segments.read().len(),
-                    compact_ms,
-                );
-            }
+        if let Ok((passes, stall_alls)) = &result
+            && (*passes > 0 || *stall_alls > 0)
+        {
+            tracing::info!(
+                "DiskIndex: compact finished passes={} stall_all={} segs_now={} compact_ms={}",
+                passes,
+                stall_alls,
+                self.segments.read().len(),
+                compact_ms,
+            );
         }
         result.map(|_| ())
     }
@@ -1465,11 +1464,11 @@ impl DiskIndex {
                         _ => {}
                     }
                 }
-                if min_e.is_some() {
-                    if let Err(e) = self.readers[min_i].advance() {
-                        tracing::warn!("GcMergeIter: advance error: {e:#}");
-                        return None;
-                    }
+                if min_e.is_some()
+                    && let Err(e) = self.readers[min_i].advance()
+                {
+                    tracing::warn!("GcMergeIter: advance error: {e:#}");
+                    return None;
                 }
                 min_e
             }

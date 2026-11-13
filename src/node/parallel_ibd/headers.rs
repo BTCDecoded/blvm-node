@@ -262,10 +262,10 @@ pub(crate) fn header_prev_links(
     last_hash: &[u8; 32],
     prev: &[u8; 32],
 ) -> bool {
-    if let Some(parent_hash) = stored_parent_hash {
-        if parent_hash == last_hash {
-            return prev == parent_hash;
-        }
+    if let Some(parent_hash) = stored_parent_hash
+        && parent_hash == last_hash
+    {
+        return prev == parent_hash;
     }
     prev == last_hash
 }
@@ -778,22 +778,22 @@ pub(crate) async fn download_headers(
                         // leftover-c1t-recv0: peer rotate never rewound last_hash (5976×).
                         if let Ok(Some(attach_h)) =
                             blockstore.get_height_by_hash(&header.prev_block_hash)
+                            && attach_h > 0
+                            && attach_h + 1 < current_height
                         {
-                            if attach_h > 0 && attach_h + 1 < current_height {
-                                warn!(
-                                    "[IBD_HEADER_REWIND] attach prev height {} → ask {} (was {}) peer={}",
-                                    attach_h,
-                                    attach_h + 1,
-                                    current_height,
-                                    peer_addr
-                                );
-                                last_hash = header.prev_block_hash;
-                                current_height = attach_h + 1;
-                                consecutive_failures = 0;
-                                batch_entries.clear();
-                                pending_work.clear();
-                                break;
-                            }
+                            warn!(
+                                "[IBD_HEADER_REWIND] attach prev height {} → ask {} (was {}) peer={}",
+                                attach_h,
+                                attach_h + 1,
+                                current_height,
+                                peer_addr
+                            );
+                            last_hash = header.prev_block_hash;
+                            current_height = attach_h + 1;
+                            consecutive_failures = 0;
+                            batch_entries.clear();
+                            pending_work.clear();
+                            break;
                         }
                         if header.prev_block_hash == genesis_hash && current_height > 1 {
                             let back = 2048u64.min(current_height.saturating_sub(1));
@@ -950,23 +950,22 @@ pub(crate) async fn download_headers(
                 // Publish HeadersSyncProgress every 5000 headers for module event subscribers
                 if current_height > last_progress_event
                     && (current_height - last_progress_event) >= 5000
+                    && let Some(ref ep) = event_publisher
                 {
-                    if let Some(ref ep) = event_publisher {
-                        let progress_percent = if end_height > start_height {
-                            ((current_height - start_height) as f64
-                                / (end_height - start_height + 1) as f64)
-                                * 100.0
-                        } else {
-                            100.0
-                        };
-                        ep.publish_headers_sync_progress(
-                            current_height.saturating_sub(1),
-                            end_height,
-                            progress_percent,
-                        )
-                        .await;
-                        last_progress_event = current_height;
-                    }
+                    let progress_percent = if end_height > start_height {
+                        ((current_height - start_height) as f64
+                            / (end_height - start_height + 1) as f64)
+                            * 100.0
+                    } else {
+                        100.0
+                    };
+                    ep.publish_headers_sync_progress(
+                        current_height.saturating_sub(1),
+                        end_height,
+                        progress_percent,
+                    )
+                    .await;
+                    last_progress_event = current_height;
                 }
 
                 let max_headers = network.protocol_limits().max_headers_results;

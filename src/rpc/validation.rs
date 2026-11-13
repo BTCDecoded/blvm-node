@@ -117,20 +117,20 @@ where
         RpcError::invalid_params(format!("Invalid {param_name} value: {value} ({e})"))
     })?;
 
-    if let Some(min_val) = min {
-        if typed_value < min_val {
-            return Err(RpcError::invalid_params(format!(
-                "{param_name} must be >= {min_val}, got {typed_value}"
-            )));
-        }
+    if let Some(min_val) = min
+        && typed_value < min_val
+    {
+        return Err(RpcError::invalid_params(format!(
+            "{param_name} must be >= {min_val}, got {typed_value}"
+        )));
     }
 
-    if let Some(max_val) = max {
-        if typed_value > max_val {
-            return Err(RpcError::invalid_params(format!(
-                "{param_name} must be <= {max_val}, got {typed_value}"
-            )));
-        }
+    if let Some(max_val) = max
+        && typed_value > max_val
+    {
+        return Err(RpcError::invalid_params(format!(
+            "{param_name} must be <= {max_val}, got {typed_value}"
+        )));
     }
 
     Ok(typed_value)
@@ -154,20 +154,20 @@ where
         let typed_value = T::try_from(value)
             .map_err(|e| RpcError::invalid_params(format!("Invalid {param_name}: {e}")))?;
 
-        if let Some(min_val) = min {
-            if typed_value < min_val {
-                return Err(RpcError::invalid_params(format!(
-                    "{param_name} must be >= {min_val}"
-                )));
-            }
+        if let Some(min_val) = min
+            && typed_value < min_val
+        {
+            return Err(RpcError::invalid_params(format!(
+                "{param_name} must be >= {min_val}"
+            )));
         }
 
-        if let Some(max_val) = max {
-            if typed_value > max_val {
-                return Err(RpcError::invalid_params(format!(
-                    "{param_name} must be <= {max_val}"
-                )));
-            }
+        if let Some(max_val) = max
+            && typed_value > max_val
+        {
+            return Err(RpcError::invalid_params(format!(
+                "{param_name} must be <= {max_val}"
+            )));
         }
 
         Ok(typed_value)

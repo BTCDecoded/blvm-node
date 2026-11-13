@@ -612,17 +612,15 @@ impl PruningManager {
                     }
                 }
                 // Handle BIP158 filters if enabled
-                if keep_filters {
-                    if let Some(ref filter_service) = self.filter_service {
-                        // Remove filter from cache (saves memory) but keep filter header
-                        // Filter headers are always kept for chain verification
-                        if filter_service.has_filter(&hash) {
-                            filter_service.remove_filter_for_pruned_block(&hash)?;
-                            debug!(
-                                "Removed BIP158 filter for pruned block at height {} (header kept)",
-                                height
-                            );
-                        }
+                if keep_filters && let Some(ref filter_service) = self.filter_service {
+                    // Remove filter from cache (saves memory) but keep filter header
+                    // Filter headers are always kept for chain verification
+                    if filter_service.has_filter(&hash) {
+                        filter_service.remove_filter_for_pruned_block(&hash)?;
+                        debug!(
+                            "Removed BIP158 filter for pruned block at height {} (header kept)",
+                            height
+                        );
                     }
                 }
 

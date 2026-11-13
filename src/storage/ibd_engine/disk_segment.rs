@@ -944,11 +944,13 @@ impl DiskSegment {
             }
             if e.is_add() {
                 let next = bucket.get(i + 1);
-                if let Some(n) = next {
-                    if n.key == *key && n.height == e.height && n.is_delete() {
-                        i += 2; // same-height create+spend: cancelled
-                        continue;
-                    }
+                if let Some(n) = next
+                    && n.key == *key
+                    && n.height == e.height
+                    && n.is_delete()
+                {
+                    i += 2; // same-height create+spend: cancelled
+                    continue;
                 }
                 return Ok(Some(e.id));
             } else if e.is_delete() {
@@ -1380,11 +1382,13 @@ fn resolve_key_in_slice(
         }
         if e.is_add() {
             let next = slice.get(i + 1);
-            if let Some(n) = next {
-                if n.key == e.key && n.height == e.height && n.is_delete() {
-                    i += 2;
-                    continue;
-                }
+            if let Some(n) = next
+                && n.key == e.key
+                && n.height == e.height
+                && n.is_delete()
+            {
+                i += 2;
+                continue;
             }
             ids[idx] = e.id;
         } else if e.is_delete() {

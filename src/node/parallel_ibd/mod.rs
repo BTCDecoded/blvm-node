@@ -869,11 +869,11 @@ pub(crate) fn tip_hedge_observe_and_should_assign(
 
 pub(crate) fn tip_hedge_mark_issued(h: u64, peer_id: &str) {
     let mut g = tip_hedge_live().lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(live) = g.as_mut() {
-        if live.h == h {
-            live.issued = live.issued.saturating_add(1);
-            live.hedge_peers.push(peer_id.to_string());
-        }
+    if let Some(live) = g.as_mut()
+        && live.h == h
+    {
+        live.issued = live.issued.saturating_add(1);
+        live.hedge_peers.push(peer_id.to_string());
     }
 }
 
@@ -1940,7 +1940,7 @@ pub(crate) fn insert_reorder_gap_aware(
     if throttle && h > next_needed.saturating_add(window) && !lookahead_height_reserved(h) {
         body_dup::note_discard(body_dup::DiscardReason::AdmitDrop, Some(h), 0);
         let n = memory::GAP_ADMIT_DROP_BLOCKS.fetch_add(1, Ordering::Relaxed) + 1;
-        if n == 1 || n % 64 == 0 {
+        if n == 1 || n.is_multiple_of(64) {
             warn!(
                 "[IBD_GAP_ADMIT_DROP] dropped h={} (next_needed={}, reorder={}, limit={}, window={}, bridge_pending={}, bridge_max={}, gap_missing={}, total_drops={})",
                 h,
@@ -2029,7 +2029,7 @@ pub(crate) fn evict_reorder_gap_pressure(
     if evicted > 0 {
         let total = memory::REORDER_EVICT_BLOCKS.fetch_add(evicted as u64, Ordering::Relaxed)
             + evicted as u64;
-        if total == evicted as u64 || total % 64 == 0 {
+        if total == evicted as u64 || total.is_multiple_of(64) {
             warn!(
                 "[IBD_REORDER_EVICT] evicted {} block(s) (next_needed={}, reorder={}, limit={}, window={}, bridge_pending={}, bridge_max={}, gap_missing={}, total_evicted={})",
                 evicted,
@@ -2076,23 +2076,21 @@ fn prepare_coordinator_tip_handoff(
     }
     let mut peeled = 0usize;
     // Peel aggressively when feeder is already deep — ahead pending is what stranded the tip.
-    if peel_bridge {
-        if let Some(bridge) = ready_bridge {
-            peeled = bridge.evict_far_ahead_pending_ex(
-                next_needed,
-                admit_window.min(64),
-                true,
-                bridge_pending_max,
-                wan_tip_crawl,
+    if peel_bridge && let Some(bridge) = ready_bridge {
+        peeled = bridge.evict_far_ahead_pending_ex(
+            next_needed,
+            admit_window.min(64),
+            true,
+            bridge_pending_max,
+            wan_tip_crawl,
+        );
+        for h in bridge.take_evicted_heights() {
+            dispatched.remove(&h);
+        }
+        if peeled > 0 {
+            warn!(
+                "[IBD_TIP_FASTPATH] peeled {peeled} far-ahead bridge pending before tip {next_needed} handoff (feeder={feeder_len})"
             );
-            for h in bridge.take_evicted_heights() {
-                dispatched.remove(&h);
-            }
-            if peeled > 0 {
-                warn!(
-                    "[IBD_TIP_FASTPATH] peeled {peeled} far-ahead bridge pending before tip {next_needed} handoff (feeder={feeder_len})"
-                );
-            }
         }
     }
     let was_dispatched = dispatched.remove(&next_needed);
@@ -2483,7 +2481,7 @@ pub(crate) fn should_advance_tip_on_skip_path(next_height: u64, effective_end_he
     if next_height == 0 {
         return false;
     }
-    if next_height % 1_000 == 0 {
+    if next_height.is_multiple_of(1_000) {
         return true;
     }
     next_height.saturating_add(1_024) > effective_end_height
@@ -3089,16 +3087,16 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
             // Exit early if this worker's own peer has been permanently evicted.
             // Staying alive just causes the worker to grab a chunk, hit the
             // wait_for_peer_connected eviction check, requeue, loop forever.
-            if let Some(net) = network_clone.as_ref() {
-                if let Ok(peer_sa) = peer_id.parse::<std::net::SocketAddr>() {
-                    let evicted = net.ibd_evicted_ips.read().unwrap();
-                    if evicted.contains(&peer_sa.ip()) {
-                        tracing::info!(
-                            "[IBD] Worker {} exiting: peer is permanently evicted (NODE_NETWORK_LIMITED)",
-                            peer_id
-                        );
-                        break None;
-                    }
+            if let Some(net) = network_clone.as_ref()
+                && let Ok(peer_sa) = peer_id.parse::<std::net::SocketAddr>()
+            {
+                let evicted = net.ibd_evicted_ips.read().unwrap();
+                if evicted.contains(&peer_sa.ip()) {
+                    tracing::info!(
+                        "[IBD] Worker {} exiting: peer is permanently evicted (NODE_NETWORK_LIMITED)",
+                        peer_id
+                    );
+                    break None;
                 }
             }
             let got = assigner_clone.get_work(
@@ -3108,12 +3106,12 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
             // R-336: window path queues front-stalling holders for eviction; any
             // worker drains it (the assigner has no network handle).
             for evict in assigner_clone.window_take_evictions() {
-                if let Some(net) = network_clone.as_ref() {
-                    if let Ok(sa) = evict.parse::<std::net::SocketAddr>() {
-                        download::download_forget_peer(&evict);
-                        let netc = net.clone();
-                        tokio::task::spawn_blocking(move || netc.evict_ibd_peer(sa));
-                    }
+                if let Some(net) = network_clone.as_ref()
+                    && let Ok(sa) = evict.parse::<std::net::SocketAddr>()
+                {
+                    download::download_forget_peer(&evict);
+                    let netc = net.clone();
+                    tokio::task::spawn_blocking(move || netc.evict_ibd_peer(sa));
                 }
             }
             if let Some((chunk_start, chunk_end)) = got {
@@ -4120,44 +4118,43 @@ where
             flight_tip_leftover,
             stalled_ms,
             next_needed,
-        ) {
-            if let Some((block, witnesses)) = reorder_buffer.remove(&next_needed) {
-                prepare_coord_dispatch_bufs(
-                    coord_engine_mode,
-                    &block,
-                    coord_tx_ids_buf,
-                    coord_keys_buf,
-                );
-                let keys_owned = std::mem::take(coord_keys_buf);
-                let tx_ids_owned = std::mem::take(coord_tx_ids_buf);
-                let ready: ReadyItem = (
-                    next_needed,
-                    block,
-                    witnesses,
-                    keys_owned,
-                    prefetch::engine_empty_prefetch_arc(),
-                    tx_ids_owned,
-                    prefetch::engine_empty_spec_adds(),
-                );
-                if let Some(bridge) = ready_bridge_for_coord {
-                    bridge.force_emit_tip_to_feeder(ready, feeder_state_for_coord);
-                    static LEFTOVER_FEEDER_LOG_MS: std::sync::atomic::AtomicU64 =
-                        std::sync::atomic::AtomicU64::new(0);
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-                    let prev = LEFTOVER_FEEDER_LOG_MS.load(Ordering::Relaxed);
-                    if now_ms.saturating_sub(prev) >= 5000 {
-                        LEFTOVER_FEEDER_LOG_MS.store(now_ms, Ordering::Relaxed);
-                        warn!(
-                            "[IBD_LEFTOVER_FEEDER] next={} val_h={} store_has={} flight_tip={}",
-                            next_needed, val_h, store_has_leftover, flight_tip_leftover
-                        );
-                    }
-                } else {
-                    reorder_buffer.insert(next_needed, (ready.1, ready.2));
+        ) && let Some((block, witnesses)) = reorder_buffer.remove(&next_needed)
+        {
+            prepare_coord_dispatch_bufs(
+                coord_engine_mode,
+                &block,
+                coord_tx_ids_buf,
+                coord_keys_buf,
+            );
+            let keys_owned = std::mem::take(coord_keys_buf);
+            let tx_ids_owned = std::mem::take(coord_tx_ids_buf);
+            let ready: ReadyItem = (
+                next_needed,
+                block,
+                witnesses,
+                keys_owned,
+                prefetch::engine_empty_prefetch_arc(),
+                tx_ids_owned,
+                prefetch::engine_empty_spec_adds(),
+            );
+            if let Some(bridge) = ready_bridge_for_coord {
+                bridge.force_emit_tip_to_feeder(ready, feeder_state_for_coord);
+                static LEFTOVER_FEEDER_LOG_MS: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let prev = LEFTOVER_FEEDER_LOG_MS.load(Ordering::Relaxed);
+                if now_ms.saturating_sub(prev) >= 5000 {
+                    LEFTOVER_FEEDER_LOG_MS.store(now_ms, Ordering::Relaxed);
+                    warn!(
+                        "[IBD_LEFTOVER_FEEDER] next={} val_h={} store_has={} flight_tip={}",
+                        next_needed, val_h, store_has_leftover, flight_tip_leftover
+                    );
                 }
+            } else {
+                reorder_buffer.insert(next_needed, (ready.1, ready.2));
             }
         }
 
@@ -6238,10 +6235,10 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                             ready.insert(p.clone());
                             continue;
                         }
-                        if let Ok(addr) = p.parse::<std::net::SocketAddr>() {
-                            if net.peer_ibd_ready(addr).await {
-                                ready.insert(p.clone());
-                            }
+                        if let Ok(addr) = p.parse::<std::net::SocketAddr>()
+                            && net.peer_ibd_ready(addr).await
+                        {
+                            ready.insert(p.clone());
                         }
                     }
                     // Active local-disk workers are always ready (no handshake).
@@ -6259,12 +6256,11 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                             Some((p, scorer.tip_owner_score(&addr)))
                         })
                         .collect();
-                    if let Some(pref) = assigner.preferred_tip_owner() {
-                        if let Ok(addr) = pref.parse::<std::net::SocketAddr>() {
-                            if !scored.iter().any(|(p, _)| p == &pref) {
-                                scored.push((pref, scorer.tip_owner_score(&addr)));
-                            }
-                        }
+                    if let Some(pref) = assigner.preferred_tip_owner()
+                        && let Ok(addr) = pref.parse::<std::net::SocketAddr>()
+                        && !scored.iter().any(|(p, _)| p == &pref)
+                    {
+                        scored.push((pref, scorer.tip_owner_score(&addr)));
                     }
                     if !scored.is_empty() {
                         scored.sort_by(|a, b| {
@@ -6303,15 +6299,15 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                         "[IBD_READY_REFRESH_TIMEOUT] 250ms — skipped to keep tip channel draining (W67)"
                     );
                 }
-                if !synthetic_wan::bulk_local_disk_stream() {
-                    if let Some(n) = network_for_coord.as_ref() {
-                        tip_probe::coord_tick(
-                            Arc::clone(n),
-                            Arc::clone(&blockstore_for_coord),
-                            Arc::clone(&assigner_for_coord),
-                            validation_height_for_coord.load(Ordering::Relaxed),
-                        );
-                    }
+                if !synthetic_wan::bulk_local_disk_stream()
+                    && let Some(n) = network_for_coord.as_ref()
+                {
+                    tip_probe::coord_tick(
+                        Arc::clone(n),
+                        Arc::clone(&blockstore_for_coord),
+                        Arc::clone(&assigner_for_coord),
+                        validation_height_for_coord.load(Ordering::Relaxed),
+                    );
                 }
                 // Flush-path tip: copy only if something live published.
                 // GAP_PERSIST must not publish (R-196 leftover genesis).
@@ -6719,32 +6715,32 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                 };
                 let current = max_ahead_live.load(Ordering::Relaxed);
                 // L1/W11 proactive: even without bridge-full, hold ahead cap.
-                if let Some((kind, lc)) = ahead_cap {
-                    if current > lc {
-                        max_ahead_live.store(lc, Ordering::Relaxed);
-                        let log_now = ahead_clamp_logged_at
-                            .map(|t| t.elapsed() > Duration::from_secs(30))
-                            .unwrap_or(true);
-                        if log_now {
-                            if kind == "local" {
-                                info!(
-                                    "[IBD_LOCAL_AHEAD] next_needed={} ≤ body_tip={} — max_ahead {} → {} (BLVM_IBD_LOCAL_AHEAD)",
-                                    next_needed, live_body_tip_for_coord, current, lc
-                                );
-                            } else {
-                                info!(
-                                    "[IBD_WAN_AHEAD] next_needed={} body_tip={} feeder={} gap_missing={} — max_ahead {} → {} ({})",
-                                    next_needed,
-                                    live_body_tip_for_coord,
-                                    feeder_len,
-                                    gap_missing_coord,
-                                    current,
-                                    lc,
-                                    kind
-                                );
-                            }
-                            ahead_clamp_logged_at = Some(std::time::Instant::now());
+                if let Some((kind, lc)) = ahead_cap
+                    && current > lc
+                {
+                    max_ahead_live.store(lc, Ordering::Relaxed);
+                    let log_now = ahead_clamp_logged_at
+                        .map(|t| t.elapsed() > Duration::from_secs(30))
+                        .unwrap_or(true);
+                    if log_now {
+                        if kind == "local" {
+                            info!(
+                                "[IBD_LOCAL_AHEAD] next_needed={} ≤ body_tip={} — max_ahead {} → {} (BLVM_IBD_LOCAL_AHEAD)",
+                                next_needed, live_body_tip_for_coord, current, lc
+                            );
+                        } else {
+                            info!(
+                                "[IBD_WAN_AHEAD] next_needed={} body_tip={} feeder={} gap_missing={} — max_ahead {} → {} ({})",
+                                next_needed,
+                                live_body_tip_for_coord,
+                                feeder_len,
+                                gap_missing_coord,
+                                current,
+                                lc,
+                                kind
+                            );
                         }
+                        ahead_clamp_logged_at = Some(std::time::Instant::now());
                     }
                 }
                 let current = max_ahead_live.load(Ordering::Relaxed);
@@ -7346,15 +7342,15 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                 {
                     continue;
                 }
-                if let Some(ref bridge) = ready_bridge_for_coord {
-                    if !bridge.may_accept_height(h, bridge_pending_max) {
-                        // Do NOT break: ascending order hits refused ahead heights
-                        // before next_expected when the gap sits later in reorder.
-                        // may_accept always allows next_expected — skip and keep looking
-                        // (live: inject 9111 then stall forever with bridge_pending=512).
-                        bridge_capped = true;
-                        continue;
-                    }
+                if let Some(ref bridge) = ready_bridge_for_coord
+                    && !bridge.may_accept_height(h, bridge_pending_max)
+                {
+                    // Do NOT break: ascending order hits refused ahead heights
+                    // before next_expected when the gap sits later in reorder.
+                    // may_accept always allows next_expected — skip and keep looking
+                    // (live: inject 9111 then stall forever with bridge_pending=512).
+                    bridge_capped = true;
+                    continue;
                 }
                 let Some((block, witnesses)) = reorder_buffer.remove(&h) else {
                     continue;
@@ -7446,41 +7442,39 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                 }
                 // If the gap is now in reorder (inject or prior), dispatch it this
                 // iteration — do not sleep past a ready next_expected.
-                if !dispatched.contains(&next_needed) {
-                    if let Some(ref bridge) = ready_bridge_for_coord {
-                        if bridge.may_accept_height(next_needed, bridge_pending_max) {
-                            if let Some((block, witnesses)) = reorder_buffer.remove(&next_needed) {
-                                dispatched.insert(next_needed);
-                                if next_needed >= next_prefetch_height {
-                                    next_prefetch_height = next_needed + 1;
-                                }
-                                prepare_coord_dispatch_bufs(
-                                    coord_engine_mode,
-                                    &block,
-                                    &mut coord_tx_ids_buf,
-                                    &mut coord_keys_buf,
-                                );
-                                let store = &ibd_store_v2_for_coord;
-                                let keys_owned = std::mem::take(&mut coord_keys_buf);
-                                let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
-                                if let Some((h, block, witnesses)) = dispatch_to_prefetch((
-                                    Arc::clone(store),
-                                    keys_owned,
-                                    tx_ids_owned,
-                                    next_needed,
-                                    block,
-                                    witnesses,
-                                    coord_engine_mode,
-                                )) {
-                                    dispatched.remove(&h);
-                                    reorder_buffer.insert(h, (block, witnesses));
-                                } else {
-                                    coord_buffer_full_since = None;
-                                }
-                                continue;
-                            }
-                        }
+                if !dispatched.contains(&next_needed)
+                    && let Some(ref bridge) = ready_bridge_for_coord
+                    && bridge.may_accept_height(next_needed, bridge_pending_max)
+                    && let Some((block, witnesses)) = reorder_buffer.remove(&next_needed)
+                {
+                    dispatched.insert(next_needed);
+                    if next_needed >= next_prefetch_height {
+                        next_prefetch_height = next_needed + 1;
                     }
+                    prepare_coord_dispatch_bufs(
+                        coord_engine_mode,
+                        &block,
+                        &mut coord_tx_ids_buf,
+                        &mut coord_keys_buf,
+                    );
+                    let store = &ibd_store_v2_for_coord;
+                    let keys_owned = std::mem::take(&mut coord_keys_buf);
+                    let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
+                    if let Some((h, block, witnesses)) = dispatch_to_prefetch((
+                        Arc::clone(store),
+                        keys_owned,
+                        tx_ids_owned,
+                        next_needed,
+                        block,
+                        witnesses,
+                        coord_engine_mode,
+                    )) {
+                        dispatched.remove(&h);
+                        reorder_buffer.insert(h, (block, witnesses));
+                    } else {
+                        coord_buffer_full_since = None;
+                    }
+                    continue;
                 }
                 tokio::time::sleep(IBD_YIELD_SLEEP).await;
                 continue;
@@ -7491,12 +7485,12 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
             continue;
         }
         #[cfg(target_os = "linux")]
-        if let Some(pipeline_quarter) = emergency_pipeline_quarter {
-            if !emergency_may_bulk_recv(&reorder_buffer, pipeline_quarter) {
-                // Buffer quarter full — skip bulk recv_many but keep dispatching above.
-                tokio::time::sleep(IBD_YIELD_SLEEP).await;
-                continue;
-            }
+        if let Some(pipeline_quarter) = emergency_pipeline_quarter
+            && !emergency_may_bulk_recv(&reorder_buffer, pipeline_quarter)
+        {
+            // Buffer quarter full — skip bulk recv_many but keep dispatching above.
+            tokio::time::sleep(IBD_YIELD_SLEEP).await;
+            continue;
         }
         // When the validation gap is missing from reorder, do not park on the full
         // coordinator stall timeout (15–30s). That made LOCAL_GAP inject run once per
@@ -7917,7 +7911,7 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                 // Every 10 stalls: emit a deeper diagnostic to verify validation_height
                 // and prefetch channel health (helps distinguish true validation stall
                 // from coordinator-reads-stale-height phantom stall).
-                if coord_stall_count % 10 == 0 {
+                if coord_stall_count.is_multiple_of(10) {
                     let vh_raw =
                         validation_height_for_coord.load(std::sync::atomic::Ordering::SeqCst);
                     warn!(
@@ -8037,7 +8031,7 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                 if total_received == 1 {
                     info!("Coordinator: first block received, height {}", h);
                 }
-                if total_received <= 3 || total_received % 500 == 0 {
+                if total_received <= 3 || total_received.is_multiple_of(500) {
                     debug!(
                         "[IBD] Coordinator: block {} (total_received={}) [sequential]",
                         h, total_received
@@ -8149,7 +8143,7 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                         );
                     }
                 }
-                if total_received <= 3 || total_received % 500 == 0 {
+                if total_received <= 3 || total_received.is_multiple_of(500) {
                     debug!(
                         "[IBD] Coordinator: block {} (total_received={}, reorder_len={})",
                         height,
@@ -8254,13 +8248,13 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                 {
                     continue;
                 }
-                if let Some(ref bridge) = ready_bridge_for_coord {
-                    if !bridge.may_accept_height(h, bridge_pending_max) {
-                        // Skip refused ahead heights; keep scanning for next_expected
-                        // (always allowed). Breaking here wedged gap fills behind
-                        // lower refused keys while bridge_pending was at cap.
-                        continue;
-                    }
+                if let Some(ref bridge) = ready_bridge_for_coord
+                    && !bridge.may_accept_height(h, bridge_pending_max)
+                {
+                    // Skip refused ahead heights; keep scanning for next_expected
+                    // (always allowed). Breaking here wedged gap fills behind
+                    // lower refused keys while bridge_pending was at cap.
+                    continue;
                 }
                 let Some((block, witnesses)) = reorder_buffer.remove(&h) else {
                     continue;
@@ -8415,41 +8409,40 @@ impl ParallelIBD {
         // → `Connected to 64`) and never replaced during IBD; evicted / gone / never-ready
         // peers thinned `ready` every run. Re-run `connect_peers_from_database` while the
         // session is live and the connected count is under target. Pinned peers: skip.
-        if let Some(ref net) = network {
-            if let (Some(target), false) =
+        if let Some(ref net) = network
+            && let (Some(target), false) =
                 (ibd_roster_target(), skip_ibd_archive_dns_seed_for(peer_ids))
-            {
-                let net_clone = Arc::clone(net);
-                let session_id = PARALLEL_IBD_SESSION_ID.load(Ordering::Acquire) + 1;
-                tokio::spawn(async move {
-                    let every = std::time::Duration::from_secs(ibd_roster_topup_secs());
-                    let mut wait = std::time::Duration::from_secs(10).min(every);
-                    loop {
-                        tokio::time::sleep(wait).await;
-                        wait = every;
-                        if !PARALLEL_IBD_SESSION_ACTIVE.load(Ordering::Acquire)
-                            || IBD_SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
-                            || PARALLEL_IBD_SESSION_ID.load(Ordering::Acquire) != session_id
-                        {
-                            break;
-                        }
-                        let have = net_clone.peer_count();
-                        if have >= target {
-                            continue;
-                        }
-                        match net_clone.connect_peers_from_database(target).await {
-                            Ok(n) => info!(
-                                "[IBD_ROSTER_TOPUP] peers={} target={} connected={}",
-                                have, target, n
-                            ),
-                            Err(e) => warn!(
-                                "[IBD_ROSTER_TOPUP] peers={} target={} failed: {}",
-                                have, target, e
-                            ),
-                        }
+        {
+            let net_clone = Arc::clone(net);
+            let session_id = PARALLEL_IBD_SESSION_ID.load(Ordering::Acquire) + 1;
+            tokio::spawn(async move {
+                let every = std::time::Duration::from_secs(ibd_roster_topup_secs());
+                let mut wait = std::time::Duration::from_secs(10).min(every);
+                loop {
+                    tokio::time::sleep(wait).await;
+                    wait = every;
+                    if !PARALLEL_IBD_SESSION_ACTIVE.load(Ordering::Acquire)
+                        || IBD_SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
+                        || PARALLEL_IBD_SESSION_ID.load(Ordering::Acquire) != session_id
+                    {
+                        break;
                     }
-                });
-            }
+                    let have = net_clone.peer_count();
+                    if have >= target {
+                        continue;
+                    }
+                    match net_clone.connect_peers_from_database(target).await {
+                        Ok(n) => info!(
+                            "[IBD_ROSTER_TOPUP] peers={} target={} connected={}",
+                            have, target, n
+                        ),
+                        Err(e) => warn!(
+                            "[IBD_ROSTER_TOPUP] peers={} target={} failed: {}",
+                            have, target, e
+                        ),
+                    }
+                }
+            });
         }
         let _ibd_session_guard = ParallelIbdSessionGuard {
             network: network.clone(),
@@ -8712,26 +8705,25 @@ impl ParallelIBD {
                 "WAN multi-peer IBD: {} peers, 1 worker/peer, work-stealing, peer blacklisting (set BLVM_IBD_WAN_SINGLE_PEER=1 to force single-peer)",
                 filtered_peers.len()
             );
-        } else if filtered_peers.len() == 1 {
-            if let Ok(addr) = filtered_peers[0].parse::<SocketAddr>() {
-                if !is_lan_peer(&addr) {
-                    info!(
-                        "WAN-only IBD: single fastest peer {} for download (mode={})",
-                        filtered_peers[0], ibd_mode
-                    );
-                }
-            }
+        } else if filtered_peers.len() == 1
+            && let Ok(addr) = filtered_peers[0].parse::<SocketAddr>()
+            && !is_lan_peer(&addr)
+        {
+            info!(
+                "WAN-only IBD: single fastest peer {} for download (mode={})",
+                filtered_peers[0], ibd_mode
+            );
         }
 
         // mode=sequential: single-peer mode. Core-like earliest-first, no chunk-boundary stalls.
-        if ibd_mode.eq_ignore_ascii_case("sequential") {
-            if let Some(best) = filtered_peers.first().cloned() {
-                filtered_peers = vec![best.clone()];
-                info!(
-                    "BLVM_IBD_MODE=sequential: single-peer mode ({}), Core-like block fetch",
-                    best
-                );
-            }
+        if ibd_mode.eq_ignore_ascii_case("sequential")
+            && let Some(best) = filtered_peers.first().cloned()
+        {
+            filtered_peers = vec![best.clone()];
+            info!(
+                "BLVM_IBD_MODE=sequential: single-peer mode ({}), Core-like block fetch",
+                best
+            );
         }
 
         // Split the height range into chunks and assign peers (weighted by speed).
@@ -9708,30 +9700,30 @@ impl ParallelIBD {
             confirmed_body_height_at_start
         };
         if confirmed_body_height_at_start == 0 {
-            if let Ok(Some(header_max)) = blockstore.highest_stored_height() {
-                if header_max > 0 {
-                    let sparse_max = logged_sparse_body_height(sparse_local_body_max, &blockstore);
-                    if sparse_max > 0 {
-                        info!(
-                            "IBD: sparse block bodies on disk up to height {} (header_max={}) \
+            if let Ok(Some(header_max)) = blockstore.highest_stored_height()
+                && header_max > 0
+            {
+                let sparse_max = logged_sparse_body_height(sparse_local_body_max, &blockstore);
+                if sparse_max > 0 {
+                    info!(
+                        "IBD: sparse block bodies on disk up to height {} (header_max={}) \
                              — per-height write skip active; contiguous replay from genesis unavailable",
-                            sparse_max, header_max
-                        );
-                    } else {
-                        info!(
-                            "IBD: height_index has {header_max} entries but no block bodies found \
+                        sparse_max, header_max
+                    );
+                } else {
+                    info!(
+                        "IBD: height_index has {header_max} entries but no block bodies found \
                              — starting fresh (no local replay)"
-                        );
-                    }
+                    );
                 }
             }
-        } else if let Ok(Some(header_max)) = blockstore.highest_stored_height() {
-            if confirmed_body_height_at_start < header_max {
-                info!(
-                    "IBD: block bodies confirmed up to height {} (header_max={})",
-                    confirmed_body_height_at_start, header_max
-                );
-            }
+        } else if let Ok(Some(header_max)) = blockstore.highest_stored_height()
+            && confirmed_body_height_at_start < header_max
+        {
+            info!(
+                "IBD: block bodies confirmed up to height {} (header_max={})",
+                confirmed_body_height_at_start, header_max
+            );
         }
 
         for peer_id in &filtered_peers {
@@ -11032,13 +11024,13 @@ impl ParallelIBD {
         // or `get_height()` / restarts see `chain_info` missing despite full block index.
         // pending is sorted by height; last entry is the tip.
         if let Some(storage) = _storage {
-            if let Some(tip_hash) = tip_hash_for_update {
-                if let Some((block, _, tip_height, _)) = pending.last() {
-                    storage.ensure_parent_chainwork(&block.header, *tip_height)?;
-                    storage
-                        .chain()
-                        .update_tip(&tip_hash, &block.header, *tip_height)?;
-                }
+            if let Some(tip_hash) = tip_hash_for_update
+                && let Some((block, _, tip_height, _)) = pending.last()
+            {
+                storage.ensure_parent_chainwork(&block.header, *tip_height)?;
+                storage
+                    .chain()
+                    .update_tip(&tip_hash, &block.header, *tip_height)?;
             }
             // Force durable commit under MDB_NOSYNC so chain_tip / height index survive
             // SIGTERM before the next watermark export can race ahead of block bodies.

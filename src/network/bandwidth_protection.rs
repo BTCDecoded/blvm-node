@@ -328,16 +328,16 @@ impl BandwidthProtectionManager {
             }
 
             // Check rate limit
-            if let Some(max_requests) = limits.max_requests_per_hour {
-                if tracker.get_request_count() >= max_requests {
-                    warn!(
-                        "Peer {} exceeded rate limit for {:?} ({} requests/hour)",
-                        peer_addr,
-                        service_type,
-                        tracker.get_request_count()
-                    );
-                    return Ok(false);
-                }
+            if let Some(max_requests) = limits.max_requests_per_hour
+                && tracker.get_request_count() >= max_requests
+            {
+                warn!(
+                    "Peer {} exceeded rate limit for {:?} ({} requests/hour)",
+                    peer_addr,
+                    service_type,
+                    tracker.get_request_count()
+                );
+                return Ok(false);
             }
         }
 
@@ -517,14 +517,14 @@ impl BandwidthProtectionManager {
             None => return true, // No limit = allow
         };
 
-        if let Some(max_cpu_ms) = limits.cpu_time_limit_ms {
-            if cpu_time_ms > max_cpu_ms {
-                warn!(
-                    "CPU time limit exceeded for {:?}: {}ms > {}ms",
-                    service_type, cpu_time_ms, max_cpu_ms
-                );
-                return false;
-            }
+        if let Some(max_cpu_ms) = limits.cpu_time_limit_ms
+            && cpu_time_ms > max_cpu_ms
+        {
+            warn!(
+                "CPU time limit exceeded for {:?}: {}ms > {}ms",
+                service_type, cpu_time_ms, max_cpu_ms
+            );
+            return false;
         }
 
         true

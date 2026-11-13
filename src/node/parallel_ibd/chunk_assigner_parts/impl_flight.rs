@@ -190,19 +190,17 @@ impl ChunkAssigner {
     fn best_covering0_tip_pin_candidate(&self, tip: u64) -> Option<String> {
         let inflight = self.in_flight_per_peer.lock().unwrap().clone();
         // 1) Idle tip-STREAM hero.
-        if let Some((cand, _)) = self.best_a6n_tip_candidate("") {
-            if self.peer_has_flight_capacity(&cand, &inflight)
+        if let Some((cand, _)) = self.best_a6n_tip_candidate("")
+            && self.peer_has_flight_capacity(&cand, &inflight)
                 && !Self::peer_inflight_ahead_only_map(&inflight, &cand, tip)
             {
                 return Some(cand);
             }
-        }
         // R-58: pin from lookahead rank, not score lottery (R-56 84.228 score=0.143).
-        if let Some((cand, _, _)) = self.best_lookahead_ready(None) {
-            if self.peer_has_flight_capacity(&cand, &inflight) {
+        if let Some((cand, _, _)) = self.best_lookahead_ready(None)
+            && self.peer_has_flight_capacity(&cand, &inflight) {
                 return Some(cand);
             }
-        }
         // 2) Idle highest-scored ready active worker.
         let scores = self.peer_scores.lock().unwrap().clone();
         let mut idle: Option<(String, f64)> = None;
@@ -348,11 +346,10 @@ impl ChunkAssigner {
                 // A6h/A6k: usable sticky (ready+active) owns open tip — even below peer_ok floor.
                 // W65: shallow walk-promote sticky does not own the open tip slot.
                 if self.tip_sticky_usable(pref) && self.peer_holds_substantial_tip_cover(pref) {
-                    if let Some(top_w) = self.top_scored_active_ready_worker() {
-                        if self.tip_owner_should_upgrade(pref, &top_w) {
+                    if let Some(top_w) = self.top_scored_active_ready_worker()
+                        && self.tip_owner_should_upgrade(pref, &top_w) {
                             return peer_id == top_w && self.peer_ok_for_gap_race(peer_id);
                         }
-                    }
                     return peer_id == pref;
                 }
                 // A6k dens KEEP (p0a_below_floor): usable preferred with covering=0 must
@@ -427,13 +424,11 @@ impl ChunkAssigner {
             && self.next_needed_height() < 64;
         if wan {
             let distress_race = covering_next >= 1 && tip_distress;
-            if !distress_race && !ignition_race {
-                if let Some(top) = self.top_scored_peer_id() {
-                    if peer_id != top {
+            if !distress_race && !ignition_race
+                && let Some(top) = self.top_scored_peer_id()
+                    && peer_id != top {
                         return false;
                     }
-                }
-            }
         }
         // Failover racer: primary already covers tip; score-ok peer may take slot 2.
         // W30/W37/W47: second slot only while tip is distressed (soft-retry / late body).

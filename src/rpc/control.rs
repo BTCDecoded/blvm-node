@@ -247,12 +247,12 @@ impl ControlRpc {
         debug!("RPC: stop");
 
         // Trigger node shutdown if callback provided
-        if let Some(ref shutdown_fn) = self.node_shutdown {
-            if let Err(e) = shutdown_fn() {
-                return Err(RpcError::internal_error(format!(
-                    "Failed to shutdown node: {e}"
-                )));
-            }
+        if let Some(ref shutdown_fn) = self.node_shutdown
+            && let Err(e) = shutdown_fn()
+        {
+            return Err(RpcError::internal_error(format!(
+                "Failed to shutdown node: {e}"
+            )));
         }
 
         // Send shutdown signal to RPC server

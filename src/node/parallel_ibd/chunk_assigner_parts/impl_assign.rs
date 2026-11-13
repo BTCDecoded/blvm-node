@@ -1019,13 +1019,11 @@ impl ChunkAssigner {
         // top_recv `142.113` was **417** Mbps, then TIP_HOLE_AHEAD
         // covering=0 / first_ahead=261499. Dump <180k keeps any-farm
         // (R-195). Empty recv cache: no top, R-195. dest-bc 298 lives.
-        if next_needed >= 180_000 {
-            if let Some((top, _)) = super::download::download_cached_fattest_other(&pref) {
-                if top != peer_id {
+        if next_needed >= 180_000
+            && let Some((top, _)) = super::download::download_cached_fattest_other(&pref)
+                && top != peer_id {
                     return false;
                 }
-            }
-        }
         self.peer_has_flight_capacity(peer_id, guard)
     }
 
@@ -1325,16 +1323,14 @@ impl ChunkAssigner {
             // W49b: ahead walk-in already covers tip in-flight — promote before assigning
             // a competing tip owner (closes race: promote only on abort tick after W28d).
             // W111: skip cooldown peers (mute residual in-flight must not re-sticky).
-            if wan_gap && effective_healthy == 0 {
-                if let Some((wp, ws, we)) = Self::find_inflight_deep_covering(&guard, next_needed) {
-                    if !self.tip_owner_in_fail_cooldown(&wp) {
+            if wan_gap && effective_healthy == 0
+                && let Some((wp, ws, we)) = Self::find_inflight_deep_covering(&guard, next_needed)
+                    && !self.tip_owner_in_fail_cooldown(&wp) {
                         self.promote_tip_walk_in(&wp, ws, we);
                         tip_claims = self.snapshot_tip_cover_claims();
                         effective_healthy =
                             Self::deep_tip_cover_count_from(&tip_claims, next_needed);
                     }
-                }
-            }
             // W28c/W32/W35‴: WAN tip owner deep pipe in one download session.
             // Near tip: tip-owner batch must match GetData pipe depth (default 128).
             // Live 2026-07-15: `wan_bulk_catchup` is true for most of IBD (header tip ≫
@@ -1497,13 +1493,12 @@ impl ChunkAssigner {
                     .preferred_tip_owner()
                     .as_ref()
                     .is_some_and(|p| self.empty_band_should_sample(p));
-            if assign_wan_gap && disjoint_only {
-                if let Some(range) =
+            if assign_wan_gap && disjoint_only
+                && let Some(range) =
                     self.try_assign_lookahead_stripe(peer_id, &mut guard, next_needed, raw_covering)
                 {
                     return TipFillStep::Return(Some(range));
                 }
-            }
             let tournament_open =
                 self.ignition_tournament_active(wan_gap, tip_missing, next_needed);
             let hole = self.first_missing_height();
@@ -1590,11 +1585,10 @@ impl ChunkAssigner {
                 // 47–48k: 129-high remnant, flight_tip=0, 9.7s).
                 // R-110 grew this to LEAD (512) in one GetData: 33–34k sat
                 // 46s on IBD_TIP_PROGRESSIVE_TIMEOUT 45s. Closed.
-                if let Some(farm_s) = self.first_reserved_start_after(assign_h) {
-                    if farm_s > assign_h {
+                if let Some(farm_s) = self.first_reserved_start_after(assign_h)
+                    && farm_s > assign_h {
                         preempt_end = preempt_end.min(farm_s.saturating_sub(1));
                     }
-                }
                 // W35‴-h: never assign past stored headers (live: 912× "hash not found"
                 // for height 957742" → mass blacklist → tip deadlock for hours).
                 let tip_headers_ok = match self.clip_end_to_headers(assign_h, preempt_end) {
@@ -1870,10 +1864,9 @@ impl ChunkAssigner {
                 // 77.8 / c1gclaim 100 vs forcedeb 108.9). Tip reassigns were accidental
                 // re-arm when claims outlived in_flight; fix is stale-claim prune above,
                 // not blocking C1g when frontier falls to tip-1.
-                if part_start <= band_end {
-                    if let Some((_, part_end)) = self.clip_end_to_headers(part_start, part_end_raw)
-                    {
-                        if !(local_ahead && !assign_wan_gap && part_start > next_needed)
+                if part_start <= band_end
+                    && let Some((_, part_end)) = self.clip_end_to_headers(part_start, part_end_raw)
+                        && !(local_ahead && !assign_wan_gap && part_start > next_needed)
                             && part_start <= max_start
                             && part_end >= part_start
                             && !Self::range_overlaps_inflight(&guard, part_start, part_end)
@@ -1898,8 +1891,6 @@ impl ChunkAssigner {
                             );
                             return TipFillStep::Return(Some((part_start, part_end)));
                         }
-                    }
-                }
             }
             // Dense-local (wan crawl with body_tip=0 / no headers): use LOCAL ahead
             // gating — WAN distress/contig freeze must not starve dens KEEP partitions.
@@ -2064,8 +2055,8 @@ impl ChunkAssigner {
                         // When frontier reaches body tip, tip-owner primes WAN GetData.
                         let body_tip = self.wan_body_tip.load(Ordering::Relaxed);
                         if body_tip > 0 && part_start > body_tip {
-                            if !super::synthetic_wan::bulk_local_disk_stream() {
-                                if let Some(range) = self.try_assign_handoff_prime(
+                            if !super::synthetic_wan::bulk_local_disk_stream()
+                                && let Some(range) = self.try_assign_handoff_prime(
                                     peer_id,
                                     next_needed,
                                     &mut guard,
@@ -2074,7 +2065,6 @@ impl ChunkAssigner {
                                     drop(guard);
                                     return TipFillStep::Return(Some(range));
                                 }
-                            }
                         } else {
                             // C1u: far-local fill to body tip — allow up to 256 so two
                             // max_in_flight=1 peers can cover HANDOFF_PRIME without
@@ -2741,13 +2731,11 @@ impl ChunkAssigner {
                 assign_end = assign_end.min(stripe_end);
             }
         }
-        if assign_start <= next_needed && next_needed <= assign_end {
-            if let Some(pref) = self.preferred_tip_owner() {
-                if pref != peer_id && self.unready_tournament_sticky_owns_h(&pref) {
+        if assign_start <= next_needed && next_needed <= assign_end
+            && let Some(pref) = self.preferred_tip_owner()
+                && pref != peer_id && self.unready_tournament_sticky_owns_h(&pref) {
                     return None;
                 }
-            }
-        }
         if self.chunk_range_in_flight(&guard, assign_start, assign_end) {
             return None;
         }
@@ -3044,7 +3032,7 @@ impl ChunkAssigner {
         t.attempts = t.attempts.saturating_add(1);
         let attempts = t.attempts;
         drop(track);
-        if attempts > 8 && attempts % 16 == 0 {
+        if attempts > 8 && attempts.is_multiple_of(16) {
             tracing::warn!(
                 "[IBD_RETRY_CAP] range={}-{} attempts={} peer={} reason={}",
                 start,
@@ -3287,8 +3275,8 @@ impl ChunkAssigner {
             }
             let debounce = Self::stall_requeue_debounce();
             let mut last = self.last_stall_requeue.lock().unwrap();
-            if let Some((h, t)) = *last {
-                if t.elapsed() < debounce {
+            if let Some((h, t)) = *last
+                && t.elapsed() < debounce {
                     // Dens parity (2026-08-03): debounce was same-height only, so tip
                     // 400288→289→290 each got a fresh (H,H) force while covering flapped 0
                     // (nudgegate FORCE×32 vs grow80 dens FORCE×0). Cross-height suppress
@@ -3301,7 +3289,6 @@ impl ChunkAssigner {
                     );
                     return;
                 }
-            }
             *last = Some((height, Instant::now()));
             drop(last);
             // W73: covering=0 → single (H,H). Stripe-32 FORCE (2026-08) bypasses C1g
@@ -3318,9 +3305,9 @@ impl ChunkAssigner {
         }
         let debounce = Self::stall_requeue_debounce();
         let mut last = self.last_stall_requeue.lock().unwrap();
-        if !force {
-            if let Some((h, t)) = *last {
-                if h == height && t.elapsed() < debounce {
+        if !force
+            && let Some((h, t)) = *last
+                && h == height && t.elapsed() < debounce {
                     tracing::debug!(
                         "stall recovery: debounced requeue for height {} (within {}s)",
                         height,
@@ -3328,8 +3315,6 @@ impl ChunkAssigner {
                     );
                     return;
                 }
-            }
-        }
         *last = Some((height, Instant::now()));
         let containing = self
             .chunks

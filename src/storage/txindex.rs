@@ -191,14 +191,13 @@ impl TxIndex {
         if self.strategy == IndexingStrategy::Lazy
             && self.background_indexing
             && (self.enable_address_index || self.enable_value_index)
+            && let Some(ref tx) = self.background_tx
         {
-            if let Some(ref tx) = self.background_tx {
-                let _ = tx.send(BackgroundBlockJob {
-                    block: block.clone(),
-                    block_hash: *block_hash,
-                    block_height,
-                });
-            }
+            let _ = tx.send(BackgroundBlockJob {
+                block: block.clone(),
+                block_hash: *block_hash,
+                block_height,
+            });
         }
 
         Ok(())
@@ -695,10 +694,10 @@ impl TxIndex {
     ) -> Result<Vec<Transaction>> {
         let mut transactions = Vec::new();
         for height in start_height..=end_height {
-            if let Ok(Some(block_hash)) = blockstore.get_hash_by_height(height) {
-                if let Ok(block_txs) = self.get_block_transactions(&block_hash) {
-                    transactions.extend(block_txs);
-                }
+            if let Ok(Some(block_hash)) = blockstore.get_hash_by_height(height)
+                && let Ok(block_txs) = self.get_block_transactions(&block_hash)
+            {
+                transactions.extend(block_txs);
             }
         }
         Ok(transactions)

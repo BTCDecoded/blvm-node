@@ -7,8 +7,8 @@
 use futures::{SinkExt, StreamExt};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -23,7 +23,7 @@ use crate::module::ipc::protocol::{
     CliSpec, InvocationMessage, InvocationResultMessage, InvocationResultPayload, InvocationType,
     ModuleMessage, RequestMessage, RequestPayload, ResponseMessage, ResponsePayload,
 };
-use crate::module::traits::{module_error_msg, EventType, ModuleError, NodeAPI};
+use crate::module::traits::{EventType, ModuleError, NodeAPI, module_error_msg};
 use tokio::sync::oneshot;
 
 /// Async invoker for in-process WASM modules. Used when a module has no IPC connection.
@@ -1060,13 +1060,13 @@ impl ConnectionCtx {
                 }
 
                 // Clean up: unsubscribe module from events when task exits
-                if let Some(event_mgr) = event_manager_clone {
-                    if let Err(e) = event_mgr.unsubscribe_module(&module_id_event_fwd).await {
-                        warn!(
-                            "Failed to unsubscribe module {} from events: {}",
-                            module_id_event_fwd, e
-                        );
-                    }
+                if let Some(event_mgr) = event_manager_clone
+                    && let Err(e) = event_mgr.unsubscribe_module(&module_id_event_fwd).await
+                {
+                    warn!(
+                        "Failed to unsubscribe module {} from events: {}",
+                        module_id_event_fwd, e
+                    );
                 }
             });
 
@@ -1137,10 +1137,10 @@ impl ConnectionCtx {
                     correlation_id,
                     invocation_type: InvocationType::Rpc { method, params },
                 };
-                if let Ok(bytes) = bincode::serialize(&ModuleMessage::Invocation(invocation)) {
-                    if outgoing_tx_for_rpc.send(bytes::Bytes::from(bytes)).is_err() {
-                        break; // Connection closed
-                    }
+                if let Ok(bytes) = bincode::serialize(&ModuleMessage::Invocation(invocation))
+                    && outgoing_tx_for_rpc.send(bytes::Bytes::from(bytes)).is_err()
+                {
+                    break; // Connection closed
                 }
             }
         });
@@ -1209,13 +1209,13 @@ impl ConnectionCtx {
         }
 
         // Unsubscribe from event manager
-        if let Some(event_mgr) = &self.event_manager {
-            if let Err(e) = event_mgr.unsubscribe_module(&module_id).await {
-                warn!(
-                    "Failed to unsubscribe module {} from events: {}",
-                    module_id, e
-                );
-            }
+        if let Some(event_mgr) = &self.event_manager
+            && let Err(e) = event_mgr.unsubscribe_module(&module_id).await
+        {
+            warn!(
+                "Failed to unsubscribe module {} from events: {}",
+                module_id, e
+            );
         }
 
         Ok(())
@@ -1255,38 +1255,33 @@ impl ConnectionCtx {
                 }
 
                 // Handle SubscribeEvents specially to register with event manager
-                if let RequestPayload::SubscribeModuleEventNames { ref names } = request.payload {
-                    if let Some(event_mgr) = &self.event_manager {
-                        event_mgr
-                            .set_module_event_filter(&connection.module_id, names.clone())
-                            .await;
-                    }
+                if let RequestPayload::SubscribeModuleEventNames { ref names } = request.payload
+                    && let Some(event_mgr) = &self.event_manager
+                {
+                    event_mgr
+                        .set_module_event_filter(&connection.module_id, names.clone())
+                        .await;
                 }
 
-                if let RequestPayload::SubscribeEvents { ref event_types } = request.payload {
-                    if let Some(event_mgr) = &self.event_manager {
-                        if let Some(event_tx) = &connection.event_tx {
-                            // Register module subscriptions
-                            let module_id = connection.module_id.clone();
-                            let event_tx_clone = event_tx.clone();
-                            event_mgr
-                                .subscribe_module(
-                                    module_id.clone(),
-                                    event_types.clone(),
-                                    event_tx_clone,
-                                )
-                                .await?;
-                            connection.subscriptions = event_types.clone();
-                            debug!(
-                                "Module {} subscribed to events: {:?}",
-                                module_id, event_types
-                            );
-                            // Note: subscribe_module() handles:
-                            // 1. Sending already-loaded modules to this newly subscribing module
-                            // 2. Publishing ModuleLoaded for this module (if loaded) AFTER subscription
-                            // This ensures ModuleLoaded only happens after startup is complete
-                        }
-                    }
+                if let RequestPayload::SubscribeEvents { ref event_types } = request.payload
+                    && let Some(event_mgr) = &self.event_manager
+                    && let Some(event_tx) = &connection.event_tx
+                {
+                    // Register module subscriptions
+                    let module_id = connection.module_id.clone();
+                    let event_tx_clone = event_tx.clone();
+                    event_mgr
+                        .subscribe_module(module_id.clone(), event_types.clone(), event_tx_clone)
+                        .await?;
+                    connection.subscriptions = event_types.clone();
+                    debug!(
+                        "Module {} subscribed to events: {:?}",
+                        module_id, event_types
+                    );
+                    // Note: subscribe_module() handles:
+                    // 1. Sending already-loaded modules to this newly subscribing module
+                    // 2. Publishing ModuleLoaded for this module (if loaded) AFTER subscription
+                    // This ensures ModuleLoaded only happens after startup is complete
                 }
 
                 // Use API hub if available, otherwise fall back to direct node_api

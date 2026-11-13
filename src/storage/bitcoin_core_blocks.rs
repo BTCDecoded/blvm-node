@@ -207,12 +207,12 @@ impl BitcoinCoreBlockReader {
             .filter_map(|entry| {
                 entry.ok().and_then(|e| {
                     let path = e.path();
-                    if path.is_file() {
-                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            if name.starts_with("blk") && name.ends_with(".dat") {
-                                return Some(path);
-                            }
-                        }
+                    if path.is_file()
+                        && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                        && name.starts_with("blk")
+                        && name.ends_with(".dat")
+                    {
+                        return Some(path);
                     }
                     None
                 })

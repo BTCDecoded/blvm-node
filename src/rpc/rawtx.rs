@@ -387,26 +387,27 @@ impl RawTxRpc {
                     };
 
                     // Check the fee cap. allowhighfees skips it. An omitted maxfeerate is 0.10 BTC/kvB.
-                    if let Some(max_feerate) = max_feerate_cap {
-                        if !allowhighfees && fee_rate_btc_per_kvb > max_feerate {
-                            return Err(RpcError::with_data(
-                                RpcErrorCode::VerifyRejected,
-                                format!(
-                                    "Fee rate {fee_rate_btc_per_kvb} BTC/kvB exceeds maximum allowed {max_feerate} BTC/kvB"
-                                ),
-                                json!({
-                                    "txid": txid_hex,
-                                    "fee_rate": fee_rate_btc_per_kvb,
-                                    "max_feerate": max_feerate,
-                                    "reason": "fee_rate_too_high",
-                                    "suggestions": [
-                                        "Reduce the transaction fee",
-                                        "Use allowhighfees=true to override this check",
-                                        "Or increase the maxfeerate parameter"
-                                    ]
-                                }),
-                            ));
-                        }
+                    if let Some(max_feerate) = max_feerate_cap
+                        && !allowhighfees
+                        && fee_rate_btc_per_kvb > max_feerate
+                    {
+                        return Err(RpcError::with_data(
+                            RpcErrorCode::VerifyRejected,
+                            format!(
+                                "Fee rate {fee_rate_btc_per_kvb} BTC/kvB exceeds maximum allowed {max_feerate} BTC/kvB"
+                            ),
+                            json!({
+                                "txid": txid_hex,
+                                "fee_rate": fee_rate_btc_per_kvb,
+                                "max_feerate": max_feerate,
+                                "reason": "fee_rate_too_high",
+                                "suggestions": [
+                                    "Reduce the transaction fee",
+                                    "Use allowhighfees=true to override this check",
+                                    "Or increase the maxfeerate parameter"
+                                ]
+                            }),
+                        ));
                     }
 
                     // Add to mempool — store witness stacks when present (SegWit).
@@ -493,12 +494,12 @@ impl RawTxRpc {
             .collect();
         for (index, (tx, _)) in decoded.iter().enumerate() {
             for input in &tx.inputs {
-                if let Some(parent) = txids.iter().position(|id| *id == input.prevout.hash) {
-                    if parent > index {
-                        return Err(RpcError::invalid_params(
-                            "package parents must appear before their children",
-                        ));
-                    }
+                if let Some(parent) = txids.iter().position(|id| *id == input.prevout.hash)
+                    && parent > index
+                {
+                    return Err(RpcError::invalid_params(
+                        "package parents must appear before their children",
+                    ));
                 }
             }
         }
@@ -1067,11 +1068,11 @@ impl RawTxRpc {
 
         let txid_array = Self::parse_rpc_txid(txid)?;
 
-        if let Some(ref mempool) = self.mempool {
-            if let Some(tx) = mempool.get_transaction(&txid_array) {
-                let witnesses = mempool.get_transaction_witnesses(&txid_array);
-                return Self::format_getrawtransaction_response(&tx, witnesses.as_deref(), verbose);
-            }
+        if let Some(ref mempool) = self.mempool
+            && let Some(tx) = mempool.get_transaction(&txid_array)
+        {
+            let witnesses = mempool.get_transaction_witnesses(&txid_array);
+            return Self::format_getrawtransaction_response(&tx, witnesses.as_deref(), verbose);
         }
 
         if let Some(ref storage) = self.storage {
@@ -1158,29 +1159,27 @@ impl RawTxRpc {
 
         if let Some(ref storage) = self.storage {
             // Check mempool first if requested
-            if include_mempool {
-                if let Some(ref mempool) = self.mempool {
-                    if mempool.spends_outpoint(&outpoint) {
-                        return Ok(Value::Null);
-                    }
-                    if let Some(tx) = mempool.get_transaction(&txid_array) {
-                        if (n as usize) < tx.outputs.len() {
-                            let output = &tx.outputs[n as usize];
-                            let (best_hash, _) = storage.chain().get_tip_hash_and_height()?;
-                            return Ok(json!({
-                                        "bestblock": Self::rpc_txid(&best_hash),
-                                        "confirmations": 0,
-                                        "value": output.value as f64 / 100_000_000.0,
-                                        "scriptPubKey": {
-                                            "asm": "",
-                                            "hex": hex::encode(&output.script_pubkey),
-                                            "type": script_pubkey_type(output.script_pubkey.as_ref()),
-                            "desc": script_pubkey_desc(output.script_pubkey.as_ref())
-                                        },
-                                        "coinbase": false
-                                    }));
-                        }
-                    }
+            if include_mempool && let Some(ref mempool) = self.mempool {
+                if mempool.spends_outpoint(&outpoint) {
+                    return Ok(Value::Null);
+                }
+                if let Some(tx) = mempool.get_transaction(&txid_array)
+                    && (n as usize) < tx.outputs.len()
+                {
+                    let output = &tx.outputs[n as usize];
+                    let (best_hash, _) = storage.chain().get_tip_hash_and_height()?;
+                    return Ok(json!({
+                                "bestblock": Self::rpc_txid(&best_hash),
+                                "confirmations": 0,
+                                "value": output.value as f64 / 100_000_000.0,
+                                "scriptPubKey": {
+                                    "asm": "",
+                                    "hex": hex::encode(&output.script_pubkey),
+                                    "type": script_pubkey_type(output.script_pubkey.as_ref()),
+                    "desc": script_pubkey_desc(output.script_pubkey.as_ref())
+                                },
+                                "coinbase": false
+                            }));
                 }
             }
 
@@ -1327,25 +1326,25 @@ impl RawTxRpc {
             } else {
                 // Search for block containing any of the txids
                 for h in 0..=tip_height {
-                    if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(h) {
-                        if let Ok(Some(b)) = storage.blocks().get_block(&block_hash) {
-                            // Check if block contains any of the requested txids
-                            use blvm_protocol::block::calculate_tx_id;
-                            for tx in &b.transactions {
-                                let txid = calculate_tx_id(tx);
-                                let txid_hex = Self::rpc_txid(&txid);
-                                if txids
-                                    .iter()
-                                    .any(|tid| tid.as_str() == Some(txid_hex.as_str()))
-                                {
-                                    resolved_height = Some(h);
-                                    block = Some(b);
-                                    break;
-                                }
-                            }
-                            if block.is_some() {
+                    if let Ok(Some(block_hash)) = storage.blocks().get_hash_by_height(h)
+                        && let Ok(Some(b)) = storage.blocks().get_block(&block_hash)
+                    {
+                        // Check if block contains any of the requested txids
+                        use blvm_protocol::block::calculate_tx_id;
+                        for tx in &b.transactions {
+                            let txid = calculate_tx_id(tx);
+                            let txid_hex = Self::rpc_txid(&txid);
+                            if txids
+                                .iter()
+                                .any(|tid| tid.as_str() == Some(txid_hex.as_str()))
+                            {
+                                resolved_height = Some(h);
+                                block = Some(b);
                                 break;
                             }
+                        }
+                        if block.is_some() {
+                            break;
                         }
                     }
                 }
@@ -1488,135 +1487,133 @@ impl RawTxRpc {
         let hash = Self::parse_rpc_txid(txid)?;
 
         // Check mempool first
-        if let Some(ref mempool) = self.mempool {
-            if let Some(tx) = mempool.get_transaction(&hash) {
-                let witnesses = mempool.get_transaction_witnesses(&hash);
-                let wire = crate::rpc::txwire::tx_wire(&tx, witnesses.as_deref());
-                let (size, _, weight, vsize) =
-                    Self::calculate_segwit_sizes(&tx, witnesses.as_deref());
-                let fee = if let Some(ref storage) = self.storage {
-                    let mut utxo_set = blvm_protocol::UtxoSet::default();
-                    for input in &tx.inputs {
-                        if let Ok(Some(utxo)) = storage.read_chain_prevout(&input.prevout) {
-                            utxo_set.insert(input.prevout, Arc::new(utxo));
-                        }
+        if let Some(ref mempool) = self.mempool
+            && let Some(tx) = mempool.get_transaction(&hash)
+        {
+            let witnesses = mempool.get_transaction_witnesses(&hash);
+            let wire = crate::rpc::txwire::tx_wire(&tx, witnesses.as_deref());
+            let (size, _, weight, vsize) = Self::calculate_segwit_sizes(&tx, witnesses.as_deref());
+            let fee = if let Some(ref storage) = self.storage {
+                let mut utxo_set = blvm_protocol::UtxoSet::default();
+                for input in &tx.inputs {
+                    if let Ok(Some(utxo)) = storage.read_chain_prevout(&input.prevout) {
+                        utxo_set.insert(input.prevout, Arc::new(utxo));
                     }
-                    mempool.calculate_transaction_fee(&tx, &utxo_set) as f64 / 100_000_000.0
-                } else {
-                    0.0
-                };
+                }
+                mempool.calculate_transaction_fee(&tx, &utxo_set) as f64 / 100_000_000.0
+            } else {
+                0.0
+            };
 
-                return Ok(json!({
-                    "txid": txid,
-                    "hash": wire.hash_hex,
-                    "version": tx.version,
-                    "size": size,
-                    "vsize": vsize,
-                    "weight": weight,
-                    "locktime": tx.lock_time,
-                    "vin": tx.inputs.iter().map(|input| json!({
-                        "txid": Self::rpc_txid(&input.prevout.hash),
-                        "vout": input.prevout.index,
-                        "scriptSig": hex::encode(&input.script_sig),
-                        "sequence": input.sequence
-                    })).collect::<Vec<_>>(),
-                    "vout": tx.outputs.iter().enumerate().map(|(idx, output)| json!({
-                        "value": output.value as f64 / 100_000_000.0,
-                        "n": idx,
-                        "scriptPubKey": {
-                            "asm": hex::encode(&output.script_pubkey),
-                            "hex": hex::encode(&output.script_pubkey),
-                            "type": script_pubkey_type(output.script_pubkey.as_ref()),
-                    "desc": script_pubkey_desc(output.script_pubkey.as_ref())
-                        }
-                    })).collect::<Vec<_>>(),
-                    "hex": if include_hex { hex::encode(&wire.bytes) } else { "".to_string() },
-                    "blockhash": Value::Null,
-                    "confirmations": 0,
-                    "time": 0,
-                    "blocktime": Value::Null,
-                    "fee": fee,
-                    "fee_rate": if size > 0 { fee / (size as f64 / 1000.0) } else { 0.0 }
-                }));
-            }
+            return Ok(json!({
+                "txid": txid,
+                "hash": wire.hash_hex,
+                "version": tx.version,
+                "size": size,
+                "vsize": vsize,
+                "weight": weight,
+                "locktime": tx.lock_time,
+                "vin": tx.inputs.iter().map(|input| json!({
+                    "txid": Self::rpc_txid(&input.prevout.hash),
+                    "vout": input.prevout.index,
+                    "scriptSig": hex::encode(&input.script_sig),
+                    "sequence": input.sequence
+                })).collect::<Vec<_>>(),
+                "vout": tx.outputs.iter().enumerate().map(|(idx, output)| json!({
+                    "value": output.value as f64 / 100_000_000.0,
+                    "n": idx,
+                    "scriptPubKey": {
+                        "asm": hex::encode(&output.script_pubkey),
+                        "hex": hex::encode(&output.script_pubkey),
+                        "type": script_pubkey_type(output.script_pubkey.as_ref()),
+                "desc": script_pubkey_desc(output.script_pubkey.as_ref())
+                    }
+                })).collect::<Vec<_>>(),
+                "hex": if include_hex { hex::encode(&wire.bytes) } else { "".to_string() },
+                "blockhash": Value::Null,
+                "confirmations": 0,
+                "time": 0,
+                "blocktime": Value::Null,
+                "fee": fee,
+                "fee_rate": if size > 0 { fee / (size as f64 / 1000.0) } else { 0.0 }
+            }));
         }
 
         // Check blockchain
-        if let Some(ref storage) = self.storage {
-            if let Ok(Some(tx)) = storage.transactions().get_transaction(&hash) {
-                use blvm_protocol::block::calculate_tx_id;
+        if let Some(ref storage) = self.storage
+            && let Ok(Some(tx)) = storage.transactions().get_transaction(&hash)
+        {
+            use blvm_protocol::block::calculate_tx_id;
 
-                // Get block info if available from transaction metadata
-                let metadata = storage.transactions().get_metadata(&hash).ok().flatten();
-                let block_hash = metadata.map(|m| m.block_hash);
-                let confirmations = if let Some(ref block_hash) = block_hash {
-                    let block_height = storage
-                        .blocks()
-                        .get_height_by_hash(block_hash)
-                        .ok()
-                        .flatten();
-                    let tip_height = storage.chain().get_height().ok().flatten().unwrap_or(0);
-                    block_height
-                        .map(|h| tip_height.saturating_sub(h) + 1)
-                        .unwrap_or(0)
-                } else {
-                    0
-                };
+            // Get block info if available from transaction metadata
+            let metadata = storage.transactions().get_metadata(&hash).ok().flatten();
+            let block_hash = metadata.map(|m| m.block_hash);
+            let confirmations = if let Some(ref block_hash) = block_hash {
+                let block_height = storage
+                    .blocks()
+                    .get_height_by_hash(block_hash)
+                    .ok()
+                    .flatten();
+                let tip_height = storage.chain().get_height().ok().flatten().unwrap_or(0);
+                block_height
+                    .map(|h| tip_height.saturating_sub(h) + 1)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
 
-                let block_time = block_hash
-                    .and_then(|bh| storage.blocks().get_header(&bh).ok().flatten())
-                    .map(|h| h.timestamp)
-                    .unwrap_or(0);
-                let witnesses = block_hash.and_then(|block_id| {
-                    let block = storage.blocks().get_block(&block_id).ok().flatten()?;
-                    let index = block
-                        .transactions
-                        .iter()
-                        .position(|stored| calculate_tx_id(stored) == hash)?;
-                    storage
-                        .blocks()
-                        .get_witness(&block_id)
-                        .ok()
-                        .flatten()
-                        .and_then(|all| all.get(index).cloned())
-                });
-                let wire = crate::rpc::txwire::tx_wire(&tx, witnesses.as_deref());
-                let (size, _, weight, vsize) =
-                    Self::calculate_segwit_sizes(&tx, witnesses.as_deref());
+            let block_time = block_hash
+                .and_then(|bh| storage.blocks().get_header(&bh).ok().flatten())
+                .map(|h| h.timestamp)
+                .unwrap_or(0);
+            let witnesses = block_hash.and_then(|block_id| {
+                let block = storage.blocks().get_block(&block_id).ok().flatten()?;
+                let index = block
+                    .transactions
+                    .iter()
+                    .position(|stored| calculate_tx_id(stored) == hash)?;
+                storage
+                    .blocks()
+                    .get_witness(&block_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|all| all.get(index).cloned())
+            });
+            let wire = crate::rpc::txwire::tx_wire(&tx, witnesses.as_deref());
+            let (size, _, weight, vsize) = Self::calculate_segwit_sizes(&tx, witnesses.as_deref());
 
-                return Ok(json!({
-                    "txid": txid,
-                    "hash": wire.hash_hex,
-                    "version": tx.version,
-                    "size": size,
-                    "vsize": vsize,
-                    "weight": weight,
-                    "locktime": tx.lock_time,
-                    "vin": tx.inputs.iter().map(|input| json!({
-                        "txid": Self::rpc_txid(&input.prevout.hash),
-                        "vout": input.prevout.index,
-                        "scriptSig": hex::encode(&input.script_sig),
-                        "sequence": input.sequence
-                    })).collect::<Vec<_>>(),
-                    "vout": tx.outputs.iter().enumerate().map(|(idx, output)| json!({
-                        "value": output.value as f64 / 100_000_000.0,
-                        "n": idx,
-                        "scriptPubKey": {
-                            "asm": hex::encode(&output.script_pubkey),
-                            "hex": hex::encode(&output.script_pubkey),
-                            "type": script_pubkey_type(output.script_pubkey.as_ref()),
-                    "desc": script_pubkey_desc(output.script_pubkey.as_ref())
-                        }
-                    })).collect::<Vec<_>>(),
-                    "hex": if include_hex { hex::encode(&wire.bytes) } else { "".to_string() },
-                    "blockhash": block_hash.map(|h| Value::String(Self::rpc_txid(&h))).unwrap_or(Value::Null),
-                    "confirmations": confirmations,
-                    "time": block_time,
-                    "blocktime": if block_time > 0 { Some(block_time) } else { None },
-                    "fee": Value::Null, // Would need to calculate from inputs/outputs
-                    "fee_rate": Value::Null
-                }));
-            }
+            return Ok(json!({
+                "txid": txid,
+                "hash": wire.hash_hex,
+                "version": tx.version,
+                "size": size,
+                "vsize": vsize,
+                "weight": weight,
+                "locktime": tx.lock_time,
+                "vin": tx.inputs.iter().map(|input| json!({
+                    "txid": Self::rpc_txid(&input.prevout.hash),
+                    "vout": input.prevout.index,
+                    "scriptSig": hex::encode(&input.script_sig),
+                    "sequence": input.sequence
+                })).collect::<Vec<_>>(),
+                "vout": tx.outputs.iter().enumerate().map(|(idx, output)| json!({
+                    "value": output.value as f64 / 100_000_000.0,
+                    "n": idx,
+                    "scriptPubKey": {
+                        "asm": hex::encode(&output.script_pubkey),
+                        "hex": hex::encode(&output.script_pubkey),
+                        "type": script_pubkey_type(output.script_pubkey.as_ref()),
+                "desc": script_pubkey_desc(output.script_pubkey.as_ref())
+                    }
+                })).collect::<Vec<_>>(),
+                "hex": if include_hex { hex::encode(&wire.bytes) } else { "".to_string() },
+                "blockhash": block_hash.map(|h| Value::String(Self::rpc_txid(&h))).unwrap_or(Value::Null),
+                "confirmations": confirmations,
+                "time": block_time,
+                "blocktime": if block_time > 0 { Some(block_time) } else { None },
+                "fee": Value::Null, // Would need to calculate from inputs/outputs
+                "fee_rate": Value::Null
+            }));
         }
 
         Err(RpcError::tx_not_found_with_context(

@@ -223,14 +223,12 @@ pub fn try_rehydrate_block_for_consensus(
             block: block.clone(),
             witnesses: witnesses.clone(),
         };
-        if let Ok(params) = bincode::serialize(&request) {
-            if let Some(bytes) = route_bytes(REHYDRATE_BLOCK_FOR_CONSENSUS, params) {
-                if let Ok(response) = bincode::deserialize::<RehydrateResponse>(&bytes) {
-                    if response.found {
-                        return (response.block, response.witnesses);
-                    }
-                }
-            }
+        if let Ok(params) = bincode::serialize(&request)
+            && let Some(bytes) = route_bytes(REHYDRATE_BLOCK_FOR_CONSENSUS, params)
+            && let Ok(response) = bincode::deserialize::<RehydrateResponse>(&bytes)
+            && response.found
+        {
+            return (response.block, response.witnesses);
         }
         let _ = handles;
     }
@@ -258,24 +256,22 @@ fn request_block_from_peers(block_hash: Hash) -> Option<(Block, Vec<Vec<Witness>
 pub fn try_get_canonical_txids(height: u64, block_hash: Hash) -> Option<Vec<Hash>> {
     if pipeline_handles().is_some() {
         let request = CanonicalTxidsRequest { height, block_hash };
-        if let Ok(params) = bincode::serialize(&request) {
-            if let Some(bytes) = route_bytes(GET_CANONICAL_TXIDS, params) {
-                if let Ok(response) = bincode::deserialize::<CanonicalTxidsResponse>(&bytes) {
-                    if response.found {
-                        let mut out = Vec::with_capacity(response.canonical_txids.len());
-                        for hex_id in response.canonical_txids {
-                            let raw = hex::decode(hex_id).ok()?;
-                            if raw.len() != 32 {
-                                return None;
-                            }
-                            let mut hash = [0u8; 32];
-                            hash.copy_from_slice(&raw);
-                            out.push(hash);
-                        }
-                        return Some(out);
-                    }
+        if let Ok(params) = bincode::serialize(&request)
+            && let Some(bytes) = route_bytes(GET_CANONICAL_TXIDS, params)
+            && let Ok(response) = bincode::deserialize::<CanonicalTxidsResponse>(&bytes)
+            && response.found
+        {
+            let mut out = Vec::with_capacity(response.canonical_txids.len());
+            for hex_id in response.canonical_txids {
+                let raw = hex::decode(hex_id).ok()?;
+                if raw.len() != 32 {
+                    return None;
                 }
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&raw);
+                out.push(hash);
             }
+            return Some(out);
         }
     }
     let (block, _) = request_block_from_peers(block_hash)?;

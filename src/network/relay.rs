@@ -217,10 +217,10 @@ impl RelayManager {
         // Clean up Dandelion state if transitioning to fluff
         #[cfg(feature = "dandelion")]
         {
-            if let Some(ref mut dandelion) = self.dandelion {
-                if dandelion.should_fluff(&tx_hash) {
-                    dandelion.transition_to_fluff(tx_hash);
-                }
+            if let Some(ref mut dandelion) = self.dandelion
+                && dandelion.should_fluff(&tx_hash)
+            {
+                dandelion.transition_to_fluff(tx_hash);
             }
         }
 

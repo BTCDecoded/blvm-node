@@ -405,14 +405,12 @@ impl SyncCoordinator {
                 Ok(true)
             }
             Err(e) => {
-                if let Some(dir) = ibd_data_dir {
-                    if crate::storage::ibd_autorepair::validation_error_suggests_utxo_repair(&e) {
-                        if let Err(flag_e) =
-                            crate::storage::ibd_autorepair::set_ibd_utxo_repair_flag(dir)
-                        {
-                            tracing::warn!("Could not write IBD UTXO repair marker: {}", flag_e);
-                        }
-                    }
+                if let Some(dir) = ibd_data_dir
+                    && crate::storage::ibd_autorepair::validation_error_suggests_utxo_repair(&e)
+                    && let Err(flag_e) =
+                        crate::storage::ibd_autorepair::set_ibd_utxo_repair_flag(dir)
+                {
+                    tracing::warn!("Could not write IBD UTXO repair marker: {}", flag_e);
                 }
                 error!(
                     "Parallel IBD failed: {:#}. Sequential sync is not supported - IBD must succeed in parallel mode.",

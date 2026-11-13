@@ -314,10 +314,10 @@ pub(crate) fn reconcile_ibd_utxo_watermark_with_disk(
             export_ckpt_missing = true;
         }
         if !export_ckpt_missing {
-            if let Some(root) = storage.data_dir() {
-                if crate::storage::database::legacy_ibd_utxo_standalone_has_data(&root) {
-                    return Ok(watermark_val);
-                }
+            if let Some(root) = storage.data_dir()
+                && crate::storage::database::legacy_ibd_utxo_standalone_has_data(&root)
+            {
+                return Ok(watermark_val);
             }
             let tree = storage.open_tree("ibd_utxos")?;
             if !tree.is_empty()? {
@@ -511,12 +511,11 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
         // passed height/7 and re-seeded poison. Use prev_accepted, else other-slot len.
         let mut gate_last = prev_accepted;
         let other_slot = if active_slot == 0 { 1u8 } else { 0u8 };
-        if gate_last == 0 {
-            if let Ok(tree) =
+        if gate_last == 0
+            && let Ok(tree) =
                 storage.open_tree(crate::storage::ibd_engine::ckpt_tree_for_slot(other_slot))
-            {
-                gate_last = tree.len().unwrap_or(0) as u64;
-            }
+        {
+            gate_last = tree.len().unwrap_or(0) as u64;
         }
         let meta_poisoned = export_height > 0
             && !checkpoint_utxo_count_monotonic(export_height, export_utxo_count, gate_last);
@@ -586,12 +585,12 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
             // No prior good ping-pong slot. Wipe both ckpt trees and reset metadata so the
             // next session replays from genesis over on-disk bodies.
             for tree_name in &["ibd_utxos_ckpt_a", "ibd_utxos_ckpt_b"] {
-                if let Ok(tree) = storage.open_tree(tree_name) {
-                    if let Err(e) = tree.clear() {
-                        warn!("[ibd_autorepair] genesis reset: failed to clear {tree_name}: {e}");
-                        return Err(e)
-                            .context(format!("IBD UTXO autorepair: failed to clear {tree_name}"));
-                    }
+                if let Ok(tree) = storage.open_tree(tree_name)
+                    && let Err(e) = tree.clear()
+                {
+                    warn!("[ibd_autorepair] genesis reset: failed to clear {tree_name}: {e}");
+                    return Err(e)
+                        .context(format!("IBD UTXO autorepair: failed to clear {tree_name}"));
                 }
             }
             storage.chain().force_reset_engine_checkpoint_metadata()?;

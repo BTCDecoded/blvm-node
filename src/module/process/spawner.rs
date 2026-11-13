@@ -6,14 +6,14 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::{Child, Command};
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
-use crate::utils::retry::{retry_async_with_backoff, RetryConfig};
+use crate::utils::retry::{RetryConfig, retry_async_with_backoff};
 
+use crate::module::ipc::ModuleIpcClient;
 #[cfg(unix)]
 use crate::module::ipc::protocol::{MessageType, RequestMessage, RequestPayload};
-use crate::module::ipc::ModuleIpcClient;
 use crate::module::sandbox::{FileSystemSandbox, ProcessSandbox, SandboxConfig};
 use crate::module::traits::{ModuleContext, ModuleError};
 
@@ -350,10 +350,10 @@ impl ModuleProcess {
         let _ = self.process.wait().await;
 
         // Clean up socket file if it exists (Unix; Windows named pipes don't create files)
-        if self.socket_path.exists() {
-            if let Err(e) = std::fs::remove_file(&self.socket_path) {
-                warn!("Failed to remove socket file {:?}: {}", self.socket_path, e);
-            }
+        if self.socket_path.exists()
+            && let Err(e) = std::fs::remove_file(&self.socket_path)
+        {
+            warn!("Failed to remove socket file {:?}: {}", self.socket_path, e);
         }
 
         Ok(())

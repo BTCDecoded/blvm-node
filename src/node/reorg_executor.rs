@@ -293,11 +293,11 @@ pub(crate) fn commit_utxo_snapshot_delta(
     if pure_disconnect {
         let mut coins = HashMap::new();
         let mut kept_muhash = None;
-        if let Some(existing) = tree.get(SNAPSHOT_REORG_ROLLBACK_KEY)? {
-            if let Some((prior, saved)) = decode_rollback(&existing) {
-                coins = saved;
-                kept_muhash = prior;
-            }
+        if let Some(existing) = tree.get(SNAPSHOT_REORG_ROLLBACK_KEY)?
+            && let Some((prior, saved)) = decode_rollback(&existing)
+        {
+            coins = saved;
+            kept_muhash = prior;
         }
         if kept_muhash.is_none() {
             kept_muhash = prior_muhash.map(|bytes| bytes.to_vec());
@@ -362,14 +362,14 @@ pub(crate) fn recover_snapshot_commit(storage: &Storage, blockstore: &BlockStore
                 batch.delete(SNAPSHOT_REORG_ROLLBACK_KEY);
                 batch.delete(SNAPSHOT_MUHASH_KEY);
                 batch.commit()?;
-                if let Some(bytes) = prior_muhash {
-                    if bytes.len() == blvm_muhash::MUHASH_RUNNING_STATE_BYTES {
-                        let mut running = [0u8; blvm_muhash::MUHASH_RUNNING_STATE_BYTES];
-                        running.copy_from_slice(&bytes);
-                        storage
-                            .chain()
-                            .persist_ibd_utxo_muhash_running_only(&running)?;
-                    }
+                if let Some(bytes) = prior_muhash
+                    && bytes.len() == blvm_muhash::MUHASH_RUNNING_STATE_BYTES
+                {
+                    let mut running = [0u8; blvm_muhash::MUHASH_RUNNING_STATE_BYTES];
+                    running.copy_from_slice(&bytes);
+                    storage
+                        .chain()
+                        .persist_ibd_utxo_muhash_running_only(&running)?;
                 }
             } else {
                 tree.remove(SNAPSHOT_REORG_ROLLBACK_KEY)?;

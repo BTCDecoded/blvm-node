@@ -48,10 +48,10 @@ fn non_coinbase_fee_sats(
     let mut spent: std::collections::HashMap<blvm_protocol::OutPoint, u64> =
         std::collections::HashMap::new();
     for entry in &undo.entries {
-        if let Some(prev) = &entry.previous_utxo {
-            if let Ok(value) = u64::try_from(prev.value) {
-                spent.insert(entry.outpoint, value);
-            }
+        if let Some(prev) = &entry.previous_utxo
+            && let Ok(value) = u64::try_from(prev.value)
+        {
+            spent.insert(entry.outpoint, value);
         }
     }
     let mut fees = Vec::new();
@@ -276,16 +276,16 @@ impl BlockchainRpc {
         }
         // Production RPC servers build BlockchainRpc without a protocol (rpc/mod.rs), so fall
         // back to the network stored with the chain, as core_chain_field does.
-        if let Some(ref storage) = self.storage {
-            if let Ok(Some(info)) = storage.chain().load_chain_info() {
-                return Some(match info.chain_params.network.as_str() {
-                    "testnet" => "testnet",
-                    "testnet4" => "testnet4",
-                    "regtest" => "regtest",
-                    "signet" => "signet",
-                    _ => "mainnet",
-                });
-            }
+        if let Some(ref storage) = self.storage
+            && let Ok(Some(info)) = storage.chain().load_chain_info()
+        {
+            return Some(match info.chain_params.network.as_str() {
+                "testnet" => "testnet",
+                "testnet4" => "testnet4",
+                "regtest" => "regtest",
+                "signet" => "signet",
+                _ => "mainnet",
+            });
         }
         None
     }
@@ -316,17 +316,17 @@ impl BlockchainRpc {
 
     /// Core-compatible `chain` field for getblockchaininfo (`main`, `test`, `regtest`).
     fn core_chain_field(&self) -> &str {
-        if let Some(ref storage) = self.storage {
-            if let Ok(Some(info)) = storage.chain().load_chain_info() {
-                return match info.chain_params.network.as_str() {
-                    "mainnet" => "main",
-                    "testnet" => "test",
-                    "testnet4" => "testnet4",
-                    "regtest" => "regtest",
-                    "signet" => "signet",
-                    _ => "main",
-                };
-            }
+        if let Some(ref storage) = self.storage
+            && let Ok(Some(info)) = storage.chain().load_chain_info()
+        {
+            return match info.chain_params.network.as_str() {
+                "mainnet" => "main",
+                "testnet" => "test",
+                "testnet4" => "testnet4",
+                "regtest" => "regtest",
+                "signet" => "signet",
+                _ => "main",
+            };
         }
         match self.get_chain_name() {
             "mainnet" => "main",
@@ -395,10 +395,10 @@ impl BlockchainRpc {
 
     /// Resolve RPC address param: hex scriptPubKey or Bech32/Base58 address string.
     fn resolve_script_pubkey_param(address: &str) -> Result<Vec<u8>, RpcError> {
-        if let Ok(script) = hex::decode(address) {
-            if !script.is_empty() {
-                return Ok(script);
-            }
+        if let Ok(script) = hex::decode(address)
+            && !script.is_empty()
+        {
+            return Ok(script);
         }
         crate::rpc::rawtx::address_string_to_script_pubkey(address)
     }
@@ -1226,14 +1226,13 @@ impl BlockchainRpc {
                             use blvm_protocol::mining::calculate_merkle_root;
 
                             if let Ok(calculated_root) = calculate_merkle_root(&block.transactions)
+                                && calculated_root != block.header.merkle_root
                             {
-                                if calculated_root != block.header.merkle_root {
-                                    errors.push(format!(
-                                        "Block at height {height} has incorrect merkle root"
-                                    ));
-                                    if check_level >= 4 {
-                                        break;
-                                    }
+                                errors.push(format!(
+                                    "Block at height {height} has incorrect merkle root"
+                                ));
+                                if check_level >= 4 {
+                                    break;
                                 }
                             }
                         }
@@ -1241,93 +1240,89 @@ impl BlockchainRpc {
                         // Check level 4: Full UTXO validation (reconnect block)
                         // Uses per-block height MTP (not tip-relative) for proper replay
                         #[cfg(feature = "production")]
-                        if check_level >= 4 {
-                            if let Some(ref mut utxo_set) = utxo_set_for_level4 {
-                                if let Some(engine_arc) = engine_arc_opt {
-                                    let protocol_version = engine_arc.get_protocol_version();
+                        if check_level >= 4
+                            && let Some(ref mut utxo_set) = utxo_set_for_level4
+                            && let Some(engine_arc) = engine_arc_opt
+                        {
+                            let protocol_version = engine_arc.get_protocol_version();
 
-                                    // Load witnesses for this block
-                                    let witnesses =
-                                        match crate::node::block_processor::load_witnesses_for_block(
-                                            blockstore.as_ref(),
-                                            &block,
-                                            height,
-                                            protocol_version,
-                                        ) {
-                                            Ok(w) => w,
-                                            Err(e) => {
-                                                errors.push(format!(
-                                                "Block at height {height} witness load error: {e}"
-                                            ));
-                                                break;
-                                            }
-                                        };
-
-                                    // Get MTP headers at this block's height (not tip-relative)
-                                    let mtp_headers = blockstore
-                                        .headers_before_height_for_mtp(height)
-                                        .ok()
-                                        .filter(|h| !h.is_empty());
-
-                                    let median_time_past = mtp_headers
-                                        .as_ref()
-                                        .map(|h| blvm_protocol::bip113::get_median_time_past(h))
-                                        .unwrap_or(0);
-
-                                    let network_time = crate::utils::current_timestamp();
-
-                                    // Create validation context with correct per-height MTP
-                                    let mut context = match blvm_protocol::validation::ProtocolValidationContext::new(
-                                        protocol_version,
-                                        height,
-                                    ) {
-                                        Ok(c) => c,
-                                        Err(e) => {
-                                            errors.push(format!(
-                                                "Block at height {height} context error: {e}"
-                                            ));
-                                            break;
-                                        }
-                                    };
-                                    context.context_data.insert(
-                                        "median_time_past".to_string(),
-                                        median_time_past.to_string(),
-                                    );
-                                    context.context_data.insert(
-                                        "network_time".to_string(),
-                                        network_time.to_string(),
-                                    );
-
-                                    // Validate and connect block
-                                    let owned_utxo = std::mem::take(utxo_set);
-                                    match engine_arc.validate_and_connect_block_with_difficulty(
-                                        &block,
-                                        &witnesses,
-                                        &owned_utxo,
-                                        height,
-                                        mtp_headers.as_deref(),
-                                        &context,
-                                        Some(blockstore.difficulty_ancestor_lookup()),
-                                    ) {
-                                        Ok((blvm_protocol::ValidationResult::Valid, new_utxo)) => {
-                                            *utxo_set = new_utxo;
-                                        }
-                                        Ok((
-                                            blvm_protocol::ValidationResult::Invalid(reason),
-                                            _,
-                                        )) => {
-                                            errors.push(format!(
-                                                "Block at height {height} invalid: {reason}"
-                                            ));
-                                            break;
-                                        }
-                                        Err(e) => {
-                                            errors.push(format!(
-                                                "Block at height {height} validation error: {e}"
-                                            ));
-                                            break;
-                                        }
+                            // Load witnesses for this block
+                            let witnesses =
+                                match crate::node::block_processor::load_witnesses_for_block(
+                                    blockstore.as_ref(),
+                                    &block,
+                                    height,
+                                    protocol_version,
+                                ) {
+                                    Ok(w) => w,
+                                    Err(e) => {
+                                        errors.push(format!(
+                                            "Block at height {height} witness load error: {e}"
+                                        ));
+                                        break;
                                     }
+                                };
+
+                            // Get MTP headers at this block's height (not tip-relative)
+                            let mtp_headers = blockstore
+                                .headers_before_height_for_mtp(height)
+                                .ok()
+                                .filter(|h| !h.is_empty());
+
+                            let median_time_past = mtp_headers
+                                .as_ref()
+                                .map(|h| blvm_protocol::bip113::get_median_time_past(h))
+                                .unwrap_or(0);
+
+                            let network_time = crate::utils::current_timestamp();
+
+                            // Create validation context with correct per-height MTP
+                            let mut context =
+                                match blvm_protocol::validation::ProtocolValidationContext::new(
+                                    protocol_version,
+                                    height,
+                                ) {
+                                    Ok(c) => c,
+                                    Err(e) => {
+                                        errors.push(format!(
+                                            "Block at height {height} context error: {e}"
+                                        ));
+                                        break;
+                                    }
+                                };
+                            context.context_data.insert(
+                                "median_time_past".to_string(),
+                                median_time_past.to_string(),
+                            );
+                            context
+                                .context_data
+                                .insert("network_time".to_string(), network_time.to_string());
+
+                            // Validate and connect block
+                            let owned_utxo = std::mem::take(utxo_set);
+                            match engine_arc.validate_and_connect_block_with_difficulty(
+                                &block,
+                                &witnesses,
+                                &owned_utxo,
+                                height,
+                                mtp_headers.as_deref(),
+                                &context,
+                                Some(blockstore.difficulty_ancestor_lookup()),
+                            ) {
+                                Ok((blvm_protocol::ValidationResult::Valid, new_utxo)) => {
+                                    *utxo_set = new_utxo;
+                                }
+                                Ok((blvm_protocol::ValidationResult::Invalid(reason), _)) => {
+                                    errors.push(format!(
+                                        "Block at height {height} invalid: {reason}"
+                                    ));
+                                    break;
+                                }
+                                Err(e) => {
+                                    errors.push(format!(
+                                        "Block at height {height} validation error: {e}"
+                                    ));
+                                    break;
                                 }
                             }
                         }
@@ -1442,21 +1437,21 @@ impl BlockchainRpc {
             let mut tx_counts = Vec::with_capacity(range_size);
 
             for height in start_height..=tip_height {
-                if let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height) {
-                    if let Ok(Some(header)) = storage.blocks().get_header(&hash) {
-                        timestamps.push(header.timestamp);
+                if let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height)
+                    && let Ok(Some(header)) = storage.blocks().get_header(&hash)
+                {
+                    timestamps.push(header.timestamp);
 
-                        // Try to get TX count from metadata (if available), otherwise use header-only fallback
-                        let n_tx = storage
-                            .blocks()
-                            .get_block_metadata(&hash)
-                            .ok()
-                            .flatten()
-                            .map(|m| m.n_tx as u64)
-                            .unwrap_or(0); // Fallback: 0 if metadata not available
+                    // Try to get TX count from metadata (if available), otherwise use header-only fallback
+                    let n_tx = storage
+                        .blocks()
+                        .get_block_metadata(&hash)
+                        .ok()
+                        .flatten()
+                        .map(|m| m.n_tx as u64)
+                        .unwrap_or(0); // Fallback: 0 if metadata not available
 
-                        tx_counts.push(n_tx);
-                    }
+                    tx_counts.push(n_tx);
                 }
             }
 
@@ -1688,13 +1683,11 @@ impl BlockchainRpc {
                     .enumerate()
                     .map(|(index, tx)| {
                         let witness = witnesses.as_ref().and_then(|all| all.get(index));
-                        if let Some(witness) = witness {
-                            if witness.iter().any(|stack| !stack.is_empty()) {
-                                if let Ok(bytes) = blvm_protocol::serialization::transaction::serialize_transaction_with_witness(tx, witness) {
+                        if let Some(witness) = witness
+                            && witness.iter().any(|stack| !stack.is_empty())
+                                && let Ok(bytes) = blvm_protocol::serialization::transaction::serialize_transaction_with_witness(tx, witness) {
                                     return bytes.len();
                                 }
-                            }
-                        }
                         blvm_protocol::serialization::transaction::serialize_transaction(tx).len()
                     })
                     .collect();
@@ -2015,10 +2008,10 @@ impl BlockchainRpc {
             if let Some(ref ep) = self.event_publisher {
                 ep.publish_block_disconnected(&hash, height).await;
 
-                if let Ok(Some(new_tip)) = storage.chain().get_tip_hash() {
-                    if new_tip != hash {
-                        ep.publish_chain_reorg(&hash, &new_tip).await;
-                    }
+                if let Ok(Some(new_tip)) = storage.chain().get_tip_hash()
+                    && new_tip != hash
+                {
+                    ep.publish_chain_reorg(&hash, &new_tip).await;
                 }
             }
 
@@ -2199,13 +2192,13 @@ impl BlockchainRpc {
 
         while tokio::time::Instant::now() < deadline {
             let tip_height = storage.chain().get_height()?.unwrap_or(0);
-            if height <= tip_height {
-                if let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height) {
-                    return Ok(json!({
-                        "hash": encode_hash32_rpc(&hash),
-                        "height": height
-                    }));
-                }
+            if height <= tip_height
+                && let Ok(Some(hash)) = storage.blocks().get_hash_by_height(height)
+            {
+                return Ok(json!({
+                    "hash": encode_hash32_rpc(&hash),
+                    "height": height
+                }));
             }
             tokio::time::sleep(poll_interval).await;
         }

@@ -132,10 +132,10 @@ pub(crate) fn build_fee_table(input: MempoolSnapshot) -> FeeTable {
                 quote_blocks(target, win.source, win.returned_target),
                 win.source,
             );
-            if matches!(win.source, FeeSource::External | FeeSource::ExternalMin) {
-                if let Some(name) = &external_name {
-                    quote.estimator = name.clone();
-                }
+            if matches!(win.source, FeeSource::External | FeeSource::ExternalMin)
+                && let Some(name) = &external_name
+            {
+                quote.estimator = name.clone();
             }
             combined[mode][index] = Some(quote);
         }

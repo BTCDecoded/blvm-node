@@ -114,11 +114,10 @@ fn classify_ibd_binder(
         // Tip may be in reorder while feeder drained — classic FEEDER_STARVE shape.
         return "SUPPLY_FEEDER_STARVE";
     }
-    if let Some(ms) = gd_ewma_ms {
-        if ms >= 200 && feeder < 16 {
+    if let Some(ms) = gd_ewma_ms
+        && ms >= 200 && feeder < 16 {
             return "SUPPLY_GD_SLOW";
         }
-    }
     if contig == 0 && feeder < 8 {
         return "SUPPLY_THIN_RUNWAY";
     }
@@ -249,7 +248,7 @@ pub(crate) fn ibd_v2_retire_pre_lock(
     } else {
         16
     };
-    if next_height % evict_interval == 0 {
+    if next_height.is_multiple_of(evict_interval) {
         store.maybe_evict(evict_scratch);
     }
     if store.is_dynamic_eviction() {
@@ -363,7 +362,7 @@ pub(crate) fn ibd_v2_retire_apply_utxo_delta(
     // Formal checkpoint first: must run at boundary heights even under Elevated/Critical.
     // Otherwise RSS pressure branches only drain adds and DEL tombstones accumulate until
     // pending exceeds the worker cap (see zeus wedge @ h≈681k, Elevated after checkpoint).
-    if ibd_defer_flush && next_height > 0 && next_height % ibd_defer_checkpoint == 0 {
+    if ibd_defer_flush && next_height > 0 && next_height.is_multiple_of(ibd_defer_checkpoint) {
         let batch = ibd_formal_checkpoint_flush_batch(store, next_height);
         return (0u64, 0u64, batch, true, cap_change);
     }
@@ -393,7 +392,7 @@ pub(crate) fn ibd_v2_retire_apply_utxo_delta(
         // huge protection set; this store can — so flush, not more scans, is the release valve.
         if pressure_level == PressureLevel::Emergency {
             let n = IBD_EMERGENCY_EVICT_BLOCKS_SEEN.fetch_add(1, Ordering::Relaxed);
-            if n % IBD_EMERGENCY_EVICT_EVERY_N_BLOCKS == 0 {
+            if n.is_multiple_of(IBD_EMERGENCY_EVICT_EVERY_N_BLOCKS) {
                 let cache_now = store.len();
                 let protected_now = store.protected_len();
                 let evictable = cache_now.saturating_sub(protected_now);
@@ -674,7 +673,7 @@ fn run_ibd_durability_loop(
             // Each cache entry: ~40B key + 16B Arc pointer + ~160B UTXO heap = ~216B.
             // This is the dominant variable RAM consumer; grows from ~2GB at h=300k to ~3GB at peak.
             let est_cache_mb = (cache_entries as u64 * 216) / (1_024 * 1_024);
-            let formal = first_h > 0 && first_h % ibd_defer_checkpoint == 0;
+            let formal = first_h > 0 && first_h.is_multiple_of(ibd_defer_checkpoint);
             info!(
                 "[IBD_DURABILITY] h={first_h}: checkpoint batch started \
                  (requests={n_reqs}, total_ops={total_ops}, formal={formal}, \
@@ -991,7 +990,7 @@ fn ibd_retire_pick_flush_batch(store: &IbdUtxoStore) -> (Option<PendingFlushPack
 
 /// Formal checkpoint boundary height for `trigger_height`, if it aligns to `interval`.
 fn ibd_formal_checkpoint_boundary(trigger_height: u64, interval: u64) -> Option<u64> {
-    if trigger_height > 0 && interval > 0 && trigger_height % interval == 0 {
+    if trigger_height > 0 && interval > 0 && trigger_height.is_multiple_of(interval) {
         Some(trigger_height)
     } else {
         None
@@ -1200,7 +1199,7 @@ fn retire_do_durability(
     if durability_on_channel {
         force_durability
     } else {
-        force_durability || batch_count <= 1 || n % batch_count == 0
+        force_durability || batch_count <= 1 || n.is_multiple_of(batch_count)
     }
 }
 
@@ -1711,11 +1710,10 @@ impl DeferredDropper {
     }
     fn close_and_join(&mut self) {
         drop(self.tx.take());
-        if let Some(h) = self.handle.take() {
-            if let Err(e) = h.join() {
+        if let Some(h) = self.handle.take()
+            && let Err(e) = h.join() {
                 warn!("IBD deferred-drop join error: {:?}", e);
             }
-        }
     }
 }
 
@@ -1818,11 +1816,10 @@ impl TipSyncer {
     }
     fn close_and_join(&mut self) {
         drop(self.tx.take());
-        if let Some(h) = self.handle.take() {
-            if let Err(e) = h.join() {
+        if let Some(h) = self.handle.take()
+            && let Err(e) = h.join() {
                 warn!("IBD tip-sync join error: {:?}", e);
             }
-        }
     }
 }
 
@@ -2343,8 +2340,8 @@ fn run_validation_worker_shared(
                 // A3: if connect parked ECDSA SoA, submit to wave and continue collecting.
                 #[cfg(all(feature = "production"))]
                 {
-                    if result_ok {
-                        if let Some(soa) = blvm_consensus::ecdsa_wave::take_parked() {
+                    if result_ok
+                        && let Some(soa) = blvm_consensus::ecdsa_wave::take_parked() {
                             let wrx = blvm_consensus::ecdsa_wave::submit(height, soa);
                             if let Some(vr) = vr_opt.take() {
                                 wave_pending.push(WavePending { vr, rx: wrx });
@@ -2360,7 +2357,6 @@ fn run_validation_worker_shared(
                                 block_wave_oldest(&mut wave_pending, &tx);
                             }
                         }
-                    }
                 }
                 if let Some(vr) = vr_opt {
                     let _ = tx.send(vr);

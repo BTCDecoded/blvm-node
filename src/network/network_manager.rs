@@ -999,17 +999,17 @@ impl NetworkManager {
                 let current_count = *violation_count;
                 drop(violations);
 
-                if let Some(ban_config) = self.spam_ban_config.as_ref() {
-                    if current_count >= ban_config.spam_ban_threshold {
-                        let unban_timestamp = crate::utils::current_timestamp()
-                            + ban_config.spam_ban_duration_seconds;
-                        warn!(
-                            "Auto-banning peer {} for spam violations ({} violations, unban at {})",
-                            peer_addr, current_count, unban_timestamp
-                        );
-                        self.ban_peer(peer_addr, unban_timestamp);
-                        return true;
-                    }
+                if let Some(ban_config) = self.spam_ban_config.as_ref()
+                    && current_count >= ban_config.spam_ban_threshold
+                {
+                    let unban_timestamp =
+                        crate::utils::current_timestamp() + ban_config.spam_ban_duration_seconds;
+                    warn!(
+                        "Auto-banning peer {} for spam violations ({} violations, unban at {})",
+                        peer_addr, current_count, unban_timestamp
+                    );
+                    self.ban_peer(peer_addr, unban_timestamp);
+                    return true;
                 }
 
                 debug!(
@@ -1315,10 +1315,10 @@ impl NetworkManager {
     /// Key for block request matching: IpAddr so inbound (diff port) matches outbound
     fn block_request_key(addr: SocketAddr) -> IpAddr {
         let ip = addr.ip();
-        if let std::net::IpAddr::V6(v6) = ip {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return std::net::IpAddr::V4(v4);
-            }
+        if let std::net::IpAddr::V6(v6) = ip
+            && let Some(v4) = v6.to_ipv4_mapped()
+        {
+            return std::net::IpAddr::V4(v4);
         }
         ip
     }
@@ -2592,7 +2592,7 @@ impl NetworkManager {
 
             // Update metrics periodically (every 100 messages or 10 seconds)
             let now = std::time::SystemTime::now();
-            let should_update = message_count % 100 == 0
+            let should_update = message_count.is_multiple_of(100)
                 || now
                     .duration_since(last_metrics_update)
                     .unwrap_or_else(|_| std::time::Duration::from_secs(0))
@@ -2739,13 +2739,12 @@ impl NetworkManager {
         }
 
         // R-304: hash 80-byte header before deserialize. Default-off is a no-op.
-        if crate::network::parse_offload::is_block_frame(&data) {
-            if let Some(hash) =
+        if crate::network::parse_offload::is_block_frame(&data)
+            && let Some(hash) =
                 crate::node::parallel_ibd::wire_hash_gate::try_skip_obsolete_block_frame(&data)
-            {
-                self.cancel_block_request_force(peer_addr, hash);
-                return Ok(());
-            }
+        {
+            self.cancel_block_request_force(peer_addr, hash);
+            return Ok(());
         }
 
         let parsed = {
@@ -2786,10 +2785,10 @@ impl NetworkManager {
             });
         }
 
-        if let ProtocolMessage::Tx(_) = &parsed {
-            if self.should_drop_tx(peer_addr, &data).await {
-                return Ok(());
-            }
+        if let ProtocolMessage::Tx(_) = &parsed
+            && self.should_drop_tx(peer_addr, &data).await
+        {
+            return Ok(());
         }
 
         if let ProtocolMessage::Block(block_msg) = parsed {
@@ -3062,18 +3061,17 @@ impl NetworkManager {
                     ep.publish_peer_banned(&addr.to_string(), "ban", ban_duration_secs)
                         .await;
                 }
-                if let Some(cfg) = self.ban_list_sharing_config.as_ref() {
-                    if cfg.shares()
-                        && matches!(cfg.share_mode, crate::config::BanShareMode::Immediate)
-                    {
-                        super::handlers::ban_list::broadcast_ban_list(
-                            self.ban_list().as_ref(),
-                            self.peer_manager_mutex().as_ref(),
-                            cfg.min_ban_duration_to_share,
-                            self.event_publisher(),
-                        )
-                        .await;
-                    }
+                if let Some(cfg) = self.ban_list_sharing_config.as_ref()
+                    && cfg.shares()
+                    && matches!(cfg.share_mode, crate::config::BanShareMode::Immediate)
+                {
+                    super::handlers::ban_list::broadcast_ban_list(
+                        self.ban_list().as_ref(),
+                        self.peer_manager_mutex().as_ref(),
+                        cfg.min_ban_duration_to_share,
+                        self.event_publisher(),
+                    )
+                    .await;
                 }
             })
         })

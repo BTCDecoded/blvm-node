@@ -290,11 +290,11 @@ impl RpcError {
             "Use estimatesmartfee to get current fee recommendations".to_string(),
         ];
 
-        if let Some(required) = required_fee {
-            if let Some(provided) = provided_fee {
-                let shortfall = required.saturating_sub(provided);
-                suggestions.push(format!("Fee shortfall: {shortfall} satoshis"));
-            }
+        if let Some(required) = required_fee
+            && let Some(provided) = provided_fee
+        {
+            let shortfall = required.saturating_sub(provided);
+            suggestions.push(format!("Fee shortfall: {shortfall} satoshis"));
         }
 
         data["suggestions"] = json!(suggestions);
@@ -487,11 +487,11 @@ impl RpcError {
     /// Add context to error
     pub fn with_context(mut self, context: Value) -> Self {
         let data = self.data.get_or_insert_with(|| json!({}));
-        if let Some(obj) = data.as_object_mut() {
-            if let Some(ctx_obj) = context.as_object() {
-                for (k, v) in ctx_obj {
-                    obj.insert(k.clone(), v.clone());
-                }
+        if let Some(obj) = data.as_object_mut()
+            && let Some(ctx_obj) = context.as_object()
+        {
+            for (k, v) in ctx_obj {
+                obj.insert(k.clone(), v.clone());
             }
         }
         self

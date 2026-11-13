@@ -21,10 +21,9 @@ pub fn verify_module_signatures(
         .binary
         .as_ref()
         .and_then(|section| section.hash.as_deref())
+        && binary_path.exists()
     {
-        if binary_path.exists() {
-            verify_stored_binary_hash(manifest, binary_path, expected_hash)?;
-        }
+        verify_stored_binary_hash(manifest, binary_path, expected_hash)?;
     }
     if manifest.signatures.is_some() {
         return Err(ModuleError::CryptoError(

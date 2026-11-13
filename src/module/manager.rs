@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -25,7 +25,7 @@ use crate::module::security::permissions::PermissionSet;
 use crate::module::traits::{ModuleContext, ModuleError, ModuleMetadata, ModuleState};
 #[cfg(feature = "wasm-modules")]
 use crate::module::wasm::{WasmModuleInstance, WasmModuleLoader};
-use crate::utils::{new_request_id, MODULE_RELOAD_CLEANUP_DELAY};
+use crate::utils::{MODULE_RELOAD_CLEANUP_DELAY, new_request_id};
 
 /// Module manager coordinates all loaded modules
 pub struct ModuleManager {
@@ -623,20 +623,19 @@ impl ModuleManager {
         base: HashMap<String, String>,
     ) -> HashMap<String, String> {
         let mut merged = base;
-        if let Ok(guard) = self.module_config_overrides.read() {
-            if let Some(overrides) = guard.get(module_name) {
-                for (k, v) in overrides {
-                    merged.insert(k.clone(), v.clone());
-                }
+        if let Ok(guard) = self.module_config_overrides.read()
+            && let Some(overrides) = guard.get(module_name)
+        {
+            for (k, v) in overrides {
+                merged.insert(k.clone(), v.clone());
             }
         }
         // Inherit node's effective module DB backend when module doesn't specify one
-        if !merged.contains_key("database_backend") {
-            if let Ok(guard) = self.default_database_backend.read() {
-                if let Some(ref backend) = *guard {
-                    merged.insert("database_backend".to_string(), backend.clone());
-                }
-            }
+        if !merged.contains_key("database_backend")
+            && let Ok(guard) = self.default_database_backend.read()
+            && let Some(ref backend) = *guard
+        {
+            merged.insert("database_backend".to_string(), backend.clone());
         }
         merged
     }
@@ -833,10 +832,10 @@ impl ModuleManager {
                             None
                         }
                     };
-                    if let Some(module_id) = crashed_module_id.as_deref() {
-                        if let Some(metrics) = &metrics_manager {
-                            metrics.clear_module_metrics(module_id).await;
-                        }
+                    if let Some(module_id) = crashed_module_id.as_deref()
+                        && let Some(metrics) = &metrics_manager
+                    {
+                        metrics.clear_module_metrics(module_id).await;
                     }
 
                     // Clean up: loaded_modules, CLI spec, API hub (same as explicit unload)
@@ -1589,14 +1588,14 @@ impl ModuleManager {
 
                 // Validate that the new version still satisfies the dependent's requirements
                 let version_req = discovered.manifest.dependencies.get(module_name);
-                if let Some(req) = version_req {
-                    if !Self::check_version_constraint(&metadata.version, req) {
-                        error!(
-                            "Cannot reload dependent module '{}': new version '{}' of '{}' does not satisfy requirement '{}'",
-                            dependent_name, metadata.version, module_name, req
-                        );
-                        continue; // Skip this dependent
-                    }
+                if let Some(req) = version_req
+                    && !Self::check_version_constraint(&metadata.version, req)
+                {
+                    error!(
+                        "Cannot reload dependent module '{}': new version '{}' of '{}' does not satisfy requirement '{}'",
+                        dependent_name, metadata.version, module_name, req
+                    );
+                    continue; // Skip this dependent
                 }
 
                 // Check if binary path exists
@@ -2246,8 +2245,8 @@ impl ModuleManager {
         crate::module::github_release_install::validate_github_repo(&github_repo)?;
 
         use crate::module::github_release_install::{
-            default_module_toml_raw_url, release_tag, resolve_release_version_for_constraint,
-            DEFAULT_MODULE_MANIFEST_REF,
+            DEFAULT_MODULE_MANIFEST_REF, default_module_toml_raw_url, release_tag,
+            resolve_release_version_for_constraint,
         };
 
         let constraint = version_constraint.trim();

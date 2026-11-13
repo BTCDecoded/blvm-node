@@ -491,17 +491,17 @@ impl RpcServer {
                     // `/health` and `/health/ready` stay status-only probes.
                     // `/health/detailed` carries peer, ban, block, and disk counts.
                     let auth_result = auth_manager.authenticate_request(&headers, addr).await;
-                    if path == "/health/detailed" {
-                        if let Some(error) = &auth_result.error {
-                            warn!(
-                                "Detailed health authentication failed from {}: {}",
-                                addr, error
-                            );
-                            return Ok(Self::http_error_response(
-                                StatusCode::UNAUTHORIZED,
-                                "Authentication required for detailed health",
-                            ));
-                        }
+                    if path == "/health/detailed"
+                        && let Some(error) = &auth_result.error
+                    {
+                        warn!(
+                            "Detailed health authentication failed from {}: {}",
+                            addr, error
+                        );
+                        return Ok(Self::http_error_response(
+                            StatusCode::UNAUTHORIZED,
+                            "Authentication required for detailed health",
+                        ));
                     }
                     if auth_result.user_id.is_none() {
                         // Unauthenticated health check - apply stricter rate limiting
@@ -536,10 +536,10 @@ impl RpcServer {
         let headers = req.headers().clone();
 
         // Check Content-Type
-        if let Some(content_type) = headers.get("content-type") {
-            if content_type != "application/json" {
-                warn!("Invalid Content-Type from {}: {:?}", addr, content_type);
-            }
+        if let Some(content_type) = headers.get("content-type")
+            && content_type != "application/json"
+        {
+            warn!("Invalid Content-Type from {}: {:?}", addr, content_type);
         }
 
         // Read request body with size limit. A body past the cap is rejected
@@ -1067,10 +1067,10 @@ impl RpcServer {
             };
         }
 
-        if let Some(content_type) = headers.get("content-type") {
-            if content_type.as_bytes() != b"application/json" {
-                warn!("Invalid Content-Type from {}: {:?}", addr, content_type);
-            }
+        if let Some(content_type) = headers.get("content-type")
+            && content_type.as_bytes() != b"application/json"
+        {
+            warn!("Invalid Content-Type from {}: {:?}", addr, content_type);
         }
 
         let request_id = new_request_id();

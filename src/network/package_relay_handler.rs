@@ -28,10 +28,9 @@ pub(crate) fn decode_package_transaction(
 ) -> Result<(Transaction, Option<Vec<blvm_protocol::segwit::Witness>>), ()> {
     if let Ok((tx, witnesses, consumed)) =
         blvm_protocol::serialization::transaction::deserialize_transaction_with_witness(raw)
+        && consumed == raw.len()
     {
-        if consumed == raw.len() {
-            return Ok((tx, Some(witnesses)));
-        }
+        return Ok((tx, Some(witnesses)));
     }
     match bincode::deserialize::<Transaction>(raw) {
         Ok(tx) => Ok((tx, None)),

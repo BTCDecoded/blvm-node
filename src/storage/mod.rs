@@ -974,25 +974,22 @@ impl Storage {
         // A height-index row at tip+1 is not the tip. av4 wrote
         // `000000000045a50e…` over the validated tip because that hash occupied
         // the next height and its prev was a different block.
-        if let Some(info) = self.chain().load_chain_info()? {
-            if info.height > 0 {
-                if let Some(parent_hash) = self.blockstore.get_hash_by_height(info.height - 1)? {
-                    if info.tip_header.prev_block_hash != parent_hash {
-                        if let Some(parent) = self.blockstore.get_block(&parent_hash)? {
-                            let restored = info.height - 1;
-                            let mut repaired = info;
-                            repaired.tip_hash = parent_hash;
-                            repaired.tip_header = parent.header.clone();
-                            repaired.height = restored;
-                            self.chainstate.store_chain_info(&repaired)?;
-                            warn!(
-                                "chain_info tip did not extend the active block at height {restored}; restored that block (prefix {:02x}{:02x}{:02x}{:02x})",
-                                parent_hash[0], parent_hash[1], parent_hash[2], parent_hash[3]
-                            );
-                        }
-                    }
-                }
-            }
+        if let Some(info) = self.chain().load_chain_info()?
+            && info.height > 0
+            && let Some(parent_hash) = self.blockstore.get_hash_by_height(info.height - 1)?
+            && info.tip_header.prev_block_hash != parent_hash
+            && let Some(parent) = self.blockstore.get_block(&parent_hash)?
+        {
+            let restored = info.height - 1;
+            let mut repaired = info;
+            repaired.tip_hash = parent_hash;
+            repaired.tip_header = parent.header.clone();
+            repaired.height = restored;
+            self.chainstate.store_chain_info(&repaired)?;
+            warn!(
+                "chain_info tip did not extend the active block at height {restored}; restored that block (prefix {:02x}{:02x}{:02x}{:02x})",
+                parent_hash[0], parent_hash[1], parent_hash[2], parent_hash[3]
+            );
         }
 
         let Some(max_h) = self.blockstore.highest_stored_height()? else {

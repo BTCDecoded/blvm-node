@@ -367,10 +367,10 @@ pub fn begin_compact_assembly(
             continue;
         }
         let found = by_short.get(&short_id).map(|pair| (*pair).clone());
-        if let Some(filled) = found {
-            if block_index < slots.len() {
-                slots[block_index] = Some(filled);
-            }
+        if let Some(filled) = found
+            && block_index < slots.len()
+        {
+            slots[block_index] = Some(filled);
         }
     }
     Ok(CompactAssembly {

@@ -334,16 +334,15 @@ impl UtxoTable {
                             let (offset, length) = IdCodec::decode(id);
                             if offset >= fence && !tail_snap.is_empty() {
                                 let pos = tail_snap.partition_point(|b| b.begin_offset <= offset);
-                                if pos > 0 {
-                                    if let Some((hdr, script)) =
+                                if pos > 0
+                                    && let Some((hdr, script)) =
                                         tail_snap[pos - 1].get(offset, length)
-                                    {
-                                        result_slots[slot] = Some(output_detail_from_parts(
-                                            hdr,
-                                            SharedByteString::from(script),
-                                        ));
-                                        continue;
-                                    }
+                                {
+                                    result_slots[slot] = Some(output_detail_from_parts(
+                                        hdr,
+                                        SharedByteString::from(script),
+                                    ));
+                                    continue;
                                 }
                             }
                             disk.push(DiskRead {

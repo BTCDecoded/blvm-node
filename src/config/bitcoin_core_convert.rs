@@ -187,17 +187,17 @@ fn expand_tilde(path: &str) -> String {
             .map(|h| h.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string());
     }
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            let joined = home.join(rest);
-            if joined
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                return path.to_string();
-            }
-            return joined.to_string_lossy().into_owned();
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        let joined = home.join(rest);
+        if joined
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return path.to_string();
         }
+        return joined.to_string_lossy().into_owned();
     }
     path.to_string()
 }

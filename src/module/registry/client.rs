@@ -13,7 +13,7 @@ use crate::module::registry::cache::{CachedModule, LocalCache};
 use crate::module::registry::cas::{ContentAddressableStorage, ModuleHash};
 use crate::module::registry::manifest::ModuleManifest;
 use crate::module::security::signing::ModuleSigner;
-use crate::module::traits::{module_error_msg, ModuleError};
+use crate::module::traits::{ModuleError, module_error_msg};
 
 /// Registry peer configuration (P2P-based)
 #[derive(Debug, Clone)]
@@ -120,24 +120,24 @@ impl ModuleRegistry {
         // 1. Check local cache first
         {
             let cache = self.local_cache.read().await;
-            if let Some(cached) = cache.get(name) {
-                if cache.is_valid(name) {
-                    debug!("Module {} found in cache", name);
-                    // Try to load from cache
-                    if let Ok(entry) = self.load_from_cache(cached).await {
-                        return Ok(entry);
-                    }
+            if let Some(cached) = cache.get(name)
+                && cache.is_valid(name)
+            {
+                debug!("Module {} found in cache", name);
+                // Try to load from cache
+                if let Ok(entry) = self.load_from_cache(cached).await {
+                    return Ok(entry);
                 }
             }
         }
 
         // 2. Fetch from mirrors (if any configured)
-        if !self.mirrors.is_empty() {
-            if let Ok(entry) = self.fetch_from_mirrors(name).await {
-                // Cache the verified entry
-                self.cache_entry(&entry).await?;
-                return Ok(entry);
-            }
+        if !self.mirrors.is_empty()
+            && let Ok(entry) = self.fetch_from_mirrors(name).await
+        {
+            // Cache the verified entry
+            self.cache_entry(&entry).await?;
+            return Ok(entry);
         }
 
         // 3. Not found
@@ -421,12 +421,12 @@ impl ModuleRegistry {
         };
 
         // Verify binary hash if present
-        if let Some(ref bin_data) = binary {
-            if !self.cas.read().await.verify(bin_data, &cached.binary_hash) {
-                return Err(ModuleError::CryptoError(
-                    "Cached binary hash mismatch".to_string(),
-                ));
-            }
+        if let Some(ref bin_data) = binary
+            && !self.cas.read().await.verify(bin_data, &cached.binary_hash)
+        {
+            return Err(ModuleError::CryptoError(
+                "Cached binary hash mismatch".to_string(),
+            ));
         }
 
         Ok(ModuleEntry {
@@ -452,10 +452,10 @@ impl ModuleRegistry {
         }
 
         // Store binary in CAS if present
-        if let Some(ref binary_data) = entry.binary {
-            if !cas.has(&entry.binary_hash) {
-                cas.store(binary_data)?;
-            }
+        if let Some(ref binary_data) = entry.binary
+            && !cas.has(&entry.binary_hash)
+        {
+            cas.store(binary_data)?;
         }
         drop(cas);
 
@@ -503,10 +503,10 @@ impl ModuleRegistry {
         }
 
         // 3. Verify binary hash if present
-        if let Some(ref binary_data) = entry.binary {
-            if !cas.verify(binary_data, &entry.binary_hash) {
-                return Err(ModuleError::CryptoError("Binary hash mismatch".to_string()));
-            }
+        if let Some(ref binary_data) = entry.binary
+            && !cas.verify(binary_data, &entry.binary_hash)
+        {
+            return Err(ModuleError::CryptoError("Binary hash mismatch".to_string()));
         }
 
         Ok(())

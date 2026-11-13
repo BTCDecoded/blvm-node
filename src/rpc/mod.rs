@@ -264,11 +264,11 @@ impl RpcManager {
         mut auth_config: RpcAuthConfig,
         datadir: Option<&std::path::Path>,
     ) -> Result<()> {
-        if let Some(dir) = datadir {
-            if let Some(path) = install_rpc_cookie(dir, &mut auth_config)? {
-                info!("RPC cookie written at {}", path.display());
-                self.rpc_cookie_path = Some(path);
-            }
+        if let Some(dir) = datadir
+            && let Some(path) = install_rpc_cookie(dir, &mut auth_config)?
+        {
+            info!("RPC cookie written at {}", path.display());
+            self.rpc_cookie_path = Some(path);
         }
         self.auth_manager = Some(Self::build_auth_manager(auth_config).await?);
         Ok(())
@@ -342,7 +342,7 @@ impl RpcManager {
             // ckpool / Bitcoin Core Basic clients need admin methods (getblocktemplate, submitblock).
             if let Err(e) = auth_manager.add_admin_token(password.clone()).await {
                 let redacted_error =
-                    auth::redact_tokens_from_log(&format!("{e}"), &[password.clone()]);
+                    auth::redact_tokens_from_log(&format!("{e}"), std::slice::from_ref(password));
                 error!(
                     "Failed to grant admin RPC access for HTTP Basic password: {}",
                     redacted_error
@@ -535,14 +535,14 @@ impl RpcManager {
             ));
         }
         #[cfg(feature = "rest-api")]
-        if let Some(rest_api_addr) = self.rest_api_addr {
-            if self.public_bind_without_auth(rest_api_addr) {
-                return Err(anyhow::anyhow!(
-                    "REST API server would bind to public address {rest_api_addr} without authentication. \
+        if let Some(rest_api_addr) = self.rest_api_addr
+            && self.public_bind_without_auth(rest_api_addr)
+        {
+            return Err(anyhow::anyhow!(
+                "REST API server would bind to public address {rest_api_addr} without authentication. \
                      Configure rpc.auth (add tokens) or call .allow_unauthenticated_rpc(true) \
                      to explicitly opt out of this safety check."
-                ));
-            }
+            ));
         }
 
         info!("Starting TCP RPC server on {}", self.server_addr);
@@ -865,12 +865,11 @@ impl RpcManager {
             let _ = tx.send(());
         }
 
-        if let Some(path) = &self.rpc_cookie_path {
-            if let Err(e) = std::fs::remove_file(path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!("Failed to remove RPC cookie {}: {e}", path.display());
-                }
-            }
+        if let Some(path) = &self.rpc_cookie_path
+            && let Err(e) = std::fs::remove_file(path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!("Failed to remove RPC cookie {}: {e}", path.display());
         }
 
         Ok(())

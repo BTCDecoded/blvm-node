@@ -695,10 +695,10 @@ impl NetworkManager {
                 false
             }
         };
-        if should_discover_dns {
-            if let Err(e) = self.discover_peers_from_dns(network, port, config).await {
-                warn!("DNS seed discovery failed: {}", e);
-            }
+        if should_discover_dns
+            && let Err(e) = self.discover_peers_from_dns(network, port, config).await
+        {
+            warn!("DNS seed discovery failed: {}", e);
         }
 
         if !config.persistent_peers.is_empty() {
@@ -709,10 +709,10 @@ impl NetworkManager {
         }
 
         #[cfg(feature = "iroh")]
-        if self.transport_preference().allows_iroh() {
-            if let Err(e) = self.discover_iroh_peers().await {
-                warn!("Iroh peer discovery failed: {}", e);
-            }
+        if self.transport_preference().allows_iroh()
+            && let Err(e) = self.discover_iroh_peers().await
+        {
+            warn!("Iroh peer discovery failed: {}", e);
         }
 
         let timing_config_default = crate::config::NetworkTimingConfig::default();
@@ -846,10 +846,10 @@ impl NetworkManager {
             }
             {
                 let pm = nm.peer_manager_mutex().lock().await;
-                if let Some(p) = pm.get_peer(&TransportAddr::Tcp(addr)) {
-                    if p.is_connected() {
-                        return;
-                    }
+                if let Some(p) = pm.get_peer(&TransportAddr::Tcp(addr))
+                    && p.is_connected()
+                {
+                    return;
                 }
             }
             {
@@ -893,12 +893,11 @@ impl NetworkManager {
         }
 
         #[cfg(feature = "iroh")]
-        if self.transport_preference().allows_iroh() {
-            if let Ok(guard) = self.iroh_transport().lock() {
-                if guard.is_some() {
-                    transports.push(TransportType::Iroh);
-                }
-            }
+        if self.transport_preference().allows_iroh()
+            && let Ok(guard) = self.iroh_transport().lock()
+            && guard.is_some()
+        {
+            transports.push(TransportType::Iroh);
         }
 
         // Only fall back to TCP if the transport preference actually allows it.

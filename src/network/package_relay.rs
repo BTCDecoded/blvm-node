@@ -211,10 +211,10 @@ impl TransactionPackage {
         // Check each transaction: inputs that reference in-package parents must be earlier
         for (i, tx) in transactions.iter().enumerate() {
             for input in &tx.inputs {
-                if let Some(&parent_pos) = idx.get(&input.prevout.hash) {
-                    if parent_pos >= i {
-                        return Err(PackageError::InvalidOrder);
-                    }
+                if let Some(&parent_pos) = idx.get(&input.prevout.hash)
+                    && parent_pos >= i
+                {
+                    return Err(PackageError::InvalidOrder);
                 }
             }
         }

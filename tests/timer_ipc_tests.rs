@@ -16,8 +16,8 @@ use blvm_node::module::ipc::protocol::{
 use blvm_node::module::ipc::server::{IpcTimerTransport, ModuleIpcServer};
 use blvm_node::module::timers::service::TimerService;
 use blvm_node::module::timers::types::{
-    monotonic_interval, CreateMode, First, Pacing, Repeat, TimerAck, TimerConfig, TimerState,
-    LEGACY_TIMER_UNSUPPORTED,
+    CreateMode, First, LEGACY_TIMER_UNSUPPORTED, Pacing, Repeat, TimerAck, TimerConfig, TimerState,
+    monotonic_interval,
 };
 use blvm_node::storage::Storage;
 use tempfile::TempDir;

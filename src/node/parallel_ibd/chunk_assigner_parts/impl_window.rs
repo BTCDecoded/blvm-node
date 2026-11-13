@@ -644,11 +644,10 @@ impl ChunkAssigner {
         // Benched (front-staller) peers get no window work until their bench expires.
         {
             let b = self.window_bench.lock().unwrap();
-            if let Some(until) = b.get(peer_id) {
-                if *until > now {
+            if let Some(until) = b.get(peer_id)
+                && *until > now {
                     return None;
                 }
-            }
         }
 
         // R-376: do not hand a tile to a peer that has not VerAck'd.

@@ -1007,24 +1007,24 @@ impl ChainState {
         // Try to get from tip height first
         if let Some(height) = self.get_height()? {
             let key = height.to_be_bytes();
-            if let Some(data) = self.network_hashrate_cache.get(&key)? {
-                if data.len() >= 8 {
-                    let bytes = [
-                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                    ];
-                    return Ok(Some(f64::from_be_bytes(bytes)));
-                }
+            if let Some(data) = self.network_hashrate_cache.get(&key)?
+                && data.len() >= 8
+            {
+                let bytes = [
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                ];
+                return Ok(Some(f64::from_be_bytes(bytes)));
             }
             // Fallback: try previous heights (up to 10 blocks back)
             for h in (height.saturating_sub(10)..height).rev() {
                 let key = h.to_be_bytes();
-                if let Some(data) = self.network_hashrate_cache.get(&key)? {
-                    if data.len() >= 8 {
-                        let bytes = [
-                            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                        ];
-                        return Ok(Some(f64::from_be_bytes(bytes)));
-                    }
+                if let Some(data) = self.network_hashrate_cache.get(&key)?
+                    && data.len() >= 8
+                {
+                    let bytes = [
+                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                    ];
+                    return Ok(Some(f64::from_be_bytes(bytes)));
                 }
             }
         }
@@ -1078,10 +1078,10 @@ impl ChainState {
         // Get timestamps from blocks
         let mut timestamps = Vec::new();
         for h in start_height..=height {
-            if let Ok(Some(hash)) = blocks.get_hash_by_height(h) {
-                if let Ok(Some(block)) = blocks.get_block(&hash) {
-                    timestamps.push((h, block.header.timestamp));
-                }
+            if let Ok(Some(hash)) = blocks.get_hash_by_height(h)
+                && let Ok(Some(block)) = blocks.get_block(&hash)
+            {
+                timestamps.push((h, block.header.timestamp));
             }
         }
 
@@ -1102,17 +1102,17 @@ impl ChainState {
         let avg_time_per_block = time_span as f64 / num_intervals as f64;
 
         // Get difficulty from tip block
-        if let Ok(Some(tip_hash)) = blocks.get_hash_by_height(height) {
-            if let Ok(Some(tip_block)) = blocks.get_block(&tip_hash) {
-                let difficulty = Self::calculate_difficulty(tip_block.header.bits);
+        if let Ok(Some(tip_hash)) = blocks.get_hash_by_height(height)
+            && let Ok(Some(tip_block)) = blocks.get_block(&tip_hash)
+        {
+            let difficulty = Self::calculate_difficulty(tip_block.header.bits);
 
-                // Calculate hashrate: difficulty * 2^32 / avg_time_per_block
-                const HASHES_PER_DIFFICULTY: f64 = 4294967296.0; // 2^32
-                let hashrate = (difficulty * HASHES_PER_DIFFICULTY) / avg_time_per_block;
+            // Calculate hashrate: difficulty * 2^32 / avg_time_per_block
+            const HASHES_PER_DIFFICULTY: f64 = 4294967296.0; // 2^32
+            let hashrate = (difficulty * HASHES_PER_DIFFICULTY) / avg_time_per_block;
 
-                // Store in cache
-                self.store_network_hashrate(height, hashrate)?;
-            }
+            // Store in cache
+            self.store_network_hashrate(height, hashrate)?;
         }
 
         Ok(())
@@ -1343,12 +1343,12 @@ impl ChainState {
         let mut tips = Vec::new();
         for result in self.chain_tips.iter() {
             let (key, data) = result?;
-            if key.len() == 32 {
-                if let Ok(tip_info) = bincode::deserialize::<TipInfo>(&data) {
-                    let mut hash = [0u8; 32];
-                    hash.copy_from_slice(&key);
-                    tips.push((hash, tip_info.height, tip_info.branchlen, tip_info.status));
-                }
+            if key.len() == 32
+                && let Ok(tip_info) = bincode::deserialize::<TipInfo>(&data)
+            {
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&key);
+                tips.push((hash, tip_info.height, tip_info.branchlen, tip_info.status));
             }
         }
         Ok(tips)

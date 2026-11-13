@@ -773,10 +773,10 @@ fn consensus_checks_reject(
     if !matches!(check_transaction(tx), Ok(ValidationResult::Valid)) {
         return true;
     }
-    if let Some(wits) = witnesses {
-        if wits.len() != tx.inputs.len() {
-            return true;
-        }
+    if let Some(wits) = witnesses
+        && wits.len() != tx.inputs.len()
+    {
+        return true;
     }
 
     // A witness program of any version, native or inside a P2SH redeem script,
@@ -1483,22 +1483,21 @@ impl MempoolManager {
 
         // Publish FeeRateChanged when min fee rate increased due to eviction
         let new_min_fee_rate = self.get_min_fee_rate_sat_per_vb();
-        if new_min_fee_rate != old_min_fee_rate {
-            if let Some(ref event_pub) = *self
+        if new_min_fee_rate != old_min_fee_rate
+            && let Some(ref event_pub) = *self
                 .event_publisher
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
-            {
-                let old_f64 = old_min_fee_rate as f64;
-                let new_f64 = new_min_fee_rate as f64;
-                let mempool_size = self.pool_lock().transactions.len();
-                let event_pub_clone = Arc::clone(event_pub);
-                tokio::spawn(async move {
-                    event_pub_clone
-                        .publish_fee_rate_changed(old_f64, new_f64, mempool_size)
-                        .await;
-                });
-            }
+        {
+            let old_f64 = old_min_fee_rate as f64;
+            let new_f64 = new_min_fee_rate as f64;
+            let mempool_size = self.pool_lock().transactions.len();
+            let event_pub_clone = Arc::clone(event_pub);
+            tokio::spawn(async move {
+                event_pub_clone
+                    .publish_fee_rate_changed(old_f64, new_f64, mempool_size)
+                    .await;
+            });
         }
 
         Ok(())
@@ -1744,10 +1743,10 @@ impl MempoolManager {
     fn txs_this_replacement_removes(&self, tx: &Transaction) -> HashSet<Hash> {
         let mut direct = Vec::new();
         for input in &tx.inputs {
-            if let Some(existing_hash) = self.pool_lock().spenders.get(&input.prevout).copied() {
-                if !direct.contains(&existing_hash) {
-                    direct.push(existing_hash);
-                }
+            if let Some(existing_hash) = self.pool_lock().spenders.get(&input.prevout).copied()
+                && !direct.contains(&existing_hash)
+            {
+                direct.push(existing_hash);
             }
         }
         let mut removed = HashSet::new();
@@ -2072,33 +2071,31 @@ impl MempoolManager {
         // check mainly serves as a safety mechanism.
         if matches!(rbf_config.mode, crate::config::RbfMode::Conservative)
             && rbf_config.min_confirmations > 0
+            && let Some(storage) = storage
         {
-            if let Some(storage) = storage {
-                // Check if transaction is in blockchain and has enough confirmations
-                if let Ok(Some(metadata)) = storage.transactions().get_metadata(&existing_tx_hash) {
-                    // Transaction is in a block - check confirmations
-                    let block_hash = metadata.block_hash;
-                    if let Ok(Some(block_height)) = storage.blocks().get_height_by_hash(&block_hash)
-                    {
-                        if let Ok(Some(tip_height)) = storage.chain().get_height() {
-                            let confirmations = tip_height.saturating_sub(block_height) + 1;
-                            if confirmations < rbf_config.min_confirmations as u64 {
-                                warn!(
-                                    "RBF replacement rejected: conservative mode requires {} confirmations, tx {} has {}",
-                                    rbf_config.min_confirmations,
-                                    hex::encode(existing_tx_hash),
-                                    confirmations
-                                );
-                                return Ok(false);
-                            }
-                        }
+            // Check if transaction is in blockchain and has enough confirmations
+            if let Ok(Some(metadata)) = storage.transactions().get_metadata(&existing_tx_hash) {
+                // Transaction is in a block - check confirmations
+                let block_hash = metadata.block_hash;
+                if let Ok(Some(block_height)) = storage.blocks().get_height_by_hash(&block_hash)
+                    && let Ok(Some(tip_height)) = storage.chain().get_height()
+                {
+                    let confirmations = tip_height.saturating_sub(block_height) + 1;
+                    if confirmations < rbf_config.min_confirmations as u64 {
+                        warn!(
+                            "RBF replacement rejected: conservative mode requires {} confirmations, tx {} has {}",
+                            rbf_config.min_confirmations,
+                            hex::encode(existing_tx_hash),
+                            confirmations
+                        );
+                        return Ok(false);
                     }
                 }
-                // If transaction is not in blockchain (mempool only), confirmations = 0
-                // For conservative mode, we might want to reject replacements of unconfirmed transactions
-                // if min_confirmations > 0, but that would prevent all mempool RBF replacements.
-                // So we allow it - the transaction is still in mempool and can be replaced.
             }
+            // If transaction is not in blockchain (mempool only), confirmations = 0
+            // For conservative mode, we might want to reject replacements of unconfirmed transactions
+            // if min_confirmations > 0, but that would prevent all mempool RBF replacements.
+            // So we allow it - the transaction is still in mempool and can be replaced.
         }
 
         // Check conflict (must spend at least one input from existing tx)
@@ -2469,10 +2466,10 @@ impl MempoolManager {
     ) -> bool {
         let mut direct = Vec::new();
         for input in &tx.inputs {
-            if let Some(existing_hash) = self.pool_lock().spenders.get(&input.prevout).copied() {
-                if !direct.contains(&existing_hash) {
-                    direct.push(existing_hash);
-                }
+            if let Some(existing_hash) = self.pool_lock().spenders.get(&input.prevout).copied()
+                && !direct.contains(&existing_hash)
+            {
+                direct.push(existing_hash);
             }
         }
         if direct.is_empty() {
@@ -2832,10 +2829,10 @@ impl MempoolManager {
                         continue;
                     }
                     self.remove_transaction(member);
-                    if let Some(flag_index) = ids.iter().position(|candidate| candidate == member) {
-                        if flag_index < flags.len() {
-                            flags[flag_index] = false;
-                        }
+                    if let Some(flag_index) = ids.iter().position(|candidate| candidate == member)
+                        && flag_index < flags.len()
+                    {
+                        flags[flag_index] = false;
                     }
                 }
             }
@@ -3425,10 +3422,10 @@ impl MempoolManager {
         // If conflict exists, check if RBF replacement is allowed
         let mut conflicting_tx_hashes: Vec<Hash> = Vec::new();
         for input in &tx.inputs {
-            if let Some(existing_hash) = self.pool_lock().spenders.get(&input.prevout).copied() {
-                if !conflicting_tx_hashes.contains(&existing_hash) {
-                    conflicting_tx_hashes.push(existing_hash);
-                }
+            if let Some(existing_hash) = self.pool_lock().spenders.get(&input.prevout).copied()
+                && !conflicting_tx_hashes.contains(&existing_hash)
+            {
+                conflicting_tx_hashes.push(existing_hash);
             }
         }
 
@@ -3572,16 +3569,16 @@ impl MempoolManager {
             return Ok(false);
         }
 
-        if let Some(wits) = &witnesses {
-            if wits.len() != tx.inputs.len() {
-                warn!(
-                    "Transaction {} rejected: witness count {} != input count {}",
-                    hex::encode(tx_hash),
-                    wits.len(),
-                    tx.inputs.len()
-                );
-                return Ok(false);
-            }
+        if let Some(wits) = &witnesses
+            && wits.len() != tx.inputs.len()
+        {
+            warn!(
+                "Transaction {} rejected: witness count {} != input count {}",
+                hex::encode(tx_hash),
+                wits.len(),
+                tx.inputs.len()
+            );
+            return Ok(false);
         }
 
         // Add transaction to mempool (store full transaction + optional witnesses)
@@ -4201,10 +4198,10 @@ impl MempoolManager {
     fn transaction_weight(&self, tx: &Transaction, witnesses: Option<&[Witness]>) -> u64 {
         use blvm_protocol::segwit::transaction_weight_from_stacks;
 
-        if let Some(wits) = witnesses {
-            if let Ok(weight) = transaction_weight_from_stacks(tx, Some(wits)) {
-                return weight;
-            }
+        if let Some(wits) = witnesses
+            && let Ok(weight) = transaction_weight_from_stacks(tx, Some(wits))
+        {
+            return weight;
         }
         self.estimate_transaction_weight(tx)
     }
@@ -4326,11 +4323,11 @@ impl MempoolManager {
             return;
         }
         let mut slot = self.utxo_set_arc.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(current) = slot.as_ref() {
-            if let Ok(mut guard) = current.try_lock() {
-                *guard = utxo_set.clone();
-                return;
-            }
+        if let Some(current) = slot.as_ref()
+            && let Ok(mut guard) = current.try_lock()
+        {
+            *guard = utxo_set.clone();
+            return;
         }
         *slot = Some(Arc::new(tokio::sync::Mutex::new(utxo_set.clone())));
     }
@@ -4369,10 +4366,10 @@ impl MempoolManager {
         transactions: &[Transaction],
         record_failures: bool,
     ) {
-        if let Some(obs) = obs.as_ref() {
-            if let Some(estimator) = self.fee_estimator() {
-                estimator.on_block_connected(obs);
-            }
+        if let Some(obs) = obs.as_ref()
+            && let Some(estimator) = self.fee_estimator()
+        {
+            estimator.on_block_connected(obs);
         }
         use blvm_protocol::block::calculate_tx_id;
         use blvm_protocol::transaction::is_coinbase;
@@ -4400,11 +4397,9 @@ impl MempoolManager {
         for id in conflicts {
             remove_ids.extend(self.replacement_package(&id));
         }
-        if !record_failures {
-            if let Some(estimator) = self.fee_estimator() {
-                for id in &remove_ids {
-                    estimator.forget_without_failure(id);
-                }
+        if !record_failures && let Some(estimator) = self.fee_estimator() {
+            for id in &remove_ids {
+                estimator.forget_without_failure(id);
             }
         }
         for id in &remove_ids {

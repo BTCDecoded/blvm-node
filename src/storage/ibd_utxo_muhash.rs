@@ -33,13 +33,13 @@ pub(crate) fn reset_engine_resume_muhash_baseline(
         );
         return Ok(());
     }
-    if let Some(tip) = chain.get_engine_validation_tip()? {
-        if tip > export_height {
-            tracing::warn!(
-                "IBD engine: export MuHash snapshot missing at height {export_height}; \
+    if let Some(tip) = chain.get_engine_validation_tip()?
+        && tip > export_height
+    {
+        tracing::warn!(
+            "IBD engine: export MuHash snapshot missing at height {export_height}; \
                  validation_tip={tip} is ahead — run backfill or wait for next checkpoint export"
-            );
-        }
+        );
     }
     Ok(())
 }
@@ -85,7 +85,7 @@ pub fn backfill_engine_export_muhash_if_missing(storage: &Storage) -> Result<boo
         let utxo: UTXO = decode_utxo_with_codec(codec, &val_bytes)?;
         mh.insert_mut(&utxo_muhash_preimage(&op, &utxo));
         count += 1;
-        if count % 5_000_000 == 0 {
+        if count.is_multiple_of(5_000_000) {
             tracing::info!(
                 "IBD engine MuHash backfill: scanned {} UTXOs from {} ({:.1}s)",
                 count,

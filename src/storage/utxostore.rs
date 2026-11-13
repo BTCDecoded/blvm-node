@@ -228,22 +228,21 @@ impl UtxoStore {
         // skips the Vec<u8> allocation from Tree::get and the full rkyv deserialize pass.
         // Not compatible with utxo-compression (rkyv + zstd don't co-exist).
         #[cfg(all(feature = "heed3", not(feature = "utxo-compression")))]
-        if self.value_codec == crate::storage::utxo_value_codec::ValueCodec::Rkyv {
-            if let Some(heed3_tree) = self.utxos.as_heed3_tree() {
-                let rtxn = heed3_tree.env().read_txn()?;
-                let legacy = self.legacy_outpoint_key(outpoint);
-                let slices =
-                    heed3_tree.get_many_heed3(&[key.as_slice(), legacy.as_slice()], &rtxn)?;
-                return match slices.into_iter().flatten().next() {
-                    Some(bytes) => {
-                        let archived = crate::storage::rkyv_codec::access_utxo(bytes)?;
-                        Ok(Some(crate::storage::rkyv_codec::utxo_from_archived(
-                            archived,
-                        )))
-                    }
-                    None => Ok(None),
-                };
-            }
+        if self.value_codec == crate::storage::utxo_value_codec::ValueCodec::Rkyv
+            && let Some(heed3_tree) = self.utxos.as_heed3_tree()
+        {
+            let rtxn = heed3_tree.env().read_txn()?;
+            let legacy = self.legacy_outpoint_key(outpoint);
+            let slices = heed3_tree.get_many_heed3(&[key.as_slice(), legacy.as_slice()], &rtxn)?;
+            return match slices.into_iter().flatten().next() {
+                Some(bytes) => {
+                    let archived = crate::storage::rkyv_codec::access_utxo(bytes)?;
+                    Ok(Some(crate::storage::rkyv_codec::utxo_from_archived(
+                        archived,
+                    )))
+                }
+                None => Ok(None),
+            };
         }
 
         let legacy = self.legacy_outpoint_key(outpoint);

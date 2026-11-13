@@ -694,11 +694,10 @@ impl ChunkAssigner {
         if cheese_hidden {
             static LAST_CHEESE: Mutex<Option<Instant>> = Mutex::new(None);
             let mut g = LAST_CHEESE.lock().unwrap();
-            if let Some(t) = *g {
-                if t.elapsed() < Duration::from_millis(80) {
+            if let Some(t) = *g
+                && t.elapsed() < Duration::from_millis(80) {
                     return false;
                 }
-            }
             *g = Some(Instant::now());
             tracing::warn!(
                 "[IBD_C1T_CHEESE] tip={} covering={} holes={} ahead={} feeder=0 — tip-height race",
@@ -729,11 +728,10 @@ impl ChunkAssigner {
         }
         static LAST_COLD: Mutex<Option<Instant>> = Mutex::new(None);
         let mut g = LAST_COLD.lock().unwrap();
-        if let Some(t) = *g {
-            if t.elapsed() < Duration::from_millis(80) {
+        if let Some(t) = *g
+            && t.elapsed() < Duration::from_millis(80) {
                 return false;
             }
-        }
         *g = Some(Instant::now());
         tracing::warn!(
             "[IBD_C1T_COLD_CLOCK] tip={} covering={} await_ms=0 feeder=0 recv0={} — tip-height race",
@@ -2379,14 +2377,13 @@ impl ChunkAssigner {
     /// Drop only the H cover so the new hero can GetData the hole. Ahead
     /// warehouse stays (R-122 UNCOVER_REFILL cancelled it → 180–200k **42**).
     fn vacate_h_cover_keep_ahead(&self, peer: &str, next_needed: u64) {
-        if let Ok(mut g) = self.in_flight_per_peer.lock() {
-            if let Some(ranges) = g.get_mut(peer) {
+        if let Ok(mut g) = self.in_flight_per_peer.lock()
+            && let Some(ranges) = g.get_mut(peer) {
                 ranges.retain(|&(s, e)| !(s <= next_needed && next_needed <= e));
                 if ranges.is_empty() {
                     g.remove(peer);
                 }
             }
-        }
         self.tip_cover_claims.lock().unwrap().retain(|(p, s, e)| {
             !(p == peer && *s <= next_needed && next_needed <= *e)
         });
@@ -2449,11 +2446,10 @@ impl ChunkAssigner {
         let Some(sticky) = self.preferred_tip_owner() else {
             return false;
         };
-        if let Some(last) = *self.last_tip_trial_at.lock().unwrap() {
-            if last.elapsed() < Duration::from_secs(Self::tip_trial_cooldown_secs()) {
+        if let Some(last) = *self.last_tip_trial_at.lock().unwrap()
+            && last.elapsed() < Duration::from_secs(Self::tip_trial_cooldown_secs()) {
                 return false;
             }
-        }
         let Some(challenger) = self.runway_outrank_challenger(&sticky) else {
             return false;
         };
@@ -2581,11 +2577,10 @@ impl ChunkAssigner {
             return 0;
         }
         let mut last = self.farm_recv_last_tick.lock().unwrap();
-        if let Some(t) = *last {
-            if t.elapsed() < Duration::from_secs(FARM_RECV_TICK_SECS) {
+        if let Some(t) = *last
+            && t.elapsed() < Duration::from_secs(FARM_RECV_TICK_SECS) {
                 return self.farm_recv_mute_streak.load(Ordering::Relaxed);
             }
-        }
         *last = Some(Instant::now());
         self.farm_recv_mute_streak.fetch_add(1, Ordering::Relaxed) + 1
     }
@@ -3144,11 +3139,9 @@ impl ChunkAssigner {
         }
         if let Some((sticky_recv, top_recv)) =
             super::download::download_cached_sticky_vs_top(&sticky)
-        {
-            if h_slow_recv_leader_holds(sticky_recv, top_recv) {
+            && h_slow_recv_leader_holds(sticky_recv, top_recv) {
                 return;
             }
-        }
         if crate::node::parallel_ibd::export_owner_hold_protects(&sticky) {
             return;
         }
@@ -3600,11 +3593,10 @@ impl ChunkAssigner {
             *g = Some(forced.clone());
             drop(g);
             self.clear_all_tip_cover_claims();
-            if let Some(ref p) = prev {
-                if p != &forced {
+            if let Some(ref p) = prev
+                && p != &forced {
                     self.force_release_peer_inflight(p);
                 }
-            }
             self.tip_owner_open.store(false, Ordering::Relaxed);
             self.reset_sticky_wan_tenure(&forced, self.next_needed_height());
             super::tip_stage::rearm_tip_sla();
@@ -3739,11 +3731,10 @@ impl ChunkAssigner {
         static LAST: Mutex<Option<Instant>> = Mutex::new(None);
         {
             let mut g = LAST.lock().unwrap();
-            if let Some(t) = *g {
-                if t.elapsed() < Duration::from_millis(80) {
+            if let Some(t) = *g
+                && t.elapsed() < Duration::from_millis(80) {
                     return;
                 }
-            }
             *g = Some(Instant::now());
         }
         if !self.wan_tip_gap_crawl(next_needed) {
@@ -3814,11 +3805,10 @@ impl ChunkAssigner {
     pub(crate) fn note_tip_progress(&self, next_needed: u64) {
         let mut samples = self.tip_progress_samples.lock().unwrap();
         let now = Instant::now();
-        if let Some((last_t, last_nn)) = samples.back().copied() {
-            if last_nn == next_needed && now.duration_since(last_t) < Duration::from_millis(200) {
+        if let Some((last_t, last_nn)) = samples.back().copied()
+            && last_nn == next_needed && now.duration_since(last_t) < Duration::from_millis(200) {
                 return;
             }
-        }
         samples.push_back((now, next_needed));
         let keep = Duration::from_secs(a6m_recent_window_secs().saturating_mul(3).max(180));
         while let Some((t, _)) = samples.front().copied() {
@@ -4142,11 +4132,10 @@ impl ChunkAssigner {
         } else {
             a6m_rotate_cooldown_secs()
         });
-        if let Some(last) = *self.last_a6m_rotate_at.lock().unwrap() {
-            if last.elapsed() < cooldown {
+        if let Some(last) = *self.last_a6m_rotate_at.lock().unwrap()
+            && last.elapsed() < cooldown {
                 return false;
             }
-        }
         let sticky = match self.preferred_tip_owner() {
             Some(p) if self.tip_sticky_usable(&p) => p,
             _ => return false,
@@ -4754,18 +4743,17 @@ impl ChunkAssigner {
         {
             return false;
         }
-        if let Some(last) = *self.last_tip_trial_at.lock().unwrap() {
-            if last.elapsed() < Duration::from_secs(Self::tip_trial_cooldown_secs()) {
+        if let Some(last) = *self.last_tip_trial_at.lock().unwrap()
+            && last.elapsed() < Duration::from_secs(Self::tip_trial_cooldown_secs()) {
                 return false;
             }
-        }
         // E16: post-OPEN settle — do not displace the OPEN pin during handoff while
         // await briefly crosses the 500ms boost gate (C1u stall: OPEN→TRIAL 1.5s).
         let settle = tip_trial_post_open_settle_secs();
-        if settle > 0 {
-            if let Ok(g) = self.tip_trial_post_open_at.lock() {
-                if let Some(t) = *g {
-                    if t.elapsed() < Duration::from_secs(settle) {
+        if settle > 0
+            && let Ok(g) = self.tip_trial_post_open_at.lock()
+                && let Some(t) = *g
+                    && t.elapsed() < Duration::from_secs(settle) {
                         let pin = self.preferred_tip_owner();
                         let pin_s = pin.as_deref().unwrap_or("-");
                         let pin_bps = pin
@@ -4782,9 +4770,6 @@ impl ChunkAssigner {
                         );
                         return false;
                     }
-                }
-            }
-        }
         // Prefer the pinned owner even when not currently "usable" (blacklisted / not
         // ready). Live Phase4: post-OPEN boost hit need_ms=500 but trials skipped
         // `no_usable_sticky` for seconds while mute burned wall — the whole point of a
@@ -5363,11 +5348,10 @@ impl ChunkAssigner {
             let mut g = self.preferred_tip_owner.lock().unwrap();
             *g = pinned.clone();
         }
-        if gd_slow {
-            if let Some(ref p) = pinned {
+        if gd_slow
+            && let Some(ref p) = pinned {
                 self.remember_gd_slow_pin(p);
             }
-        }
         // Concrete pin → closed sticky; None → leave open for first ready poller.
         self.tip_owner_open
             .store(pinned.is_none(), Ordering::Relaxed);
@@ -5690,8 +5674,8 @@ impl ChunkAssigner {
                     );
                     *g = None;
                     skip_covering0_pin = true;
-                } else if let Some(top_w) = self.top_scored_active_ready_worker() {
-                    if self.tip_owner_should_upgrade(p, &top_w) {
+                } else if let Some(top_w) = self.top_scored_active_ready_worker()
+                    && self.tip_owner_should_upgrade(p, &top_w) {
                         let sticky_score = self.peer_score_of(p);
                         let holds = self.peer_holds_tip_download(p, next_needed);
                         // Dens KEEP / nudge_defers: never score-upgrade away from a peer
@@ -5716,7 +5700,6 @@ impl ChunkAssigner {
                             *g = Some(top_w);
                         }
                     }
-                }
             }
         }
         // Release weak covering claims after upgrade; blacklist demoted unproven only when
@@ -5809,8 +5792,7 @@ impl ChunkAssigner {
                     && pin_target
                         .as_ref()
                         .is_some_and(|p| self.peer_score_of(p) <= Self::TIP_OWNER_MID_SCORE)
-                {
-                    if let Some(mid) =
+                    && let Some(mid) =
                         self.active_ready_worker_above(Self::TIP_OWNER_MID_SCORE, false)
                     {
                         tracing::warn!(
@@ -5826,9 +5808,8 @@ impl ChunkAssigner {
                         );
                         pin_target = Some(mid);
                     }
-                }
-                if let Some(ref forced) = forced_tip {
-                    if pin_target.as_deref() != Some(forced.as_str()) {
+                if let Some(ref forced) = forced_tip
+                    && pin_target.as_deref() != Some(forced.as_str()) {
                         tracing::warn!(
                             "[IBD_TIP_PIN_FORCED] tip={} → {} (first BLVM_IBD_PEERS)",
                             next_needed,
@@ -5836,7 +5817,6 @@ impl ChunkAssigner {
                         );
                         pin_target = Some(forced.clone());
                     }
-                }
                 if let Some(ref top_w) = pin_target {
                     let ahead_only = {
                         let g = self.in_flight_per_peer.lock().unwrap();
@@ -5852,8 +5832,8 @@ impl ChunkAssigner {
                     }
                 }
                 let mut g = self.preferred_tip_owner.lock().unwrap();
-                if g.is_none() {
-                    if let Some(top_w) = pin_target {
+                if g.is_none()
+                    && let Some(top_w) = pin_target {
                         tracing::warn!(
                             "[IBD_TIP_PIN] covering=0 preferred=None → pin top_w={} score={:.3}",
                             top_w,
@@ -5863,7 +5843,6 @@ impl ChunkAssigner {
                         drop(g);
                         self.reset_sticky_wan_tenure(&top_w, next_needed);
                     }
-                }
             }
             self.clear_all_tip_cover_claims();
             self.log_tip_open_stall_diag(next_needed);
@@ -6209,8 +6188,8 @@ impl ChunkAssigner {
             }
             // C: issued extra stays while hero is line-rate and H is covered.
             // dest-ba C1J_ABORT 495. Silent ≥15s still dies (cold leftover).
-            if self.preferred_tip_owner().as_deref() != Some(peer_id) {
-                if let Some(pref) = self.preferred_tip_owner() {
+            if self.preferred_tip_owner().as_deref() != Some(peer_id)
+                && let Some(pref) = self.preferred_tip_owner() {
                     let extra_fresh = last_ago_s.map(|s| s < 15).unwrap_or(true);
                     if extra_fresh
                         && Self::line_rate_or_keep(self.wan_tip_stream_bps(&pref))
@@ -6219,7 +6198,6 @@ impl ChunkAssigner {
                         return false;
                     }
                 }
-            }
             if no_tip_abort {
                 Self::c1j_noabort_log(peer_id, start, end, next_needed, 3);
                 return false;
@@ -6385,8 +6363,8 @@ impl ChunkAssigner {
         // ahead mutes. W51 only no-ops while a deep claim still exists; after the
         // hero pipe completes, walk-promote restickies the mute (243× on o).
         // Hold a usable ≥80 preferred — not steal, not DEAD_OWNER.
-        if let Some(pref) = self.preferred_tip_owner() {
-            if pref != peer_id
+        if let Some(pref) = self.preferred_tip_owner()
+            && pref != peer_id
                 && self.tip_sticky_usable(&pref)
                 && Self::line_rate_or_keep(self.wan_tip_stream_bps(&pref))
             {
@@ -6419,7 +6397,6 @@ impl ChunkAssigner {
                 }
                 return;
             }
-        }
         {
             let mut g = self.tip_cover_claims.lock().unwrap();
             // W51/W65: idempotent only when an existing claim still has substantial

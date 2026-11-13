@@ -88,24 +88,25 @@ fn seed_count_must_be_healthy(
             "checkpoint tree empty at height {checkpoint_height} — export incomplete or wrong slot"
         );
     }
-    if let Some(expected) = expected_count {
-        if expected > 0 && total as u64 != expected {
-            let delta = (total as u64).abs_diff(expected);
-            // Live 2026-07-16: tree 98581399 vs meta 98581401 (Δ=2) after
-            // Emergency checkpoint race — exact match refused seed forever.
-            const MAX_EXPORT_META_SLACK: u64 = 16;
-            if delta > MAX_EXPORT_META_SLACK {
-                anyhow::bail!(
-                    "IBD engine seed: imported {total} UTXOs but chain_info expected {expected} \
+    if let Some(expected) = expected_count
+        && expected > 0
+        && total as u64 != expected
+    {
+        let delta = (total as u64).abs_diff(expected);
+        // Live 2026-07-16: tree 98581399 vs meta 98581401 (Δ=2) after
+        // Emergency checkpoint race — exact match refused seed forever.
+        const MAX_EXPORT_META_SLACK: u64 = 16;
+        if delta > MAX_EXPORT_META_SLACK {
+            anyhow::bail!(
+                "IBD engine seed: imported {total} UTXOs but chain_info expected {expected} \
                      at height {checkpoint_height} (Δ={delta}) — checkpoint incomplete/poisoned (refusing seed)"
-                );
-            }
-            warn!(
-                "IBD engine seed: imported {} UTXOs vs chain_info expected {} at h={} \
-                 (Δ={}) — accepting within slack {}",
-                total, expected, checkpoint_height, delta, MAX_EXPORT_META_SLACK
             );
         }
+        warn!(
+            "IBD engine seed: imported {} UTXOs vs chain_info expected {} at h={} \
+                 (Δ={}) — accepting within slack {}",
+            total, expected, checkpoint_height, delta, MAX_EXPORT_META_SLACK
+        );
     }
     if !crate::storage::ibd_autorepair::checkpoint_utxo_count_monotonic(
         checkpoint_height as u64,
@@ -167,86 +168,84 @@ pub fn seed_from_ibd_utxos(
 
     #[cfg(feature = "heed3")]
     {
-        if codec == ValueCodec::Rkyv {
-            if let Some(h3) = tree.as_heed3_tree() {
-                let scan = h3.scan_heed3(|key_bytes, val_bytes| {
-                    if key_bytes.len() != 40 {
-                        return Ok(());
-                    }
-                    let mut op_key = [0u8; 40];
-                    op_key.copy_from_slice(key_bytes);
-                    let op = key_to_outpoint(&op_key);
-                    let out_key = outpoint_to_output_key(&op);
-                    let archived = access_utxo(val_bytes)?;
-                    let header = OutputHeader {
-                        height: u64::from(archived.height).min(i32::MAX as u64) as i32,
-                        flags: if archived.is_coinbase { 1 } else { 0 },
-                        amount: archived.value.into(),
-                    };
-                    batch_items.push((out_key, header, archived.script_pubkey.to_vec()));
-                    if batch_items.len() >= SEED_BATCH
-                        && push_seed_batch(
-                            db,
-                            checkpoint_height,
-                            &mut batch_items,
-                            &mut entry_buf,
-                            &tx,
-                            &mut total,
-                        )?
-                    {
-                        channel_closed.set(true);
-                        return Ok(());
-                    }
-                    Ok(())
-                });
-                if let Err(e) = scan {
-                    warn!(
-                        "IBD engine seed: heed3 scan failed ({e:#}); falling back to tree.iter()"
-                    );
-                } else if !channel_closed.get() {
-                    if push_seed_batch(
+        if codec == ValueCodec::Rkyv
+            && let Some(h3) = tree.as_heed3_tree()
+        {
+            let scan = h3.scan_heed3(|key_bytes, val_bytes| {
+                if key_bytes.len() != 40 {
+                    return Ok(());
+                }
+                let mut op_key = [0u8; 40];
+                op_key.copy_from_slice(key_bytes);
+                let op = key_to_outpoint(&op_key);
+                let out_key = outpoint_to_output_key(&op);
+                let archived = access_utxo(val_bytes)?;
+                let header = OutputHeader {
+                    height: u64::from(archived.height).min(i32::MAX as u64) as i32,
+                    flags: if archived.is_coinbase { 1 } else { 0 },
+                    amount: archived.value.into(),
+                };
+                batch_items.push((out_key, header, archived.script_pubkey.to_vec()));
+                if batch_items.len() >= SEED_BATCH
+                    && push_seed_batch(
                         db,
                         checkpoint_height,
                         &mut batch_items,
                         &mut entry_buf,
                         &tx,
                         &mut total,
-                    )? {
-                        channel_closed.set(true);
-                    }
-                    if !channel_closed.get() {
-                        drop(tx);
-                        let seg = writer
-                            .join()
-                            .map_err(|_| anyhow::anyhow!("ibd-seed-writer thread panicked"))??;
-                        seed_count_must_be_healthy(
-                            checkpoint_height,
-                            total,
-                            expected_count,
-                            last_accepted,
-                        )?;
-                        db.finalize_seed(seg, checkpoint_height);
-                        db.flush_table_tail()?;
-                        #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
-                        unsafe {
-                            libmimalloc_sys::mi_collect(true);
-                        }
-                        #[cfg(target_os = "linux")]
-                        unsafe {
-                            libc::malloc_trim(0);
-                        }
-                        info!(
-                            "IBD engine: seeded {} UTXOs from checkpoint h={} in {:.1}s \
-                             (heed3 zero-copy scan, peak UTXO buffer ≈ 6 MB)",
-                            total,
-                            checkpoint_height,
-                            t0.elapsed().as_secs_f64()
-                        );
-                        return Ok(total);
-                    }
-                } else {
-                    send_err = true;
+                    )?
+                {
+                    channel_closed.set(true);
+                    return Ok(());
                 }
+                Ok(())
+            });
+            if let Err(e) = scan {
+                warn!("IBD engine seed: heed3 scan failed ({e:#}); falling back to tree.iter()");
+            } else if !channel_closed.get() {
+                if push_seed_batch(
+                    db,
+                    checkpoint_height,
+                    &mut batch_items,
+                    &mut entry_buf,
+                    &tx,
+                    &mut total,
+                )? {
+                    channel_closed.set(true);
+                }
+                if !channel_closed.get() {
+                    drop(tx);
+                    let seg = writer
+                        .join()
+                        .map_err(|_| anyhow::anyhow!("ibd-seed-writer thread panicked"))??;
+                    seed_count_must_be_healthy(
+                        checkpoint_height,
+                        total,
+                        expected_count,
+                        last_accepted,
+                    )?;
+                    db.finalize_seed(seg, checkpoint_height);
+                    db.flush_table_tail()?;
+                    #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
+                    unsafe {
+                        libmimalloc_sys::mi_collect(true);
+                    }
+                    #[cfg(target_os = "linux")]
+                    unsafe {
+                        libc::malloc_trim(0);
+                    }
+                    info!(
+                        "IBD engine: seeded {} UTXOs from checkpoint h={} in {:.1}s \
+                             (heed3 zero-copy scan, peak UTXO buffer ≈ 6 MB)",
+                        total,
+                        checkpoint_height,
+                        t0.elapsed().as_secs_f64()
+                    );
+                    return Ok(total);
+                }
+            } else {
+                send_err = true;
             }
         }
     }

@@ -499,10 +499,10 @@ pub fn try_repair_missing_witness(
         if block_in_memory.is_none() && blockstore.get_block(&block_hash)?.is_none() {
             return Ok(false);
         }
-    } else if let Some(w) = blockstore.get_witness(&block_hash)? {
-        if has_real_witnesses(&w) {
-            return Ok(false);
-        }
+    } else if let Some(w) = blockstore.get_witness(&block_hash)?
+        && has_real_witnesses(&w)
+    {
+        return Ok(false);
     }
     let header_ts = match block_in_memory {
         Some(b) => b.header.timestamp,
@@ -674,7 +674,9 @@ pub(crate) fn gap_persist_gate(
     // before any blockstore call.
     let horizon = published_prune_horizon();
     if height_below_prune_horizon(height, horizon) {
-        if !GAP_PERSIST_PRUNE_SKIP_LOGGED.swap(true, Ordering::Relaxed) || height % 10_000 == 0 {
+        if !GAP_PERSIST_PRUNE_SKIP_LOGGED.swap(true, Ordering::Relaxed)
+            || height.is_multiple_of(10_000)
+        {
             info!("[IBD_GAP_PERSIST_PRUNE_SKIP] h={height} horizon={horizon} val={val_h}");
         }
         return Ok(GapPersistGate::Skip);
@@ -857,7 +859,7 @@ pub fn note_store_apply(height: u64) {
     let n = STORE_APPLY_N
         .fetch_add(1, Ordering::Relaxed)
         .saturating_add(1);
-    if n <= 3 || n % 256 == 0 {
+    if n <= 3 || n.is_multiple_of(256) {
         info!("[IBD_STORE_APPLY] h={} n={}", height, n);
     }
 }

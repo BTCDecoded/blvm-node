@@ -116,9 +116,7 @@ async fn spawn_log_omits_module_config() {
         .config
         .insert("api_key".to_string(), "super-secret-value".to_string());
     let fake_binary = PathBuf::from("/bin/true");
-    let result = spawner
-        .spawn("test-module", &fake_binary, context)
-        .await;
+    let result = spawner.spawn("test-module", &fake_binary, context).await;
     drop(_guard);
 
     assert!(result.is_err());

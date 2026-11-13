@@ -128,12 +128,12 @@ pub fn store_block_with_context_and_index(
         };
         blockstore.store_block_with_witness(block, witnesses, height)?;
         let block_hash = blockstore.get_block_hash(block);
-        if let Some(prev) = previous {
-            if prev != block_hash {
-                blockstore.store_height(height, &prev)?;
-                if let Some(header) = previous_header {
-                    blockstore.store_recent_header(height, &header)?;
-                }
+        if let Some(prev) = previous
+            && prev != block_hash
+        {
+            blockstore.store_height(height, &prev)?;
+            if let Some(header) = previous_header {
+                blockstore.store_recent_header(height, &header)?;
             }
         }
         blockstore.store_hash_height(height, &block_hash)?;
@@ -220,12 +220,12 @@ pub(crate) fn reject_if_bad_prev_hash(
     if height == 0 {
         return Ok(None);
     }
-    if let Some(parent) = blockstore.get_header_at_height(height - 1)? {
-        if !blvm_consensus::block::validate_prev_block_hash(&block.header, &parent) {
-            return Ok(Some(ValidationResult::Invalid(
-                "Block prev_block_hash does not match parent header hash".to_string(),
-            )));
-        }
+    if let Some(parent) = blockstore.get_header_at_height(height - 1)?
+        && !blvm_consensus::block::validate_prev_block_hash(&block.header, &parent)
+    {
+        return Ok(Some(ValidationResult::Invalid(
+            "Block prev_block_hash does not match parent header hash".to_string(),
+        )));
     }
     Ok(None)
 }

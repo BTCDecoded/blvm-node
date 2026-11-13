@@ -171,25 +171,24 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                             node.network
                                 .announce_connected_block(block_hash, block.header.clone())
                                 .await;
-                            if block.header.bits != prev_tip_header_bits {
-                                if let Some(ep) = node
+                            if block.header.bits != prev_tip_header_bits
+                                && let Some(ep) = node
                                     .module_subsystem
                                     .as_ref()
                                     .and_then(|s| s.event_publisher.as_ref())
-                                {
-                                    ep.publish_mining_difficulty_changed(
-                                        prev_tip_header_bits as u32,
-                                        block.header.bits as u32,
-                                        tip_height,
-                                    )
-                                    .await;
-                                    ep.publish_difficulty_adjusted(
-                                        prev_tip_header_bits as u32,
-                                        block.header.bits as u32,
-                                        tip_height,
-                                    )
-                                    .await;
-                                }
+                            {
+                                ep.publish_mining_difficulty_changed(
+                                    prev_tip_header_bits as u32,
+                                    block.header.bits as u32,
+                                    tip_height,
+                                )
+                                .await;
+                                ep.publish_difficulty_adjusted(
+                                    prev_tip_header_bits as u32,
+                                    block.header.bits as u32,
+                                    tip_height,
+                                )
+                                .await;
                             }
 
                             let transaction_count =
@@ -250,29 +249,28 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                             {
                                 if !utxo_set.is_empty()
                                     && let Some(pruning_manager) = node.storage.pruning()
-                                {
-                                    if let (Some(commitment_store), Some(_utxostore)) = (
+                                    && let (Some(commitment_store), Some(_utxostore)) = (
                                         pruning_manager.commitment_store(),
                                         pruning_manager.utxostore(),
-                                    ) {
-                                        if let Err(e) = pruning_manager
-                                            .generate_commitment_from_current_state(
-                                                &block_hash,
-                                                tip_height,
-                                                &utxo_set,
-                                                &commitment_store,
-                                            )
-                                        {
-                                            warn!(
-                                                "Failed to generate commitment for block {}: {}",
-                                                tip_height, e
-                                            );
-                                        } else {
-                                            debug!(
-                                                "Generated UTXO commitment for block {}",
-                                                tip_height
-                                            );
-                                        }
+                                    )
+                                {
+                                    if let Err(e) = pruning_manager
+                                        .generate_commitment_from_current_state(
+                                            &block_hash,
+                                            tip_height,
+                                            &utxo_set,
+                                            &commitment_store,
+                                        )
+                                    {
+                                        warn!(
+                                            "Failed to generate commitment for block {}: {}",
+                                            tip_height, e
+                                        );
+                                    } else {
+                                        debug!(
+                                            "Generated UTXO commitment for block {}",
+                                            tip_height
+                                        );
                                     }
                                 }
                             }
@@ -288,18 +286,17 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                     let chain_height = current_height.saturating_sub(1);
                     let best_header = node.storage.blocks().highest_stored_height().ok().flatten();
                     let is_ibd = node_is_in_ibd(chain_height, best_header);
-                    if let Some(pruning_manager) = node.storage.pruning() {
-                        if let Ok(Some(prune_stats)) =
+                    if let Some(pruning_manager) = node.storage.pruning()
+                        && let Ok(Some(prune_stats)) =
                             pruning_manager.incremental_prune_during_ibd(chain_height, is_ibd)
-                        {
-                            info!(
-                                "Incremental pruning during IBD: {} blocks pruned, {} bytes freed",
-                                prune_stats.blocks_pruned, prune_stats.storage_freed
-                            );
-                            // Flush storage to persist pruning changes
-                            if let Err(e) = node.storage.flush() {
-                                warn!("Failed to flush storage after incremental pruning: {}", e);
-                            }
+                    {
+                        info!(
+                            "Incremental pruning during IBD: {} blocks pruned, {} bytes freed",
+                            prune_stats.blocks_pruned, prune_stats.storage_freed
+                        );
+                        // Flush storage to persist pruning changes
+                        if let Err(e) = node.storage.flush() {
+                            warn!("Failed to flush storage after incremental pruning: {}", e);
                         }
                     }
 
@@ -353,28 +350,28 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                                 }
                             };
 
-                            if let Some(prune_to_height) = prune_height {
-                                if prune_to_height < current_height {
-                                    match pruning_manager.prune_to_height(
-                                        prune_to_height,
-                                        current_height,
-                                        false,
-                                    ) {
-                                        Ok(prune_stats) => {
-                                            info!(
-                                                "Automatic pruning completed: {} blocks pruned, {} blocks kept",
-                                                prune_stats.blocks_pruned, prune_stats.blocks_kept
-                                            );
-                                            // Flush storage to persist pruning changes
-                                            use crate::utils::log_error;
-                                            log_error(
-                                                || node.storage.flush(),
-                                                "Failed to flush storage after automatic pruning",
-                                            );
-                                        }
-                                        Err(e) => {
-                                            warn!("Automatic pruning failed: {}", e);
-                                        }
+                            if let Some(prune_to_height) = prune_height
+                                && prune_to_height < current_height
+                            {
+                                match pruning_manager.prune_to_height(
+                                    prune_to_height,
+                                    current_height,
+                                    false,
+                                ) {
+                                    Ok(prune_stats) => {
+                                        info!(
+                                            "Automatic pruning completed: {} blocks pruned, {} blocks kept",
+                                            prune_stats.blocks_pruned, prune_stats.blocks_kept
+                                        );
+                                        // Flush storage to persist pruning changes
+                                        use crate::utils::log_error;
+                                        log_error(
+                                            || node.storage.flush(),
+                                            "Failed to flush storage after automatic pruning",
+                                        );
+                                    }
+                                    Err(e) => {
+                                        warn!("Automatic pruning failed: {}", e);
                                     }
                                 }
                             }
@@ -450,7 +447,7 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
         loop_counter = loop_counter.saturating_add(1);
 
         // Peers advance the tip while we idle; re-check every ~5s and resume parallel IBD when behind.
-        if loop_counter % 50 == 0 {
+        if loop_counter.is_multiple_of(50) {
             if let Err(e) = node.mempool_manager.process_once().await {
                 warn!("Mempool maintenance failed: {}", e);
             }
@@ -470,7 +467,7 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
         let counter = node
             .disk_check_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if counter % 10 == 0 {
+        if counter.is_multiple_of(10) {
             let timeout_dur = node.storage_timeout();
             use crate::utils::with_custom_timeout;
             match with_custom_timeout(async { node.check_disk_space().await }, timeout_dur).await {

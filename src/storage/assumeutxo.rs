@@ -305,12 +305,12 @@ impl AssumeUtxoManager {
 
         // Load known mainnet snapshots
         for &(height, hash_hex) in MAINNET_ASSUMEUTXO_SNAPSHOTS {
-            if let Ok(hash) = hex::decode(hash_hex) {
-                if hash.len() == 32 {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&hash);
-                    known_snapshots.insert(height, arr);
-                }
+            if let Ok(hash) = hex::decode(hash_hex)
+                && hash.len() == 32
+            {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&hash);
+                known_snapshots.insert(height, arr);
             }
         }
 
@@ -658,13 +658,13 @@ impl AssumeUtxoManager {
         self.background_validated_height = height;
 
         // Check if we've caught up to the snapshot
-        if let Some(snapshot) = &self.loaded_snapshot {
-            if height >= snapshot.block_height {
-                info!(
-                    "Background validation complete! Validated up to snapshot height {}",
-                    snapshot.block_height
-                );
-            }
+        if let Some(snapshot) = &self.loaded_snapshot
+            && height >= snapshot.block_height
+        {
+            info!(
+                "Background validation complete! Validated up to snapshot height {}",
+                snapshot.block_height
+            );
         }
     }
 

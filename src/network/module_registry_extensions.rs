@@ -75,134 +75,134 @@ pub async fn handle_get_module(
         .map_err(|e| anyhow::anyhow!("Failed to fetch module {}: {}", message.name, e))?;
 
     // Check version if specified
-    if let Some(ref requested_version) = message.version {
-        if entry.version != *requested_version {
-            return Err(anyhow::anyhow!(
-                "Module {} version mismatch: requested {}, available {}",
-                message.name,
-                requested_version,
-                entry.version
-            ));
-        }
+    if let Some(ref requested_version) = message.version
+        && entry.version != *requested_version
+    {
+        return Err(anyhow::anyhow!(
+            "Module {} version mismatch: requested {}, available {}",
+            message.name,
+            requested_version,
+            entry.version
+        ));
     }
 
     // Check if module requires payment
     let mut module_binary = entry.binary;
-    if let Some(ref payment_section) = entry.manifest.payment {
-        if payment_section.required {
-            // Module requires payment
-            if let Some(ref payment_id) = message.payment_id {
-                // Payment ID provided - verify payment and decrypt if confirmed
-                let payment_confirmed = match node_api.as_ref() {
-                    Some(api) => payment_is_released(api.as_ref(), payment_id).await?,
-                    None => {
-                        return Err(anyhow::anyhow!(
-                            "blvm-payment is not available: cannot verify payment for module {}",
-                            message.name
-                        ));
-                    }
-                };
+    if let Some(ref payment_section) = entry.manifest.payment
+        && payment_section.required
+    {
+        // Module requires payment
+        if let Some(ref payment_id) = message.payment_id {
+            // Payment ID provided - verify payment and decrypt if confirmed
+            let payment_confirmed = match node_api.as_ref() {
+                Some(api) => payment_is_released(api.as_ref(), payment_id).await?,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "blvm-payment is not available: cannot verify payment for module {}",
+                        message.name
+                    ));
+                }
+            };
 
-                // If payment confirmed, decrypt module; otherwise serve encrypted
-                if payment_confirmed {
-                    // Payment confirmed - decrypt module
-                    if let (Some(ref enc), Some(ref modules_dir_path)) = (encryption, modules_dir) {
-                        match crate::module::encryption::load_encrypted_module(
-                            modules_dir_path,
-                            &message.name,
-                        )
-                        .await
-                        {
-                            Ok((encrypted_binary, metadata)) => {
-                                // Decrypt
-                                let module_hash: [u8; 32] =
-                                    metadata.module_hash[..32].try_into().map_err(|_| {
-                                        anyhow::anyhow!("Invalid module hash length in metadata")
-                                    })?;
+            // If payment confirmed, decrypt module; otherwise serve encrypted
+            if payment_confirmed {
+                // Payment confirmed - decrypt module
+                if let (Some(ref enc), Some(ref modules_dir_path)) = (encryption, modules_dir) {
+                    match crate::module::encryption::load_encrypted_module(
+                        modules_dir_path,
+                        &message.name,
+                    )
+                    .await
+                    {
+                        Ok((encrypted_binary, metadata)) => {
+                            // Decrypt
+                            let module_hash: [u8; 32] =
+                                metadata.module_hash[..32].try_into().map_err(|_| {
+                                    anyhow::anyhow!("Invalid module hash length in metadata")
+                                })?;
 
-                                match crate::module::encryption::load_or_create_master_key(
-                                    modules_dir_path,
+                            match crate::module::encryption::load_or_create_master_key(
+                                modules_dir_path,
+                            ) {
+                                Ok(master_key) => match enc.decrypt_module(
+                                    &encrypted_binary,
+                                    &metadata.nonce,
+                                    payment_id,
+                                    &module_hash,
+                                    &master_key,
                                 ) {
-                                    Ok(master_key) => match enc.decrypt_module(
-                                        &encrypted_binary,
-                                        &metadata.nonce,
-                                        payment_id,
-                                        &module_hash,
-                                        &master_key,
-                                    ) {
-                                        Ok(decrypted) => {
-                                            tracing::info!(
-                                                "Module {} decrypted for payment {}",
-                                                message.name,
-                                                payment_id
-                                            );
-                                            module_binary = Some(decrypted);
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                "Failed to decrypt module {}: {}",
-                                                message.name,
-                                                e
-                                            );
-                                            // Fall back to encrypted version
-                                        }
-                                    },
+                                    Ok(decrypted) => {
+                                        tracing::info!(
+                                            "Module {} decrypted for payment {}",
+                                            message.name,
+                                            payment_id
+                                        );
+                                        module_binary = Some(decrypted);
+                                    }
                                     Err(e) => {
                                         tracing::warn!(
-                                            "Failed to load module master key for {}: {}",
+                                            "Failed to decrypt module {}: {}",
                                             message.name,
                                             e
                                         );
-                                        module_binary = Some(encrypted_binary);
+                                        // Fall back to encrypted version
                                     }
+                                },
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to load module master key for {}: {}",
+                                        message.name,
+                                        e
+                                    );
+                                    module_binary = Some(encrypted_binary);
                                 }
                             }
-                            Err(_) => {
-                                // Encrypted module not found - may not be encrypted yet
-                                // Use original binary if available
-                            }
                         }
-                    }
-                } else {
-                    // Payment pending - serve encrypted version
-                    if let Some(ref modules_dir_path) = modules_dir {
-                        match crate::module::encryption::load_encrypted_module(
-                            modules_dir_path,
-                            &message.name,
-                        )
-                        .await
-                        {
-                            Ok((encrypted_binary, _metadata)) => {
-                                tracing::info!(
-                                    "Serving encrypted module {} (payment pending)",
-                                    message.name
-                                );
-                                module_binary = Some(encrypted_binary);
-                            }
-                            Err(_) => {
-                                // Encrypted module not found - may not be encrypted yet
-                                // Return error or serve nothing
-                                return Err(anyhow::anyhow!(
-                                    "Module {} payment pending but encrypted module not found",
-                                    message.name
-                                ));
-                            }
+                        Err(_) => {
+                            // Encrypted module not found - may not be encrypted yet
+                            // Use original binary if available
                         }
-                    } else {
-                        return Err(anyhow::anyhow!(
-                            "Payment pending for module {} but modules directory not configured",
-                            message.name
-                        ));
                     }
                 }
             } else {
-                // No payment ID provided - return error indicating payment required
-                return Err(anyhow::anyhow!(
-                    "Module {} requires payment. Request payment with GetPaymentRequest message (module_name: {})",
-                    message.name,
-                    message.name
-                ));
+                // Payment pending - serve encrypted version
+                if let Some(ref modules_dir_path) = modules_dir {
+                    match crate::module::encryption::load_encrypted_module(
+                        modules_dir_path,
+                        &message.name,
+                    )
+                    .await
+                    {
+                        Ok((encrypted_binary, _metadata)) => {
+                            tracing::info!(
+                                "Serving encrypted module {} (payment pending)",
+                                message.name
+                            );
+                            module_binary = Some(encrypted_binary);
+                        }
+                        Err(_) => {
+                            // Encrypted module not found - may not be encrypted yet
+                            // Return error or serve nothing
+                            return Err(anyhow::anyhow!(
+                                "Module {} payment pending but encrypted module not found",
+                                message.name
+                            ));
+                        }
+                    }
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "Payment pending for module {} but modules directory not configured",
+                        message.name
+                    ));
+                }
             }
+        } else {
+            // No payment ID provided - return error indicating payment required
+            return Err(anyhow::anyhow!(
+                "Module {} requires payment. Request payment with GetPaymentRequest message (module_name: {})",
+                message.name,
+                message.name
+            ));
         }
     }
 
@@ -274,14 +274,14 @@ pub async fn handle_get_module_by_hash(
                         let cas = cas_arc.read().await;
                         cas.get(&hash_array).ok().inspect(|bin_data| {
                             // Verify size matches if specified
-                            if let Some(expected_size) = binary_section.size {
-                                if bin_data.len() != expected_size as usize {
-                                    tracing::warn!(
-                                        "Binary size mismatch: expected {}, got {}",
-                                        expected_size,
-                                        bin_data.len()
-                                    );
-                                }
+                            if let Some(expected_size) = binary_section.size
+                                && bin_data.len() != expected_size as usize
+                            {
+                                tracing::warn!(
+                                    "Binary size mismatch: expected {}, got {}",
+                                    expected_size,
+                                    bin_data.len()
+                                );
                             }
                         })
                     } else {
@@ -340,10 +340,10 @@ pub async fn handle_get_module_list(
             .iter()
             .filter_map(|name| {
                 // Apply name prefix filter if specified
-                if let Some(prefix) = &name_prefix {
-                    if !name.starts_with(prefix) {
-                        return None;
-                    }
+                if let Some(prefix) = &name_prefix
+                    && !name.starts_with(prefix)
+                {
+                    return None;
                 }
 
                 // Get cached module entry
