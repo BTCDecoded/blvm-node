@@ -1,0 +1,4 @@
+# Validation code. A pull request that changes these paths needs
+# `freeze-exception` or a `Freeze-Exception:` body line. See FREEZE.md.
+src/validation/
+src/node/parallel_ibd/validation_loop.rs
