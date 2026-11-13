@@ -223,6 +223,15 @@ default = [
     "sigop",
     "rest-api",
 ]
+# Audit-surface subset. Not part of `default`. Excludes the module loader,
+# iroh, governance, utxo-commitments, dandelion, rest-api, and sigop.
+minimal = [
+    "sysinfo",
+    "heed3",
+    "libc",
+    "production",
+    "protocol-verification",
+]
 # Note: rocksdb and erlay are mutually exclusive due to clang-sys version conflicts
 iroh = ["dep:iroh"]
 quinn = ["dep:quinn", "dep:rcgen", "dep:rustls", "dep:h3", "dep:h3-quinn"]
