@@ -11,7 +11,7 @@ permissions:
 jobs:
   deny:
     name: cargo-deny
-    runs-on: [self-hosted, Linux, X64, builds]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
@@ -30,7 +30,7 @@ jobs:
   semver:
     name: cargo-semver-checks
     if: github.event_name == 'pull_request'
-    runs-on: [self-hosted, Linux, X64, builds]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:

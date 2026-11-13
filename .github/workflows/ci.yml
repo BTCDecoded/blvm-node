@@ -6,8 +6,16 @@ name: CI
 on:
   push:
     branches: [ main, develop ]
+    paths-ignore:
+      - ".github/**"
+      - "docs/**"
+      - "**/*.md"
   pull_request:
     branches: [ main, develop ]
+    paths-ignore:
+      - ".github/**"
+      - "docs/**"
+      - "**/*.md"
   release:
     types: [published]
   repository_dispatch:
@@ -46,10 +54,16 @@ env:
   # at a parent directory shared with unrelated workflows risks deleting other jobs' build trees.
   BLVM_RUNNER_DATA_ROOT: ${{ vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace) }}
   BLVM_BUILD_TARGET: ${{ format('{0}/{1}/target', vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace), github.run_id) }}
+  # Cargo does not read BLVM_BUILD_TARGET. Without this, every job fills the checkout target/.
+  CARGO_TARGET_DIR: ${{ format('{0}/{1}/target', vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace), github.run_id) }}
   # Keep rustc/link temps on the same volume as target (system /tmp may be small or full).
   TMPDIR: ${{ format('{0}/{1}/tmp', vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace), github.run_id) }}
   TMP: ${{ format('{0}/{1}/tmp', vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace), github.run_id) }}
   TEMP: ${{ format('{0}/{1}/tmp', vars.BLVM_RUNNER_BUILD_ROOT || format('{0}/.build/gh-blvm-node-build', github.workspace), github.run_id) }}
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   setup:
@@ -57,6 +71,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, builds]
 
     if: |
+      (github.event_name != 'pull_request' || (!contains(github.event.pull_request.title, '[skip ci]') && !contains(github.event.pull_request.title, '[ci skip]') && !contains(github.event.pull_request.title, '[no ci]'))) &&
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
@@ -75,6 +90,11 @@ jobs:
           BUILD_ROOT="${BLVM_RUNNER_DATA_ROOT}"
           RUN_ID="${{ github.run_id }}"
           mkdir -p "$BUILD_ROOT/$RUN_ID/target" "$BUILD_ROOT/$RUN_ID/tmp"
+          # Runs before CARGO_TARGET_DIR existed wrote this checkout path. It is not the per-run dir.
+          if [ -d "$WORK/target" ]; then
+            echo "Removing leaked checkout target/"
+            rm -rf "$WORK/target"
+          fi
 
           avail_min_two() {
             local w b
@@ -266,6 +286,7 @@ jobs:
       RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
       BLVM_SECP256K1_NO_GPU: "1"
     if: |
+      (github.event_name != 'pull_request') &&
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
@@ -287,6 +308,10 @@ jobs:
           df -h "${RUNNER_TEMP:-/tmp}" 2>/dev/null || true
           # Show /mnt/data if distinct volume (common self-hosted runner layout)
           df -h /mnt/data 2>/dev/null || true
+          if [ -d "${{ github.workspace }}/target" ]; then
+            echo "Removing leaked checkout target/"
+            rm -rf "${{ github.workspace }}/target"
+          fi
 
           # RUNNER_TEMP is the per-runner-process temp used as CARGO_HOME by this workflow.
           # Clean stale cargo registry/git before the heavy test build to avoid ENOSPC.
@@ -337,6 +362,7 @@ jobs:
           # Stale ../blvm-spec breaks verify (e.g. F_FeeNonNeg missing after spec update).
           if [ -d "../blvm-spec" ]; then rm -rf ../blvm-spec; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
+          if [ -d "${{ github.workspace }}/target" ]; then rm -rf "${{ github.workspace }}/target"; fi
 
       - name: Checkout develop scripts (blvm)
         if: github.ref == 'refs/heads/develop' || github.base_ref == 'develop'
@@ -496,6 +522,7 @@ jobs:
           # Stale ../blvm-spec breaks verify (e.g. F_FeeNonNeg missing after spec update).
           if [ -d "../blvm-spec" ]; then rm -rf ../blvm-spec; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
+          if [ -d "${{ github.workspace }}/target" ]; then rm -rf "${{ github.workspace }}/target"; fi
 
       - name: Install OpenSSL development headers (openssl-sys / native-tls)
         run: |
@@ -554,6 +581,7 @@ jobs:
       RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
     timeout-minutes: 60
     if: |
+      (github.event_name != 'pull_request') &&
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
@@ -576,6 +604,7 @@ jobs:
           # Stale ../blvm-spec breaks verify (e.g. F_FeeNonNeg missing after spec update).
           if [ -d "../blvm-spec" ]; then rm -rf ../blvm-spec; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
+          if [ -d "${{ github.workspace }}/target" ]; then rm -rf "${{ github.workspace }}/target"; fi
 
       - name: Setup blvm-spec (Orange Paper for spec-lock verification)
         uses: BTCDecoded/rust-ci/setup-blvm-spec@main
@@ -703,7 +732,7 @@ jobs:
   fmt:
     name: Format
     needs: setup
-    runs-on: [self-hosted, Linux, X64, builds]
+    runs-on: ubuntu-latest
 
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
@@ -736,6 +765,7 @@ jobs:
     env:
       RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
     if: |
+      (github.event_name != 'pull_request') &&
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
@@ -758,6 +788,7 @@ jobs:
           # Stale ../blvm-spec breaks verify (e.g. F_FeeNonNeg missing after spec update).
           if [ -d "../blvm-spec" ]; then rm -rf ../blvm-spec; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
+          if [ -d "${{ github.workspace }}/target" ]; then rm -rf "${{ github.workspace }}/target"; fi
 
       - name: Install OpenSSL development headers (openssl-sys / native-tls)
         run: |
@@ -807,6 +838,7 @@ jobs:
     env:
       RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
     if: |
+      (github.event_name != 'pull_request') &&
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
@@ -860,6 +892,7 @@ jobs:
       RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
     timeout-minutes: 30
     if: |
+      (github.event_name != 'pull_request') &&
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
         !contains(github.event.head_commit.message, '[ci skip]') &&
@@ -1077,6 +1110,7 @@ jobs:
           # Stale ../blvm-spec breaks verify (e.g. F_FeeNonNeg missing after spec update).
           if [ -d "../blvm-spec" ]; then rm -rf ../blvm-spec; fi
           if [ -f ".cargo/config.toml" ]; then rm -f .cargo/config.toml; fi
+          if [ -d "${{ github.workspace }}/target" ]; then rm -rf "${{ github.workspace }}/target"; fi
 
       - name: Isolate CARGO_HOME for this runner
         # RUNNER_TEMP is set by the Actions runner to a per-runner-process temp dir.
@@ -1819,6 +1853,10 @@ jobs:
           # Only this run's dir: concurrent runs on this runner still need theirs.
           # Clean fuzz temp dir
           rm -rf ${{ github.workspace }}/.build/gh-fuzz-blvm-node 2>/dev/null || true
+          if [ -d "${{ github.workspace }}/target" ]; then
+            echo "Removing leaked checkout target/"
+            rm -rf "${{ github.workspace }}/target"
+          fi
           echo "=== disk after teardown ==="
           df -h /
 
