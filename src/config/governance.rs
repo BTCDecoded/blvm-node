@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Governance message relay configuration
 #[cfg(feature = "governance")]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct GovernanceConfig {
     /// Enable governance message relay (default: false)
     /// If false, governance messages are gossiped but not forwarded to blvm-commons
@@ -20,6 +20,32 @@ pub struct GovernanceConfig {
     /// Can also be set via COMMONS_API_KEY environment variable
     #[serde(default)]
     pub api_key: Option<String>,
+}
+
+#[cfg(feature = "governance")]
+impl std::fmt::Debug for GovernanceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let url = self.commons_url.as_deref().map(redact_url_if_secret);
+        f.debug_struct("GovernanceConfig")
+            .field("enabled", &self.enabled)
+            .field("commons_url", &url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "redacted"))
+            .finish()
+    }
+}
+
+#[cfg(feature = "governance")]
+fn redact_url_if_secret(url: &str) -> String {
+    let lower = url.to_ascii_lowercase();
+    if url.contains('@')
+        || lower.contains("key=")
+        || lower.contains("token=")
+        || lower.contains("password=")
+    {
+        "redacted".to_string()
+    } else {
+        url.to_string()
+    }
 }
 
 #[cfg(feature = "governance")]
@@ -125,5 +151,31 @@ impl BanListSharingConfig {
                 false
             }
         })
+    }
+}
+
+#[cfg(all(test, feature = "governance"))]
+mod secret_debug {
+    use super::GovernanceConfig;
+
+    #[test]
+    fn debug_output_does_not_contain_the_api_key_or_a_url_secret() {
+        let config = GovernanceConfig {
+            enabled: true,
+            commons_url: Some(
+                "https://commons.example/internal?api_key=url-secret-should-not-leak".to_string(),
+            ),
+            api_key: Some("commons-api-key-should-not-leak".to_string()),
+        };
+        let rendered = format!("{config:?}");
+        assert!(
+            !rendered.contains("commons-api-key-should-not-leak"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("url-secret-should-not-leak"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("redacted"));
     }
 }
