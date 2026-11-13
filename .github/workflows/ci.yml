@@ -601,10 +601,9 @@ jobs:
           pkg-config --exists openssl 2>/dev/null || command -v openssl >/dev/null 2>&1 || { echo "❌ openssl not found; install it on the runner."; exit 1; }
           echo "✅ Z3 + clang + jq + openssl present."
 
-          # 0.1.48 check-drift exits on notation the Orange Paper does not spell the
-          # same way. 0.1.45 is the verifier that passed the consensus 0.1.73 release.
-          # The installed binary resolves the spec from BLVM_SPEC_DIR, not from --spec-path.
-          cargo install --force blvm-spec-lock --version 0.1.45 --locked --features z3
+          # Consensus installs the current spec-lock. 0.1.45 no longer parses the
+          # Orange Paper latex (F_SighashBase static FAIL), so verify never starts.
+          cargo install --force blvm-spec-lock --version '>=0.1, <1' --locked --features z3
 
           UA='BTCDecoded/blvm-node verify job (https://github.com/BTCDecoded/blvm-node)'
           CONS_VER=$(curl -fsSL --retry 3 --retry-delay 2 -A "$UA" \
