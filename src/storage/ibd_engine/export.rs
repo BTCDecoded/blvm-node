@@ -1605,9 +1605,17 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(ibd)]
     fn test_run_watermark_export_streaming_writes_utxos() {
         // Phase 3 production path: run_watermark_export must succeed via streaming
         // checkpoint export (not scan_all_live).
+        struct RestoreFence;
+        impl Drop for RestoreFence {
+            fn drop(&mut self) {
+                crate::storage::ibd_engine::set_gc_fence(i32::MAX);
+            }
+        }
+        let _restore_fence = RestoreFence;
         let tmp = NamedTempFile::new().unwrap();
         let db = UtxoDatabase::open(tmp.path(), 0).unwrap();
         let tree: Arc<dyn Tree> = Arc::new(MockTree::new());
@@ -1641,6 +1649,13 @@ mod tests {
     #[test]
     #[serial_test::serial(ibd)]
     fn r349_piggyback_export_defaults_spill_sort_and_clean_up() {
+        struct RestoreFence;
+        impl Drop for RestoreFence {
+            fn drop(&mut self) {
+                crate::storage::ibd_engine::set_gc_fence(i32::MAX);
+            }
+        }
+        let _restore_fence = RestoreFence;
         assert!(export_global_offset_sort(), "E3c default on");
         assert!(export_append_load(), "E4 default on");
         let tmp = NamedTempFile::new().unwrap();

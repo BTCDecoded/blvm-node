@@ -1705,6 +1705,9 @@ pub(crate) fn test_reset_tip_stage() {
     }
     super::IBD_FIRST_HOLE.store(0, Ordering::Relaxed);
     super::IBD_FIRST_HOLE_AT.store(0, Ordering::Relaxed);
+    // A leftover `true` makes `first_missing_height` return H+1, so the
+    // tournament winner's GetData starts at 2 instead of 1.
+    super::IBD_TIP_IN_REORDER.store(false, Ordering::Relaxed);
     super::test_clear_lookahead_reserved();
 }
 

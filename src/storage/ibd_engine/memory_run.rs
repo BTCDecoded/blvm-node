@@ -1259,6 +1259,16 @@ mod tests {
     #[serial_test::serial(ibd)]
     #[test]
     fn test_merge_cross_height_with_recreation() {
+        // Other lib tests store a checkpoint fence and do not always put it
+        // back. A delete above that fence must be kept; the live-UTXO case
+        // below requires the open fence.
+        struct RestoreFence;
+        impl Drop for RestoreFence {
+            fn drop(&mut self) {
+                set_gc_fence(i32::MAX);
+            }
+        }
+        let _restore = RestoreFence;
         let k = make_key(1);
         // UTXO created h=100, spent h=200, recreated h=300 (early Bitcoin P2PKH reuse).
         let run_a = Arc::new(MemoryRun::build(vec![
@@ -1266,6 +1276,15 @@ mod tests {
             OutputKV::new_delete(k, 200),
             OutputKV::new_add(k, 300, 99),
         ]));
+        set_gc_fence(50);
+        let blocked = MemoryRun::merge(&[Arc::clone(&run_a)]);
+        assert_eq!(
+            blocked.entries.len(),
+            3,
+            "delete above the fence stays, got {:?}",
+            blocked.entries
+        );
+        set_gc_fence(i32::MAX);
         let merged = MemoryRun::merge(&[run_a]);
         // Add(h=100) + Delete(h=200) cancel; Add(h=300) survives as the live UTXO.
         assert_eq!(
