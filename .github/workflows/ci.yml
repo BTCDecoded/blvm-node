@@ -1469,7 +1469,7 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       
-      # Commit the [package] version bump back to main (same commit message as blvm-consensus).
+      # Record the [package] version bump as a pull request. Do not push it onto main.
       # Only after a successful publish, and only the [package] version line: the release
       # Cargo.toml on disk also has crates.io dependency pins and a stripped [patch.crates-io],
       # which must not land on main. The working tree is left untouched (publish already ran).
@@ -1503,9 +1503,35 @@ jobs:
           if [ -n "${REPO_ACCESS_TOKEN}" ]; then
             git config --local --unset-all 'http.https://github.com/.extraheader' 2>/dev/null || true
             git remote set-url origin "https://x-access-token:${REPO_ACCESS_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-            git -c credential.helper= push origin HEAD:${{ github.ref }} || true
+            RELEASE_BRANCH="release/v${VERSION}"
+            BASE="${{ github.ref_name }}"
+            if git -c credential.helper= push origin "HEAD:${RELEASE_BRANCH}"; then
+              OWNER="${GITHUB_REPOSITORY%%/*}"
+              EXISTING=$(curl -sS -o /tmp/release-prs.json -w "%{http_code}" \
+                -H "Authorization: Bearer ${REPO_ACCESS_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls?head=${OWNER}:${RELEASE_BRANCH}&base=${BASE}&state=open" || echo "000")
+              if [ "${EXISTING}" = "200" ] && grep -q '"number"' /tmp/release-prs.json; then
+                echo "Pull request already open for ${RELEASE_BRANCH}"
+              else
+                PAYLOAD=$(printf '{"title":"Bump version to %s for release [skip ci]","head":"%s","base":"%s","body":"This pull request records the release version on main. It does not change consensus behavior. The title contains [skip ci] so merging it does not cut another release. The tag push is unchanged."}' "${VERSION}" "${RELEASE_BRANCH}" "${BASE}")
+                CODE=$(curl -sS -o /tmp/release-pr.json -w "%{http_code}" \
+                  -X POST \
+                  -H "Authorization: Bearer ${REPO_ACCESS_TOKEN}" \
+                  -H "Accept: application/vnd.github+json" \
+                  "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls" \
+                  -d "${PAYLOAD}" || echo "000")
+                if [ "${CODE}" = "201" ]; then
+                  echo "Opened pull request for ${RELEASE_BRANCH}"
+                else
+                  echo "::warning::Version bump is on ${RELEASE_BRANCH} but the pull request was not opened (HTTP ${CODE})"
+                fi
+              fi
+            else
+              echo "::warning::Could not push ${RELEASE_BRANCH}. main was not updated."
+            fi
           else
-            echo "⚠️  REPO_ACCESS_TOKEN not set, skipping push"
+            echo "⚠️  REPO_ACCESS_TOKEN not set, skipping pull request"
           fi
       
       - name: Verify published crate is available
