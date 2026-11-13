@@ -5,10 +5,10 @@
 //! Unix: Unix domain sockets. Windows: named pipes.
 
 use futures::{SinkExt, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
@@ -23,7 +23,7 @@ use crate::module::ipc::protocol::{
     CliSpec, InvocationMessage, InvocationResultMessage, InvocationResultPayload, InvocationType,
     ModuleMessage, RequestMessage, RequestPayload, ResponseMessage, ResponsePayload,
 };
-use crate::module::traits::{EventType, ModuleError, NodeAPI, module_error_msg};
+use crate::module::traits::{module_error_msg, EventType, ModuleError, NodeAPI};
 use tokio::sync::oneshot;
 
 /// Async invoker for in-process WASM modules. Used when a module has no IPC connection.
@@ -51,8 +51,6 @@ pub trait WasmInvoker: Send + Sync {
 pub struct ModuleIpcServer {
     /// Socket/pipe path where server listens
     socket_path: PathBuf,
-    /// Connection count (for fallback module IDs)
-    connection_count: Arc<std::sync::atomic::AtomicUsize>,
     /// Event manager for publishing events
     event_manager: Option<Arc<crate::module::api::events::EventManager>>,
     /// API hub for request routing
@@ -96,6 +94,8 @@ pub struct ModuleIpcServer {
     wasm_invoker: Option<Arc<dyn WasmInvoker>>,
     /// Timer service notified when a module connects and disconnects.
     timer_service: Option<crate::module::timers::TimerService>,
+    /// Module ids this node minted. Handshake rejects every other id.
+    issued_module_ids: Arc<std::sync::RwLock<HashSet<String>>>,
 }
 
 /// Active connection to a module (generic over stream read half)
@@ -161,6 +161,8 @@ pub struct ModuleIpcHandle {
         Arc<tokio::sync::Mutex<HashMap<u64, oneshot::Sender<InvocationResultMessage>>>>,
     pub(crate) next_invocation_id: Arc<AtomicU64>,
     pub(crate) cli_registry: Arc<tokio::sync::RwLock<HashMap<String, CliSpec>>>,
+    /// Module ids the node minted. A handshake for any other id is rejected.
+    pub(crate) issued_module_ids: Arc<std::sync::RwLock<HashSet<String>>>,
 }
 
 impl ModuleIpcHandle {
@@ -173,6 +175,16 @@ impl ModuleIpcHandle {
     pub async fn unregister_cli_spec_by_name(&self, module_name: &str) {
         let mut registry = self.cli_registry.write().await;
         registry.retain(|id, _| id != module_name && !id.starts_with(&format!("{module_name}_")));
+    }
+
+    /// Record an id the node minted. Handshake rejects every other id.
+    ///
+    /// Safe to call while `start` holds the server mutex: the set is its own lock.
+    pub fn issue_module_id(&self, module_id: &str) {
+        self.issued_module_ids
+            .write()
+            .expect("issued module ids")
+            .insert(module_id.to_string());
     }
 
     /// Invoke a subprocess module's registered ModuleAPI method (node → module).
@@ -421,6 +433,7 @@ impl ModuleIpcServer {
             pending_invocations: Arc::clone(&self.pending_invocations),
             next_invocation_id: Arc::clone(&self.next_invocation_id),
             cli_registry: Arc::clone(&self.cli_registry),
+            issued_module_ids: Arc::clone(&self.issued_module_ids),
         }
     }
 
@@ -428,7 +441,6 @@ impl ModuleIpcServer {
     pub fn new<P: AsRef<Path>>(socket_path: P) -> Self {
         Self {
             socket_path: socket_path.as_ref().to_path_buf(),
-            connection_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             event_manager: None,
             api_hub: None,
             rpc_channels: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -440,7 +452,16 @@ impl ModuleIpcServer {
             #[cfg(feature = "wasm-modules")]
             wasm_invoker: None,
             timer_service: None,
+            issued_module_ids: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
+    }
+
+    /// Record an id this node minted. See [`ModuleIpcHandle::issue_module_id`].
+    pub fn issue_module_id(&self, module_id: &str) {
+        self.issued_module_ids
+            .write()
+            .expect("issued module ids")
+            .insert(module_id.to_string());
     }
 
     /// Notify this service when modules connect and disconnect.
@@ -816,7 +837,6 @@ impl ModuleIpcServer {
 /// Shared per-connection state. Each accepted module runs on its own task.
 #[derive(Clone)]
 struct ConnectionCtx {
-    connection_count: Arc<std::sync::atomic::AtomicUsize>,
     event_manager: Option<Arc<crate::module::api::events::EventManager>>,
     api_hub: Option<Arc<tokio::sync::Mutex<ModuleApiHub>>>,
     rpc_channels: Arc<
@@ -846,12 +866,12 @@ struct ConnectionCtx {
         >,
     >,
     timer_service: Option<crate::module::timers::TimerService>,
+    issued_module_ids: Arc<std::sync::RwLock<HashSet<String>>>,
 }
 
 impl ModuleIpcServer {
     fn connection_ctx(&self) -> ConnectionCtx {
         ConnectionCtx {
-            connection_count: Arc::clone(&self.connection_count),
             event_manager: self.event_manager.clone(),
             api_hub: self.api_hub.clone(),
             rpc_channels: Arc::clone(&self.rpc_channels),
@@ -860,6 +880,7 @@ impl ModuleIpcServer {
             pending_invocations: Arc::clone(&self.pending_invocations),
             rpc_pending: Arc::clone(&self.rpc_pending),
             timer_service: self.timer_service.clone(),
+            issued_module_ids: Arc::clone(&self.issued_module_ids),
         }
     }
 }
@@ -924,6 +945,32 @@ impl ConnectionCtx {
                             _ => None,
                         };
                         if let Some((module_id, module_name)) = accepted {
+                            let issued = self
+                                .issued_module_ids
+                                .read()
+                                .expect("issued module ids")
+                                .contains(&module_id);
+                            if !issued {
+                                let nak = ResponseMessage::error(
+                                    request.correlation_id,
+                                    "module id was not issued by the node".to_string(),
+                                );
+                                let nak_bytes = bincode::serialize(&ModuleMessage::Response(nak))
+                                    .map_err(|e| {
+                                    ModuleError::SerializationError(e.to_string())
+                                })?;
+                                writer
+                                    .send(bytes::Bytes::from(nak_bytes))
+                                    .await
+                                    .map_err(|e| {
+                                        ModuleError::IpcError(format!(
+                                            "Failed to send handshake rejection: {e}"
+                                        ))
+                                    })?;
+                                return Err(ModuleError::IpcError(
+                                    "module id was not issued by the node".to_string(),
+                                ));
+                            }
                             let ack = ResponseMessage {
                                 correlation_id: request.correlation_id,
                                 success: true,
@@ -944,11 +991,9 @@ impl ConnectionCtx {
                                 })?;
                             (module_id, module_name)
                         } else {
-                            warn!("Module did not send handshake, using fallback ID");
-                            let timestamp = crate::utils::current_timestamp_nanos();
-                            let count = self.connection_count.fetch_add(1, Ordering::SeqCst);
-                            let module_id = format!("module_{count}_{timestamp}");
-                            (module_id.clone(), module_id)
+                            return Err(ModuleError::IpcError(
+                                "First message must be a handshake request".to_string(),
+                            ));
                         }
                     }
                     _ => {
@@ -2201,6 +2246,7 @@ mod timer_invoke_tests {
             pending_invocations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             next_invocation_id: Arc::new(AtomicU64::new(1)),
             cli_registry: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            issued_module_ids: Arc::new(std::sync::RwLock::new(HashSet::new())),
         };
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let err = handle

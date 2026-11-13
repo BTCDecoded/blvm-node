@@ -481,6 +481,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unissued_module_id_is_rejected() {
+        let (_temp_dir, socket_path) = ipc_harness::setup_ipc_socket();
+        let node_api = Arc::new(MockNodeAPI::new());
+        let mut server_handle =
+            ipc_harness::spawn_ipc_server_with(socket_path.clone(), node_api, |server| server);
+        let mut client =
+            ipc_harness::wait_bound_then_connect(&socket_path, &mut server_handle).await;
+        let correlation_id = client.next_correlation_id();
+        let handshake = RequestMessage {
+            correlation_id,
+            request_type: blvm_node::module::ipc::protocol::MessageType::Handshake,
+            payload: blvm_node::module::ipc::protocol::RequestPayload::Handshake {
+                module_id: "not-issued".to_string(),
+                module_name: "Not Issued".to_string(),
+                version: "1.0.0".to_string(),
+            },
+        };
+        let response = client.request(handshake).await.unwrap();
+        assert!(!response.success);
+        let error = response.error.unwrap_or_default();
+        assert!(error.contains("not issued"), "handshake error was {error}");
+        server_handle.abort();
+    }
+
+    #[tokio::test]
     async fn test_server_get_block_request() {
         let (_temp_dir, socket_path) = ipc_harness::setup_ipc_socket();
         let node_api = Arc::new(MockNodeAPI::new());
@@ -761,6 +786,7 @@ mod tests {
         let event_mgr_clone = Arc::clone(&event_manager);
         let mut server_handle =
             ipc_harness::spawn_ipc_server_with(socket_path.clone(), node_api, move |s| {
+                s.issue_module_id("test");
                 s.with_event_manager(event_mgr_clone)
             });
 

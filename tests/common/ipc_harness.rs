@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, Instant, sleep};
+use tokio::time::{sleep, Duration, Instant};
 
 use blvm_node::module::ipc::client::ModuleIpcClient;
 use blvm_node::module::ipc::server::ModuleIpcServer;
@@ -23,7 +23,14 @@ pub fn spawn_ipc_server<A: NodeAPI + Send + Sync + 'static>(
     server_path: PathBuf,
     node_api: Arc<A>,
 ) -> JoinHandle<Result<(), ModuleError>> {
-    spawn_ipc_server_with(server_path, node_api, |s| s)
+    // Fixture ids used by the existing IPC tests. A test that wants the
+    // rejection path starts a server without issuing its id.
+    spawn_ipc_server_with(server_path, node_api, |server| {
+        for id in ["test", "test-module", "cov-test", "cov-wrap", "cov-int"] {
+            server.issue_module_id(id);
+        }
+        server
+    })
 }
 
 /// Build the server (e.g. `with_event_manager`) before `start`.

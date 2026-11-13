@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -25,7 +25,7 @@ use crate::module::security::permissions::PermissionSet;
 use crate::module::traits::{ModuleContext, ModuleError, ModuleMetadata, ModuleState};
 #[cfg(feature = "wasm-modules")]
 use crate::module::wasm::{WasmModuleInstance, WasmModuleLoader};
-use crate::utils::{MODULE_RELOAD_CLEANUP_DELAY, new_request_id};
+use crate::utils::{new_request_id, MODULE_RELOAD_CLEANUP_DELAY};
 
 /// Module manager coordinates all loaded modules
 pub struct ModuleManager {
@@ -1206,7 +1206,11 @@ impl ModuleManager {
             }
         }
 
-        // Native path: spawn subprocess
+        // Native path: spawn subprocess. The handshake id has to be one this
+        // node minted; the accept loop rejects every other id.
+        if let Some(handle) = &self.ipc_handle {
+            handle.issue_module_id(&module_id);
+        }
         let process = self
             .spawner
             .spawn(module_name, binary_path, context)
@@ -2242,8 +2246,8 @@ impl ModuleManager {
         crate::module::github_release_install::validate_github_repo(&github_repo)?;
 
         use crate::module::github_release_install::{
-            DEFAULT_MODULE_MANIFEST_REF, default_module_toml_raw_url, release_tag,
-            resolve_release_version_for_constraint,
+            default_module_toml_raw_url, release_tag, resolve_release_version_for_constraint,
+            DEFAULT_MODULE_MANIFEST_REF,
         };
 
         let constraint = version_constraint.trim();

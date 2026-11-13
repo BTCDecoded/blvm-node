@@ -16,8 +16,8 @@ use blvm_node::module::ipc::protocol::{
 use blvm_node::module::ipc::server::{IpcTimerTransport, ModuleIpcServer};
 use blvm_node::module::timers::service::TimerService;
 use blvm_node::module::timers::types::{
-    CreateMode, First, LEGACY_TIMER_UNSUPPORTED, Pacing, Repeat, TimerAck, TimerConfig, TimerState,
-    monotonic_interval,
+    monotonic_interval, CreateMode, First, Pacing, Repeat, TimerAck, TimerConfig, TimerState,
+    LEGACY_TIMER_UNSUPPORTED,
 };
 use blvm_node::storage::Storage;
 use tempfile::TempDir;
@@ -27,6 +27,7 @@ struct Running {
     _dir: TempDir,
     socket: std::path::PathBuf,
     server: JoinHandle<Result<(), blvm_node::module::traits::ModuleError>>,
+    ipc: blvm_node::module::ipc::server::ModuleIpcHandle,
 }
 
 async fn start_server() -> Running {
@@ -41,7 +42,7 @@ async fn start_server() -> Running {
     let mut server = ModuleIpcServer::new(&socket).with_timer_service(service.clone());
     let ipc = server.handle();
     service
-        .set_transport(Arc::new(IpcTimerTransport::new(ipc)))
+        .set_transport(Arc::new(IpcTimerTransport::new(ipc.clone())))
         .await;
     let api = Arc::new(api);
     let server = tokio::spawn(async move { server.start(api).await });
@@ -56,6 +57,7 @@ async fn start_server() -> Running {
         _dir: dir,
         socket,
         server,
+        ipc,
     }
 }
 
@@ -64,6 +66,8 @@ fn module_id(name: &str, suffix: &str) -> String {
 }
 
 async fn connect(running: &Running, name: &str, suffix: &str) -> ModuleIpcClient {
+    let id = module_id(name, suffix);
+    running.ipc.issue_module_id(&id);
     let mut client = ModuleIpcClient::connect(&running.socket).await.unwrap();
     let correlation_id = client.next_correlation_id();
     let response = client
@@ -71,7 +75,7 @@ async fn connect(running: &Running, name: &str, suffix: &str) -> ModuleIpcClient
             correlation_id,
             request_type: MessageType::Handshake,
             payload: RequestPayload::Handshake {
-                module_id: module_id(name, suffix),
+                module_id: id,
                 module_name: name.to_string(),
                 version: "0.0.0".to_string(),
             },

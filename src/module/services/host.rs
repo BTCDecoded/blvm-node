@@ -18,8 +18,8 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -32,7 +32,7 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio::task::JoinHandle;
 use tracing::info;
 
@@ -679,6 +679,7 @@ mod tests {
             pending_invocations: Arc::clone(&pending),
             next_invocation_id: Arc::new(AtomicU64::new(1)),
             cli_registry: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            issued_module_ids: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         };
         let pending_reply = Arc::clone(&pending);
         let reply = tokio::spawn(async move {
