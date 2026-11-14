@@ -1206,7 +1206,9 @@ impl ModuleManager {
         }
 
         // Native path: spawn subprocess. The handshake id has to be one this
-        // node minted; the accept loop rejects every other id.
+        // node minted; the accept loop rejects every other id. The handle is
+        // unix-only; Windows has no module IPC server to register it with.
+        #[cfg(unix)]
         if let Some(handle) = &self.ipc_handle {
             handle.issue_module_id(&module_id);
         }
