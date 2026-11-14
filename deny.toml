@@ -4,8 +4,11 @@
 # before that upgrade exists. See docs/stability/PROGRESS.md.
 
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
+# cargo-deny 0.16 removed the vulnerability lint. Vulnerabilities still deny
+# unless they are in ignore. 0.18 made unmaintained a scope: none, workspace,
+# transitive, or all. The previous value was "warn", which this schema cannot
+# express. "none" is the scope that does not fail the build.
+unmaintained = "none"
 yanked = "warn"
 ignore = [
     "RUSTSEC-2026-0118",
