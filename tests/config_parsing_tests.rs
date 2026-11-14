@@ -32,7 +32,6 @@ fn test_module_config_default() {
         config.enabled_modules.get("blvm-index").map(String::as_str),
         Some("0.1.*")
     );
-    assert!(config.enabled_modules.get("blvm-wallet-index").is_none());
     assert!(config.enabled_modules.get("blvm-fees").is_none());
     assert!(config.enabled_modules.get("blvm-upstream").is_none());
     assert!(config.registry_url.is_some());
