@@ -410,16 +410,26 @@ pub fn host_is_loopback_link_local_or_private(host: &str) -> bool {
 
 pub fn ip_is_loopback_link_local_or_private(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(ip) => {
-            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
-        }
+        IpAddr::V4(ip) => ipv4_is_loopback_link_local_or_private(ip),
         IpAddr::V6(ip) => {
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return ipv4_is_loopback_link_local_or_private(v4);
+            }
             ip.is_loopback()
                 || ip.is_unicast_link_local()
                 || ip.is_unique_local()
                 || ip.is_unspecified()
         }
     }
+}
+
+fn ipv4_is_loopback_link_local_or_private(ip: std::net::Ipv4Addr) -> bool {
+    ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+}
+
+/// A public host must resolve to a public address. A loopback, link-local, or private host must too.
+fn resolved_address_allowed(host: &str, ip: IpAddr) -> bool {
+    host_is_loopback_link_local_or_private(host) == ip_is_loopback_link_local_or_private(ip)
 }
 
 fn content_type_allowed(value: Option<&str>) -> bool {
@@ -614,9 +624,16 @@ async fn resolve_connect_address(origin: &HttpOrigin) -> Result<IpAddr, HttpBrok
         .map_err(|err| {
             HttpBrokerError::new(Some(origin.display()), format!("dns lookup failed: {err}"))
         })?;
-    addrs.next().map(|addr| addr.ip()).ok_or_else(|| {
+    let ip = addrs.next().map(|addr| addr.ip()).ok_or_else(|| {
         HttpBrokerError::new(Some(origin.display()), "dns lookup returned no address")
-    })
+    })?;
+    if !resolved_address_allowed(&origin.host, ip) {
+        return Err(HttpBrokerError::new(
+            Some(origin.display()),
+            "private address refused",
+        ));
+    }
+    Ok(ip)
 }
 
 #[cfg(test)]
@@ -643,6 +660,29 @@ mod tests {
             &allow.map(|s| s.to_string()),
         );
         assert!(public.unwrap_err().message.contains("not allowed"));
+    }
+
+    #[test]
+    fn a_public_name_must_not_resolve_to_a_private_address() {
+        let public = "1.1.1.1".parse().unwrap();
+        let loopback = "127.0.0.1".parse().unwrap();
+        let lan = "10.1.2.3".parse().unwrap();
+        let link_local = "169.254.169.254".parse().unwrap();
+        let mapped = "::ffff:169.254.169.254".parse().unwrap();
+        assert!(resolved_address_allowed("mempool.space", public));
+        assert!(!resolved_address_allowed("mempool.space", loopback));
+        assert!(!resolved_address_allowed("mempool.space", lan));
+        assert!(!resolved_address_allowed("mempool.space", link_local));
+        assert!(!resolved_address_allowed("mempool.space", mapped));
+        assert!(ip_is_loopback_link_local_or_private(mapped));
+        assert!(resolved_address_allowed("localhost", loopback));
+        assert!(!resolved_address_allowed("localhost", public));
+        assert!(resolved_address_allowed("10.1.2.3", lan));
+        let mapped_url = check_url(
+            "https://[::ffff:10.1.2.3]/secret",
+            &["https://mempool.space".to_string()],
+        );
+        assert!(mapped_url.unwrap_err().message.contains("private address"));
     }
 
     #[test]
