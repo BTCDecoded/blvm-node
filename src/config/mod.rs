@@ -857,6 +857,11 @@ pub struct NodeConfig {
     #[serde(default = "default_true")]
     pub listen: bool,
 
+    /// The loaded document is `minimal-hardened`. Not a config key. The
+    /// binary must not seed assume-valid after this parse.
+    #[serde(skip)]
+    pub(crate) assume_valid_seed_rejected: bool,
+
     /// RPC bind address. Absent means the network default chosen by the binary.
     #[serde(default)]
     pub rpc_addr: Option<SocketAddr>,
@@ -1075,6 +1080,7 @@ impl Default for NodeConfig {
         Self {
             listen_addr: None,
             listen: true,
+            assume_valid_seed_rejected: false,
             rpc_addr: None,
             block_validation: None,
             assumeutxo_blockhash: None,
@@ -1267,6 +1273,8 @@ impl NodeConfig {
         let mut config: NodeConfig = toml::from_str(content)
             .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {e}"))?;
         hardened::apply_profile_gate(&config, content, true)?;
+        config.assume_valid_seed_rejected =
+            hardened::document_rejects_assume_valid_seed(content, true)?;
         config.expand_paths();
         Ok(config)
     }
@@ -1276,6 +1284,8 @@ impl NodeConfig {
         let mut config: NodeConfig = serde_json::from_str(content)
             .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {e}"))?;
         hardened::apply_profile_gate(&config, content, false)?;
+        config.assume_valid_seed_rejected =
+            hardened::document_rejects_assume_valid_seed(content, false)?;
         config.expand_paths();
         Ok(config)
     }

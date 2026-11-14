@@ -65,6 +65,20 @@ impl NodeConfig {
     pub fn minimal_hardened() -> Result<Self> {
         Self::from_toml_str(PROFILE_TOML)
     }
+
+    /// The profile document, so a binary can write it when no config file is given.
+    pub fn minimal_hardened_document() -> &'static str {
+        PROFILE_TOML
+    }
+
+    /// True when this config was parsed from a `minimal-hardened` document.
+    pub fn rejects_assume_valid_seed(&self) -> bool {
+        self.assume_valid_seed_rejected
+    }
+}
+
+pub(crate) fn document_rejects_assume_valid_seed(raw: &str, is_toml: bool) -> Result<bool> {
+    Ok(document_profile(raw, is_toml)?.as_deref() == Some(PROFILE_MINIMAL_HARDENED))
 }
 
 pub(crate) fn apply_profile_gate(config: &NodeConfig, raw: &str, is_toml: bool) -> Result<()> {
@@ -245,6 +259,8 @@ mod tests {
     fn shipped_profile_holds_the_audit_boundary() {
         let config = NodeConfig::minimal_hardened().expect("shipped profile");
         assert!(PROFILE_TOML.contains("profile = \"minimal-hardened\""));
+        assert!(config.rejects_assume_valid_seed());
+        assert!(config.block_validation.is_none());
         assert!(!config.listen);
         assert!(config.listen_addr.unwrap().ip().is_loopback());
         assert!(config.rpc_addr.unwrap().ip().is_loopback());
@@ -274,9 +290,10 @@ mod tests {
     #[test]
     fn unknown_key_fails_only_inside_the_profile() {
         let historical = "listen = false\nthis_key_is_not_real = true\n";
+        let historical_config = NodeConfig::from_toml_str(historical).expect("historical file");
         assert!(
-            NodeConfig::from_toml_str(historical).is_ok(),
-            "historical files still ignore unknown keys"
+            !historical_config.rejects_assume_valid_seed(),
+            "a document without the profile still allows the assume-valid seed"
         );
         let hardened = format!("this_key_is_not_real = true\n{PROFILE_TOML}");
         let err = NodeConfig::from_toml_str(&hardened)
