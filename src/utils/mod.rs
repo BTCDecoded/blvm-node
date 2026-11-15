@@ -27,7 +27,7 @@ pub use durations::{
     MEMPOOL_LOOP_SLEEP, MESSAGE_PROCESSOR_POLL_SLEEP, MODULE_RELOAD_CLEANUP_DELAY,
     POLL_INTERVAL_WAIT_FOR_BLOCK, RPC_CLIENT_READ_TIMEOUT, RPC_SERVER_STARTUP_WAIT,
 };
-pub use env::{env_bool, env_int, env_opt, env_or_default, env_or_else};
+pub use env::{env_bool, env_int, env_opt, env_or_default, env_or_else, home_dir};
 pub use error::{
     err_option_to_result, log_error, log_error_async, result_to_option, with_default,
     with_default_async, with_fallback, with_fallback_async,

@@ -13,7 +13,7 @@ categories = ["cryptography::cryptocurrencies", "network-programming"]
 rust-version = "1.91"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("governance", "erlay", "rayon", "wasm-modules", "ibd-dev", "spec-lock", "timer-cron"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("governance", "erlay", "rayon", "wasm-modules", "ibd-dev", "spec-lock", "timer-cron", "module-encryption"))'] }
 # Integration tests (`tests/*.rs`) intentionally exercise APIs without always consuming every binding.
 unused_variables = "allow"
 unused_comparisons = "allow"
@@ -72,7 +72,7 @@ futures = "=0.3.31"  # Updated for iroh 0.95 compatibility (requires ^0.3.31)
 # HTTP server - EXACT VERSIONS for security
 http = "=1.1.0"
 http-body-util = "=0.1.5"
-hyper = { version = "=1.8.0", features = ["server", "http1", "http2"] }  # Updated for iroh 0.95 compatibility (hyper-util 0.1.18 requires ^1.8.0)
+hyper = { version = "=1.8.0", features = ["client", "server", "http1", "http2"] }  # client: the blvm CLI posts JSON-RPC. server: the RPC listener.
 hyper-util = { version = "=0.1.18", features = ["server", "http1", "tokio"] }  # Updated for iroh 0.95 compatibility (requires ^0.1.11)
 
 # Serialization - EXACT VERSIONS for security
@@ -108,8 +108,6 @@ hkdf = "=0.12.4"  # Key derivation for module encryption
 
 # Random number generation for Dandelion++
 rand = "=0.8.5"
-# Directory utilities for Bitcoin Core detection
-dirs = "=5.0"
 # SmallVec: required because blvm-protocol's Transaction always uses SmallVec regardless
 # of feature flags in published versions.  The production feature previously made this
 # optional but that's incompatible with the published blvm-protocol API.

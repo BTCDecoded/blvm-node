@@ -89,7 +89,7 @@ impl BitcoinCoreDetection {
         let mut paths = Vec::new();
 
         // Standard home directory paths
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::utils::home_dir() {
             let base = home.join(".bitcoin");
             if network == CoreDataNetwork::Mainnet {
                 paths.push(Some(base.clone()));

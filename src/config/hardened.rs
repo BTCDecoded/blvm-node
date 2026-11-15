@@ -5,11 +5,11 @@
 //! documents that omit `profile` keep the previous defaults, including ignored
 //! unknown keys.
 
+pub use super::profiles::PROFILE_MINIMAL_HARDENED;
+use super::profiles::{self, ProfileApplication};
 use super::{BanShareMode, NodeConfig, TransportPreferenceConfig};
 use anyhow::{Result, bail};
 use std::net::SocketAddr;
-
-pub const PROFILE_MINIMAL_HARDENED: &str = "minimal-hardened";
 
 const PROFILE_TOML: &str = include_str!("../../config/minimal-hardened.toml");
 
@@ -82,8 +82,18 @@ pub(crate) fn document_rejects_assume_valid_seed(raw: &str, is_toml: bool) -> Re
 }
 
 pub(crate) fn apply_profile_gate(config: &NodeConfig, raw: &str, is_toml: bool) -> Result<()> {
-    if document_profile(raw, is_toml)?.as_deref() != Some(PROFILE_MINIMAL_HARDENED) {
+    let Some(name) = document_profile(raw, is_toml)? else {
         return Ok(());
+    };
+    let profile = profiles::require_known_profile(&name)?;
+    if profile.application != ProfileApplication::Applied {
+        return Ok(());
+    }
+    if profile.id != PROFILE_MINIMAL_HARDENED {
+        bail!(
+            "profile {} is marked applied and has no checker",
+            profile.id
+        );
     }
     let unknown = unknown_top_level_keys(raw, is_toml)?;
     if !unknown.is_empty() {

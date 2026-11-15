@@ -9,6 +9,7 @@ pub mod cache;
 pub mod commons_gbt;
 pub mod control;
 pub mod errors;
+pub mod local_client;
 pub mod mempool;
 pub mod merkle_block;
 pub mod methods;

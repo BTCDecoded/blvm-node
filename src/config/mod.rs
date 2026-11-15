@@ -27,6 +27,7 @@ pub mod network;
 pub use network::*;
 
 pub mod hardened;
+pub mod profiles;
 
 use crate::network::transport::TransportPreference;
 use anyhow::{Context, Result};
@@ -850,6 +851,12 @@ fn default_modules_option() -> Option<ModuleConfig> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NodeConfig {
+    /// Named deployment profile. Absent keeps the historical defaults.
+    /// A name other than `minimal-hardened` is stored for blvm-ui and does not
+    /// change settings. An unknown name is a load error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+
     /// Network listening address
     pub listen_addr: Option<SocketAddr>,
 
@@ -1078,6 +1085,7 @@ impl From<TransportPreferenceConfig> for TransportPreference {
 impl Default for NodeConfig {
     fn default() -> Self {
         Self {
+            profile: None,
             listen_addr: None,
             listen: true,
             assume_valid_seed_rejected: false,
@@ -1137,12 +1145,12 @@ fn expand_tilde_path(s: &str) -> String {
         return s.to_string();
     }
     if s == "~" {
-        return dirs::home_dir()
+        return crate::utils::home_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "~".to_string());
     }
     if let (Some(home), Some(rest)) = (
-        dirs::home_dir(),
+        crate::utils::home_dir(),
         s.strip_prefix("~/").or_else(|| s.strip_prefix("~\\")),
     ) {
         let joined = home.join(rest);
@@ -1268,7 +1276,10 @@ impl NodeConfig {
         }
     }
 
-    /// Parse a TOML document. A `minimal-hardened` profile rejects unknown keys.
+    /// Parse a TOML document. `profile` must be a known name when it is set.
+    /// `minimal-hardened` rejects unknown keys. Other profile names are stored
+    /// and do not change settings. A document that omits `profile` ignores
+    /// unknown keys.
     pub fn from_toml_str(content: &str) -> anyhow::Result<Self> {
         let mut config: NodeConfig = toml::from_str(content)
             .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {e}"))?;
@@ -1279,7 +1290,10 @@ impl NodeConfig {
         Ok(config)
     }
 
-    /// Parse a JSON document. A `minimal-hardened` profile rejects unknown keys.
+    /// Parse a JSON document. `profile` must be a known name when it is set.
+    /// `minimal-hardened` rejects unknown keys. Other profile names are stored
+    /// and do not change settings. A document that omits `profile` ignores
+    /// unknown keys.
     pub fn from_json_str(content: &str) -> anyhow::Result<Self> {
         let mut config: NodeConfig = serde_json::from_str(content)
             .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {e}"))?;

@@ -3110,6 +3110,13 @@ impl NetworkManager {
         if !self.enable_self_advertisement {
             return Ok(()); // Self-advertisement disabled
         }
+        if !crate::config::profiles::listen_address_can_be_advertised(listen_addr) {
+            tracing::info!(
+                "not advertising {}: a loopback or unspecified address is not reachable by peers",
+                listen_addr
+            );
+            return Ok(());
+        }
 
         use crate::network::protocol::{
             AddrMessage, NetworkAddress, ProtocolMessage, ProtocolParser,
