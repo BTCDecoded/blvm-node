@@ -345,7 +345,7 @@ fn fee_line(config: &NodeConfig) -> String {
     let fees = config
         .fees
         .clone()
-        .unwrap_or_else(super::FeeEstimatorConfig::default);
+        .unwrap_or_default();
     if fees.estimator == "auto" && fees.allow_auto_override.is_empty() {
         "fees=built-in (estimator auto has no module allowed to replace it)".to_string()
     } else {
