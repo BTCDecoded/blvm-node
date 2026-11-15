@@ -177,6 +177,9 @@ where
             let mut module_database_backend: Option<String> = None;
             let mut marketplace_fetch_enabled = false;
             let mut allow_unsigned_modules = false;
+            // Applied after `enabled_modules`, so a pin survives an empty list
+            // whatever order the table was written in.
+            let mut pins = Vec::new();
 
             while let Some(key) = map.next_key::<String>()? {
                 if MODULE_CONFIG_KNOWN_KEYS.contains(&key.as_str()) {
@@ -221,12 +224,12 @@ where
                     let value: toml::Value = map.next_value()?;
                     match &value {
                         toml::Value::String(version_constraint) => {
-                            enabled_modules.insert(key, version_constraint.clone());
+                            pins.push((key, version_constraint.clone()));
                         }
                         toml::Value::Table(_) => {
                             let mut flat = flatten_toml_to_string_map(&value);
                             if let Some(version) = flat.remove("version") {
-                                enabled_modules.insert(key.clone(), version);
+                                pins.push((key.clone(), version));
                             }
                             if !flat.is_empty() {
                                 module_configs.entry(key).or_default().extend(flat);
@@ -235,6 +238,9 @@ where
                         _ => {}
                     }
                 }
+            }
+            for (name, version) in pins {
+                enabled_modules.insert(name, version);
             }
 
             let registry_url = registry_url.filter(|s| !s.trim().is_empty());
@@ -297,9 +303,10 @@ pub struct ModuleConfig {
     /// Enabled modules and optional version constraints.
     ///
     /// The baseline is `blvm-miniscript`, `blvm-zmq`, and `blvm-index` at `0.1.*`.
-    /// A `[modules]` table starts from that set. An inline `name = "0.1.*"` adds or replaces
-    /// one pin. A present `enabled_modules` key replaces the whole set; an empty list loads
-    /// only binaries already on disk. `disabled_modules` wins over a pin at load time.
+    /// A `[modules]` table starts from that set. A present `enabled_modules` key replaces
+    /// the whole set; an empty list loads only binaries already on disk. An inline
+    /// `name = "0.1.*"` then adds or replaces one pin, whichever order the keys were
+    /// written. `disabled_modules` wins over a pin at load time.
     ///
     /// When a module also needs spawn overrides (`[modules.blvm-zmq]`), put the pin in that
     /// table as `version = "0.1.*"` (inline `blvm-zmq = "…"` would conflict with the table).
@@ -1277,29 +1284,41 @@ impl NodeConfig {
     }
 
     /// Parse a TOML document. `profile` must be a known name when it is set.
-    /// `minimal-hardened` rejects unknown keys. Other profile names are stored
-    /// and do not change settings. A document that omits `profile` ignores
-    /// unknown keys.
+    /// `local` overlays the embedded document and then rejects unknown keys.
+    /// `minimal-hardened` rejects unknown keys and checks the file as written.
+    /// Other profile names are stored and do not change settings. A document
+    /// that omits `profile` ignores unknown keys.
     pub fn from_toml_str(content: &str) -> anyhow::Result<Self> {
-        let mut config: NodeConfig = toml::from_str(content)
+        let content = profiles::with_overlay_document(content, true)?;
+        let mut config: NodeConfig = toml::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {e}"))?;
-        hardened::apply_profile_gate(&config, content, true)?;
+        hardened::apply_profile_gate(&config, &content, true)?;
         config.assume_valid_seed_rejected =
-            hardened::document_rejects_assume_valid_seed(content, true)?;
+            hardened::document_rejects_assume_valid_seed(&content, true)?
+                || config
+                    .profile
+                    .as_deref()
+                    .is_some_and(profiles::skips_assume_valid_seed);
         config.expand_paths();
         Ok(config)
     }
 
     /// Parse a JSON document. `profile` must be a known name when it is set.
-    /// `minimal-hardened` rejects unknown keys. Other profile names are stored
-    /// and do not change settings. A document that omits `profile` ignores
-    /// unknown keys.
+    /// `local` overlays the embedded document and then rejects unknown keys.
+    /// `minimal-hardened` rejects unknown keys and checks the file as written.
+    /// Other profile names are stored and do not change settings. A document
+    /// that omits `profile` ignores unknown keys.
     pub fn from_json_str(content: &str) -> anyhow::Result<Self> {
-        let mut config: NodeConfig = serde_json::from_str(content)
+        let content = profiles::with_overlay_document(content, false)?;
+        let mut config: NodeConfig = serde_json::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {e}"))?;
-        hardened::apply_profile_gate(&config, content, false)?;
+        hardened::apply_profile_gate(&config, &content, false)?;
         config.assume_valid_seed_rejected =
-            hardened::document_rejects_assume_valid_seed(content, false)?;
+            hardened::document_rejects_assume_valid_seed(&content, false)?
+                || config
+                    .profile
+                    .as_deref()
+                    .is_some_and(profiles::skips_assume_valid_seed);
         config.expand_paths();
         Ok(config)
     }

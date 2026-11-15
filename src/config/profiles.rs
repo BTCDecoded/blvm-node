@@ -1,22 +1,27 @@
 //! Named deployment profiles.
 //!
-//! `minimal-hardened` is applied when a file names it. The other names are
-//! accepted and stored so blvm-ui can select them. Their presets are not
-//! applied, and a file that omits `profile` keeps the historical defaults.
+//! `local` is an overlay: the embedded document is the base and the user's
+//! file replaces its keys. `minimal-hardened` is a lock: the file itself must
+//! satisfy the checker. The other names are stored for blvm-ui and do not
+//! change settings. A file that omits `profile` keeps the historical defaults.
 
 use super::NodeConfig;
 use anyhow::Result;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 
-/// The one profile whose settings and checks run today.
+/// The audit profile. A file that names it is checked and not overlaid.
 pub const PROFILE_MINIMAL_HARDENED: &str = "minimal-hardened";
+
+const LOCAL_PROFILE_TOML: &str = include_str!("../../config/local.toml");
 
 /// Whether selecting a profile changes the running settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileApplication {
-    /// The profile's settings and checks run.
-    Applied,
+    /// The embedded document is the base. The user's file replaces its keys.
+    Overlay,
+    /// The file must contain the strict values. It is not filled in.
+    Lock,
     /// The name is stored. The file's own settings are what runs.
     NamedOnly,
 }
@@ -26,6 +31,8 @@ pub enum ProfileApplication {
 pub struct DeploymentProfile {
     pub id: &'static str,
     pub application: ProfileApplication,
+    /// The binary must not plant an assume-valid height for this profile.
+    pub skips_assume_valid_seed: bool,
     pub summary: &'static str,
 }
 
@@ -34,28 +41,33 @@ pub fn deployment_profiles() -> &'static [DeploymentProfile] {
     &[
         DeploymentProfile {
             id: "local",
-            application: ProfileApplication::NamedOnly,
-            summary: "Loopback node with modules, ZeroMQ, and assume-valid off.",
+            application: ProfileApplication::Overlay,
+            skips_assume_valid_seed: true,
+            summary: "Loopback listen, modules off, native fees, mempool saved. Network and ports come from the CLI.",
         },
         DeploymentProfile {
             id: "minimal-hardened",
-            application: ProfileApplication::Applied,
+            application: ProfileApplication::Lock,
+            skips_assume_valid_seed: true,
             summary: "No inbound, no modules, no assume-valid, native fees. Unknown keys are errors.",
         },
         DeploymentProfile {
             id: "public-peer",
             application: ProfileApplication::NamedOnly,
-            summary: "Public listen of the address in the file. RPC stays on loopback.",
+            skips_assume_valid_seed: false,
+            summary: "Not applied yet. Public listen of the address in the file, with RPC on loopback.",
         },
         DeploymentProfile {
             id: "desktop",
             application: ProfileApplication::NamedOnly,
-            summary: "Local node plus the index and loopback ZeroMQ.",
+            skips_assume_valid_seed: false,
+            summary: "Not applied yet. Local node plus the index and loopback ZeroMQ.",
         },
         DeploymentProfile {
             id: "pool",
             application: ProfileApplication::NamedOnly,
-            summary: "Local RPC and Stratum, without the index or a fee website.",
+            skips_assume_valid_seed: false,
+            summary: "Not applied yet. Local RPC and Stratum, without the index or a fee website.",
         },
     ]
 }
@@ -73,6 +85,129 @@ pub fn require_known_profile(name: &str) -> Result<DeploymentProfile> {
                 .join(", ");
             anyhow::anyhow!("unknown config profile {name:?}; known profiles: {known}")
         })
+}
+
+pub fn skips_assume_valid_seed(name: &str) -> bool {
+    require_known_profile(name)
+        .ok()
+        .is_some_and(|profile| profile.skips_assume_valid_seed)
+}
+
+pub(crate) fn profile_is_applied(application: ProfileApplication) -> bool {
+    matches!(
+        application,
+        ProfileApplication::Overlay | ProfileApplication::Lock
+    )
+}
+
+impl NodeConfig {
+    /// The embedded `local` profile.
+    pub fn local() -> Result<Self> {
+        Self::from_toml_str(LOCAL_PROFILE_TOML)
+    }
+}
+
+/// When `profile = "local"`, merge the embedded document under the user's file.
+/// Any other document is returned unchanged.
+pub(crate) fn with_overlay_document(content: &str, is_toml: bool) -> Result<String> {
+    let Some(name) = raw_profile_name(content, is_toml)? else {
+        return Ok(content.to_string());
+    };
+    let profile = require_known_profile(&name)?;
+    if profile.application != ProfileApplication::Overlay {
+        return Ok(content.to_string());
+    }
+    if profile.id != "local" {
+        anyhow::bail!(
+            "profile {} is marked overlay and has no document",
+            profile.id
+        );
+    }
+    let base: toml::Value = toml::from_str(LOCAL_PROFILE_TOML)
+        .map_err(|err| anyhow::anyhow!("embedded local profile: {err}"))?;
+    if is_toml {
+        let overlay: toml::Value = toml::from_str(content)
+            .map_err(|err| anyhow::anyhow!("Failed to parse TOML config: {err}"))?;
+        let merged = merge_toml(base, overlay);
+        toml::to_string(&merged).map_err(|err| anyhow::anyhow!("profile overlay: {err}"))
+    } else {
+        let overlay: serde_json::Value = serde_json::from_str(content)
+            .map_err(|err| anyhow::anyhow!("Failed to parse JSON config: {err}"))?;
+        let merged = merge_json(toml_to_json(base), overlay);
+        serde_json::to_string(&merged).map_err(|err| anyhow::anyhow!("profile overlay: {err}"))
+    }
+}
+
+fn raw_profile_name(raw: &str, is_toml: bool) -> Result<Option<String>> {
+    if is_toml {
+        let value: toml::Value = toml::from_str(raw)
+            .map_err(|err| anyhow::anyhow!("Failed to parse TOML config: {err}"))?;
+        Ok(value
+            .get("profile")
+            .and_then(|item| item.as_str())
+            .map(str::to_string))
+    } else {
+        let value: serde_json::Value = serde_json::from_str(raw)
+            .map_err(|err| anyhow::anyhow!("Failed to parse JSON config: {err}"))?;
+        Ok(value
+            .get("profile")
+            .and_then(|item| item.as_str())
+            .map(str::to_string))
+    }
+}
+
+fn merge_toml(base: toml::Value, overlay: toml::Value) -> toml::Value {
+    match (base, overlay) {
+        (toml::Value::Table(mut base_table), toml::Value::Table(overlay_table)) => {
+            for (key, value) in overlay_table {
+                let merged = match base_table.remove(&key) {
+                    Some(existing) => merge_toml(existing, value),
+                    None => value,
+                };
+                base_table.insert(key, merged);
+            }
+            toml::Value::Table(base_table)
+        }
+        (_base, overlay) => overlay,
+    }
+}
+
+fn merge_json(base: serde_json::Value, overlay: serde_json::Value) -> serde_json::Value {
+    match (base, overlay) {
+        (serde_json::Value::Object(mut base_object), serde_json::Value::Object(overlay_object)) => {
+            for (key, value) in overlay_object {
+                let merged = match base_object.remove(&key) {
+                    Some(existing) => merge_json(existing, value),
+                    None => value,
+                };
+                base_object.insert(key, merged);
+            }
+            serde_json::Value::Object(base_object)
+        }
+        (_base, overlay) => overlay,
+    }
+}
+
+fn toml_to_json(value: toml::Value) -> serde_json::Value {
+    match value {
+        toml::Value::String(text) => serde_json::Value::String(text),
+        toml::Value::Integer(number) => serde_json::Value::Number(number.into()),
+        toml::Value::Float(number) => serde_json::Number::from_f64(number)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        toml::Value::Boolean(bit) => serde_json::Value::Bool(bit),
+        toml::Value::Datetime(stamp) => serde_json::Value::String(stamp.to_string()),
+        toml::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(toml_to_json).collect())
+        }
+        toml::Value::Table(table) => {
+            let mut object = serde_json::Map::new();
+            for (key, item) in table {
+                object.insert(key, toml_to_json(item));
+            }
+            serde_json::Value::Object(object)
+        }
+    }
 }
 
 /// A loopback or unspecified listen address is not sent to peers.
@@ -121,7 +256,7 @@ fn profile_line(config: &NodeConfig) -> String {
     match config.profile.as_deref() {
         None => "profile=none (open defaults)".to_string(),
         Some(id) => match require_known_profile(id) {
-            Ok(profile) if profile.application == ProfileApplication::Applied => {
+            Ok(profile) if profile_is_applied(profile.application) => {
                 format!("profile={id} (applied)")
             }
             Ok(_) => format!("profile={id} (named only; this file's settings are what runs)"),
@@ -271,14 +406,105 @@ mod tests {
 
     #[test]
     fn a_named_profile_does_not_change_settings() {
-        let config = NodeConfig::from_toml_str("profile = \"local\"\n").expect("local");
-        assert_eq!(config.profile.as_deref(), Some("local"));
+        let config = NodeConfig::from_toml_str("profile = \"desktop\"\n").expect("desktop");
+        assert_eq!(config.profile.as_deref(), Some("desktop"));
         assert!(config.listen);
         assert!(config.modules.as_ref().unwrap().enabled);
         let lines = operator_start_lines(&config, "./data");
         assert!(
             lines.iter().any(|line| line.contains("named only")),
             "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn local_turns_modules_off_and_saves_the_mempool() {
+        let config = NodeConfig::from_toml_str("profile = \"local\"\n").expect("local");
+        assert!(config.listen);
+        assert!(config.listen_addr.is_none());
+        assert!(config.rpc_addr.is_none());
+        assert!(config.protocol_version.is_none());
+        assert!(!config.enable_self_advertisement);
+        let modules = config.modules.as_ref().unwrap();
+        assert!(!modules.enabled);
+        assert!(modules.enabled_modules.is_empty());
+        assert!(modules.registry_url.is_none());
+        assert!(!modules.watch_enabled);
+        let fees = config.fees.as_ref().unwrap();
+        assert_eq!(fees.estimator, "native");
+        assert_eq!(fees.fallback, "native");
+        assert!(fees.allow_auto_override.is_empty());
+        let mempool = config.mempool.as_ref().unwrap();
+        assert!(mempool.persist_mempool);
+        assert_eq!(mempool.mempool_persistence_path, "mempool.dat");
+        assert!(skips_assume_valid_seed("local"));
+        let lines = operator_start_lines(&config, "./data");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("profile=local (applied)")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_module_pin_survives_the_local_base() {
+        let config = NodeConfig::from_toml_str(
+            "profile = \"local\"\n[modules]\nenabled = true\nblvm-index = \"0.1.*\"\n",
+        )
+        .expect("pin");
+        let modules = config.modules.unwrap();
+        assert!(modules.enabled);
+        assert_eq!(
+            modules
+                .enabled_modules
+                .get("blvm-index")
+                .map(String::as_str),
+            Some("0.1.*")
+        );
+        assert!(!modules.enabled_modules.contains_key("blvm-miniscript"));
+        assert!(!modules.enabled_modules.contains_key("blvm-zmq"));
+        assert!(modules.registry_url.is_none());
+    }
+
+    #[test]
+    fn local_rejects_an_unknown_top_level_key() {
+        let err = NodeConfig::from_toml_str("profile = \"local\"\nnot_a_real_key = true\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not_a_real_key"), "{err}");
+    }
+
+    #[test]
+    fn a_one_line_hardened_profile_fails_closed() {
+        let err = NodeConfig::from_toml_str("profile = \"minimal-hardened\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("minimal-hardened"), "{err}");
+    }
+
+    #[test]
+    fn a_file_without_a_profile_keeps_the_module_defaults() {
+        let config = NodeConfig::from_toml_str("listen = true\n").expect("historical");
+        assert!(config.profile.is_none());
+        assert!(
+            config
+                .modules
+                .unwrap()
+                .enabled_modules
+                .contains_key("blvm-zmq")
+        );
+        assert!(!skips_assume_valid_seed("desktop"));
+        assert!(skips_assume_valid_seed("minimal-hardened"));
+    }
+
+    #[test]
+    fn json_local_uses_the_same_base() {
+        let config = NodeConfig::from_json_str(r#"{"profile":"local"}"#).expect("json");
+        assert!(!config.modules.unwrap().enabled);
+        assert_eq!(
+            config.mempool.unwrap().mempool_persistence_path,
+            "mempool.dat"
         );
     }
 
@@ -315,12 +541,17 @@ mod tests {
     #[test]
     fn applied_profile_is_the_hardened_one() {
         let profile = require_known_profile(PROFILE_MINIMAL_HARDENED).unwrap();
-        assert_eq!(profile.application, ProfileApplication::Applied);
+        assert_eq!(profile.application, ProfileApplication::Lock);
+        assert!(profile.skips_assume_valid_seed);
         let named = deployment_profiles()
             .iter()
             .filter(|profile| profile.application == ProfileApplication::NamedOnly)
             .count();
-        assert_eq!(named, 4);
+        assert_eq!(named, 3);
+        assert_eq!(
+            require_known_profile("local").unwrap().application,
+            ProfileApplication::Overlay
+        );
     }
 
     #[test]

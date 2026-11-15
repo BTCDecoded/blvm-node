@@ -377,9 +377,12 @@ impl Node {
             self.mempool_manager
                 .set_policy_config(Some(mempool_policy.clone()));
             if mempool_policy.persist_mempool {
-                let path = std::path::Path::new(&mempool_policy.mempool_persistence_path);
+                let path = crate::config::resolve_mempool_persistence_path(
+                    &self.data_dir,
+                    &mempool_policy.mempool_persistence_path,
+                );
                 if path.exists() {
-                    match self.mempool_manager.load_from_disk(path) {
+                    match self.mempool_manager.load_from_disk(&path) {
                         Ok(()) => info!("Loaded mempool from {}", path.display()),
                         Err(e) => warn!("Failed to load mempool from {}: {}", path.display(), e),
                     }
@@ -2640,13 +2643,16 @@ impl Node {
         if let Some(policy) = self.config.as_ref().and_then(|cfg| cfg.mempool.as_ref())
             && policy.persist_mempool
         {
-            let path = std::path::Path::new(&policy.mempool_persistence_path);
+            let path = crate::config::resolve_mempool_persistence_path(
+                &self.data_dir,
+                &policy.mempool_persistence_path,
+            );
             if let Some(parent) = path.parent()
                 && !parent.as_os_str().is_empty()
             {
                 let _ = std::fs::create_dir_all(parent);
             }
-            match self.mempool_manager.save_to_disk(path) {
+            match self.mempool_manager.save_to_disk(&path) {
                 Ok(()) => info!("Saved mempool to {}", path.display()),
                 Err(e) => warn!("Failed to save mempool to {}: {}", path.display(), e),
             }

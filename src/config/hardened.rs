@@ -86,23 +86,24 @@ pub(crate) fn apply_profile_gate(config: &NodeConfig, raw: &str, is_toml: bool) 
         return Ok(());
     };
     let profile = profiles::require_known_profile(&name)?;
-    if profile.application != ProfileApplication::Applied {
+    if !profiles::profile_is_applied(profile.application) {
         return Ok(());
-    }
-    if profile.id != PROFILE_MINIMAL_HARDENED {
-        bail!(
-            "profile {} is marked applied and has no checker",
-            profile.id
-        );
     }
     let unknown = unknown_top_level_keys(raw, is_toml)?;
     if !unknown.is_empty() {
         bail!(
-            "minimal-hardened profile rejects unknown config keys: {}",
+            "{} profile rejects unknown config keys: {}",
+            profile.id,
             unknown.join(", ")
         );
     }
-    enforce_minimal_hardened(config)
+    if profile.application == ProfileApplication::Lock {
+        if profile.id != PROFILE_MINIMAL_HARDENED {
+            bail!("profile {} is marked lock and has no checker", profile.id);
+        }
+        enforce_minimal_hardened(config)?;
+    }
+    Ok(())
 }
 
 fn document_profile(raw: &str, is_toml: bool) -> Result<Option<String>> {

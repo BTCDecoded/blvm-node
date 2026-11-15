@@ -316,6 +316,20 @@ fn default_mempool_persistence_path() -> String {
     "data/mempool.dat".to_string()
 }
 
+/// A relative persistence path is stored under the node data directory.
+/// An absolute path is used as written.
+pub fn resolve_mempool_persistence_path(
+    data_dir: &std::path::Path,
+    configured: &str,
+) -> std::path::PathBuf {
+    let path = std::path::Path::new(configured);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        data_dir.join(path)
+    }
+}
+
 fn default_tx_rate_limit_burst() -> u32 {
     10
 }
@@ -394,8 +408,21 @@ impl Default for MempoolPolicyConfig {
 
 #[cfg(test)]
 mod overlay_tests {
-    use super::{MempoolPolicyConfig, RbfConfig, overlay_mempool_onto_consensus};
+    use super::{
+        MempoolPolicyConfig, RbfConfig, overlay_mempool_onto_consensus,
+        resolve_mempool_persistence_path,
+    };
     use blvm_protocol::consensus_config::MempoolConfig;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn relative_mempool_path_joins_the_data_dir() {
+        let path = resolve_mempool_persistence_path(Path::new("/var/lib/blvm"), "mempool.dat");
+        assert_eq!(path, PathBuf::from("/var/lib/blvm/mempool.dat"));
+        let absolute =
+            resolve_mempool_persistence_path(Path::new("/var/lib/blvm"), "/tmp/mempool.dat");
+        assert_eq!(absolute, PathBuf::from("/tmp/mempool.dat"));
+    }
 
     #[test]
     fn file_mempool_replaces_env_size() {
