@@ -106,8 +106,8 @@ time = { version = ">=0.3.47", default-features = false }
 aes-gcm = "=0.10.3"  # Module encryption
 hkdf = "=0.12.4"  # Key derivation for module encryption
 
-# Random number generation for Dandelion++
-rand = "=0.8.5"
+# Random number generation for Dandelion++. 0.8.5 is RUSTSEC-2026-0097.
+rand = "=0.8.6"
 # SmallVec: required because blvm-protocol's Transaction always uses SmallVec regardless
 # of feature flags in published versions.  The production feature previously made this
 # optional but that's incompatible with the published blvm-protocol API.
