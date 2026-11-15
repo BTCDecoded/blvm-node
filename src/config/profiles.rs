@@ -342,10 +342,7 @@ fn assume_valid_line(config: &NodeConfig) -> String {
 }
 
 fn fee_line(config: &NodeConfig) -> String {
-    let fees = config
-        .fees
-        .clone()
-        .unwrap_or_default();
+    let fees = config.fees.clone().unwrap_or_default();
     if fees.estimator == "auto" && fees.allow_auto_override.is_empty() {
         "fees=built-in (estimator auto has no module allowed to replace it)".to_string()
     } else {
