@@ -8,6 +8,10 @@ were not enforced when those commits were written. Merge commits are omitted.
 
 ## [Unreleased]
 
+### Security
+
+- Pin optional `quinn` to 0.11.12. That release requires `quinn-proto` >= 0.11.18, and the resolve uses 0.11.19 (RUSTSEC-2026-0338 through 0342).
+
 ## [v0.1.1] - 2026-05-06
 
 ### Reconstructed

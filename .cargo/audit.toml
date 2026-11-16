@@ -2,15 +2,7 @@
 # CI runs plain `cargo audit` from this repo root so all ignores come from here.
 #
 # iroh 1.0.0 pulls hickory-proto 0.26.3, so the 0.25 advisories are gone.
-# quinn-proto 0.11.15 is still selected by the optional `quinn` feature.
-# 0.11.19 fixes RUSTSEC-2026-0338 through 0342, and it does not resolve next
-# to the quinn 0.11 crate this node pins. Those ignores stay until that bump.
+# quinn 0.11.12 selects quinn-proto 0.11.19 (RUSTSEC-2026-0338 through 0342).
 
 [advisories]
-ignore = [
-    "RUSTSEC-2026-0338",
-    "RUSTSEC-2026-0339",
-    "RUSTSEC-2026-0340",
-    "RUSTSEC-2026-0341",
-    "RUSTSEC-2026-0342",
-]
+ignore = []

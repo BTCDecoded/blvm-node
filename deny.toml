@@ -1,27 +1,14 @@
-# cargo-deny policy for the blvm binary.
-# Vulnerability IDs match .cargo/audit.toml. Duplicate versions warn: the iroh 0.95
-# and quinn-proto pins cannot unify, and a deny would fail every pull request
-# before that upgrade exists. See docs/stability/PROGRESS.md.
+# cargo-deny policy for blvm-node.
+# Vulnerability IDs match .cargo/audit.toml.
+# quinn 0.11.12 selects quinn-proto 0.11.19. rand is 0.8.6.
 
 [advisories]
 # cargo-deny 0.16 removed the vulnerability lint. Vulnerabilities still deny
 # unless they are in ignore. 0.18 made unmaintained a scope: none, workspace,
-# transitive, or all. The previous value was "warn", which this schema cannot
-# express. "none" is the scope that does not fail the build.
+# transitive, or all. "warn" is not a scope. "none" does not fail the build.
 unmaintained = "none"
 yanked = "warn"
-ignore = [
-    "RUSTSEC-2026-0118",
-    "RUSTSEC-2026-0119",
-    "RUSTSEC-2026-0338",
-    "RUSTSEC-2026-0339",
-    "RUSTSEC-2026-0340",
-    "RUSTSEC-2026-0341",
-    "RUSTSEC-2026-0342",
-    "RUSTSEC-2026-0379",
-    "RUSTSEC-2026-0380",
-    "RUSTSEC-2026-0424",
-]
+ignore = []
 
 [licenses]
 version = 2
