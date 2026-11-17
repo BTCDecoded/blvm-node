@@ -10296,6 +10296,9 @@ impl ParallelIBD {
         let pin_height = blvm_consensus::block::get_assume_valid_height();
         let hash_at_pin = blockstore.get_hash_by_height(pin_height).ok().flatten();
         let assume_valid_pin_connected = crate::config::assume_valid_pin_connected(hash_at_pin);
+        // Consensus 0.1.84 takes the two-week burial as an argument. No best
+        // header is recorded here, so the signature skip stays closed.
+        let assume_valid_buried = false;
         let (result, new_utxo_set, tx_ids, utxo_delta, undo_log) =
             blvm_consensus::block::connect_block_ibd_with_undo(
                 block,
@@ -10310,6 +10313,7 @@ impl ParallelIBD {
                 best_header_chainwork,
                 ibd_utxo_lookup,
                 assume_valid_pin_connected,
+                assume_valid_buried,
             )?;
 
         *utxo_set = new_utxo_set;
