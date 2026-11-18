@@ -539,26 +539,26 @@ impl RawTxRpc {
         for (tx, witnesses) in &decoded {
             let txid = blvm_protocol::block::calculate_tx_id(tx);
             let txid_hex = Self::rpc_txid(&txid);
-            if let Some(mempool) = &self.mempool {
-                if let Some(stored) = mempool.get_transaction(&txid) {
-                    let stored_witness = mempool.get_transaction_witnesses(&txid);
-                    let stored_wtxid =
-                        crate::network::txhash::calculate_wtxid(&stored, stored_witness.as_deref());
-                    let submitted_wtxid =
-                        crate::network::txhash::calculate_wtxid(tx, Some(witnesses.as_slice()));
-                    if stored_wtxid == submitted_wtxid {
-                        results.push(json!({
-                            "txid": txid_hex,
-                            "error": "txn-already-in-mempool"
-                        }));
-                    } else {
-                        results.push(json!({
-                            "txid": txid_hex,
-                            "other-wtxid": Self::rpc_txid(&stored_wtxid)
-                        }));
-                    }
-                    continue;
+            if let Some(mempool) = &self.mempool
+                && let Some(stored) = mempool.get_transaction(&txid)
+            {
+                let stored_witness = mempool.get_transaction_witnesses(&txid);
+                let stored_wtxid =
+                    crate::network::txhash::calculate_wtxid(&stored, stored_witness.as_deref());
+                let submitted_wtxid =
+                    crate::network::txhash::calculate_wtxid(tx, Some(witnesses.as_slice()));
+                if stored_wtxid == submitted_wtxid {
+                    results.push(json!({
+                        "txid": txid_hex,
+                        "error": "txn-already-in-mempool"
+                    }));
+                } else {
+                    results.push(json!({
+                        "txid": txid_hex,
+                        "other-wtxid": Self::rpc_txid(&stored_wtxid)
+                    }));
                 }
+                continue;
             }
             let bytes = Self::serialize_transaction_with_witness(tx, Some(witnesses));
             let one = json!([bytes, maxfeerate, maxburn]);
