@@ -2029,6 +2029,7 @@ impl Node {
         static CATCH_UP_LAST_FAIL_SECS: AtomicU64 = AtomicU64::new(0);
         static CATCH_UP_FAIL_STREAK: AtomicU32 = AtomicU32::new(0);
         static CATCH_UP_SEED_BLOCKED: AtomicBool = AtomicBool::new(false);
+        static CATCH_UP_FORK_RETRY_SECS: AtomicU64 = AtomicU64::new(0);
 
         // Mode T archive: never catch-up IBD / DNS reseed while serving getdata.
         if crate::config::ibd_serve_only() {
@@ -2084,6 +2085,21 @@ impl Node {
             }
         }
 
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let last = CATCH_UP_FORK_RETRY_SECS.load(Ordering::Relaxed);
+            if !catch_up_fork_retry_elapsed(last, now) {
+                debug!(
+                    "[CATCH_UP] skip — heavier fork retry {}s left",
+                    30u64.saturating_sub(now.saturating_sub(last))
+                );
+                return Ok(());
+            }
+        }
+
         let (synced_tip, ibd_first_block_height) = self.ibd_resume_heights()?;
         let mut peer_height = match self.network.get_highest_peer_start_height_async().await {
             Some(h) => h,
@@ -2131,6 +2147,13 @@ impl Node {
                     .await
                     {
                         warn!("[UNDO_REPAIR] heavier fork not activated: {e:#}");
+                        CATCH_UP_FORK_RETRY_SECS.store(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0),
+                            Ordering::Relaxed,
+                        );
                         return Ok(());
                     }
                     if let Some(candidate) = probed.heavier_tip {
@@ -2161,6 +2184,13 @@ impl Node {
                 {
                     warn!("[CATCH_UP] heavier-fork getdata failed: {e}");
                 }
+                CATCH_UP_FORK_RETRY_SECS.store(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                    Ordering::Relaxed,
+                );
                 return Ok(());
             }
         }
@@ -2819,6 +2849,11 @@ impl Node {
     }
 }
 
+/// A heavier fork is retried on a fixed 30s gap. `last_secs == 0` is the first probe.
+pub(crate) fn catch_up_fork_retry_elapsed(last_secs: u64, now: u64) -> bool {
+    last_secs == 0 || now.saturating_sub(last_secs) >= 30
+}
+
 /// A checkpoint the importer already refused will fail the same way on the next
 /// attempt. Peer loss and a short IBD error stay retriable.
 pub(crate) fn catch_up_failure_is_terminal(err: &str) -> bool {
@@ -2881,6 +2916,9 @@ mod resume_snapshot_tests {
         assert!(!catch_up_failure_is_terminal(
             "IBD engine seed: heed3 scan failed after a partial import: boom"
         ));
+        assert!(!catch_up_fork_retry_elapsed(1_000, 1_029));
+        assert!(catch_up_fork_retry_elapsed(1_000, 1_030));
+        assert!(catch_up_fork_retry_elapsed(0, 1_000));
         let dir = tempfile::tempdir().unwrap();
         record_refused_seed_height(dir.path(), 330797);
         assert_eq!(read_refused_seed_height(dir.path()), Some(330797));
