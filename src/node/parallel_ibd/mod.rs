@@ -1420,6 +1420,16 @@ pub(crate) fn wan_gap_admit_window() -> u64 {
     }
 }
 
+pub(crate) fn missing_peer_semaphore<'a>(
+    peers: &'a [String],
+    has_semaphore: impl Fn(&str) -> bool,
+) -> Option<&'a str> {
+    peers
+        .iter()
+        .find(|peer| !has_semaphore(peer))
+        .map(String::as_str)
+}
+
 pub(crate) fn clamped_worker_count(requested: Option<usize>, cap: usize) -> Option<usize> {
     let cap = cap.max(1);
     requested.map(|n| n.clamp(1, cap))
@@ -9495,6 +9505,14 @@ impl ParallelIBD {
                 None => guard_limit,
             }
         };
+        if let Some(peer_id) = missing_peer_semaphore(&filtered_peers, |id| {
+            self.peer_semaphores.contains_key(id)
+        }) {
+            return Err(anyhow::anyhow!(
+                "Peer {peer_id} not found in peer_semaphores"
+            ));
+        }
+
         let prefetch_workers: usize = if engine_direct_feed {
             0
         } else {

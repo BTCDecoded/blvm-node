@@ -3739,6 +3739,17 @@ fn a_dead_export_scratch_dir_is_removed_and_a_live_one_stays() {
 }
 
 #[test]
+fn a_missing_peer_semaphore_is_reported_before_prefetch() {
+    use super::missing_peer_semaphore;
+    let peers = vec!["a".to_string(), "b".to_string()];
+    assert_eq!(
+        missing_peer_semaphore(&peers, |id| id == "a"),
+        Some("b")
+    );
+    assert_eq!(missing_peer_semaphore(&peers, |_| true), None);
+}
+
+#[test]
 fn bridge_pending_max_cannot_exceed_the_reorder_limit() {
     use super::clamped_bridge_pending_max;
     assert_eq!(clamped_bridge_pending_max(Some("1000000"), 256), 256);
