@@ -109,7 +109,7 @@ async fn test_sendrawtransaction_allowhighfees() {
 
     let tx_hex = create_simple_tx_hex();
     // Set low maxfeerate but allowhighfees=true
-    let params = json!([tx_hex, 0.00000001, true]);
+    let params = json!([tx_hex, 0.00000001, null, true]);
 
     let result = rawtx.sendrawtransaction(&params).await;
 
@@ -148,7 +148,7 @@ async fn test_sendrawtransaction_parameter_parsing() {
     );
 
     // Test with allowhighfees as boolean
-    let params_bool = json!([tx_hex, 0.001, true]);
+    let params_bool = json!([tx_hex, 0.001, 0, true]);
     let result_bool = rawtx.sendrawtransaction(&params_bool).await;
     assert!(
         result_bool.is_err() || result_bool.is_ok(),
