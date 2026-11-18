@@ -165,7 +165,11 @@ impl Node {
             .with_profiler(Arc::clone(&profiler_arc))
             .with_dependencies(Arc::clone(&storage_arc), Arc::clone(&mempool_manager_arc))
             .with_network_manager(Arc::clone(&network_arc))
-            .with_protocol_engine(Arc::clone(&protocol_arc));
+            .with_protocol_engine(Arc::clone(&protocol_arc))
+            .with_node_shutdown(Arc::new(|| {
+                crate::utils::request_shutdown();
+                Ok(())
+            }));
         // Note: EventPublisher will be set later in start_components() after it's created
         let mut sync_coordinator = sync::SyncCoordinator::default();
         sync_coordinator.set_mempool(Some(Arc::clone(&mempool_manager_arc)));
@@ -493,6 +497,7 @@ impl Node {
     /// Start the node
     pub async fn start(&mut self) -> Result<()> {
         info!("[NODE] Starting node");
+        crate::utils::sd_notify::start_runtime_watchdog();
 
         // Start all components
         info!("[NODE] Calling start_components()...");

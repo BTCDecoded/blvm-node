@@ -363,6 +363,7 @@ impl RpcServer {
     pub async fn start(&self) -> Result<()> {
         let listener = TcpListener::bind(self.addr).await?;
         info!("RPC server listening on {}", self.addr);
+        crate::utils::sd_notify::notify_ready();
 
         // Wrap server in Arc to share across connections
         // Create a new server instance with cloned Arc handlers

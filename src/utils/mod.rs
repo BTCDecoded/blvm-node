@@ -12,6 +12,7 @@ pub mod option;
 pub mod ram_tier;
 pub mod request_id;
 pub mod retry;
+pub mod sd_notify;
 pub mod signal;
 pub mod time;
 pub mod timeout;
@@ -39,7 +40,7 @@ pub use logging::{init_logging, init_logging_from_config, init_module_logging, i
 pub use option::{map_or_default, option_to_result, or_else, unwrap_or_default_with};
 pub use request_id::new_request_id;
 pub use retry::{RetryConfig, retry_async_with_backoff, retry_with_backoff};
-pub use signal::{create_shutdown_receiver, wait_for_shutdown_signal};
+pub use signal::{create_shutdown_receiver, request_shutdown, wait_for_shutdown_signal};
 pub use time::{
     current_timestamp, current_timestamp_duration, current_timestamp_millis,
     current_timestamp_nanos,
