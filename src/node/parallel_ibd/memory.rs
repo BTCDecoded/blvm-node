@@ -3268,6 +3268,26 @@ mod memory_tier_tests {
     };
     use crate::storage::database::DatabaseBackend;
 
+    #[test]
+    fn feeder_byte_cap_shrinks_after_height_300k() {
+        let full = 100_000_000usize;
+        let base = 2_000usize;
+        let total_mb = 64 * 1024;
+        assert_eq!(
+            MemoryGuard::feeder_bytes_for(full, base, total_mb, 0),
+            full
+        );
+        assert_eq!(
+            MemoryGuard::feeder_bytes_for(full, base, total_mb, 400_000),
+            58_000_000
+        );
+        assert!(58_000_000 >= 32 * 1024 * 1024);
+        assert_eq!(
+            MemoryGuard::feeder_bytes_for(1_000, base, total_mb, 800_000),
+            32 * 1024 * 1024
+        );
+    }
+
     /// Phase 0b.4: H3-like accounted engine vs residual mystery.
     #[test]
     fn mem_report_accounted_vs_residual_c2_gate() {

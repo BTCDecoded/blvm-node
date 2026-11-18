@@ -4730,7 +4730,7 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     if utxo_engine.is_some() && sparse_local_body_max > start_height {
         feeder_buffer_limit = feeder_buffer_limit.max(400);
     }
-    let feeder_buffer_bytes_limit = mem_guard.feeder_buffer_bytes_limit;
+    let feeder_buffer_bytes_limit = mem_guard.feeder_bytes_limit_for_height(start_height);
     // Lets the teardown path unblock the feeder (which otherwise parks on backpressure / a
     // blocking recv kept open by the detached coordinator's sender clones) so the real
     // validation error surfaces instead of `feeder_handle.join()` hanging forever.
