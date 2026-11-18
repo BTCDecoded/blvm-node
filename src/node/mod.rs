@@ -2022,11 +2022,10 @@ impl Node {
         utxo_set: &mut blvm_protocol::UtxoSet,
     ) -> Result<()> {
         use crate::node::parallel_ibd::PARALLEL_IBD_SESSION_ACTIVE;
-        use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+        use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
         static CATCH_UP_LAST_FAIL_SECS: AtomicU64 = AtomicU64::new(0);
         static CATCH_UP_FAIL_STREAK: AtomicU32 = AtomicU32::new(0);
-        static CATCH_UP_SEED_BLOCKED: AtomicBool = AtomicBool::new(false);
         static CATCH_UP_FORK_RETRY_SECS: AtomicU64 = AtomicU64::new(0);
 
         // Mode T archive: never catch-up IBD / DNS reseed while serving getdata.
@@ -2847,6 +2846,20 @@ impl Node {
     }
 }
 
+#[cfg(feature = "production")]
+static CATCH_UP_SEED_BLOCKED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "production")]
+pub(crate) fn catch_up_seed_is_blocked() -> bool {
+    CATCH_UP_SEED_BLOCKED.load(std::sync::atomic::Ordering::Acquire)
+}
+
+#[cfg(all(test, feature = "production"))]
+fn reset_catch_up_seed_blocked() {
+    CATCH_UP_SEED_BLOCKED.store(false, std::sync::atomic::Ordering::Release);
+}
+
 /// A heavier fork is retried on a fixed 30s gap. `last_secs == 0` is the first probe.
 pub(crate) fn catch_up_fork_retry_elapsed(last_secs: u64, now: u64) -> bool {
     last_secs == 0 || now.saturating_sub(last_secs) >= 30
@@ -2920,6 +2933,36 @@ mod resume_snapshot_tests {
         let dir = tempfile::tempdir().unwrap();
         record_refused_seed_height(dir.path(), 330797);
         assert_eq!(read_refused_seed_height(dir.path()), Some(330797));
+    }
+
+    #[cfg(feature = "production")]
+    #[tokio::test]
+    async fn a_refused_export_height_sets_the_catch_up_stop() {
+        super::reset_catch_up_seed_blocked();
+        let temp = tempfile::TempDir::new().unwrap();
+        let network: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let rpc: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let mut node = Node::new(
+            temp.path().to_str().unwrap(),
+            network,
+            rpc,
+            Some(ProtocolVersion::Regtest),
+        )
+        .unwrap();
+        node.storage()
+            .chain()
+            .force_set_engine_export_height(7)
+            .unwrap();
+        record_refused_seed_height(temp.path(), 7);
+        let mut utxo = blvm_protocol::UtxoSet::default();
+        node.try_catch_up_ibd(&mut utxo).await.unwrap();
+        assert!(catch_up_seed_is_blocked());
+        assert_eq!(read_refused_seed_height(temp.path()), Some(7));
+        std::fs::remove_file(super::refused_seed_height_path(temp.path())).unwrap();
+        node.try_catch_up_ibd(&mut utxo).await.unwrap();
+        assert!(catch_up_seed_is_blocked());
+        assert!(read_refused_seed_height(temp.path()).is_none());
+        super::reset_catch_up_seed_blocked();
     }
 
     fn put_ckpt(storage: &Storage, tree: &str, prevout: &OutPoint, utxo: &UTXO) {
