@@ -149,7 +149,9 @@ fn spawn_watchdog_thread() {
 #[cfg(unix)]
 fn send_line(name: &str, payload: &[u8]) -> std::io::Result<()> {
     let Some(sock) = datagram() else {
-        return Err(std::io::Error::other("systemd notify socket was not opened"));
+        return Err(std::io::Error::other(
+            "systemd notify socket was not opened",
+        ));
     };
     if let Some(abstract_name) = name.strip_prefix('@') {
         send_abstract(sock, abstract_name, payload)
@@ -302,10 +304,7 @@ mod tests {
         unsafe { std::env::remove_var("WATCHDOG_USEC") };
         unsafe { std::env::set_var("NOTIFY_SOCKET", &path) };
         touch_runtime_heartbeat();
-        assert!(
-            !watchdog_ping_once(),
-            "unset WATCHDOG_USEC must not ping"
-        );
+        assert!(!watchdog_ping_once(), "unset WATCHDOG_USEC must not ping");
 
         unsafe { std::env::set_var("WATCHDOG_USEC", "5000000") };
         touch_runtime_heartbeat();
