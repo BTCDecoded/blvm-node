@@ -1088,7 +1088,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     // pages to the OS via MADV_DONTNEED. The background thread does this
                     // automatically after dirty_decay_ms, but an explicit purge here ensures
                     // freed pages are returned promptly during the watchdog window.
-                    #[cfg(all(feature = "jemalloc", not(target_os = "windows")))]
+                    #[cfg(all(feature = "jemalloc", not(test), not(target_os = "windows")))]
                     {
                         use std::os::raw::c_void;
                         unsafe extern "C" {
@@ -1330,7 +1330,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         // in jemalloc arenas (includes dirty freed pages not yet MADV_DONTNEED'd).
                         // If allocated << resident, jemalloc is holding freed pages (purge needed).
                         // If allocated ≈ resident ≈ UNEXPLAINED_ANON, the app has untracked live allocs.
-                        #[cfg(all(feature = "jemalloc", not(target_os = "windows")))]
+                        #[cfg(all(feature = "jemalloc", not(test), not(target_os = "windows")))]
                         let (jemalloc_allocated_mb, jemalloc_active_mb, jemalloc_resident_mb, jemalloc_retained_mb) = {
                             use std::os::raw::c_void;
                             unsafe extern "C" {
@@ -1365,7 +1365,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                 )
                             }
                         };
-                        #[cfg(not(all(feature = "jemalloc", not(target_os = "windows"))))]
+                        #[cfg(not(all(feature = "jemalloc", not(test), not(target_os = "windows"))))]
                         let (jemalloc_allocated_mb, jemalloc_active_mb, jemalloc_resident_mb, jemalloc_retained_mb) = (0u64, 0u64, 0u64, 0u64);
 
                         // Dump jemalloc per-size-class stats to identify where allocations are.
@@ -1374,7 +1374,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         // (those containing "reg_size" in the bin breakdown) and logs the
                         // top-10 by bytes allocated.  This lets us identify what object sizes
                         // are consuming the unexplained anonymous memory.
-                        #[cfg(all(feature = "jemalloc", not(target_os = "windows")))]
+                        #[cfg(all(feature = "jemalloc", not(test), not(target_os = "windows")))]
                         {
                             use std::os::raw::{c_char, c_void};
                             use std::sync::Mutex;
@@ -1617,7 +1617,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             engine_index_mb, engine_compacter_mb, engine_tail_mb, engine_total_mb, table_file_mb,
                             engine_index_mb, engine_compacter_mb, engine_tail_mb, feeder_mb + staged_mb, accounted_mb,
                         );
-                        #[cfg(all(feature = "jemalloc", not(target_os = "windows")))]
+                        #[cfg(all(feature = "jemalloc", not(test), not(target_os = "windows")))]
                         {
                             memory::maybe_purge_jemalloc_retained("mem_report");
                         }
@@ -1935,7 +1935,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             break;
                         }
                         if paused_ms.is_multiple_of(5_000) {
-                            #[cfg(all(feature = "jemalloc", not(target_os = "windows")))]
+                            #[cfg(all(feature = "jemalloc", not(test), not(target_os = "windows")))]
                             {
                                 use std::os::raw::c_void;
                                 unsafe extern "C" {
