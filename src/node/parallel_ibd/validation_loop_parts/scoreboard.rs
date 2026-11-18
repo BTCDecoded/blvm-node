@@ -523,71 +523,11 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         max_pending_ops_nominal
     );
 
-    // ── Background durability thread ────────────────────────────────────────────────────────
-    // Retire threads offload synchronous LMDB durability flushes (2–20 s each) here,
-    // eliminating staged_count stalls that idled validation workers for ~40% of SegWit-era
-    // IBD (h=500k–956k: 39 IBD_WATCHDOG freeze events observed in one run).
-    // Packages arrive in FIFO order; the single reader preserves monotonic watermark + crash safety.
-    // Disabled in engine mode (engine bypasses IbdUtxoStore flush path entirely).
-    let (durability_tx_opt, _durability_thread_handle) = if !skip_storage && utxo_engine.is_none() {
-        // Bounded channel with backpressure. Sizing rules:
-        //
-        // 1. Cap must be > (BPS × checkpoint_duration / checkpoint_interval) to absorb
-        //    one checkpoint batch without filling: at h=300k, 250 BPS × 13s / 200 = 16 req.
-        //    Cap=512 gives 32× headroom for the worst case (fast BPS + slow checkpoint).
-        //
-        // 2. When the channel IS full (LMDB can't keep up with validation rate), retire
-        //    briefly blocks, causing staged_count to grow. max_ahead must absorb the block:
-        //    staged_growth ≤ BPS × block_duration ≤ 250 × (512 / drain_rate) ≈ 4000 blocks.
-        //    BLVM_IBD_MAX_AHEAD must be set ≥ 4096 (see start-ibd-mainnet.sh).
-        //
-        // 3. Unbounded channel was tried and rejected: with no backpressure, the retire thread
-        //    enqueued 83M inflight ops before the durability thread could process them, causing
-        //    an inflight-cap stall and internal process recovery from an earlier watermark.
-        // Channel cap: 64 requests × ~50-75 MB per package ≈ 3-5 GB max in-flight.
-        //
-        // The original cap=512 assumed checkpoint_duration ≈ 4s (25 BPS). When the durability
-        // thread stalls for minutes (LMDB write amplification at large tree sizes), the channel
-        // fills completely: 512 × 75 MB = 38 GB — enough to OOM a 64 GB host. Reduced to 32:
-        // each package now carries both ADDs and DELs combined (~500k ops × ~144 B = ~72 MB),
-        // so 32 × 72 MB ≈ 2.3 GB peak channel RSS. The prior 64-slot cap with ADD-only packages
-        // (~15 MB each) also totalled ~960 MB; with ADDs+DELs per package, 32 slots reproduce
-        // that budget while completely eliminating the separate del_backlog flush cycle.
-        //
-        // If a checkpoint takes longer, retirement blocks on channel-full and staged_count grows.
-        // The coordinator's staged_dispatch_cap prevents unbounded validated-but-unretired
-        // blocks from accumulating in the feeder.
-        // 4 slots default (env override): at SegWit heights each retire package can be large;
-        // smaller buffer = correct back-pressure when durability is slow.
-        let chan_cap = ibd_durability_channel_cap(start_height);
-        info!("[IBD_DURABILITY] durability channel cap={chan_cap} (start_height={start_height})");
-        let (tx, rx) = std::sync::mpsc::sync_channel::<DurabilityRequest>(chan_cap);
-        let dur_store = Arc::clone(&ibd_store_v2_for_validation);
-        let dur_storage_wm = Arc::clone(&storage_for_retire);
-        let dur_flush_handles = Arc::clone(&utxo_flush_handles);
-        let dur_muhash = Arc::clone(&ibd_muhash_accumulator);
-        let dur_err = Arc::clone(&retire_err);
-        let dur_inflight = Arc::clone(&durability_in_flight);
-        let defer_checkpoint = ibd_defer_checkpoint;
-        let handle = std::thread::Builder::new()
-            .name("ibd-durability".to_string())
-            .spawn(move || {
-                run_ibd_durability_loop(
-                    dur_store,
-                    dur_storage_wm,
-                    dur_flush_handles,
-                    dur_muhash,
-                    dur_err,
-                    dur_inflight,
-                    defer_checkpoint,
-                    rx,
-                );
-            })
-            .expect("spawn IBD durability thread");
-        (Some(tx), Some(handle))
-    } else {
-        (None, None)
-    };
+    // The legacy LMDB durability thread is gone. Engine checkpoints are separate.
+    let (durability_tx_opt, _durability_thread_handle): (
+        Option<std::sync::mpsc::SyncSender<DurabilityRequest>>,
+        Option<std::thread::JoinHandle<()>>,
+    ) = (None, None);
 
     // Background retire dispatcher: 1..N retire threads, sharded by `height % N`.
     // Each shard runs the same retire loop body as before; only the cursor wiring
@@ -814,7 +754,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     //
     // Engine mode default 16 (not 32): each in-flight height pins age-0; with 1-height
     // frozen runs, depth 32 made mergeable_prefix 0–1 and stalled the compacter.
-    let engine_default_depth = if utxo_engine.is_some() { 16 } else { 32 };
+    let engine_default_depth = 16;
     let n_pipeline_depth: usize = std::env::var("BLVM_IBD_PIPELINE_DEPTH")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -834,8 +774,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     let (valres_tx, valres_rx) = crossbeam_channel::unbounded::<ValidateResult>();
     // R-359: per-block MuHash subs arrive here after the result; folded in height order by
     // `muhash_folder` so the running accumulator is always "exactly blocks ≤ folded_through".
-    let (muhash_tx, muhash_rx) =
-        crossbeam_channel::unbounded::<super::muhash_fold::MuHashSub>();
+    let (muhash_tx, muhash_rx) = crossbeam_channel::unbounded::<super::muhash_fold::MuHashSub>();
     let mut muhash_folder = super::muhash_fold::InOrderMuHashFolder::new(start_height);
     let muhash_fold_active =
         utxo_engine.is_some() && crate::config::ibd::ibd_engine_muhash_enabled();
@@ -903,53 +842,53 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         break 'recv;
                     }
                     while let Some(job) = queue.pop_ready() {
-                    let t_append = Instant::now();
-                    match SpendSession::append(
-                        Arc::clone(&job.db),
-                        job.block_arc.as_ref(),
-                        job.tx_ids.as_slice(),
-                        job.height as i32,
-                    ) {
-                        Ok(partial) => {
-                            let engine_append_ms = t_append.elapsed().as_millis() as u64;
-                            if vjob_tx
-                                .send(ValidateJob::Engine(EngineValidateJob {
+                        let t_append = Instant::now();
+                        match SpendSession::append(
+                            Arc::clone(&job.db),
+                            job.block_arc.as_ref(),
+                            job.tx_ids.as_slice(),
+                            job.height as i32,
+                        ) {
+                            Ok(partial) => {
+                                let engine_append_ms = t_append.elapsed().as_millis() as u64;
+                                if vjob_tx
+                                    .send(ValidateJob::Engine(EngineValidateJob {
+                                        height: job.height,
+                                        block_arc: job.block_arc,
+                                        witnesses_storage: job.witnesses_storage,
+                                        bip30_index: job.bip30_index,
+                                        recent_headers: job.recent_headers,
+                                        tx_ids: job.tx_ids,
+                                        best_header_chainwork: job.best_header_chainwork,
+                                        cached_network_time: job.cached_network_time,
+                                        partial_session: partial,
+                                        engine_append_ms,
+                                        ibd_block_outputs: job.ibd_block_outputs,
+                                    }))
+                                    .is_err()
+                                {
+                                    break 'recv;
+                                }
+                            }
+                            Err(e) => {
+                                let _ = vres_tx.send(ValidateResult {
                                     height: job.height,
-                                    block_arc: job.block_arc,
-                                    witnesses_storage: job.witnesses_storage,
-                                    bip30_index: job.bip30_index,
-                                    recent_headers: job.recent_headers,
-                                    tx_ids: job.tx_ids,
-                                    best_header_chainwork: job.best_header_chainwork,
-                                    cached_network_time: job.cached_network_time,
-                                    partial_session: partial,
-                                    engine_append_ms,
-                                    ibd_block_outputs: job.ibd_block_outputs,
-                                }))
-                                .is_err()
-                            {
+                                    result: Err(e.context(format!(
+                                        "IBD engine SpendSession::append failed at height {}",
+                                        job.height
+                                    ))),
+                                    undo_log: blvm_consensus::reorganization::BlockUndoLog::new(),
+                                    bip30_post: job.bip30_index,
+                                    elapsed: Duration::ZERO,
+                                    view_build_ms: 0,
+                                    engine_append_ms: t_append.elapsed().as_millis() as u64,
+                                    engine_complete_ms: 0,
+                                });
+                                // Stop accepting further appends; orchestrator will see the error
+                                // via in-order collect and tear down.
                                 break 'recv;
                             }
                         }
-                        Err(e) => {
-                            let _ = vres_tx.send(ValidateResult {
-                                height: job.height,
-                                result: Err(e.context(format!(
-                                    "IBD engine SpendSession::append failed at height {}",
-                                    job.height
-                                ))),
-                                undo_log: blvm_consensus::reorganization::BlockUndoLog::new(),
-                                bip30_post: job.bip30_index,
-                                elapsed: Duration::ZERO,
-                                view_build_ms: 0,
-                                engine_append_ms: t_append.elapsed().as_millis() as u64,
-                                engine_complete_ms: 0,
-                            });
-                            // Stop accepting further appends; orchestrator will see the error
-                            // via in-order collect and tear down.
-                            break 'recv;
-                        }
-                    }
                     } // while queue.pop_ready()
                 }
                 if queue.pending_len() > 0 {
@@ -1023,14 +962,18 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     };
     // R-361: last-reference deallocation of validated blocks moves to `ibd-drop`.
     let mut deferred_dropper = if deferred_drop_enabled() {
-        info!("IBD: deferred block drop enabled (ibd-drop thread; opt out BLVM_IBD_DEFERRED_DROP=0)");
+        info!(
+            "IBD: deferred block drop enabled (ibd-drop thread; opt out BLVM_IBD_DEFERRED_DROP=0)"
+        );
         DeferredDropper::spawn()
     } else {
         DeferredDropper::disabled()
     };
     // R-362: the `[IBD_TIP_SKIP]` force_sync moves to `ibd-tip-sync`.
     let mut tip_syncer = if tip_sync_inline() {
-        info!("IBD: tip sync inline (BLVM_IBD_TIP_SYNC=inline; force_sync on the orchestrator, R-361 behaviour)");
+        info!(
+            "IBD: tip sync inline (BLVM_IBD_TIP_SYNC=inline; force_sync on the orchestrator, R-361 behaviour)"
+        );
         TipSyncer::inline()
     } else {
         info!("IBD: tip sync thread enabled (ibd-tip-sync; force_sync off the orchestrator)");
@@ -1050,9 +993,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         _validate_workers.push(
             std::thread::Builder::new()
                 .name(format!("ibd-validate-{i}"))
-                .spawn(move || {
-                    run_validation_worker_shared(rx, tx, mh, pi, bs, pr, st, lr, mpo)
-                })
+                .spawn(move || run_validation_worker_shared(rx, tx, mh, pi, bs, pr, st, lr, mpo))
                 .expect("spawn IBD validate worker"),
         );
     }
@@ -2290,7 +2231,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             next_validation_height,
                             protocol.get_protocol_version(),
                         ) {
-                            let est = super::types::estimate_block_bytes(arc_b.as_ref(), w.as_ref());
+                            let est =
+                                super::types::estimate_block_bytes(arc_b.as_ref(), w.as_ref());
                             super::local_block::note_store_apply(next_validation_height);
                             super::tip_stage::mark_taken_from_feeder(next_validation_height);
                             break Some((
@@ -2474,16 +2416,17 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 let next_h = next_validation_height;
                 let from_feeder = {
                     let mut guard = feeder_state.0.lock();
-                    guard.0.remove(next_h).map(
-                        |(arc_b, w, ik, u, tx_ids, spec_adds, est_bytes)| {
+                    guard
+                        .0
+                        .remove(next_h)
+                        .map(|(arc_b, w, ik, u, tx_ids, spec_adds, est_bytes)| {
                             super::tip_stage::mark_taken_from_feeder(next_h);
                             guard.2 = guard.2.saturating_sub(est_bytes);
                             feeder_state.1.notify_one();
                             super::IBD_FEEDER_BUFFER_BLOCKS
                                 .store(guard.0.len(), std::sync::atomic::Ordering::Relaxed);
                             (next_h, arc_b, w, ik, u, tx_ids, spec_adds, est_bytes)
-                        },
-                    )
+                        })
                 };
                 from_feeder.or_else(|| {
                     if utxo_engine.is_some() && super::local_block::store_apply_enabled() {
@@ -2613,17 +2556,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             // In engine mode the worker uses `partial_session` (query+fetch via the age-tiered
             // index) rather than the legacy prefetch/cache key path, so `keys_v2_buf` is dead
             // work — skip the input-key extraction entirely.
-            if utxo_engine.is_none() {
-                if input_keys_from_feeder.is_empty() {
-                    block_input_keys_into_filtered_with_tx_ids(
-                        block_arc_d.as_ref(),
-                        tx_ids_precomputed_d.as_slice(),
-                        &mut keys_v2_buf,
-                    );
-                } else {
-                    std::mem::swap(&mut keys_v2_buf, &mut input_keys_from_feeder);
-                }
-            }
+            let _ = input_keys_from_feeder;
             if h <= 200 {
                 debug!(
                     "[IBD_V2] height={} keys_needed={} store_len={}",
@@ -2636,14 +2569,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             // Spec snapshot: shallow Arc clones of in-flight blocks' speculative additions.
             // Dead in engine mode — workers use `partial_session` (age-tiered query+fetch)
             // and never consult `spec_adds_snapshot`.  Skip the Arc-clone loop entirely.
-            let spec_adds_snapshot: Vec<(u64, Arc<UtxoSet>)> = if utxo_engine.is_none() {
-                spec_adds_snapshot_buf.clear();
-                spec_adds_snapshot_buf
-                    .extend(spec_adds.iter().map(|(sh, set)| (*sh, Arc::clone(set))));
-                std::mem::replace(&mut spec_adds_snapshot_buf, Vec::with_capacity(64))
-            } else {
-                Vec::new()
-            };
+            let spec_adds_snapshot: Vec<(u64, Arc<UtxoSet>)> = Vec::new();
 
             // Optional debug/profile snapshot (rare, off by default).
             if let Some(ref base) = snapshot_dir_base {
@@ -2688,20 +2614,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
             // Speculative additions: legacy prefetch path only. Engine workers use
             // `partial_session` and never read `spec_adds_snapshot`.
-            if utxo_engine.is_none() {
-                let spec_arc: Arc<UtxoSet> = spec_adds_d;
-                let spec_entry_bytes = (spec_arc.len() as u64).saturating_mul(64);
-                spec_adds_bytes.fetch_add(spec_entry_bytes, Ordering::Relaxed);
-                spec_adds.insert(h, Arc::clone(&spec_arc));
-            } else {
-                drop(spec_adds_d);
-            }
-
-            let keys_for_job: Vec<OutPointKey> = if utxo_engine.is_some() {
-                Vec::new()
-            } else {
-                std::mem::take(&mut keys_v2_buf)
-            };
+            drop(spec_adds_d);
+            let keys_for_job: Vec<OutPointKey> = Vec::new();
 
             // After the known height-in-coinbase block, a new coinbase cannot repeat an
             // earlier one until `BIP34_IMPLIES_BIP30_LIMIT`. An empty index is the skip.
@@ -3162,32 +3076,11 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 Ok(utxo_delta_opt) => {
                     // Engine mode: UTXO state lives in `UtxoDatabase`; legacy staged deltas and
                     // incremental commitments are skipped (commitments rebuilt post-IBD).
-                    if utxo_engine.is_none() {
-                        let delta = Arc::new(utxo_delta_opt.unwrap_or_else(empty_utxo_delta));
-                        {
-                            let mut m = staged.lock();
-                            m.insert(next_height, delta);
-                        }
-                        staged_count.fetch_add(1, Ordering::Relaxed);
-                    }
-                    // In engine mode: the retire thread immediately calls `continue` (publish
-                    // + adapt only), so blocks_buf and block are never accessed. Sending
-                    // Arc<Block> in engine mode causes the channel backlog to hold O(blocks)
-                    // heap allocations when dispatch outruns the retire thread — the primary
-                    // root cause of memory growth during local replay (45K blocks/sec).
-                    // In non-engine mode: blocks_buf is needed only for dynamic-eviction.
-                    let retire_blocks_buf = if utxo_engine.is_none()
-                        && ibd_store_v2_for_validation.is_dynamic_eviction()
-                    {
-                        blocks_buf.clone()
-                    } else {
-                        Vec::new()
-                    };
-                    let retire_block = if utxo_engine.is_none() {
-                        Some(Arc::clone(&block_arc))
-                    } else {
-                        None // engine mode retire thread does not use the block
-                    };
+                    let _ = utxo_delta_opt;
+                    // The retire thread only publishes. Sending Arc<Block> would pin every
+                    // in-flight body on the retire channel during local replay.
+                    let retire_blocks_buf = Vec::new();
+                    let retire_block = None;
                     if _retire_dispatcher
                         .send(IbdRetireWork {
                             height: next_height,
@@ -3388,9 +3281,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         blockstore
                             .store_undo_log_if_absent(&block_hash, undo)
                             .map_err(|e| {
-                                anyhow::anyhow!(
-                                    "height {next_height} undo was not stored: {e:#}"
-                                )
+                                anyhow::anyhow!("height {next_height} undo was not stored: {e:#}")
                             })?;
                     }
                     // Skip path: body already on disk, so `do_flush_to_storage` (and its
@@ -3816,8 +3707,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                         &parent, &txid, vout,
                                     ) =>
                                 {
-                                    let failed_hash =
-                                        blockstore.get_block_hash(block_arc.as_ref());
+                                    let failed_hash = blockstore.get_block_hash(block_arc.as_ref());
                                     warn!(
                                         "[IBD_DOUBLE_SPEND] height={} prevout {}:{} already spent in connected parent {} — not a snapshot repair",
                                         next_height,
@@ -4402,9 +4292,9 @@ fn parse_smaps_report(text: &str) -> SmapsReport {
         } else if in_mi {
             if line.starts_with("Rss:")
                 && let Some(v) = line.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok())
-                {
-                    mi_rss_mb += v / 1024;
-                }
+            {
+                mi_rss_mb += v / 1024;
+            }
             if line.starts_with("VmFlags:") {
                 in_mi = false;
             }

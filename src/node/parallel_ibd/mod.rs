@@ -2636,9 +2636,11 @@ pub struct ParallelIBDConfig {
     pub headers_timeout_secs: u64,
     /// Headers max failures before peer switch (default: 10)
     pub headers_max_failures: u32,
-    /// Dedicated headless IBD — larger RSS envelope (`[ibd] dedicated` or BLVM_IBD_EXCLUSIVE).
+    /// Resolved `[ibd] workload`. `BLVM_IBD_EXCLUSIVE=1` still forces Dedicated inside MemoryGuard.
+    pub memory_request: crate::config::IbdMemoryRequest,
+    /// True when this session asked for the larger envelope, including `BLVM_IBD_EXCLUSIVE`.
     pub dedicated: bool,
-    /// Age-tiered UTXO engine (resolved from env + `[ibd].utxo_engine` in `from_config`).
+    /// Age-tiered UTXO engine. Always on; the legacy store is not selectable.
     pub utxo_engine: bool,
 }
 
@@ -2825,13 +2827,11 @@ impl ParallelIBDConfig {
             .and_then(|s| s.parse().ok())
             .or_else(|| ibd_config.map(|c| c.headers_max_failures))
             .unwrap_or(10);
-        let dedicated = std::env::var("BLVM_IBD_EXCLUSIVE")
+        let memory_request = crate::config::resolve_ibd_memory_request(ibd_config);
+        let exclusive = std::env::var("BLVM_IBD_EXCLUSIVE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or_else(|_| {
-                std::env::var("BLVM_DEDICATED_NODE")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or_else(|_| ibd_config.map(|c| c.dedicated).unwrap_or(false))
-            });
+            .unwrap_or(false);
+        let dedicated = exclusive || memory_request == crate::config::IbdMemoryRequest::Dedicated;
         Self {
             network: blvm_protocol::types::Network::Mainnet,
             num_workers: std::thread::available_parallelism()
@@ -2856,6 +2856,7 @@ impl ParallelIBDConfig {
             max_blocks_in_transit_per_peer: max_blocks_in_transit,
             headers_timeout_secs: headers_timeout,
             headers_max_failures,
+            memory_request,
             dedicated,
             utxo_engine: crate::config::ibd::ibd_engine_enabled(ibd_config),
         }
@@ -8547,7 +8548,7 @@ impl ParallelIBD {
         }
         let ibd_tuning = IbdTuningContext {
             storage_backend: storage.database_backend(),
-            ibd_dedicated: self.config.dedicated,
+            memory_request: self.config.memory_request,
             db_file_size_mb,
         };
         let mut mem_guard = MemoryGuard::new_for_ibd(ibd_tuning);
@@ -9045,198 +9046,14 @@ impl ParallelIBD {
         );
         #[cfg(target_os = "linux")]
         memory::refresh_stale_emergency_pressure(coord_rss_budget_mb);
-        let engine_will_run = self.config.utxo_engine;
-        let ibd_path_reason = match std::env::var("BLVM_IBD_ENGINE") {
-            Ok(v)
-                if v.trim() == "0"
-                    || v.eq_ignore_ascii_case("false")
-                    || v.eq_ignore_ascii_case("no") =>
-            {
-                "BLVM_IBD_ENGINE=0"
-            }
-            Ok(v)
-                if v.trim() == "1"
-                    || v.eq_ignore_ascii_case("true")
-                    || v.eq_ignore_ascii_case("yes") =>
-            {
-                "BLVM_IBD_ENGINE=1"
-            }
-            Ok(_) => "BLVM_IBD_ENGINE set (unrecognized value — using config default)",
-            Err(_) if !engine_will_run => "[ibd].utxo_engine=false",
-            Err(_) => "default (engine on)",
-        };
-        info!(
-            "IBD UTXO path: {} ({})",
-            if engine_will_run { "engine" } else { "legacy" },
-            ibd_path_reason
-        );
-        if !engine_will_run {
-            warn!(
-                "IBD legacy UTXO path is deprecated; prefer engine (default). \
-                 Set BLVM_IBD_ENGINE unset or remove utxo_engine=false to migrate."
-            );
-        }
-        // IBD v2 (IbdUtxoStore) is the only path. Storage is guaranteed Some (checked at start).
-        let ibd_memory_only: bool =
-            (self.config.memory_only && start_height <= 1) || engine_will_run;
-        // Keeps the standalone LMDB environment alive for the duration of IBD (dropped after
-        // `ibd_store_v2` is no longer used). The `Heed3Tree`'s Arc<Env> would keep the env
-        // alive on its own, but holding the Box<dyn Database> here makes the lifetime explicit
-        // and ensures a clean shutdown flush sequence.
-        let _ibd_utxo_standalone_db: Option<Box<dyn crate::storage::database::Database>>;
+        info!("IBD UTXO path: engine");
+        let ibd_memory_only = true;
         let ibd_store_v2: Arc<IbdUtxoStore> = {
-            // Open the IBD UTXO tree from a SEPARATE, fresh LMDB environment when possible.
-            //
-            // The main storage LMDB holds 400+ GB of block data. After `ibd_utxos.clear()` is
-            // called during autorepair, millions of freed pages are scattered throughout this
-            // file. LMDB reuses freed pages for new allocations, which requires reading each
-            // old page from a random file offset (page fault, ~89% cache-miss rate on a large
-            // file). At h=385k this causes 40+ seconds per 200k-op write transaction.
-            //
-            // A separate fresh LMDB at `<data_dir>/ibd_utxo_store/` allocates pages
-            // sequentially from the end of a small file. With no free-list bloat, the same
-            // 200k-op batch completes in ~1 second — a 40x improvement.
-            //
-            // SELECTION RULE (preserves backward compatibility):
-            //   1. If standalone LMDB exists AND is non-empty → use standalone (resumed session
-            //      that already wrote to the standalone store).
-            //   2. If standalone is empty/absent AND main storage's `ibd_utxos` is non-empty →
-            //      use main storage (legacy partial IBD or previous session without standalone).
-            //   3. If both are empty (fresh start or post-repair) → use standalone (future writes
-            //      go to the small, unfragmented file).
-            //   4. If standalone creation fails → fall back to main storage.
-            let tree: std::sync::Arc<dyn crate::storage::database::Tree> = {
-                let maybe_data_dir = storage.data_dir();
-                if engine_will_run {
-                    _ibd_utxo_standalone_db = None;
-                    info!(
-                        "IBD engine mode: skipping standalone {}/ LMDB (no 128GiB mmap reservation)",
-                        IBD_UTXO_STORE_SUBDIR
-                    );
-                    storage
-                        .open_tree("ibd_utxos")
-                        .context("Failed to open IBD UTXO tree (engine legacy shell)")?
-                } else if let Some(ref root) = maybe_data_dir {
-                    let utxo_store_dir = root.join(IBD_UTXO_STORE_SUBDIR);
-                    match crate::storage::database::create_ibd_utxo_standalone_db(&utxo_store_dir) {
-                        Ok(standalone_db) => {
-                            let standalone_tree = standalone_db.open_tree("ibd_utxos");
-                            let standalone_non_empty = match &standalone_tree {
-                                Ok(tree) => {
-                                    let empty =
-                                        tree.is_empty().context("standalone ibd_utxos is_empty")?;
-                                    !empty
-                                }
-                                Err(_) => false,
-                            };
-
-                            // Case 0: standalone has data from a prior session BUT we are
-                            // replaying from genesis (start_height == 0 ← watermark was not
-                            // durably written on the previous exit, so ibd_resume_heights reset
-                            // synced_tip to 0). Reusing that stale data causes UTXO_TOTAL_MISS:
-                            // old DEL tombstones shadow UTXOs that the fresh replay needs to
-                            // look up, and UTXOs added before the prior session's last
-                            // checkpoint exist in LMDB but with the wrong generation context.
-                            // Fix: drop the env, wipe the directory, and open a clean instance.
-                            if standalone_non_empty && start_height == 0 {
-                                warn!(
-                                    "[IBD_UTXO_STORE] standalone LMDB is non-empty but \
-                                     start_height=0 (watermark not durably written on prior exit). \
-                                     Wiping stale standalone data to prevent UTXO_TOTAL_MISS \
-                                     during local replay."
-                                );
-                                drop(standalone_tree);
-                                drop(standalone_db);
-                                reopen_after_stale_wipe(
-                                    || std::fs::remove_dir_all(&utxo_store_dir),
-                                    || Ok(()),
-                                )?;
-                                match crate::storage::database::create_ibd_utxo_standalone_db(
-                                    &utxo_store_dir,
-                                ) {
-                                    Ok(fresh_db) => {
-                                        info!(
-                                            "IBD UTXO store: using SEPARATE LMDB at {:?} \
-                                             (fresh after stale-wipe — avoids free-list bloat)",
-                                            utxo_store_dir
-                                        );
-                                        let fresh_tree = fresh_db
-                                            .open_tree("ibd_utxos")
-                                            .context("open ibd_utxos after stale-wipe")?;
-                                        _ibd_utxo_standalone_db = Some(fresh_db);
-                                        std::sync::Arc::from(fresh_tree)
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            "create_ibd_utxo_standalone_db failed after \
-                                             stale-wipe ({e}); falling back to main storage"
-                                        );
-                                        _ibd_utxo_standalone_db = None;
-                                        storage.open_tree("ibd_utxos").context(
-                                            "Failed to open IBD UTXO tree (stale-wipe fallback)",
-                                        )?
-                                    }
-                                }
-                            } else if standalone_non_empty {
-                                // Case 1: standalone already has data from a prior session.
-                                info!(
-                                    "IBD UTXO store: resuming SEPARATE LMDB at {:?} \
-                                     (contains existing UTXO data from prior session)",
-                                    utxo_store_dir
-                                );
-                                _ibd_utxo_standalone_db = Some(standalone_db);
-                                std::sync::Arc::from(standalone_tree.unwrap())
-                            } else {
-                                // Case 2 or 3: standalone is empty.
-                                // Check if main storage has UTXO data (legacy partial IBD).
-                                let main_tree =
-                                    storage.open_tree("ibd_utxos").context("open ibd_utxos")?;
-                                let main_non_empty =
-                                    main_utxo_tree_non_empty(main_tree.is_empty())?;
-                                if main_non_empty {
-                                    // Case 2: legacy data in main storage — keep using it.
-                                    // Migrating mid-IBD would require copying millions of entries.
-                                    info!(
-                                        "IBD UTXO store: using MAIN storage ibd_utxos \
-                                         (contains existing UTXO data; standalone store is empty). \
-                                         Next fresh IBD will use the standalone store."
-                                    );
-                                    _ibd_utxo_standalone_db = None;
-                                    main_tree
-                                } else {
-                                    // Case 3: both empty → fresh start → use standalone.
-                                    info!(
-                                        "IBD UTXO store: using SEPARATE LMDB at {:?} \
-                                         (fresh IBD start — avoids free-list bloat in main \
-                                         400GB block store LMDB)",
-                                        utxo_store_dir
-                                    );
-                                    _ibd_utxo_standalone_db = Some(standalone_db);
-                                    std::sync::Arc::from(standalone_tree.unwrap())
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!(
-                                "create_ibd_utxo_standalone_db failed ({e}); \
-                                 falling back to main storage ibd_utxos"
-                            );
-                            _ibd_utxo_standalone_db = None;
-                            storage
-                                .open_tree("ibd_utxos")
-                                .context("Failed to open IBD UTXO tree (fallback)")?
-                        }
-                    }
-                } else {
-                    // In-memory or non-file-backed backend — use the main storage.
-                    _ibd_utxo_standalone_db = None;
-                    storage
-                        .open_tree("ibd_utxos")
-                        .context("Failed to open IBD UTXO tree")?
-                }
-            };
+            let tree = storage
+                .open_tree("ibd_utxos")
+                .context("Failed to open IBD UTXO tree")?;
             info!(
-                "IBD v2: IbdUtxoStore (DashMap, zero lock, max_cache={} entries)",
+                "IBD v2: IbdUtxoStore shell (inactive; engine holds the UTXO set), max_cache={} entries",
                 effective_max_entries
             );
             let eviction: crate::storage::ibd_utxo_store::EvictionStrategy = self
@@ -9250,7 +9067,7 @@ impl ParallelIBD {
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| start_height.saturating_sub(1));
-            let store = Arc::new(IbdUtxoStore::new_with_options(
+            Arc::new(IbdUtxoStore::new_with_options(
                 tree,
                 utxo_flush_threshold,
                 ibd_memory_only,
@@ -9258,25 +9075,9 @@ impl ParallelIBD {
                 eviction,
                 utxo_disk_baseline,
                 storage.utxo_value_codec(),
-            ));
-            if start_height <= 1 && !engine_will_run {
-                store.bootstrap_genesis(&protocol.get_network_params().genesis_block);
-            }
-            if ibd_memory_only && !engine_will_run {
-                info!("IBD_MEMORY_ONLY=1: prefetch uses cache only (no disk reads during IBD)");
-            } else if engine_will_run {
-                info!("IBD engine mode: IbdUtxoStore shell inactive (cache-only placeholder)");
-            }
-            store
+            ))
         };
-
-        // Age-tiered UTXO engine (Phase 2). Opened here (before coordinator) so `coord_engine_mode`
-        // reflects the actual runtime path — including resume-after-SIGKILL when we re-seed from
-        // the durable `ibd_utxos` checkpoint.
-        let utxo_engine: Option<Arc<crate::storage::ibd_engine::UtxoDatabase>> = if !engine_will_run
-        {
-            None
-        } else {
+        let utxo_engine: Option<Arc<crate::storage::ibd_engine::UtxoDatabase>> = {
             let engine_path = crate::config::ibd::ibd_engine_path(storage.data_dir().as_deref());
             if let Some(parent) = engine_path.parent() {
                 std::fs::create_dir_all(parent)
@@ -9377,7 +9178,7 @@ impl ParallelIBD {
                 )
                 .with_context(|| {
                     format!(
-                        "open IBD engine at {} for dirty re-seed (set BLVM_IBD_ENGINE=0 for legacy path)",
+                        "open IBD engine at {} for dirty re-seed",
                         engine_path.display()
                     )
                 })?
@@ -9386,12 +9187,7 @@ impl ParallelIBD {
                     &engine_path,
                     mem_guard.engine_avail_mb(),
                 )
-                .with_context(|| {
-                    format!(
-                        "open IBD engine at {} (set BLVM_IBD_ENGINE=0 for legacy path)",
-                        engine_path.display()
-                    )
-                })?
+                .with_context(|| format!("open IBD engine at {}", engine_path.display()))?
             };
 
             if resume_seed {

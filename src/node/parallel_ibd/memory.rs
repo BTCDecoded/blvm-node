@@ -318,6 +318,31 @@ fn read_cgroup_memory_max_mb() -> Option<u64> {
     None
 }
 
+/// Absolute MiB used on a large host, capped so it cannot exceed `pct` of this host.
+///
+/// `2048` is half of a 4 GiB machine and the whole of a 2 GiB machine. Callers that
+/// used to write `.max(2048)` keep that floor on hosts big enough to hold it.
+pub(crate) fn mb_floor(total_mb: u64, absolute_mb: u64, pct: u64) -> u64 {
+    absolute_mb.min(total_mb.saturating_mul(pct) / 100)
+}
+
+/// Index budget inside an RSS envelope.
+///
+/// The 6144 MiB pipeline reserve and the 2048 MiB floor are the large-envelope
+/// numbers. The reserve still applies only when the envelope can pay it. The floor
+/// cannot exceed half of this envelope, so a 4 GiB host is not asked for 2048 MiB
+/// after the reserve has already consumed the budget.
+pub(crate) fn engine_index_budget_mb(rss_budget_mb: u64, utxo_cache_mb: u64) -> u64 {
+    const PIPELINE_RESERVE_MB: u64 = 6144;
+    const LEGACY_CACHE_CAP_MB: u64 = 4096;
+    let legacy = utxo_cache_mb.min(LEGACY_CACHE_CAP_MB);
+    let engine_mb = rss_budget_mb
+        .saturating_sub(PIPELINE_RESERVE_MB)
+        .saturating_sub(legacy);
+    let floor = 2048.min(rss_budget_mb / 2);
+    engine_mb.max(floor)
+}
+
 /// Limit the node may consume: min(RSS budget, cgroup max).
 pub(crate) fn footprint_limit_mb(rss_budget_mb: u64) -> u64 {
     match cgroup_memory_limit_mb() {
@@ -1257,8 +1282,8 @@ pub(crate) const ROCKSDB_PIPELINE_RESERVE_MB: u64 = 2048;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct IbdTuningContext {
     pub storage_backend: crate::storage::database::DatabaseBackend,
-    /// From `[ibd] dedicated`, `BLVM_DEDICATED_NODE`, or `BLVM_IBD_EXCLUSIVE`.
-    pub ibd_dedicated: bool,
+    /// From `[ibd] workload`. `BLVM_IBD_EXCLUSIVE=1` is applied in [`Self::detect_workload_class`].
+    pub memory_request: crate::config::IbdMemoryRequest,
     /// Estimated MiB of file-backed DB pages that will be resident in our RSS.
     /// For Heed3: derived from `data.mdb` file size at IBD start. These pages cannot
     /// be freed by UTXO cache eviction, so they must be subtracted from the RSS budget
@@ -1270,7 +1295,7 @@ impl Default for IbdTuningContext {
     fn default() -> Self {
         Self {
             storage_backend: crate::storage::database::default_backend(),
-            ibd_dedicated: false,
+            memory_request: crate::config::IbdMemoryRequest::Auto,
             db_file_size_mb: 0,
         }
     }
@@ -1292,7 +1317,7 @@ impl MemoryGuard {
     pub(crate) fn detect_workload_class(
         total_mb: u64,
         avail_mb: u64,
-        ibd_dedicated: bool,
+        request: crate::config::IbdMemoryRequest,
     ) -> WorkloadClass {
         let exclusive = std::env::var("BLVM_IBD_EXCLUSIVE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -1300,22 +1325,21 @@ impl MemoryGuard {
         if exclusive {
             return WorkloadClass::Dedicated;
         }
+        if request == crate::config::IbdMemoryRequest::Shared {
+            return WorkloadClass::Shared;
+        }
         let avail_pct = if total_mb > 0 {
             avail_mb.saturating_mul(100) / total_mb
         } else {
             100
         };
-        let wants_dedicated = ibd_dedicated
-            || std::env::var("BLVM_DEDICATED_NODE")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-        if wants_dedicated {
-            // `[ibd] dedicated = true` in the example config must not OOM shared workstations.
+        if request == crate::config::IbdMemoryRequest::Dedicated {
+            // `workload = "dedicated"` must not OOM a host that is already busy.
             // Only treat as Dedicated when most RAM is actually free at boot.
             const DEDICATED_MIN_AVAIL_PCT: u64 = 70;
             if avail_pct < DEDICATED_MIN_AVAIL_PCT {
                 tracing::warn!(
-                    "MemoryGuard: dedicated mode requested but MemAvailable is only {avail_pct}% \
+                    "MemoryGuard: dedicated workload requested but MemAvailable is only {avail_pct}% \
                      of MemTotal — using Shared memory envelope (set BLVM_IBD_EXCLUSIVE=1 to force Dedicated)"
                 );
                 return WorkloadClass::Shared;
@@ -1430,11 +1454,11 @@ impl MemoryGuard {
             return from_total
                 .max(from_avail)
                 .min(total_mb * 80 / 100)
-                .max(2048);
+                .max(mb_floor(total_mb, 2048, 50));
         }
         if total_mb <= Self::EXTENDED_SIXTEEN_CLASS_MB {
             let from_avail = (avail_mb * 60 / 100).clamp(3000, 7000);
-            return from_avail.max(2048);
+            return from_avail.max(mb_floor(total_mb, 2048, 50));
         }
         // **Dedicated machines** use total RAM as the reference instead of available RAM.
         //
@@ -1468,7 +1492,8 @@ impl MemoryGuard {
                 (total_mb * 10 / 100).max(4096)
             };
             let from_avail = avail_mb.saturating_sub(os_reserve);
-            return from_total.min(from_avail.max(2048)).max(2048);
+            let floor = mb_floor(total_mb, 2048, 50);
+            return from_total.min(from_avail.max(floor)).max(floor);
         }
         let os_reserve_pct: u64 = if total_mb >= 32 * 1024 { 25 } else { 22 };
         let os_reserve = (total_mb * os_reserve_pct / 100).max(2816);
@@ -1485,7 +1510,9 @@ impl MemoryGuard {
             }
             WorkloadClass::Dedicated => unreachable!("handled above"),
         };
-        from_spare.min(total_mb * cap_pct / 100).max(2048)
+        from_spare
+            .min(total_mb * cap_pct / 100)
+            .max(mb_floor(total_mb, 2048, 50))
     }
 
     /// Nominal pending-ops cap — **always > 0**. Pipeline throttle, not optional on large hosts.
@@ -1605,7 +1632,7 @@ impl MemoryGuard {
             total_mb = 8192;
         }
         if available_mb == 0 {
-            available_mb = (total_mb * 60 / 100).max(2048);
+            available_mb = (total_mb * 60 / 100).max(mb_floor(total_mb, 2048, 60));
         }
 
         let total_gb = Self::total_gb_rounded(total_mb);
@@ -1654,7 +1681,7 @@ impl MemoryGuard {
             // A Dedicated latch then reserves a 16 GiB UTXO cache and a ~47 GiB RSS
             // budget on top of that full swap (testnet4 av2, 2026-10-27: 1 GiB swap
             // free, cache latched at 16384 MiB).
-            let detected = Self::detect_workload_class(total_mb, available_mb, ctx.ibd_dedicated);
+            let detected = Self::detect_workload_class(total_mb, available_mb, ctx.memory_request);
             let wc = Self::workload_for_startup_swap(
                 detected,
                 startup_swap_total_mb,
@@ -1719,7 +1746,7 @@ impl MemoryGuard {
         // file-backed mmap pages.  Those pages are kernel-evictable and already accounted for
         // in the system-level MemAvailable estimate, so they pose no OOM risk and need not
         // shrink our anonymous memory budget.
-        let rss_budget_mb = rss_budget_mb_raw.max(2048);
+        let rss_budget_mb = rss_budget_mb_raw.max(mb_floor(total_mb, 2048, 50));
 
         // UTXO cache: dominant post-200k BPS factor. Sized from the RSS **envelope**, not raw
         // MemAvailable×60% (which assumed blvm owns the machine — caused 16 GiB cache + 66 GiB
@@ -1820,9 +1847,10 @@ impl MemoryGuard {
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|&n| (800..=8000).contains(&n))
             .unwrap_or_else(|| {
-                // Scale with total RAM so a 16 GiB host with 3 GiB RSS doesn't trigger Critical.
+                // 22% of RAM, capped at 6000 MiB. A 1200 MiB lower clamp sat above 22%
+                // on hosts under ~5 GiB, so the percent is the floor there.
                 // 8 GiB → ~1800 MB, 12 GiB → ~2700 MB, 16 GiB → ~3600 MB.
-                (total_mb * 22 / 100).clamp(1200, 6000)
+                (total_mb * 22 / 100).min(6000)
             });
 
         // Defer flush on 32+ GiB only. The earlier 16 GiB tier ran with defer=true (every 500
@@ -2487,19 +2515,11 @@ impl MemoryGuard {
     /// RAM budget (MiB) for sizing the IBD engine index at open — derived from `rss_budget_mb`,
     /// not raw MemAvailable (which ignores other workloads on the host).
     pub(crate) fn engine_avail_mb(&self) -> u64 {
-        const PIPELINE_RESERVE_MB: u64 = 6144;
-        const LEGACY_CACHE_CAP_MB: u64 = 4096;
-        let legacy = (self.utxo_cache_mb as u64).min(LEGACY_CACHE_CAP_MB);
-        let engine_mb = self
-            .rss_budget_mb
-            .saturating_sub(PIPELINE_RESERVE_MB)
-            .saturating_sub(legacy);
         // Size the index from the IBD RSS envelope, not boot-time MemAvailable. On Zeus with
         // vLLM running, MemAvailable at IBD start can be ~10 GiB while rss_budget is ~37 GiB;
         // clamping to avail_mb forced eviction age 3 and left memory_pressure_tick with no
-        // room to spill (Emergency also maps to age 3). engine_mb already reserves pipeline +
-        // legacy cache headroom within the budget.
-        engine_mb.max(2048)
+        // room to spill (Emergency also maps to age 3).
+        engine_index_budget_mb(self.rss_budget_mb, self.utxo_cache_mb as u64)
     }
 
     #[allow(dead_code)]
@@ -2535,8 +2555,10 @@ impl MemoryGuard {
             // it is non-zero only when our pages are actually on disk.
             let our_swap = snap.vm_swap_mb > 256; // >256MB of OUR pages are in swap
             let crit_rss = self.crit_rss_threshold_mb; // default = t*22/100
-            let rss_elev = (t * 30 / 100).max(2000); // e.g. 4776 MB on 16 GiB
-            let rss_emerg = (t * 50 / 100).max(4000); // e.g. 8192 MB on 16 GiB
+            // Percent of this host. A 2000/4000 MiB floor matched ~16 GiB and sat at
+            // the size of a 4 GiB machine, so Emergency could not fire there.
+            let rss_elev = t * 30 / 100;
+            let rss_emerg = t * 50 / 100;
             // Hysteresis on avail thresholds: enter at A_up, require A_up + 512 MB to deactivate
             // the swap_X flag (and thus permit downward transitions). The 512 MB gap absorbs the
             // observed sys_avail swing (3015–3555 MB at h=315k = 540 MB swing under steady IBD
@@ -3240,8 +3262,9 @@ mod memory_tier_tests {
         MemReportAccountedVerdict, MemoryGuard, MemorySnapshot, PressureLevel,
         ROCKSDB_PIPELINE_RESERVE_MB, WorkloadClass, c2_working_set_track_ok,
         classify_host_oom_backstop, classify_mem_report_accounted, classify_node_pressure,
-        emergency_entry_anon_mb, ibd_pressure_is_emergency, ibd_pressure_level_snapshot,
-        publish_ibd_pressure, reset_ibd_pressure_on_session_end, stale_emergency_step_down_level,
+        emergency_entry_anon_mb, engine_index_budget_mb, ibd_pressure_is_emergency,
+        ibd_pressure_level_snapshot, publish_ibd_pressure, reset_ibd_pressure_on_session_end,
+        stale_emergency_step_down_level,
     };
     use crate::storage::database::DatabaseBackend;
 
@@ -3275,7 +3298,8 @@ mod memory_tier_tests {
     fn shared_ninety_two_gb_envelope_and_pending_cap() {
         let total = 94_162_u64;
         let avail = 52_449_u64;
-        let workload = MemoryGuard::detect_workload_class(total, avail, false);
+        let workload =
+            MemoryGuard::detect_workload_class(total, avail, crate::config::IbdMemoryRequest::Auto);
         assert_eq!(workload, WorkloadClass::Shared);
         let rss = MemoryGuard::compute_rss_budget_mb(total, avail, workload);
         // Reduced from ~31 GiB (old 35% cap_pct) to ~23 GiB (new 25% cap_pct).
@@ -3350,12 +3374,29 @@ mod memory_tier_tests {
             MemoryGuard::compute_rss_budget_mb(total, 90_000, WorkloadClass::Dedicated);
         assert!(rss_dedicated > rss_shared);
         assert_eq!(
-            MemoryGuard::detect_workload_class(total, 90_000, false),
+            MemoryGuard::detect_workload_class(
+                total,
+                90_000,
+                crate::config::IbdMemoryRequest::Auto
+            ),
             WorkloadClass::Dedicated
         );
-        // dedicated=true with low MemAvailable → Shared (avoid OOM on workstations)
+        // dedicated request with low MemAvailable → Shared (avoid OOM on workstations)
         assert_eq!(
-            MemoryGuard::detect_workload_class(total, 52_449, true),
+            MemoryGuard::detect_workload_class(
+                total,
+                52_449,
+                crate::config::IbdMemoryRequest::Dedicated
+            ),
+            WorkloadClass::Shared
+        );
+        // shared stays on the smaller envelope even when the host looks empty
+        assert_eq!(
+            MemoryGuard::detect_workload_class(
+                total,
+                90_000,
+                crate::config::IbdMemoryRequest::Shared
+            ),
             WorkloadClass::Shared
         );
     }
@@ -3371,8 +3412,25 @@ mod memory_tier_tests {
             .min(engine_mb)
             .min(boot_avail_mb);
         assert_eq!(old_capped, boot_avail_mb, "old formula forced age-3 sizing");
-        let new_hint = engine_mb.max(2048);
+        let new_hint = engine_index_budget_mb(rss_budget_mb, 4096);
         assert_eq!(new_hint, 27_424, "new formula uses RSS budget headroom");
+        // 16 GiB envelope still pays the 2048 floor. A 4 GiB envelope does not.
+        assert_eq!(engine_index_budget_mb(7000, 1400), 2048);
+        let small = engine_index_budget_mb(2662, 256);
+        assert!(small <= 2662 / 2, "small={small}");
+    }
+
+    #[test]
+    fn rss_floor_stays_inside_a_two_gib_host() {
+        let total = 2 * 1024;
+        let budget = MemoryGuard::compute_rss_budget_mb_auto(total, 1800, WorkloadClass::Shared);
+        assert!(budget < total, "budget={budget}");
+        assert!(budget <= total * 80 / 100, "budget={budget}");
+        let four = 4 * 1024;
+        assert_eq!(
+            MemoryGuard::compute_rss_budget_mb_auto(four, 3500, WorkloadClass::Shared),
+            four * 65 / 100
+        );
     }
 
     #[test]
@@ -3408,7 +3466,11 @@ mod memory_tier_tests {
         let total = 94_162_u64;
         let avail = 64_865_u64; // ~69% — zeus with vLLM + IDE
         assert_eq!(
-            MemoryGuard::detect_workload_class(total, avail, true),
+            MemoryGuard::detect_workload_class(
+                total,
+                avail,
+                crate::config::IbdMemoryRequest::Dedicated
+            ),
             WorkloadClass::Shared
         );
         let rss = MemoryGuard::compute_rss_budget_mb(total, avail, WorkloadClass::Shared);

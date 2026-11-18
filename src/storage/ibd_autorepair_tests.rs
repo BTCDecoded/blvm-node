@@ -30,8 +30,8 @@ fn apply_autorepair_soft_rolls_back_watermark_clears_marker() {
     );
     assert_eq!(
         storage.chain().get_utxo_watermark().unwrap(),
-        Some(680_600),
-        "soft repair must roll back one 200-block interval"
+        Some(0),
+        "no engine export: soft repair aligns the watermark to export height 0"
     );
     assert!(
         !tree.is_empty().unwrap(),
@@ -47,7 +47,7 @@ fn apply_autorepair_aggressive_wipes_state_on_env_flag() {
     let storage = Storage::new(data_dir).unwrap();
 
     storage.chain().set_utxo_watermark(999).unwrap();
-    let tree = storage.open_tree("ibd_utxos").unwrap();
+    let tree = storage.open_tree("ibd_utxos_ckpt_a").unwrap();
     tree.insert(b"tkey", b"tval").unwrap();
     storage.flush().unwrap();
 
@@ -165,16 +165,16 @@ fn apply_autorepair_soft_wipes_standalone_store_when_watermark_zero() {
     let storage = Storage::new(data_dir).unwrap();
     storage.chain().force_set_ibd_utxo_watermark(0).unwrap();
 
-    let utxo_store_dir = data_dir.join(crate::storage::database::IBD_UTXO_STORE_SUBDIR);
-    std::fs::create_dir_all(&utxo_store_dir).unwrap();
-    std::fs::write(utxo_store_dir.join("marker"), b"stale").unwrap();
+    let engine_dir = data_dir.join("ibd_engine");
+    std::fs::create_dir_all(&engine_dir).unwrap();
+    std::fs::write(engine_dir.join("marker"), b"stale").unwrap();
 
     set_ibd_utxo_repair_flag(data_dir).unwrap();
     apply_ibd_utxo_autorepair_if_needed(&storage, data_dir).unwrap();
 
     assert!(
-        !utxo_store_dir.exists(),
-        "wm=0 soft repair must wipe standalone ibd_utxo_store"
+        !engine_dir.exists(),
+        "wm=0 soft repair must wipe ibd_engine"
     );
     assert_eq!(storage.chain().get_utxo_watermark().unwrap(), Some(0));
 }
