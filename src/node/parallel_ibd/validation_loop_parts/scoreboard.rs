@@ -1523,14 +1523,14 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                 );
 
                                 // Dump jemalloc heap profile only when BLVM_IBD_JEMALLOC_DUMP is set
-                                // (requires MALLOC_CONF=prof:true). Produces /tmp/blvm_heap_{h}.jep.
+                                // (requires MALLOC_CONF=prof:true). One file, overwritten (F63).
                                 static PROF_DUMP_COUNT: std::sync::atomic::AtomicU64
                                     = std::sync::atomic::AtomicU64::new(0);
                                 let dump_idx = PROF_DUMP_COUNT.fetch_add(1, Ordering::Relaxed);
                                 if std::env::var_os("BLVM_IBD_JEMALLOC_DUMP").is_none() {
                                     let _ = dump_idx;
                                 } else {
-                                let prof_path = format!("/tmp/blvm_heap_{h}.jep\0");
+                                let prof_path = format!("{}\0", jemalloc_heap_profile_path());
                                 unsafe {
                                     unsafe extern "C" {
                                         fn _rjem_mallctl(
@@ -4354,6 +4354,11 @@ fn parse_smaps_report(text: &str) -> SmapsReport {
     }
 }
 
+/// One heap profile path. A height in the name left a new file on every report (F63).
+fn jemalloc_heap_profile_path() -> &'static str {
+    "/tmp/blvm_heap.jep"
+}
+
 #[cfg(test)]
 mod duplicate_coinbase_depth_tests {
     use super::duplicate_coinbase_serial_height;
@@ -4382,5 +4387,15 @@ Rss:               4096 kB
         assert_eq!(report.mi_virtual_mb, 1);
         assert_eq!(report.mi_rss_mb, 200);
         assert!(report.top_anon.contains("[anon:mimalloc]"));
+    }
+}
+
+#[cfg(test)]
+mod heap_profile_path_tests {
+    #[test]
+    fn the_heap_profile_is_one_file() {
+        let path = super::jemalloc_heap_profile_path();
+        assert_eq!(path, "/tmp/blvm_heap.jep");
+        assert!(!path.contains('{'));
     }
 }

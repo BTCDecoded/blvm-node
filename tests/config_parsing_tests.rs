@@ -529,6 +529,14 @@ fn test_zero_header_cap_is_rejected_and_is_not_a_protocol_violation() {
     assert!(!headers_batch_is_full(1, 0));
     assert!(headers_batch_is_full(2000, 2000));
     assert!(headers_message_exceeds_limit(2001, 2000));
+
+    let mut limits = ProtocolLimitsConfig::default();
+    limits.max_headers_results = 2001;
+    config.protocol_limits = Some(limits);
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("max_headers_results"));
+    config.protocol_limits.as_mut().unwrap().max_headers_results = 2000;
+    assert!(config.validate().is_ok());
 }
 
 #[test]

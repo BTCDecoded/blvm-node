@@ -5741,6 +5741,18 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     Ok(())
 }
 
+/// `BLVM_IBD_BRIDGE_PENDING_MAX` when it is at least 32, capped by the reorder
+/// limit. Unset, or a value below 32, uses that limit clamped to 128..=512 (F56).
+pub(crate) fn clamped_bridge_pending_max(raw: Option<&str>, coord_buffer_limit: usize) -> usize {
+    match raw
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 32)
+    {
+        Some(n) => n.min(coord_buffer_limit),
+        None => coord_buffer_limit.clamp(128, 512),
+    }
+}
+
 async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
     let IbdCoordinatorCtx {
         assigner_for_coord,
@@ -5815,6 +5827,7 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                 already_dispatched,
                 &mut local_gap_miss_logged,
                 tip_in_pipeline,
+                coord_buffer_limit,
             )
         });
         let injected = match inject {
@@ -9834,11 +9847,10 @@ impl ParallelIBD {
         // engine-mode dispatch dumps every ahead height into the bridge and pending grows to
         // 3–4k (~6–8 GB) while validation waits on a single gap. Default: ≤512 or reorder cap.
         // Override: BLVM_IBD_BRIDGE_PENDING_MAX (≥32).
-        let bridge_pending_max: usize = std::env::var("BLVM_IBD_BRIDGE_PENDING_MAX")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .filter(|&n| n >= 32)
-            .unwrap_or_else(|| coord_buffer_limit.clamp(128, 512));
+        let bridge_pending_max: usize = clamped_bridge_pending_max(
+            std::env::var("BLVM_IBD_BRIDGE_PENDING_MAX").ok().as_deref(),
+            coord_buffer_limit,
+        );
         if wan_multi_peer {
             info!(
                 "Coordinator: WAN multi-peer reorder buffer={} blocks",

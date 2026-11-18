@@ -63,12 +63,12 @@ pub use memory_run::{
 };
 pub use meta::{
     clear_engine_dirty_flag, contiguous_length_sidecar, engine_dirty_flag_path,
-    read_contiguous_length_sidecar, remove_contiguous_length_sidecar,
-    sweep_dead_export_scratch, write_contiguous_length_sidecar,
+    read_contiguous_length_sidecar, remove_contiguous_length_sidecar, sweep_dead_export_scratch,
+    write_contiguous_length_sidecar,
 };
 pub use spend_session::{
-    PartialSpendSession, SpendSession, hotpath_timer_sample, session_fill_utxo_set,
-    session_to_utxo_set,
+    PartialSpendSession, SpendSession, hotpath_timer_sample, session_fill_coinbase_utxos,
+    session_fill_utxo_set, session_to_utxo_set,
 };
 #[cfg(feature = "production")]
 pub use spend_session::{

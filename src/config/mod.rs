@@ -1464,10 +1464,11 @@ impl NodeConfig {
             }
         }
 
-        if let Some(ref limits) = self.protocol_limits
-            && limits.max_headers_results == 0
-        {
-            anyhow::bail!("max_headers_results must be greater than 0");
+        if let Some(ref limits) = self.protocol_limits {
+            let cap = default_max_headers_results();
+            if limits.max_headers_results == 0 || limits.max_headers_results > cap {
+                anyhow::bail!("max_headers_results must be between 1 and {cap}");
+            }
         }
 
         Ok(())

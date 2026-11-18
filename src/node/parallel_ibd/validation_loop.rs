@@ -16,7 +16,8 @@ use crate::storage::disk_utxo::{
     block_input_keys_into_filtered_with_tx_ids, key_to_outpoint, outpoint_to_key,
 };
 use crate::storage::ibd_engine::{
-    PartialSpendSession, SpendSession, UtxoDatabase, hotpath_timer_sample, session_fill_utxo_set,
+    PartialSpendSession, SpendSession, UtxoDatabase, hotpath_timer_sample,
+    session_fill_coinbase_utxos, session_fill_utxo_set,
 };
 use crate::storage::ibd_utxo_store::{IbdUtxoStore, PendingFlushPackage};
 use crate::utils::time::current_timestamp;

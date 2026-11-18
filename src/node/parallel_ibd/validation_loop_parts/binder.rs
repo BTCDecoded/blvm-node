@@ -2279,7 +2279,7 @@ fn run_validation_worker_shared(
                 let raw = match recent_opt {
                     Err(e) => Err(e),
                     Ok(headers) if use_lookup => {
-                        utxo_base.clear();
+                        session_fill_coinbase_utxos(&session, &mut utxo_base);
                         parallel_ibd.validate_block_only(
                             &blockstore,
                             protocol.as_ref(),

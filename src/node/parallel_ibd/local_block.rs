@@ -1101,6 +1101,7 @@ pub fn coordinator_inject_local_gap(
     already_dispatched: &rustc_hash::FxHashSet<u64>,
     log_miss: &mut rustc_hash::FxHashSet<u64>,
     tip_in_pipeline: bool,
+    reorder_limit: usize,
 ) -> Result<bool> {
     if height != validation_height.saturating_add(1) {
         return Ok(false);
@@ -1118,6 +1119,11 @@ pub fn coordinator_inject_local_gap(
     for i in 0..lookahead {
         let h = height + i;
         let had_in_reorder = reorder_buffer.contains_key(&h);
+        // F72: the reorder cap is the memory bound. A height already in the buffer
+        // can still be stepped over so a chain can pass it. A new height stops.
+        if !had_in_reorder && reorder_buffer.len() >= reorder_limit {
+            break;
+        }
         // Tip only: reload when not confirmed in-pipeline. Lookahead heights keep skip-on-dispatched.
         let reload_if_dispatched = i == 0 && !tip_in_pipeline;
         match coordinator_inject_one(

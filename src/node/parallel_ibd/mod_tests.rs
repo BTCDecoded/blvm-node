@@ -833,7 +833,7 @@ fn n15_prepare_coord_dispatch_defers_engine_txids() {
 #[serial_test::serial(ibd)]
 #[test]
 fn phase3_path_promotes_when_tip_ckpt_ready() {
-    use crate::storage::ibd_engine::{phase3_path, Phase3Finish};
+    use crate::storage::ibd_engine::{Phase3Finish, phase3_path};
     assert_eq!(
         phase3_path(957_950, 957_950, 957_950, true),
         Phase3Finish::PromotedAlias
@@ -843,7 +843,7 @@ fn phase3_path_promotes_when_tip_ckpt_ready() {
 #[serial_test::serial(ibd)]
 #[test]
 fn phase3_path_catchup_when_export_lags_tip() {
-    use crate::storage::ibd_engine::{phase3_path, Phase3Finish};
+    use crate::storage::ibd_engine::{Phase3Finish, phase3_path};
     // Live soak: export_h=880k, tip=957950, nonempty ckpt at 880k.
     assert_eq!(
         phase3_path(880_000, 957_950, 880_000, true),
@@ -854,7 +854,7 @@ fn phase3_path_catchup_when_export_lags_tip() {
 #[serial_test::serial(ibd)]
 #[test]
 fn phase3_path_full_when_no_ckpt() {
-    use crate::storage::ibd_engine::{phase3_path, Phase3Finish};
+    use crate::storage::ibd_engine::{Phase3Finish, phase3_path};
     assert_eq!(
         phase3_path(0, 100_000, 0, false),
         Phase3Finish::FullWatermarkExport
@@ -1962,7 +1962,7 @@ fn checkpoint_export_exits_when_last_committed_near_end() {
         0, 957000, 957804, 880000, 10000
     ));
     assert!(checkpoint_export_thread_should_exit(0, 0, 0, 0, 0)); // end_h<=0
-                                                                  // interval<=0: must have committed at end_h itself
+    // interval<=0: must have committed at end_h itself
     assert!(!checkpoint_export_thread_should_exit(100, 100, 100, 99, 0));
     assert!(checkpoint_export_thread_should_exit(100, 100, 100, 100, 0));
 }
@@ -1974,7 +1974,7 @@ fn tip_skip_advances_near_effective_end_without_1000_boundary() {
     assert!(should_advance_tip_on_skip_path(957632, 957804));
     assert!(should_advance_tip_on_skip_path(957804, 957804));
     assert!(should_advance_tip_on_skip_path(957000, 957804)); // %1000
-                                                              // Far from end and not on 1000 boundary:
+    // Far from end and not on 1000 boundary:
     assert!(!should_advance_tip_on_skip_path(900001, 957804));
     assert!(!should_advance_tip_on_skip_path(0, 100));
 }
@@ -3720,7 +3720,31 @@ fn a_dead_export_scratch_dir_is_removed_and_a_live_one_stays() {
     std::fs::create_dir(&dead).unwrap();
     std::fs::create_dir(&live).unwrap();
     std::fs::write(dead.join("run"), b"x").unwrap();
+    let dead_spill = dir.path().join("blvm-export-e3c-10-4294967294.bin");
+    let dead_run = dir
+        .path()
+        .join("blvm-export-e3c-off-10-00001-4294967294.bin");
+    let live_spill = dir
+        .path()
+        .join(format!("blvm-export-e3c-10-{}.bin", std::process::id()));
+    std::fs::write(&dead_spill, b"s").unwrap();
+    std::fs::write(&dead_run, b"r").unwrap();
+    std::fs::write(&live_spill, b"l").unwrap();
     crate::storage::ibd_engine::sweep_dead_export_scratch(dir.path());
     assert!(!dead.exists());
     assert!(live.exists());
+    assert!(!dead_spill.exists());
+    assert!(!dead_run.exists());
+    assert!(live_spill.exists());
+}
+
+#[test]
+fn bridge_pending_max_cannot_exceed_the_reorder_limit() {
+    use super::clamped_bridge_pending_max;
+    assert_eq!(clamped_bridge_pending_max(Some("1000000"), 256), 256);
+    assert_eq!(clamped_bridge_pending_max(Some("32"), 256), 32);
+    assert_eq!(clamped_bridge_pending_max(Some("16"), 256), 256);
+    assert_eq!(clamped_bridge_pending_max(None, 64), 128);
+    assert_eq!(clamped_bridge_pending_max(None, 2000), 512);
+    assert_eq!(clamped_bridge_pending_max(None, 200), 200);
 }

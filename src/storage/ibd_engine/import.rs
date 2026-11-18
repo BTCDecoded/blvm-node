@@ -184,6 +184,39 @@ fn seed_count_must_be_healthy(
 ///
 /// Peak memory: O(SEED_BATCH × 56 B × 2) ≈ 6 MB — safe on an 8 GB Raspberry Pi 5.
 /// `last_accepted` is the previously committed persist count (0 if none).
+
+/// Joins the seed writer when `seed_from_ibd_utxos` returns early.
+/// Dropping a `JoinHandle` detaches the thread (F60). The sender is closed
+/// first so `write_from_iter` sees end-of-iterator and the join cannot block.
+/// `finish` takes the handle so the success path does not join twice.
+struct SeedWriterJoin<T> {
+    tx: Option<std::sync::mpsc::SyncSender<T>>,
+    handle: Option<std::thread::JoinHandle<anyhow::Result<DiskSegment>>>,
+}
+
+impl<T> SeedWriterJoin<T> {
+    fn sender(&self) -> &std::sync::mpsc::SyncSender<T> {
+        self.tx.as_ref().expect("seed writer sender")
+    }
+
+    fn finish(&mut self) -> anyhow::Result<DiskSegment> {
+        self.tx.take();
+        let handle = self.handle.take().expect("seed writer already joined");
+        handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("ibd-seed-writer thread panicked"))?
+    }
+}
+
+impl<T> Drop for SeedWriterJoin<T> {
+    fn drop(&mut self) {
+        self.tx.take();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 pub fn seed_from_ibd_utxos(
     db: &UtxoDatabase,
     tree: &dyn Tree,
@@ -211,11 +244,15 @@ pub fn seed_from_ibd_utxos(
 
     // Writer thread: receives OutputKVs from the channel and writes a single disk segment.
     // RocksDB iterates keys in byte order; all entries are same-height Adds — already sorted.
-    let writer = thread::Builder::new()
+    let handle = thread::Builder::new()
         .name("ibd-seed-writer".to_string())
         .spawn(move || -> anyhow::Result<DiskSegment> {
             DiskSegment::write_from_iter(&seg_dir, seg_idx, capacity, rx.into_iter())
         })?;
+    let mut writer = SeedWriterJoin {
+        tx: Some(tx),
+        handle: Some(handle),
+    };
 
     // Producer: iterate tree → import to flat table → send OutputKVs to writer.
     let mut total = 0usize;
@@ -250,7 +287,7 @@ pub fn seed_from_ibd_utxos(
                         checkpoint_height,
                         &mut batch_items,
                         &mut entry_buf,
-                        &tx,
+                        writer.sender(),
                         &mut total,
                     )?
                 {
@@ -267,16 +304,13 @@ pub fn seed_from_ibd_utxos(
                     checkpoint_height,
                     &mut batch_items,
                     &mut entry_buf,
-                    &tx,
+                    writer.sender(),
                     &mut total,
                 )? {
                     channel_closed.set(true);
                 }
                 if !channel_closed.get() {
-                    drop(tx);
-                    let seg = writer
-                        .join()
-                        .map_err(|_| anyhow::anyhow!("ibd-seed-writer thread panicked"))??;
+                    let seg = writer.finish()?;
                     seed_count_must_be_healthy(
                         checkpoint_height,
                         total,
@@ -320,7 +354,7 @@ pub fn seed_from_ibd_utxos(
                 checkpoint_height,
                 &mut batch_items,
                 &mut entry_buf,
-                &tx,
+                writer.sender(),
                 &mut total,
             )?
         {
@@ -335,7 +369,7 @@ pub fn seed_from_ibd_utxos(
             checkpoint_height,
             &mut batch_items,
             &mut entry_buf,
-            &tx,
+            writer.sender(),
             &mut total,
         )?
     {
@@ -343,10 +377,7 @@ pub fn seed_from_ibd_utxos(
     }
 
     // Close sender → writer thread sees end-of-iterator → finalises segment file.
-    drop(tx);
-    let seg = writer
-        .join()
-        .map_err(|_| anyhow::anyhow!("ibd-seed-writer thread panicked"))??;
+    let seg = writer.finish()?;
 
     if send_err {
         anyhow::bail!("ibd-seed-writer thread exited early; disk segment may be incomplete");
@@ -484,7 +515,7 @@ pub fn bootstrap_ckpt_from_legacy_standalone(
 #[cfg(test)]
 mod tests {
     use super::seed_count_must_be_healthy;
-    use super::{OutputHeader, RefusedSeedGuard, UtxoDatabase};
+    use super::{OutputHeader, RefusedSeedGuard, SeedWriterJoin, UtxoDatabase};
 
     #[test]
     fn seed_refuses_dest_ak_drop_vs_last_accepted() {
@@ -529,5 +560,42 @@ mod tests {
         }
         let (_, _, after) = db.mem_usage_bytes();
         assert_eq!(after, 0, "the refusal guard must drop an unflushed tail");
+    }
+
+    #[test]
+    fn dropping_the_seed_writer_joins_after_the_sender_closes() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<u8>(1);
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&finished);
+        let handle = std::thread::spawn(move || {
+            let _ = rx.recv();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            flag.store(true, std::sync::atomic::Ordering::Release);
+            Err(anyhow::anyhow!("stopped"))
+        });
+        drop(SeedWriterJoin {
+            tx: Some(tx),
+            handle: Some(handle),
+        });
+        assert!(
+            finished.load(std::sync::atomic::Ordering::Acquire),
+            "dropping the guard must join the writer before it returns"
+        );
+    }
+
+    #[test]
+    fn finish_joins_the_seed_writer_once() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<u8>(1);
+        let handle = std::thread::spawn(move || {
+            let _ = rx.recv();
+            Err(anyhow::anyhow!("stopped"))
+        });
+        let mut writer = SeedWriterJoin {
+            tx: Some(tx),
+            handle: Some(handle),
+        };
+        let err = writer.finish().unwrap_err();
+        assert!(err.to_string().contains("stopped"));
+        drop(writer);
     }
 }

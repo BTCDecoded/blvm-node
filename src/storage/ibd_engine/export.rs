@@ -131,6 +131,40 @@ fn export_piggyback_enabled() -> bool {
 }
 
 /// Batched checkpoint writer used by piggyback export and memory overlay.
+
+/// Removes the spill file unless `finish` has taken the path (F57).
+struct SpillPath {
+    path: Option<PathBuf>,
+}
+
+impl Default for SpillPath {
+    fn default() -> Self {
+        Self { path: None }
+    }
+}
+
+impl SpillPath {
+    fn set(&mut self, path: PathBuf) {
+        self.path = Some(path);
+    }
+
+    fn take(&mut self) -> Option<PathBuf> {
+        self.path.take()
+    }
+
+    fn path(&self) -> Option<&PathBuf> {
+        self.path.as_ref()
+    }
+}
+
+impl Drop for SpillPath {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 struct CheckpointChunkWriter<'a> {
     db: &'a UtxoDatabase,
     tree: &'a dyn Tree,
@@ -149,7 +183,7 @@ struct CheckpointChunkWriter<'a> {
     /// E3c: defer fetch until after compact; spill Adds, global offset-sort, one IO pass.
     global_offset_sort: bool,
     spill: Option<BufWriter<File>>,
-    spill_path: Option<PathBuf>,
+    spill_path: SpillPath,
     spill_count: usize,
     sort_ms: u64,
     /// E4: defer LMDB puts; spill key-sorted runs; merge + MDB_APPEND.
@@ -182,7 +216,7 @@ impl<'a> CheckpointChunkWriter<'a> {
             write_ms: 0,
             global_offset_sort: export_global_offset_sort(),
             spill: None,
-            spill_path: None,
+            spill_path: SpillPath::default(),
             spill_count: 0,
             sort_ms: 0,
             append_load: export_append_load(),
@@ -206,7 +240,7 @@ impl<'a> CheckpointChunkWriter<'a> {
         let f =
             File::create(&path).with_context(|| format!("E3c spill create {}", path.display()))?;
         self.spill = Some(BufWriter::with_capacity(8 << 20, f));
-        self.spill_path = Some(path);
+        self.spill_path.set(path);
         Ok(())
     }
 
@@ -519,8 +553,9 @@ impl<'a> CheckpointChunkWriter<'a> {
             left -= n;
             batch.sort_unstable_by_key(e3c_offset);
             let run_path = dir.join(format!(
-                "blvm-export-e3c-off-{}-{run_idx:05}.bin",
-                self.checkpoint_height
+                "blvm-export-e3c-off-{}-{run_idx:05}-{}.bin",
+                self.checkpoint_height,
+                std::process::id()
             ));
             let mut w = BufWriter::with_capacity(8 << 20, File::create(&run_path)?);
             for kv in &batch {
@@ -1785,5 +1820,18 @@ mod tests {
             kvs.iter().map(e3c_offset).collect::<Vec<_>>(),
             vec![10, 20, 30]
         );
+    }
+
+    #[test]
+    fn dropping_a_checkpoint_writer_removes_its_spill() {
+        let tmp = NamedTempFile::new().unwrap();
+        let db = UtxoDatabase::open(tmp.path(), 0).unwrap();
+        let tree = MockTree::new();
+        let mut w = CheckpointChunkWriter::new(&db, &tree, ValueCodec::Bincode, 10);
+        w.ensure_spill().unwrap();
+        let path = w.spill_path.path().unwrap().to_path_buf();
+        assert!(path.exists(), "ensure_spill creates the file");
+        drop(w);
+        assert!(!path.exists(), "a dropped writer must remove its spill");
     }
 }

@@ -602,6 +602,7 @@ fn persist_gap_block_enables_local_inject() {
             &already_dispatched,
             &mut log_miss,
             false,
+            usize::MAX,
         )
         .unwrap()
     );
@@ -1066,6 +1067,7 @@ fn inject_past_start_confirmed_body_cap_when_uncapped() {
             &already_dispatched,
             &mut log_miss,
             false,
+            usize::MAX,
         )
         .unwrap()
     );
@@ -1115,6 +1117,7 @@ fn inject_skips_already_dispatched_heights() {
             &already_dispatched,
             &mut log_miss,
             true,
+            usize::MAX,
         )
         .unwrap()
     );
@@ -1176,6 +1179,7 @@ fn inject_chain_skips_counting_already_present_heights() {
             &already_dispatched,
             &mut log_miss,
             true,
+            usize::MAX,
         )
         .unwrap()
     );
@@ -1230,7 +1234,8 @@ fn inject_tip_not_in_pipeline_reloads_from_disk() {
             &mut reorder_buffer,
             &already_dispatched,
             &mut log_miss,
-            false, // tip not confirmed in pipeline
+            false, // tip not confirmed in pipeline,
+            usize::MAX,
         )
         .unwrap()
     );
@@ -1258,6 +1263,7 @@ fn filled_gap_miss_leaves_the_log_and_the_cursor_drops_old_keys() {
             &already_dispatched,
             &mut log_miss,
             true,
+            usize::MAX,
         )
         .unwrap()
     );
@@ -1297,6 +1303,7 @@ fn filled_gap_miss_leaves_the_log_and_the_cursor_drops_old_keys() {
             &already_dispatched,
             &mut log_miss,
             true,
+            usize::MAX,
         )
         .unwrap()
     );
@@ -1320,6 +1327,7 @@ fn filled_gap_miss_leaves_the_log_and_the_cursor_drops_old_keys() {
             &dispatched,
             &mut log_miss,
             true,
+            usize::MAX,
         )
         .unwrap()
     );
@@ -1374,4 +1382,63 @@ fn witness_repair_stores_row_key_when_body_exists() {
     assert!(blockstore.has_witness_blob(&hash).unwrap());
     let loaded = blockstore.get_witness(&hash).unwrap().unwrap();
     assert!(has_real_witnesses(&loaded));
+}
+
+#[test]
+fn inject_chain_stops_when_the_reorder_buffer_is_at_its_limit() {
+    let blockstore = temp_blockstore();
+    let vh = Arc::new(AtomicU64::new(499));
+    let block = Block {
+        header: BlockHeader {
+            version: 4,
+            timestamp: 1_600_000_000,
+            ..Default::default()
+        },
+        transactions: vec![Transaction {
+            version: 1,
+            inputs: blvm_protocol::tx_inputs![],
+            outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                value: 50_0000_0000,
+                script_pubkey: vec![0x51],
+            }],
+            lock_time: 0,
+        }]
+        .into(),
+    };
+    let hash = blockstore.get_block_hash(&block);
+    blockstore.store_height(500, &hash).unwrap();
+    assert!(
+        try_persist_gap_block_for_local_inject(
+            &blockstore,
+            Some(&vh),
+            500,
+            hash,
+            &block,
+            &[],
+            ProtocolVersion::BitcoinV1,
+        )
+        .unwrap()
+    );
+    let mut reorder_buffer: std::collections::BTreeMap<u64, (SharedBlock, SharedWitnesses)> =
+        std::collections::BTreeMap::new();
+    reorder_buffer.insert(1, (Arc::new(block), Arc::new(Vec::new())));
+    let already_dispatched = rustc_hash::FxHashSet::default();
+    let mut log_miss = rustc_hash::FxHashSet::default();
+    assert!(
+        !coordinator_inject_local_gap(
+            &blockstore,
+            ProtocolVersion::BitcoinV1,
+            500,
+            0,
+            499,
+            &mut reorder_buffer,
+            &already_dispatched,
+            &mut log_miss,
+            false,
+            1,
+        )
+        .unwrap()
+    );
+    assert!(!reorder_buffer.contains_key(&500));
+    assert_eq!(reorder_buffer.len(), 1);
 }
