@@ -280,6 +280,11 @@ fn cloned_fork_choice_entry<T: Clone, W: Clone>(block: &T, witnesses: &[W]) -> O
     None
 }
 
+/// The memory-set write has to succeed before the tip moves.
+pub(crate) fn memory_set_store_before_tip(store: Result<()>) -> Result<()> {
+    store
+}
+
 impl SyncCoordinator {
     /// Create a new sync coordinator
     pub fn new() -> Self {
@@ -828,11 +833,13 @@ impl SyncCoordinator {
                     Self::apply_connect_undo_to_chainstate(storage, &undo_log)?;
                     *utxo_set = UtxoSet::default();
                 } else {
+                    memory_set_store_before_tip(
+                        storage.utxos().store_utxo_set(&connected_utxo),
+                    )?;
                     storage
                         .chain()
                         .update_tip(&block_hash, &block.header, connect_height)?;
                     *utxo_set = connected_utxo;
-                    storage.utxos().store_utxo_set(utxo_set)?;
                 }
             } else {
                 let validation_result = validate_block_protocol_only(
@@ -1204,6 +1211,12 @@ pub async fn run_utxo_commitments_initial_sync(
 mod tests {
     use super::*;
     use blvm_protocol::{Block, BlockHeader, Transaction};
+
+    #[test]
+    fn memory_set_connect_does_not_move_the_tip_when_the_store_fails() {
+        assert!(memory_set_store_before_tip(Err(anyhow::anyhow!("store"))).is_err());
+        assert!(memory_set_store_before_tip(Ok(())).is_ok());
+    }
 
     #[test]
     fn matching_witness_list_is_not_cloned() {
