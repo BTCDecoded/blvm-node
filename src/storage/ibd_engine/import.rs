@@ -39,6 +39,12 @@ use libmimalloc_sys;
 /// 50 k × 56 B ≈ 2.8 MB per batch; channel holds 2 batches ≈ 5.6 MB total.
 const SEED_BATCH: usize = 50_000;
 
+/// A failed heed3 scan may fall back to `tree.iter` only before the first batch.
+/// A later fallback would import those keys a second time.
+fn heed3_scan_falls_back(scan_failed: bool, imported: usize) -> bool {
+    scan_failed && imported == 0
+}
+
 fn push_seed_batch(
     db: &UtxoDatabase,
     checkpoint_height: i32,
@@ -296,6 +302,12 @@ pub fn seed_from_ibd_utxos(
                 Ok(())
             });
             if let Err(e) = scan {
+                if !heed3_scan_falls_back(true, total) {
+                    return Err(anyhow::anyhow!(
+                        "IBD engine seed: heed3 scan failed after a partial import: {e:#}"
+                    ));
+                }
+                batch_items.clear();
                 warn!("IBD engine seed: heed3 scan failed ({e:#}); falling back to tree.iter()");
             } else if !channel_closed.get() {
                 if push_seed_batch(
@@ -307,6 +319,7 @@ pub fn seed_from_ibd_utxos(
                     &mut total,
                 )? {
                     channel_closed.set(true);
+                    send_err = true;
                 }
                 if !channel_closed.get() {
                     let seg = writer.finish()?;
@@ -333,6 +346,9 @@ pub fn seed_from_ibd_utxos(
         }
     }
 
+    // A partial heed3 import already committed batches. Scanning the tree
+    // again would import those keys a second time (F3).
+    if total == 0 {
     'outer: for kv in tree.iter() {
         let (key_bytes, val_bytes) = kv?;
         if key_bytes.len() != 40 {
@@ -360,6 +376,7 @@ pub fn seed_from_ibd_utxos(
             send_err = true;
             break 'outer;
         }
+    }
     }
 
     if !send_err
@@ -559,6 +576,13 @@ mod tests {
         }
         let (_, _, after) = db.mem_usage_bytes();
         assert_eq!(after, 0, "the refusal guard must drop an unflushed tail");
+    }
+
+    #[test]
+    fn a_partial_heed3_scan_does_not_fall_back() {
+        assert!(super::heed3_scan_falls_back(true, 0));
+        assert!(!super::heed3_scan_falls_back(true, 1));
+        assert!(!super::heed3_scan_falls_back(false, 0));
     }
 
     #[test]

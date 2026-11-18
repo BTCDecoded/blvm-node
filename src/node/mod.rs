@@ -2878,6 +2878,9 @@ mod resume_snapshot_tests {
         assert!(!catch_up_failure_is_terminal(
             "IBD shutdown requested during seed"
         ));
+        assert!(!catch_up_failure_is_terminal(
+            "IBD engine seed: heed3 scan failed after a partial import: boom"
+        ));
         let dir = tempfile::tempdir().unwrap();
         record_refused_seed_height(dir.path(), 330797);
         assert_eq!(read_refused_seed_height(dir.path()), Some(330797));
