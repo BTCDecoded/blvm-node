@@ -17,8 +17,8 @@ use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTi
 #[cfg(feature = "production")]
 use crate::node::reorg_executor::{
     commit_utxo_snapshot_delta, note_snapshot_height, read_snapshot_inputs,
-    record_snapshot_coin_delta, running_hash_from_read, snapshot_connect_coin_delta,
-    try_activate_heavier_fork,
+    record_snapshot_coin_delta, recover_if_snapshot_step_failed, recover_snapshot_commit,
+    running_hash_from_read, snapshot_connect_coin_delta, try_activate_heavier_fork,
 };
 use crate::storage::Storage;
 use crate::storage::blockstore::BlockStore;
@@ -779,23 +779,34 @@ impl SyncCoordinator {
                         Some((connect_height, block_hash)),
                         muhash.as_mut(),
                     )?;
-                    record_snapshot_coin_delta(
-                        storage,
-                        snapshot_connect_coin_delta(&[&undo_log]),
-                        Some(connect_height),
+                    let recovered = recover_if_snapshot_step_failed(
+                        (|| -> Result<()> {
+                            record_snapshot_coin_delta(
+                                storage,
+                                snapshot_connect_coin_delta(&[&undo_log]),
+                                Some(connect_height),
+                            )?;
+                            storage.chain().update_tip(
+                                &block_hash,
+                                &block.header,
+                                connect_height,
+                            )?;
+                            note_snapshot_height(storage, connect_height)?;
+                            if let Some(mh) = muhash.as_ref() {
+                                let bytes = mh.serialize_running_state();
+                                storage
+                                    .chain()
+                                    .persist_ibd_utxo_muhash_running_only(&bytes)?;
+                            }
+                            Ok(())
+                        })(),
+                        || recover_snapshot_commit(storage.as_ref(), blockstore),
                     )?;
-                    storage
-                        .chain()
-                        .update_tip(&block_hash, &block.header, connect_height)?;
-                    note_snapshot_height(storage, connect_height)?;
-                    if let Some(mh) = muhash.as_ref() {
-                        let bytes = mh.serialize_running_state();
-                        storage
-                            .chain()
-                            .persist_ibd_utxo_muhash_running_only(&bytes)?;
+                    if !recovered {
+                        let _ =
+                            tree.remove(crate::node::reorg_executor::SNAPSHOT_REORG_JOURNAL_KEY);
+                        let _ = tree.remove(crate::node::reorg_executor::SNAPSHOT_MUHASH_KEY);
                     }
-                    let _ = tree.remove(crate::node::reorg_executor::SNAPSHOT_REORG_JOURNAL_KEY);
-                    let _ = tree.remove(crate::node::reorg_executor::SNAPSHOT_MUHASH_KEY);
                     info!("[CONNECT] wrote {written} UTXO rows in snapshot {name}");
                     *utxo_set = UtxoSet::default();
                 } else if from_disk {

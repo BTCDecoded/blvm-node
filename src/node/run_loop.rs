@@ -6,6 +6,11 @@ use tracing::{debug, info, warn};
 
 use crate::utils::{HANDSHAKE_POLL_SLEEP, log_error, with_custom_timeout};
 
+/// An unfinished snapshot journal stops the node. Other processing errors stay in the loop.
+pub(crate) fn snapshot_journal_failure_stops(err: &str) -> bool {
+    err.contains("snapshot journal unfinished")
+}
+
 /// The node is still downloading while the connected chain is behind the best header.
 ///
 /// No stored header means header sync has not finished, so the window prune stays available.
@@ -371,6 +376,15 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                     }
                 }
                 Err(e) => {
+                    if snapshot_journal_failure_stops(&e.to_string()) {
+                        warn!("Error processing block: {e}");
+                        if let Err(stop_err) = node.stop().await {
+                            warn!(
+                                "shutdown after unfinished snapshot journal failed: {stop_err}"
+                            );
+                        }
+                        return Err(e);
+                    }
                     warn!("Error processing block: {}", e);
                     let validation_time_ms = validation_start_time.elapsed().as_millis() as u64;
 
@@ -473,7 +487,16 @@ pub(crate) fn persist_connected_utxo_set(
 
 #[cfg(test)]
 mod tests {
-    use super::{block_hash_from_wire_prefix, node_is_in_ibd};
+    use super::{block_hash_from_wire_prefix, node_is_in_ibd, snapshot_journal_failure_stops};
+
+    #[test]
+    fn snapshot_journal_failure_stops_the_node() {
+        assert!(snapshot_journal_failure_stops(
+            "snapshot journal unfinished: reorg journal tip aa has no header"
+        ));
+        assert!(!snapshot_journal_failure_stops("peer disconnected"));
+        assert!(!snapshot_journal_failure_stops("Block validation failed"));
+    }
 
     #[test]
     fn node_is_in_ibd_follows_the_header_tip() {

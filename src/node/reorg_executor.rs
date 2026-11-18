@@ -861,6 +861,27 @@ pub(crate) fn running_hash_from_read(
     read
 }
 
+/// Finish the steps after a committed snapshot coin batch.
+///
+/// `Ok(false)` means every step succeeded. `Ok(true)` means a step failed and
+/// recovery finished the journal, so the caller continues the connect.
+/// Recovery's own error is `snapshot journal unfinished`.
+pub(crate) fn recover_if_snapshot_step_failed(
+    step: Result<()>,
+    recover: impl FnOnce() -> Result<()>,
+) -> Result<bool> {
+    match step {
+        Ok(()) => Ok(false),
+        Err(step_err) => {
+            recover().map_err(|e| anyhow::anyhow!("snapshot journal unfinished: {e:#}"))?;
+            warn!(
+                "snapshot connect step failed after the coin batch; journal finished: {step_err:#}"
+            );
+            Ok(true)
+        }
+    }
+}
+
 /// Switch to `candidate_tip` when it carries more work than the active tip.
 #[cfg(feature = "production")]
 pub fn try_activate_heavier_fork(
@@ -1528,6 +1549,57 @@ mod snapshot_delta_tests {
         assert!(running_hash_from_read(missing).unwrap().is_none());
         let err = running_hash_from_read(Err(anyhow::anyhow!("chain info"))).unwrap_err();
         assert!(err.to_string().contains("chain info"));
+    }
+
+    #[test]
+    fn a_post_batch_error_finishes_the_journal() {
+        let skipped = recover_if_snapshot_step_failed(Ok(()), || {
+            panic!("recovery ran after a successful step");
+        })
+        .unwrap();
+        assert!(!skipped);
+
+        let wrapped = recover_if_snapshot_step_failed(Err(anyhow::anyhow!("note height")), || {
+            Err(anyhow::anyhow!("no header"))
+        })
+        .unwrap_err();
+        assert!(wrapped.to_string().contains("snapshot journal unfinished"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        storage
+            .chain()
+            .set_ibd_utxo_canonical_tree("ibd_utxos")
+            .unwrap();
+        let tree = storage.open_tree("ibd_utxos").unwrap();
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [5u8; 32],
+            timestamp: 1_700_000_000,
+            bits: 0x1d00ffff,
+            nonce: 7,
+        };
+        let hash = blvm_consensus::block::block_header_hash(&header);
+        storage.blocks().store_header(&hash, &header).unwrap();
+        commit_utxo_snapshot_delta(
+            tree.as_ref(),
+            storage.utxo_value_codec(),
+            &[],
+            &[],
+            Some((0, hash)),
+            None,
+        )
+        .unwrap();
+        let recovered = recover_if_snapshot_step_failed(Err(anyhow::anyhow!("note height")), || {
+            recover_snapshot_commit(&storage, storage.blocks().as_ref())
+        })
+        .unwrap();
+        assert!(recovered);
+        let (tip, height) = storage.chain().get_tip_hash_and_height().unwrap();
+        assert_eq!(tip, hash);
+        assert_eq!(height, 0);
+        assert!(tree.get(SNAPSHOT_REORG_JOURNAL_KEY).unwrap().is_none());
     }
 
     #[test]
