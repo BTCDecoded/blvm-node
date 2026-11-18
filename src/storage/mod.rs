@@ -63,6 +63,16 @@ use bitcoin_detection::BitcoinCoreDetection;
 #[cfg(feature = "rocksdb")]
 use bitcoin_detection::CoreDataNetwork;
 
+/// A slot-read error is not slot 0. A missing slot key is already `Ok(0)`.
+pub(crate) fn resume_ckpt_slot(slot: Result<u8>) -> Result<u8> {
+    slot
+}
+
+/// An empty-check error is not an empty tree. `Ok(true)` means the tree has no rows.
+pub(crate) fn snapshot_has_rows(is_empty: Result<bool>) -> Result<bool> {
+    Ok(!is_empty?)
+}
+
 /// Which named tree holds the durable UTXO snapshot for an engine resume.
 ///
 /// Slot ckpt wins when it has rows. Otherwise the stored canonical tree, when
@@ -1102,24 +1112,20 @@ impl Storage {
     /// Active ckpt when it has rows. Otherwise the explicitly stored canonical
     /// tree when that tree has rows and is not the empty slot. `None` means
     /// both snapshots are missing: replay from genesis. The default canonical
-    /// name `ibd_utxos` is not used when the key was never written.
+    /// name `ibd_utxos` is not used when the key was never written. A slot
+    /// read, tree open, or empty-check error is returned to the caller.
     pub fn open_engine_resume_snapshot(
         &self,
     ) -> Result<Option<(String, std::sync::Arc<dyn database::Tree>)>> {
-        let slot = self.chain().get_engine_ckpt_slot().unwrap_or(0);
+        let slot = resume_ckpt_slot(self.chain().get_engine_ckpt_slot())?;
         let slot_name = crate::storage::ibd_engine::ckpt_tree_for_slot(slot);
-        let slot_has_rows = self
-            .open_tree(slot_name)
-            .ok()
-            .and_then(|tree| tree.is_empty().ok())
-            == Some(false);
+        let slot_tree = self.open_tree(slot_name)?;
+        let slot_has_rows = snapshot_has_rows(slot_tree.is_empty())?;
         let stored = self.chain().get_stored_ibd_utxo_canonical_tree()?;
         let canonical_has_rows = match stored.as_deref() {
             Some(name) if name != slot_name => {
-                self.open_tree(name)
-                    .ok()
-                    .and_then(|tree| tree.is_empty().ok())
-                    == Some(false)
+                let tree = self.open_tree(name)?;
+                snapshot_has_rows(tree.is_empty())?
             }
             _ => false,
         };

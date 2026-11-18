@@ -713,6 +713,16 @@ fn reconcile_keeps_watermark_when_phase3_canonical_ibd_utxos_is_set() {
 }
 
 #[test]
+fn a_snapshot_open_error_is_not_an_empty_tree() {
+    assert!(crate::storage::resume_ckpt_slot(Err(anyhow::anyhow!("slot"))).is_err());
+    assert_eq!(crate::storage::resume_ckpt_slot(Ok(0)).unwrap(), 0);
+    assert_eq!(crate::storage::resume_ckpt_slot(Ok(1)).unwrap(), 1);
+    assert!(crate::storage::snapshot_has_rows(Err(anyhow::anyhow!("open"))).is_err());
+    assert!(!crate::storage::snapshot_has_rows(Ok(true)).unwrap());
+    assert!(crate::storage::snapshot_has_rows(Ok(false)).unwrap());
+}
+
+#[test]
 fn resume_snapshot_name_ignores_default_ibd_utxos() {
     assert_eq!(
         crate::storage::engine_resume_snapshot_name("ibd_utxos_ckpt_a", true, None, false),
