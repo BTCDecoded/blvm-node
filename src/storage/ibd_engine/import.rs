@@ -178,13 +178,6 @@ fn seed_count_must_be_healthy(
     Ok(())
 }
 
-/// Rebuild engine state from the durable checkpoint tree at `checkpoint_height`.
-///
-/// The tree must be an exact snapshot (clear + write export). Returns the number of UTXOs imported.
-///
-/// Peak memory: O(SEED_BATCH × 56 B × 2) ≈ 6 MB — safe on an 8 GB Raspberry Pi 5.
-/// `last_accepted` is the previously committed persist count (0 if none).
-
 /// Joins the seed writer when `seed_from_ibd_utxos` returns early.
 /// Dropping a `JoinHandle` detaches the thread (F60). The sender is closed
 /// first so `write_from_iter` sees end-of-iterator and the join cannot block.
@@ -217,6 +210,12 @@ impl<T> Drop for SeedWriterJoin<T> {
     }
 }
 
+/// Rebuild engine state from the durable checkpoint tree at `checkpoint_height`.
+///
+/// The tree must be an exact snapshot (clear + write export). Returns the number of UTXOs imported.
+///
+/// Peak memory: O(SEED_BATCH × 56 B × 2) ≈ 6 MB — safe on an 8 GB Raspberry Pi 5.
+/// `last_accepted` is the previously committed persist count (0 if none).
 pub fn seed_from_ibd_utxos(
     db: &UtxoDatabase,
     tree: &dyn Tree,
