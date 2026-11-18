@@ -94,6 +94,7 @@ impl MempoolRpc {
                 })
                 .sum();
             let relay = mempool.min_relay_fee_btc_per_kvb();
+            let policy = mempool.effective_policy();
 
             Ok(json!({
                 "loaded": true,
@@ -102,7 +103,11 @@ impl MempoolRpc {
                 "usage": bytes,
                 "maxmempool": mempool.max_mempool_bytes(),
                 "mempoolminfee": relay,
-                "minrelaytxfee": relay
+                "minrelaytxfee": relay,
+                "policy": {
+                    "require_standard": policy.require_standard,
+                    "max_op_return_script_bytes": policy.max_op_return_script_bytes
+                }
             }))
         } else {
             // Graceful degradation: return empty mempool info when mempool unavailable

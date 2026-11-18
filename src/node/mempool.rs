@@ -289,23 +289,18 @@ const MIN_STANDARD_TX_NONWITNESS_SIZE: usize = 65;
 /// A standard input's scriptSig is at most this many bytes.
 const MAX_STANDARD_SCRIPTSIG_SIZE: usize = 1_650;
 
-/// A standard `OP_RETURN` output is at most this many bytes.
-/// The budget is the standard transaction weight divided by four.
-const MAX_STANDARD_OP_RETURN_SIZE: usize = (MAX_STANDARD_TX_WEIGHT / 4) as usize;
-
 /// True for a standard output script: P2PKH, P2SH, P2PK, a witness program, or an `OP_RETURN`.
 ///
 /// Version 0 is standard only at 20 or 32 bytes. Any other witness version, `OP_1`
 /// through `OP_16`, is standard for a direct push of 2–40 bytes. An `OP_RETURN`
-/// is standard up to [`MAX_STANDARD_OP_RETURN_SIZE`] bytes when every following
-/// byte is a push.
-fn output_script_is_standard(script: &[u8]) -> bool {
+/// is standard up to `max_op_return_script_bytes` when every following byte is a push.
+/// That limit is the whole script, opcode included.
+fn output_script_is_standard(script: &[u8], max_op_return_script_bytes: usize) -> bool {
     if script.is_empty() {
         return false;
     }
     if script[0] == 0x6a {
-        return script.len() <= MAX_STANDARD_OP_RETURN_SIZE
-            && op_return_payload_is_push_only(script);
+        return script.len() <= max_op_return_script_bytes && op_return_payload_is_push_only(script);
     }
     if blvm_protocol::witness::is_any_witness_program(script)
         && !blvm_protocol::witness::is_invalid_v0_witness_program(script)
@@ -336,8 +331,9 @@ fn output_script_is_standard(script: &[u8]) -> bool {
 }
 
 /// A spent script Core's solver recognizes. A larger bare multisig is still that type.
-fn spent_script_is_standard(script: &[u8]) -> bool {
-    output_script_is_standard(script) || bare_multisig_within(script, 16)
+fn spent_script_is_standard(script: &[u8], max_op_return_script_bytes: usize) -> bool {
+    output_script_is_standard(script, max_op_return_script_bytes)
+        || bare_multisig_within(script, 16)
 }
 
 /// Bare `OP_m <keys> OP_n OP_CHECKMULTISIG` with `1 <= m <= n <= 3`.
@@ -2337,13 +2333,9 @@ impl MempoolManager {
         {
             return Err("dust");
         }
-        let require_standard = self
-            .policy_config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|policy| policy.require_standard)
-            .unwrap_or(true);
+        let policy = self.effective_policy();
+        let require_standard = policy.require_standard;
+        let max_op_return_script_bytes = policy.max_op_return_script_bytes;
         if require_standard && !(1..=2).contains(&tx.version) {
             return Err("version");
         }
@@ -2354,7 +2346,12 @@ impl MempoolManager {
             && tx
                 .outputs
                 .iter()
-                .any(|output| !output_script_is_standard(output.script_pubkey.as_ref()))
+                .any(|output| {
+                    !output_script_is_standard(
+                        output.script_pubkey.as_ref(),
+                        max_op_return_script_bytes,
+                    )
+                })
         {
             return Err("scriptpubkey");
         }
@@ -2401,7 +2398,12 @@ impl MempoolManager {
             && self.script_prevouts(tx, utxo_set).iter().any(|prevout| {
                 prevout
                     .as_ref()
-                    .is_some_and(|prevout| !spent_script_is_standard(prevout.script.as_ref()))
+                    .is_some_and(|prevout| {
+                        !spent_script_is_standard(
+                            prevout.script.as_ref(),
+                            max_op_return_script_bytes,
+                        )
+                    })
             })
         {
             return Err("bad-txns-nonstandard-inputs");
@@ -3059,12 +3061,7 @@ impl MempoolManager {
             return Ok(false);
         }
 
-        let effective_policy = self
-            .policy_config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .unwrap_or_default();
+        let effective_policy = self.effective_policy();
 
         if effective_policy.require_standard && !(1..=2).contains(&tx.version) {
             warn!(
@@ -3100,7 +3097,12 @@ impl MempoolManager {
             && tx
                 .outputs
                 .iter()
-                .any(|output| !output_script_is_standard(output.script_pubkey.as_ref()))
+                .any(|output| {
+                    !output_script_is_standard(
+                        output.script_pubkey.as_ref(),
+                        effective_policy.max_op_return_script_bytes,
+                    )
+                })
         {
             warn!(
                 "Transaction {} rejected: non-standard output",
@@ -3297,7 +3299,12 @@ impl MempoolManager {
                 .any(|prevout| {
                     prevout
                         .as_ref()
-                        .is_some_and(|prevout| !spent_script_is_standard(prevout.script.as_ref()))
+                        .is_some_and(|prevout| {
+                            !spent_script_is_standard(
+                                prevout.script.as_ref(),
+                                effective_policy.max_op_return_script_bytes,
+                            )
+                        })
                 })
         {
             warn!(
@@ -4635,6 +4642,16 @@ impl MempoolManager {
             let _ = std::fs::remove_file(&tmp_path);
         }
         write_result
+    }
+
+    /// Policy admission is using. An unset config is [`MempoolPolicyConfig::default`]:
+    /// standardness on, and an `OP_RETURN` script of at most 100,000 bytes.
+    pub(crate) fn effective_policy(&self) -> crate::config::MempoolPolicyConfig {
+        self.policy_config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_default()
     }
 
     /// Mempool byte cap from `max_mempool_mb`. An unset policy uses the default of 300 MiB.

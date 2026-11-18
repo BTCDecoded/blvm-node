@@ -1,8 +1,8 @@
 //! Mempool admission, policy, persistence, and reorg tests.
 
 use super::{
-    MempoolManager, decode_persisted_tx, effective_ranked_fee, encode_persisted_tx,
-    replacement_clears_fee_rate,
+    MempoolManager, MAX_STANDARD_TX_WEIGHT, decode_persisted_tx, effective_ranked_fee,
+    encode_persisted_tx, replacement_clears_fee_rate,
 };
 use crate::config::MempoolPolicyConfig;
 use blvm_protocol::serialization::transaction::serialize_transaction;
@@ -1378,6 +1378,61 @@ fn op_return_of_84_bytes_is_standard() {
     assert!(eighty_three);
     assert!(eighty_four);
     assert!(!not_return);
+}
+
+#[test]
+fn default_op_return_budget_is_standard_weight_over_four() {
+    let policy = crate::config::MempoolPolicyConfig::default();
+    assert_eq!(
+        policy.max_op_return_script_bytes,
+        (MAX_STANDARD_TX_WEIGHT / 4) as usize
+    );
+    assert_eq!(
+        MempoolManager::new()
+            .effective_policy()
+            .max_op_return_script_bytes,
+        policy.max_op_return_script_bytes
+    );
+}
+
+#[test]
+fn configured_op_return_limit_is_what_admission_uses() {
+    let carrier = |payload: usize| {
+        let mut s = vec![0x6a, 0x4c, payload as u8];
+        s.extend(std::iter::repeat(0u8).take(payload));
+        s
+    };
+    let admit = |script: Vec<u8>, limit: usize| {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let mut tx = legacy_empty_script();
+        tx.inputs[0].script_sig = script_sig;
+        tx.outputs[0].value = 0;
+        tx.outputs[0].script_pubkey = script;
+        let mempool = MempoolManager::new();
+        let mut policy = crate::config::MempoolPolicyConfig::default();
+        policy.max_op_return_script_bytes = limit;
+        mempool.set_policy_config(Some(policy));
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+            prevout, 100_000,
+        ))));
+        let script_len = tx.outputs[0].script_pubkey.len();
+        let admitted = mempool.add_transaction(tx).unwrap();
+        assert_eq!(
+            mempool.effective_policy().max_op_return_script_bytes,
+            limit
+        );
+        (script_len, admitted)
+    };
+    let short = carrier(80);
+    let long = carrier(81);
+    assert_eq!(short.len(), 83);
+    assert_eq!(long.len(), 84);
+    let (short_len, short_admitted) = admit(short, 83);
+    let (long_len, long_admitted) = admit(long, 83);
+    assert_eq!(short_len, 83);
+    assert!(short_admitted);
+    assert_eq!(long_len, 84);
+    assert!(!long_admitted);
 }
 
 #[test]

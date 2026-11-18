@@ -254,6 +254,13 @@ pub struct MempoolPolicyConfig {
     #[serde(default = "default_require_standard")]
     pub require_standard: bool,
 
+    /// Whole `OP_RETURN` output script, opcode included, accepted while
+    /// `require_standard` is on. Default 100,000, the standard transaction
+    /// weight (400,000) divided by four. Each output is checked on its own.
+    /// There is no limit on how many `OP_RETURN` outputs a transaction has.
+    #[serde(default = "default_max_op_return_script_bytes")]
+    pub max_op_return_script_bytes: usize,
+
     /// Reject transactions classified as spam before they enter the mempool (opt-in).
     /// When `spam_filter` is set, it overrides default spam filter parameters.
     #[serde(default = "default_reject_spam_in_mempool")]
@@ -350,6 +357,10 @@ fn default_require_standard() -> bool {
     true
 }
 
+fn default_max_op_return_script_bytes() -> usize {
+    100_000
+}
+
 fn default_reject_spam_in_mempool() -> bool {
     false
 }
@@ -400,6 +411,7 @@ impl Default for MempoolPolicyConfig {
             tx_byte_rate_limit: 100_000,
             tx_byte_rate_burst: 1_000_000,
             require_standard: true,
+            max_op_return_script_bytes: 100_000,
             reject_spam_in_mempool: false,
             spam_filter: None,
         }
@@ -414,6 +426,17 @@ mod overlay_tests {
     };
     use blvm_protocol::consensus_config::MempoolConfig;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn omitted_op_return_limit_is_the_standard_budget() {
+        let parsed: MempoolPolicyConfig = toml::from_str("max_mempool_mb = 50\n").unwrap();
+        assert_eq!(parsed.max_op_return_script_bytes, 100_000);
+        assert!(parsed.require_standard);
+        let explicit: MempoolPolicyConfig =
+            toml::from_str("max_op_return_script_bytes = 83\n").unwrap();
+        assert_eq!(explicit.max_op_return_script_bytes, 83);
+        assert_eq!(explicit.max_mempool_mb, 300);
+    }
 
     #[test]
     fn relative_mempool_path_joins_the_data_dir() {
