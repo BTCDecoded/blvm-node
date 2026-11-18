@@ -1420,6 +1420,36 @@ pub(crate) fn wan_gap_admit_window() -> u64 {
     }
 }
 
+pub(crate) fn clamped_worker_count(requested: Option<usize>, cap: usize) -> Option<usize> {
+    let cap = cap.max(1);
+    requested.map(|n| n.clamp(1, cap))
+}
+
+pub(crate) fn clamped_pipeline_depth(
+    requested: Option<usize>,
+    workers: usize,
+    default_depth: usize,
+) -> usize {
+    let workers = workers.clamp(1, 64);
+    requested
+        .map(|n| n.clamp(1, 64))
+        .unwrap_or_else(|| default_depth.clamp(workers, 64))
+        .max(workers)
+}
+
+/// Keep admission inside the reorder cap. The reorder stays a slack above
+/// anything admission can fill, and neither passes the RAM cap.
+pub(crate) fn bound_bulk_windows(base: usize, admit: usize, ram_cap: usize) -> (usize, usize) {
+    let ram_cap = ram_cap.max(1);
+    let slack = 512.min(ram_cap / 4);
+    let admit = admit.min(ram_cap.saturating_sub(slack));
+    let reorder = base
+        .max(admit.saturating_add(slack))
+        .min(ram_cap)
+        .max(admit);
+    (admit, reorder)
+}
+
 /// Mid-chain catch-up past body tip: admit window must track the multi-peer ahead pipe.
 /// Default **1024** (was 256). Live: max_ahead 400–528 with admit=256 → 20k+ GAP_ADMIT_DROP
 /// of ahead bodies while tip starved (~few BPS despite busy_peers>1).
@@ -6040,10 +6070,16 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                     .max(effective_end_live_for_coord.load(Ordering::Relaxed)),
                 next_needed,
             );
-            let admit_win = admit_window_for_height(
+            let raw_early = admit_window_for_height(
                 next_needed,
                 effective_gap_admit_window(wan_tip_crawl_early, bulk_early),
             );
+            let admit_win = if (raw_early as usize) > coord_buffer_limit {
+                bound_bulk_windows(coord_buffer_limit, raw_early as usize, coord_buffer_limit).0
+                    as u64
+            } else {
+                raw_early
+            };
             let early_drain_t0 = std::time::Instant::now();
             // W6/N14: release-side tip latch before channel drain / bulk admit.
             if let Some((h, block, witnesses)) = tip_release::take_tip_release() {
@@ -6420,10 +6456,15 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                 .max(effective_end_live_for_coord.load(Ordering::Relaxed)),
             next_for_admit,
         );
-        let admit_window = admit_window_for_height(
+        let raw_admit = admit_window_for_height(
             next_for_admit,
             effective_gap_admit_window(wan_tip_crawl_now, bulk_catchup_now),
         );
+        let admit_window = if (raw_admit as usize) > coord_buffer_limit {
+            bound_bulk_windows(coord_buffer_limit, raw_admit as usize, coord_buffer_limit).0 as u64
+        } else {
+            raw_admit
+        };
         let coord_stall_effective_secs = if assigner_for_coord.is_bootstrap_complete() {
             coord_stall_log_secs
         } else {
@@ -9082,6 +9123,7 @@ impl ParallelIBD {
             if let Some(parent) = engine_path.parent() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("create IBD engine directory {}", parent.display()))?;
+                crate::storage::ibd_engine::sweep_dead_export_scratch(parent);
             }
             let stored_export = storage.chain().get_engine_export_height().ok().flatten();
             let export_override = crate::config::ibd::export_height_override_from_env();
@@ -9781,7 +9823,10 @@ impl ParallelIBD {
             // R-342 200–250k 40.2 BPS at 20 ms poll (R-341 418.7). The limit must sit above
             // anything admission allows; the admit window is the memory governor.
             if wan_multi_peer {
-                limit = limit.max(wan_bulk_admit_window() as usize + 512);
+                let ram_cap_blocks = (total_ram_mb / 40).clamp(64, 2000) as usize;
+                let (_admit, raised) =
+                    bound_bulk_windows(limit, wan_bulk_admit_window() as usize, ram_cap_blocks);
+                limit = raised;
             }
             limit
         };
@@ -10239,6 +10284,33 @@ impl ParallelIBD {
             dir.display(),
             height
         );
+        Self::retain_recent_height_dumps(std::path::Path::new(base), 8);
+    }
+
+    fn retain_recent_height_dumps(base: &std::path::Path, keep: usize) {
+        let Ok(entries) = std::fs::read_dir(base) else {
+            return;
+        };
+        let mut heights = Vec::new();
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let Some(rest) = name.strip_prefix("height_") else {
+                continue;
+            };
+            let Ok(height) = rest.parse::<u64>() else {
+                continue;
+            };
+            if entry.path().is_dir() {
+                heights.push((height, entry.path()));
+            }
+        }
+        heights.sort_by_key(|(height, _)| *height);
+        let drop_n = heights.len().saturating_sub(keep);
+        for (_, path) in heights.into_iter().take(drop_n) {
+            let _ = std::fs::remove_dir_all(path);
+        }
     }
 
     /// Dump successful block + witnesses + pre-state UTXO at IBD milestones for snapshot tests.

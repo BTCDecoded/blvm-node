@@ -57,6 +57,10 @@ pub(crate) fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
     {
         std::fs::create_dir_all(parent)?;
     }
+    const EVAL_LOG_CAP: u64 = 32 * 1024 * 1024;
+    if std::fs::metadata(path).is_ok_and(|meta| meta.len() >= EVAL_LOG_CAP) {
+        return Ok(());
+    }
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -302,5 +306,17 @@ mod tests {
         );
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn the_eval_log_stops_at_32_mib() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("eval.log");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(32 * 1024 * 1024)
+            .unwrap();
+        append_line(&path, "should-not-append").unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 32 * 1024 * 1024);
     }
 }

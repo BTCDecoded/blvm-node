@@ -52,6 +52,14 @@ fn push_seed_batch(
     }
     entry_buf.clear();
     db.import_utxos(batch_items, checkpoint_height, entry_buf)?;
+    // Same-height seed entries never reach the background flusher. Flush each
+    // batch so the script tail stays one batch, then drop anything still
+    // unflushed if this seed is refused or the process is stopping.
+    db.flush_table_tail()?;
+    if crate::node::parallel_ibd::IBD_SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Acquire)
+    {
+        anyhow::bail!("IBD shutdown requested during seed");
+    }
     *total += batch_items.len();
     batch_items.clear();
     for kv in entry_buf.drain(..) {
@@ -100,7 +108,7 @@ fn release_seed_allocator() {
     unsafe {
         libmimalloc_sys::mi_collect(true);
     }
-    #[cfg(all(feature = "jemalloc", not(target_os = "windows")))]
+    #[cfg(all(feature = "jemalloc", not(target_os = "windows"), not(test)))]
     unsafe {
         use std::os::raw::c_void;
         unsafe extern "C" {
@@ -476,6 +484,7 @@ pub fn bootstrap_ckpt_from_legacy_standalone(
 #[cfg(test)]
 mod tests {
     use super::seed_count_must_be_healthy;
+    use super::{OutputHeader, RefusedSeedGuard, UtxoDatabase};
 
     #[test]
     fn seed_refuses_dest_ak_drop_vs_last_accepted() {
@@ -492,5 +501,33 @@ mod tests {
         );
         assert!(seed_count_must_be_healthy(340_000, 16_800_000, Some(16_800_000), 0).is_ok());
         assert!(seed_count_must_be_healthy(0, 0, None, 0).is_ok());
+    }
+
+    #[test]
+    fn a_flushed_batch_and_the_refusal_guard_leave_no_script_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("utxo_table.bin");
+        let db = UtxoDatabase::open(&path, 0).unwrap();
+        let header = OutputHeader {
+            height: 1,
+            flags: 0,
+            amount: 1,
+        };
+        let items = vec![([7u8; 36], header, vec![1, 2, 3, 4])];
+        let mut entries = Vec::new();
+        db.import_utxos(&items, 10, &mut entries).unwrap();
+        let (_, _, before) = db.mem_usage_bytes();
+        assert!(before > 0, "the imported script must sit in the tail");
+        db.flush_table_tail().unwrap();
+        let (_, _, flushed) = db.mem_usage_bytes();
+        assert_eq!(flushed, 0, "one flushed batch must release the script tail");
+        db.import_utxos(&items, 10, &mut entries).unwrap();
+        let (_, _, again) = db.mem_usage_bytes();
+        assert!(again > 0, "a second batch must refill the tail");
+        {
+            let _guard = RefusedSeedGuard { db: &db };
+        }
+        let (_, _, after) = db.mem_usage_bytes();
+        assert_eq!(after, 0, "the refusal guard must drop an unflushed tail");
     }
 }

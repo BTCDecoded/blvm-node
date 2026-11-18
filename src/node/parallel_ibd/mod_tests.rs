@@ -833,7 +833,7 @@ fn n15_prepare_coord_dispatch_defers_engine_txids() {
 #[serial_test::serial(ibd)]
 #[test]
 fn phase3_path_promotes_when_tip_ckpt_ready() {
-    use crate::storage::ibd_engine::{Phase3Finish, phase3_path};
+    use crate::storage::ibd_engine::{phase3_path, Phase3Finish};
     assert_eq!(
         phase3_path(957_950, 957_950, 957_950, true),
         Phase3Finish::PromotedAlias
@@ -843,7 +843,7 @@ fn phase3_path_promotes_when_tip_ckpt_ready() {
 #[serial_test::serial(ibd)]
 #[test]
 fn phase3_path_catchup_when_export_lags_tip() {
-    use crate::storage::ibd_engine::{Phase3Finish, phase3_path};
+    use crate::storage::ibd_engine::{phase3_path, Phase3Finish};
     // Live soak: export_h=880k, tip=957950, nonempty ckpt at 880k.
     assert_eq!(
         phase3_path(880_000, 957_950, 880_000, true),
@@ -854,7 +854,7 @@ fn phase3_path_catchup_when_export_lags_tip() {
 #[serial_test::serial(ibd)]
 #[test]
 fn phase3_path_full_when_no_ckpt() {
-    use crate::storage::ibd_engine::{Phase3Finish, phase3_path};
+    use crate::storage::ibd_engine::{phase3_path, Phase3Finish};
     assert_eq!(
         phase3_path(0, 100_000, 0, false),
         Phase3Finish::FullWatermarkExport
@@ -1962,7 +1962,7 @@ fn checkpoint_export_exits_when_last_committed_near_end() {
         0, 957000, 957804, 880000, 10000
     ));
     assert!(checkpoint_export_thread_should_exit(0, 0, 0, 0, 0)); // end_h<=0
-    // interval<=0: must have committed at end_h itself
+                                                                  // interval<=0: must have committed at end_h itself
     assert!(!checkpoint_export_thread_should_exit(100, 100, 100, 99, 0));
     assert!(checkpoint_export_thread_should_exit(100, 100, 100, 100, 0));
 }
@@ -1974,7 +1974,7 @@ fn tip_skip_advances_near_effective_end_without_1000_boundary() {
     assert!(should_advance_tip_on_skip_path(957632, 957804));
     assert!(should_advance_tip_on_skip_path(957804, 957804));
     assert!(should_advance_tip_on_skip_path(957000, 957804)); // %1000
-    // Far from end and not on 1000 boundary:
+                                                              // Far from end and not on 1000 boundary:
     assert!(!should_advance_tip_on_skip_path(900001, 957804));
     assert!(!should_advance_tip_on_skip_path(0, 100));
 }
@@ -3671,4 +3671,56 @@ fn block_whose_prev_is_not_the_active_parent_is_rejected() {
         utxo.is_empty(),
         "a block that does not extend the parent must not change the utxo set"
     );
+}
+
+#[test]
+fn ibd_worker_and_pipeline_env_overrides_stay_inside_the_cap() {
+    assert_eq!(clamped_worker_count(Some(10_000), 8), Some(8));
+    assert_eq!(clamped_worker_count(None, 8), None);
+    assert_eq!(clamped_pipeline_depth(Some(100_000), 8, 16), 64);
+    assert_eq!(clamped_pipeline_depth(None, 8, 16), 16);
+    assert_eq!(clamped_pipeline_depth(Some(4), 8, 16), 8);
+}
+
+#[test]
+fn bulk_admit_stays_under_the_ram_reorder_cap() {
+    let (admit, reorder) = bound_bulk_windows(100, 2048, 2000);
+    assert!(admit < reorder, "reorder must stay above admission");
+    assert!(reorder <= 2000);
+    assert!(admit + 512 >= reorder || admit + (2000 / 4) >= reorder);
+    let (small_admit, small_reorder) = bound_bulk_windows(400, 2048, 64);
+    assert!(small_reorder <= 64);
+    assert!(small_admit <= small_reorder);
+}
+
+#[test]
+fn failure_dumps_keep_the_newest_eight_heights() {
+    let dir = tempfile::tempdir().unwrap();
+    for height in 1..=10 {
+        std::fs::create_dir(dir.path().join(format!("height_{height}"))).unwrap();
+    }
+    ParallelIBD::retain_recent_height_dumps(dir.path(), 8);
+    let mut left = Vec::new();
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        left.push(entry.unwrap().file_name().to_string_lossy().into_owned());
+    }
+    left.sort();
+    let mut expect: Vec<_> = (3..=10).map(|height| format!("height_{height}")).collect();
+    expect.sort();
+    assert_eq!(left, expect);
+}
+
+#[test]
+fn a_dead_export_scratch_dir_is_removed_and_a_live_one_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let dead = dir.path().join("blvm-export-e4-10-4294967294");
+    let live = dir
+        .path()
+        .join(format!("blvm-export-e4-10-{}", std::process::id()));
+    std::fs::create_dir(&dead).unwrap();
+    std::fs::create_dir(&live).unwrap();
+    std::fs::write(dead.join("run"), b"x").unwrap();
+    crate::storage::ibd_engine::sweep_dead_export_scratch(dir.path());
+    assert!(!dead.exists());
+    assert!(live.exists());
 }

@@ -64,7 +64,7 @@ pub use memory_run::{
 pub use meta::{
     clear_engine_dirty_flag, contiguous_length_sidecar, engine_dirty_flag_path,
     read_contiguous_length_sidecar, remove_contiguous_length_sidecar,
-    write_contiguous_length_sidecar,
+    sweep_dead_export_scratch, write_contiguous_length_sidecar,
 };
 pub use spend_session::{
     PartialSpendSession, SpendSession, hotpath_timer_sample, session_fill_utxo_set,

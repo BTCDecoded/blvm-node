@@ -705,28 +705,41 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // `BLVM_IBD_MAX_PARALLEL` overrides. Otherwise default scales with **RAM**:
     // low-memory hosts stay at half-cores (capped) to limit RSS. 32+ GiB hosts
     // cap at 8: cpus-1 up to 24 built ~3–4 GB of per-thread allocator cache.
-    let n_validate_workers: usize = std::env::var("BLVM_IBD_MAX_PARALLEL")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| {
-            let cpus = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4);
-            let total_gb = MemoryGuard::total_gb_rounded(system_total_ram_mb);
-            if total_gb >= 32 {
-                cpus.saturating_sub(1).clamp(4, 8)
-            } else if total_gb >= 24 {
-                (cpus * 3 / 4).clamp(2, 16)
-            } else if total_gb >= 16 {
-                // At h=450k+ the bottleneck shifts to CPU-bound ECDSA verification, not memory.
-                // The adaptive cache cap handles RSS automatically. Use cpus-2 to leave headroom
-                // for coordinator, retire, and prefetch threads while maximising validation
-                // parallelism. On 12-core/16GB this raises workers 8 → 10 (+25% BPS ceiling).
-                cpus.saturating_sub(2).clamp(4, 16)
-            } else {
-                (cpus / 2).clamp(1, 6)
-            }
-        });
+    let worker_cap = {
+        let total_gb = MemoryGuard::total_gb_rounded(system_total_ram_mb);
+        if total_gb >= 32 {
+            8
+        } else if total_gb >= 16 {
+            16
+        } else {
+            6
+        }
+    };
+    let n_validate_workers: usize = crate::node::parallel_ibd::clamped_worker_count(
+        std::env::var("BLVM_IBD_MAX_PARALLEL")
+            .ok()
+            .and_then(|s| s.parse().ok()),
+        worker_cap,
+    )
+    .unwrap_or_else(|| {
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let total_gb = MemoryGuard::total_gb_rounded(system_total_ram_mb);
+        if total_gb >= 32 {
+            cpus.saturating_sub(1).clamp(4, 8)
+        } else if total_gb >= 24 {
+            (cpus * 3 / 4).clamp(2, 16)
+        } else if total_gb >= 16 {
+            // At h=450k+ the bottleneck shifts to CPU-bound ECDSA verification, not memory.
+            // The adaptive cache cap handles RSS automatically. Use cpus-2 to leave headroom
+            // for coordinator, retire, and prefetch threads while maximising validation
+            // parallelism. On 12-core/16GB this raises workers 8 → 10 (+25% BPS ceiling).
+            cpus.saturating_sub(2).clamp(4, 16)
+        } else {
+            (cpus / 2).clamp(1, 6)
+        }
+    });
 
     // Pipeline depth (max in-flight blocks) is **decoupled** from worker count. With
     // pipeline_depth == n_workers, a single slow block (cache-miss → 80ms view-build) at the
@@ -755,11 +768,13 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // Engine mode default 16 (not 32): each in-flight height pins age-0; with 1-height
     // frozen runs, depth 32 made mergeable_prefix 0–1 and stalled the compacter.
     let engine_default_depth = 16;
-    let n_pipeline_depth: usize = std::env::var("BLVM_IBD_PIPELINE_DEPTH")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| engine_default_depth.clamp(n_validate_workers, 64))
-        .max(n_validate_workers);
+    let n_pipeline_depth: usize = crate::node::parallel_ibd::clamped_pipeline_depth(
+        std::env::var("BLVM_IBD_PIPELINE_DEPTH")
+            .ok()
+            .and_then(|s| s.parse().ok()),
+        n_validate_workers,
+        engine_default_depth,
+    );
 
     info!(
         "IBD: n_validate_workers={} pipeline_depth={} engine_mode={}",
@@ -1401,7 +1416,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
                                 // Write the full stats to a temp file only when explicitly requested.
                                 if std::env::var_os("BLVM_IBD_JEMALLOC_DUMP").is_some() {
-                                    let stats_path = format!("/tmp/jemalloc_h{h}.txt");
+                                    let stats_path = "/tmp/jemalloc_ibd.txt";
                                     let _ = std::fs::write(&stats_path, &*buf);
                                 }
 
@@ -4258,6 +4273,13 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // `push_utxo_flush_from_retire`). Bumping from tip caused resume at height H with an empty or
     // partial `ibd_utxos` tree → immediate `UTXO not found for input`.
 
+    if let Some(ref db) = utxo_engine {
+        db.flush_contiguous_length_sidecar();
+    }
+    if let Some(data_dir) = storage_clone.data_dir() {
+        let engine_path = crate::config::ibd::ibd_engine_path(Some(data_dir.as_path()));
+        crate::storage::ibd_engine::clear_engine_dirty_flag(&engine_path);
+    }
     info!("IBD shutdown: validation loop complete");
     Ok(())
 }

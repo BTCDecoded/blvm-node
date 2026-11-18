@@ -2040,7 +2040,24 @@ impl Node {
         }
 
         // A refused checkpoint is the same tree on every retry. Re-importing it
-        // walks the whole UTXO snapshot into RSS and cannot succeed.
+        // walks the whole UTXO snapshot into RSS and cannot succeed. The file
+        // survives a restart; a newer export height is a different checkpoint.
+        if let Some(blocked) = read_refused_seed_height(&self.data_dir) {
+            let current = self
+                .storage
+                .chain()
+                .get_engine_export_height()
+                .ok()
+                .flatten();
+            if current == Some(blocked) {
+                CATCH_UP_SEED_BLOCKED.store(true, Ordering::Release);
+                info!(
+                    "catch-up skipped: checkpoint seed already refused at export height {blocked}"
+                );
+                return Ok(());
+            }
+            let _ = std::fs::remove_file(refused_seed_height_path(&self.data_dir));
+        }
         if CATCH_UP_SEED_BLOCKED.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -2310,6 +2327,15 @@ impl Node {
                 // days. Backoff caps at 10 minutes, so the import never stopped.
                 let rendered = format!("{e:#}");
                 if catch_up_failure_is_terminal(&rendered) {
+                    if let Some(h) = self
+                        .storage
+                        .chain()
+                        .get_engine_export_height()
+                        .ok()
+                        .flatten()
+                    {
+                        record_refused_seed_height(&self.data_dir, h);
+                    }
                     CATCH_UP_SEED_BLOCKED.store(true, Ordering::Release);
                     warn!(
                         "[CATCH_UP] checkpoint seed refused — this process will not import it again: {rendered}"
@@ -2800,6 +2826,24 @@ pub(crate) fn catch_up_failure_is_terminal(err: &str) -> bool {
         || err.contains("checkpoint incomplete/poisoned")
         || err.contains("checkpoint poisoned")
         || err.contains("checkpoint tree empty")
+        || err.contains("ibd-seed-writer thread exited early")
+        || err.contains("ibd-seed-writer thread panicked")
+}
+
+fn refused_seed_height_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("seed_refused_height")
+}
+
+pub(crate) fn record_refused_seed_height(data_dir: &std::path::Path, height: u64) {
+    let _ = std::fs::write(refused_seed_height_path(data_dir), format!("{height}\n"));
+}
+
+pub(crate) fn read_refused_seed_height(data_dir: &std::path::Path) -> Option<u64> {
+    std::fs::read_to_string(refused_seed_height_path(data_dir))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 #[cfg(test)]
@@ -2825,6 +2869,18 @@ mod resume_snapshot_tests {
         assert!(!catch_up_failure_is_terminal(
             "[CATCH_UP] Parallel IBD failed: connection reset"
         ));
+        assert!(catch_up_failure_is_terminal(
+            "ibd-seed-writer thread exited early"
+        ));
+        assert!(catch_up_failure_is_terminal(
+            "ibd-seed-writer thread panicked: boom"
+        ));
+        assert!(!catch_up_failure_is_terminal(
+            "IBD shutdown requested during seed"
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        record_refused_seed_height(dir.path(), 330797);
+        assert_eq!(read_refused_seed_height(dir.path()), Some(330797));
     }
 
     fn put_ckpt(storage: &Storage, tree: &str, prevout: &OutPoint, utxo: &UTXO) {
