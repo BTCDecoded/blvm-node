@@ -1,7 +1,7 @@
 //! Mempool admission, policy, persistence, and reorg tests.
 
 use super::{
-    MempoolManager, MAX_STANDARD_TX_WEIGHT, decode_persisted_tx, effective_ranked_fee,
+    MAX_STANDARD_TX_WEIGHT, MempoolManager, decode_persisted_tx, effective_ranked_fee,
     encode_persisted_tx, replacement_clears_fee_rate,
 };
 use crate::config::MempoolPolicyConfig;
@@ -1417,10 +1417,7 @@ fn configured_op_return_limit_is_what_admission_uses() {
         ))));
         let script_len = tx.outputs[0].script_pubkey.len();
         let admitted = mempool.add_transaction(tx).unwrap();
-        assert_eq!(
-            mempool.effective_policy().max_op_return_script_bytes,
-            limit
-        );
+        assert_eq!(mempool.effective_policy().max_op_return_script_bytes, limit);
         (script_len, admitted)
     };
     let short = carrier(80);

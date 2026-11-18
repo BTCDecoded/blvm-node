@@ -300,7 +300,8 @@ fn output_script_is_standard(script: &[u8], max_op_return_script_bytes: usize) -
         return false;
     }
     if script[0] == 0x6a {
-        return script.len() <= max_op_return_script_bytes && op_return_payload_is_push_only(script);
+        return script.len() <= max_op_return_script_bytes
+            && op_return_payload_is_push_only(script);
     }
     if blvm_protocol::witness::is_any_witness_program(script)
         && !blvm_protocol::witness::is_invalid_v0_witness_program(script)
@@ -2343,15 +2344,12 @@ impl MempoolManager {
             return Err("tx-size");
         }
         if require_standard
-            && tx
-                .outputs
-                .iter()
-                .any(|output| {
-                    !output_script_is_standard(
-                        output.script_pubkey.as_ref(),
-                        max_op_return_script_bytes,
-                    )
-                })
+            && tx.outputs.iter().any(|output| {
+                !output_script_is_standard(
+                    output.script_pubkey.as_ref(),
+                    max_op_return_script_bytes,
+                )
+            })
         {
             return Err("scriptpubkey");
         }
@@ -2396,14 +2394,9 @@ impl MempoolManager {
         }
         if require_standard
             && self.script_prevouts(tx, utxo_set).iter().any(|prevout| {
-                prevout
-                    .as_ref()
-                    .is_some_and(|prevout| {
-                        !spent_script_is_standard(
-                            prevout.script.as_ref(),
-                            max_op_return_script_bytes,
-                        )
-                    })
+                prevout.as_ref().is_some_and(|prevout| {
+                    !spent_script_is_standard(prevout.script.as_ref(), max_op_return_script_bytes)
+                })
             })
         {
             return Err("bad-txns-nonstandard-inputs");
@@ -3094,15 +3087,12 @@ impl MempoolManager {
             return Ok(false);
         }
         if effective_policy.require_standard
-            && tx
-                .outputs
-                .iter()
-                .any(|output| {
-                    !output_script_is_standard(
-                        output.script_pubkey.as_ref(),
-                        effective_policy.max_op_return_script_bytes,
-                    )
-                })
+            && tx.outputs.iter().any(|output| {
+                !output_script_is_standard(
+                    output.script_pubkey.as_ref(),
+                    effective_policy.max_op_return_script_bytes,
+                )
+            })
         {
             warn!(
                 "Transaction {} rejected: non-standard output",
@@ -3297,14 +3287,12 @@ impl MempoolManager {
                 .script_prevouts(&tx, &utxo_snapshot)
                 .iter()
                 .any(|prevout| {
-                    prevout
-                        .as_ref()
-                        .is_some_and(|prevout| {
-                            !spent_script_is_standard(
-                                prevout.script.as_ref(),
-                                effective_policy.max_op_return_script_bytes,
-                            )
-                        })
+                    prevout.as_ref().is_some_and(|prevout| {
+                        !spent_script_is_standard(
+                            prevout.script.as_ref(),
+                            effective_policy.max_op_return_script_bytes,
+                        )
+                    })
                 })
         {
             warn!(
