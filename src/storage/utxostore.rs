@@ -122,6 +122,32 @@ impl UtxoStore {
         Ok(value)
     }
 
+    /// Spend and create outpoints in one batch. `None` deletes the current and legacy keys.
+    pub(crate) fn commit_outpoint_batch(&self, ops: &[(&OutPoint, Option<&UTXO>)]) -> Result<()> {
+        let mut encoded = Vec::with_capacity(ops.len());
+        for (outpoint, utxo) in ops {
+            match utxo {
+                None => {
+                    encoded.push((self.outpoint_key(outpoint), None));
+                    encoded.push((self.legacy_outpoint_key(outpoint).to_vec(), None));
+                }
+                Some(utxo) => {
+                    let value = self.encode_stored_utxo(self.serialize_utxo(utxo)?)?;
+                    encoded.push((self.outpoint_key(outpoint), Some(value)));
+                }
+            }
+        }
+        let mut batch = self.utxos.batch()?;
+        for (key, value) in &encoded {
+            match value {
+                Some(bytes) => batch.put(key, bytes),
+                None => batch.delete(key),
+            }
+        }
+        batch.commit()?;
+        Ok(())
+    }
+
     /// Store the entire UTXO set
     ///
     /// Performance optimization: Caches serialized UTXO bytes to avoid re-serialization
@@ -689,6 +715,48 @@ mod tests {
         assert!(utxos.get_utxo(&first).unwrap().is_none());
         assert!(utxos.get_utxo(&second).unwrap().is_none());
         assert_eq!(utxos.get_utxo(&kept).unwrap().unwrap().value, 20);
+    }
+
+    #[test]
+    fn chainstate_undo_is_one_batch() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = crate::storage::Storage::new(temp.path()).unwrap();
+        let utxos = storage.utxos();
+        let spent = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let kept = OutPoint {
+            hash: [5u8; 32],
+            index: 1,
+        };
+        let created = OutPoint {
+            hash: [6u8; 32],
+            index: 0,
+        };
+        let coin = UTXO {
+            value: 30,
+            script_pubkey: vec![OP_1].into(),
+            height: 3,
+            is_coinbase: false,
+        };
+        let created_coin = UTXO {
+            value: 40,
+            script_pubkey: vec![OP_1].into(),
+            height: 4,
+            is_coinbase: false,
+        };
+        utxos.add_utxo(&spent, &coin).unwrap();
+        utxos.add_utxo(&kept, &coin).unwrap();
+        utxos
+            .commit_outpoint_batch(&[
+                (&spent, None),
+                (&created, Some(&created_coin)),
+            ])
+            .unwrap();
+        assert!(utxos.get_utxo(&spent).unwrap().is_none());
+        assert_eq!(utxos.get_utxo(&kept).unwrap().unwrap().value, 30);
+        assert_eq!(utxos.get_utxo(&created).unwrap().unwrap().value, 40);
     }
 
     #[test]

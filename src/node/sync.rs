@@ -280,6 +280,11 @@ fn cloned_fork_choice_entry<T: Clone, W: Clone>(block: &T, witnesses: &[W]) -> O
     None
 }
 
+/// The chainstate write has to succeed before the tip moves.
+pub(crate) fn chainstate_undo_before_tip(batch: Result<()>) -> Result<()> {
+    batch
+}
+
 /// The memory-set write has to succeed before the tip moves.
 pub(crate) fn memory_set_store_before_tip(store: Result<()>) -> Result<()> {
     store
@@ -614,17 +619,16 @@ impl SyncCoordinator {
         storage: &Storage,
         undo: &blvm_consensus::reorganization::BlockUndoLog,
     ) -> Result<()> {
+        let mut ops = Vec::new();
         for entry in undo.entries.iter().rev() {
             if entry.previous_utxo.is_some() {
-                storage.utxos().remove_utxo(&entry.outpoint)?;
+                ops.push((&entry.outpoint, None));
             }
             if let Some(created) = &entry.new_utxo {
-                storage
-                    .utxos()
-                    .add_utxo(&entry.outpoint, created.as_ref())?;
+                ops.push((&entry.outpoint, Some(created.as_ref())));
             }
         }
-        Ok(())
+        storage.utxos().commit_outpoint_batch(&ops)
     }
 
     #[cfg(feature = "production")]
@@ -827,10 +831,13 @@ impl SyncCoordinator {
                     {
                         anyhow::bail!("connect refused: IBD UTXO snapshot is empty");
                     }
+                    chainstate_undo_before_tip(Self::apply_connect_undo_to_chainstate(
+                        storage,
+                        &undo_log,
+                    ))?;
                     storage
                         .chain()
                         .update_tip(&block_hash, &block.header, connect_height)?;
-                    Self::apply_connect_undo_to_chainstate(storage, &undo_log)?;
                     *utxo_set = UtxoSet::default();
                 } else {
                     memory_set_store_before_tip(
@@ -1216,6 +1223,12 @@ mod tests {
     fn memory_set_connect_does_not_move_the_tip_when_the_store_fails() {
         assert!(memory_set_store_before_tip(Err(anyhow::anyhow!("store"))).is_err());
         assert!(memory_set_store_before_tip(Ok(())).is_ok());
+    }
+
+    #[test]
+    fn chainstate_undo_does_not_move_the_tip_when_the_batch_fails() {
+        assert!(chainstate_undo_before_tip(Err(anyhow::anyhow!("batch"))).is_err());
+        assert!(chainstate_undo_before_tip(Ok(())).is_ok());
     }
 
     #[test]
