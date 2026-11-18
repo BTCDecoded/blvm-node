@@ -77,6 +77,55 @@ fn seed_entry_from_utxo(
 
 /// Refuse truncated / poisoned snapshots before `finalize_seed`.
 /// dest-ak 8.2M@516k vs last_accepted 16.8M must not re-seed.
+fn abandon_refused_seed(db: &UtxoDatabase) {
+    db.discard_unflushed_tail();
+    release_seed_allocator();
+}
+
+/// Drops when `seed_from_ibd_utxos` returns. Failure frees the script tail the
+/// health check used to leave resident. Success runs after `flush_table_tail`,
+/// so the drop purges the pages that flush just released.
+struct RefusedSeedGuard<'a> {
+    db: &'a UtxoDatabase,
+}
+
+impl Drop for RefusedSeedGuard<'_> {
+    fn drop(&mut self) {
+        abandon_refused_seed(self.db);
+    }
+}
+
+fn release_seed_allocator() {
+    #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
+    unsafe {
+        libmimalloc_sys::mi_collect(true);
+    }
+    #[cfg(all(feature = "jemalloc", not(target_os = "windows")))]
+    unsafe {
+        use std::os::raw::c_void;
+        unsafe extern "C" {
+            fn _rjem_mallctl(
+                name: *const std::ffi::c_char,
+                oldp: *mut c_void,
+                oldlenp: *mut usize,
+                newp: *mut c_void,
+                newlen: usize,
+            ) -> i32;
+        }
+        _rjem_mallctl(
+            c"arena.4294967295.purge".as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        );
+    }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 fn seed_count_must_be_healthy(
     checkpoint_height: i32,
     total: usize,
@@ -135,6 +184,7 @@ pub fn seed_from_ibd_utxos(
     last_accepted: u64,
     codec: ValueCodec,
 ) -> Result<usize> {
+    let _release_tail = RefusedSeedGuard { db };
     use std::cell::Cell;
     use std::sync::mpsc;
     use std::thread;
@@ -227,14 +277,6 @@ pub fn seed_from_ibd_utxos(
                     )?;
                     db.finalize_seed(seg, checkpoint_height);
                     db.flush_table_tail()?;
-                    #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
-                    unsafe {
-                        libmimalloc_sys::mi_collect(true);
-                    }
-                    #[cfg(target_os = "linux")]
-                    unsafe {
-                        libc::malloc_trim(0);
-                    }
                     info!(
                         "IBD engine: seeded {} UTXOs from checkpoint h={} in {:.1}s \
                              (heed3 zero-copy scan, peak UTXO buffer ≈ 6 MB)",
@@ -312,16 +354,6 @@ pub fn seed_from_ibd_utxos(
     // so it never fires. Without this call, ~12 GB of script data stays in anonymous
     // memory until the process exits.
     db.flush_table_tail()?;
-
-    // Explicitly return freed pages to the OS before validation starts.
-    #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
-    unsafe {
-        libmimalloc_sys::mi_collect(true);
-    }
-    #[cfg(target_os = "linux")]
-    unsafe {
-        libc::malloc_trim(0);
-    }
 
     info!(
         "IBD engine: seeded {} UTXOs from checkpoint h={} in {:.1}s \

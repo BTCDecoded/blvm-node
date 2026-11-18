@@ -2024,10 +2024,11 @@ impl Node {
         utxo_set: &mut blvm_protocol::UtxoSet,
     ) -> Result<()> {
         use crate::node::parallel_ibd::PARALLEL_IBD_SESSION_ACTIVE;
-        use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
         static CATCH_UP_LAST_FAIL_SECS: AtomicU64 = AtomicU64::new(0);
         static CATCH_UP_FAIL_STREAK: AtomicU32 = AtomicU32::new(0);
+        static CATCH_UP_SEED_BLOCKED: AtomicBool = AtomicBool::new(false);
 
         // Mode T archive: never catch-up IBD / DNS reseed while serving getdata.
         if crate::config::ibd_serve_only() {
@@ -2035,6 +2036,12 @@ impl Node {
         }
 
         if PARALLEL_IBD_SESSION_ACTIVE.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        // A refused checkpoint is the same tree on every retry. Re-importing it
+        // walks the whole UTXO snapshot into RSS and cannot succeed.
+        if CATCH_UP_SEED_BLOCKED.load(Ordering::Acquire) {
             return Ok(());
         }
 
@@ -2299,7 +2306,17 @@ impl Node {
             Err(e) => {
                 // Live 2026-07-16: seed-from-ckpt failures under memory pressure retried every
                 // ~5–12s for hours (629 dirty wipe+reseed loops) — burn RAM + hide root cause.
-                warn!("[CATCH_UP] Parallel IBD failed: {:#}", e);
+                // Live 2026-11-14: the same Δ=70 refusal was retried 1422 times across four
+                // days. Backoff caps at 10 minutes, so the import never stopped.
+                let rendered = format!("{e:#}");
+                if catch_up_failure_is_terminal(&rendered) {
+                    CATCH_UP_SEED_BLOCKED.store(true, Ordering::Release);
+                    warn!(
+                        "[CATCH_UP] checkpoint seed refused — this process will not import it again: {rendered}"
+                    );
+                    return Ok(());
+                }
+                warn!("[CATCH_UP] Parallel IBD failed: {rendered}");
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
@@ -2776,12 +2793,39 @@ impl Node {
     }
 }
 
+/// A checkpoint the importer already refused will fail the same way on the next
+/// attempt. Peer loss and a short IBD error stay retriable.
+pub(crate) fn catch_up_failure_is_terminal(err: &str) -> bool {
+    err.contains("refusing seed")
+        || err.contains("checkpoint incomplete/poisoned")
+        || err.contains("checkpoint poisoned")
+        || err.contains("checkpoint tree empty")
+}
+
 #[cfg(test)]
 mod resume_snapshot_tests {
     use super::*;
     use blvm_protocol::BlockHeader;
     use blvm_protocol::types::{OutPoint, UTXO};
     use std::net::SocketAddr;
+
+    #[test]
+    fn a_refused_checkpoint_seed_is_not_retried() {
+        let refused = "seed engine from ibd_utxos_ckpt_a at checkpoint h=330797: \
+                       IBD engine seed: imported 91605408 UTXOs but chain_info expected 91605478 \
+                       at height 330797 (Δ=70) — checkpoint incomplete/poisoned (refusing seed)";
+        assert!(catch_up_failure_is_terminal(refused));
+        assert!(catch_up_failure_is_terminal(
+            "checkpoint tree empty at height 330797 — export incomplete or wrong slot"
+        ));
+        assert!(catch_up_failure_is_terminal(
+            "fails monotonicity (last_accepted=1) — checkpoint poisoned (refusing seed)"
+        ));
+        assert!(!catch_up_failure_is_terminal("peer disconnected"));
+        assert!(!catch_up_failure_is_terminal(
+            "[CATCH_UP] Parallel IBD failed: connection reset"
+        ));
+    }
 
     fn put_ckpt(storage: &Storage, tree: &str, prevout: &OutPoint, utxo: &UTXO) {
         let tree = storage.open_tree(tree).unwrap();

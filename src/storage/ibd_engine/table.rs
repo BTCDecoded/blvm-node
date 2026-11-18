@@ -164,6 +164,12 @@ impl UtxoTable {
         self.tail.read().iter().map(|b| b.data.capacity()).sum()
     }
 
+    /// Drop script bytes the background flusher will not write. Seed entries share
+    /// one height, so a refused import otherwise keeps about 12 GiB resident.
+    pub fn discard_tail(&self) {
+        *self.tail.write() = Arc::new(Vec::new());
+    }
+
     /// Total bytes written to the on-disk flat file (not in RAM — pread64 path).
     pub fn file_size_bytes(&self) -> u64 {
         self.committed_fence

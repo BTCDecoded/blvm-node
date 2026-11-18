@@ -1924,6 +1924,7 @@ impl BlockchainRpc {
                 .get_undo_log(&hash)?
                 .ok_or_else(|| anyhow::anyhow!("missing undo log for invalidated block"))?;
             if let Some((_, tree)) = &snapshot {
+                let delta = crate::node::reorg_executor::snapshot_batch_coin_delta(&[&undo], &[]);
                 crate::node::reorg_executor::commit_utxo_snapshot_delta(
                     tree.as_ref(),
                     storage.utxo_value_codec(),
@@ -1932,6 +1933,7 @@ impl BlockchainRpc {
                     None,
                     None,
                 )?;
+                crate::node::reorg_executor::record_snapshot_coin_delta(storage, delta, None)?;
             } else {
                 for entry in &undo.entries {
                     if entry.new_utxo.is_some() {

@@ -17,7 +17,7 @@ use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTi
 #[cfg(feature = "production")]
 use crate::node::reorg_executor::{
     commit_utxo_snapshot_delta, note_snapshot_height, read_snapshot_inputs,
-    try_activate_heavier_fork,
+    record_snapshot_coin_delta, snapshot_connect_coin_delta, try_activate_heavier_fork,
 };
 use crate::storage::Storage;
 use crate::storage::blockstore::BlockStore;
@@ -779,6 +779,11 @@ impl SyncCoordinator {
                         &[&undo_log],
                         Some((connect_height, block_hash)),
                         muhash.as_mut(),
+                    )?;
+                    record_snapshot_coin_delta(
+                        storage,
+                        snapshot_connect_coin_delta(&[&undo_log]),
+                        Some(connect_height),
                     )?;
                     storage
                         .chain()

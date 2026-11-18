@@ -377,6 +377,11 @@ impl UtxoDatabase {
         self.table.flush_all()
     }
 
+    /// Free the unflushed script tail without writing a refused snapshot.
+    pub fn discard_unflushed_tail(&self) {
+        self.table.discard_tail();
+    }
+
     /// Convert a legacy `OutPointKey = [u8; 40]` to `OutputKey = [u8; 36]`.
     #[inline]
     pub fn to_output_key(k: &[u8; 40]) -> OutputKey {

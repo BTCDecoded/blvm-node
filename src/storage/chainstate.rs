@@ -712,10 +712,119 @@ impl ChainState {
         Ok(())
     }
 
+    /// Add a snapshot connect's net coin change to the stored export count.
+    ///
+    /// A tip connect rewrites the checkpoint tree in place. Leaving the count at
+    /// the last full export makes the next seed refuse a tree that already
+    /// contains those coins. No stored count means there is nothing to adjust.
+    /// `through_height` advances only upward, and only in this same batch, so a
+    /// crash cannot leave the count covering a block the height label denies.
+    pub fn add_engine_export_utxo_count(
+        &self,
+        delta: i64,
+        through_height: Option<u64>,
+    ) -> Result<()> {
+        let Some(current) = self.get_engine_export_utxo_count()? else {
+            return Ok(());
+        };
+        if current == 0 {
+            return Ok(());
+        }
+        let next = (current as i64).saturating_add(delta).max(0) as u64;
+        let mut batch = self.chain_info.batch()?;
+        batch.put(b"ibd_engine_export_utxo_count", &next.to_be_bytes());
+        if let Some(height) = through_height {
+            let covered = self.get_engine_export_count_height()?;
+            if height > covered {
+                batch.put(b"ibd_engine_export_count_height", &height.to_be_bytes());
+            }
+        }
+        batch.commit()?;
+        Ok(())
+    }
+
+    /// Height the stored export count is known to include. `0` means an export
+    /// written before this field existed; the slot height is the fallback.
+    pub fn get_engine_export_count_height(&self) -> Result<u64> {
+        Ok(
+            match self.chain_info.get(b"ibd_engine_export_count_height")? {
+                Some(data) if data.len() >= 8 => {
+                    let mut bytes = [0u8; 8];
+                    bytes.copy_from_slice(&data[..8]);
+                    u64::from_be_bytes(bytes)
+                }
+                _ => 0,
+            },
+        )
+    }
+
+    /// Count saved before a reorg disconnect. Startup restores it when the
+    /// connect batch never committed. A second disconnect in the same reorg
+    /// must not overwrite the original count.
+    pub fn remember_export_count_before_reorg(&self) -> Result<()> {
+        if self
+            .chain_info
+            .get(b"ibd_engine_export_count_before_reorg")?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let Some(count) = self.get_engine_export_utxo_count()? else {
+            return Ok(());
+        };
+        self.chain_info.insert(
+            b"ibd_engine_export_count_before_reorg",
+            &count.to_be_bytes(),
+        )?;
+        Ok(())
+    }
+
+    pub fn take_export_count_before_reorg(&self) -> Result<Option<u64>> {
+        let Some(data) = self
+            .chain_info
+            .get(b"ibd_engine_export_count_before_reorg")?
+        else {
+            return Ok(None);
+        };
+        self.chain_info
+            .remove(b"ibd_engine_export_count_before_reorg")?;
+        if data.len() < 8 {
+            return Ok(None);
+        }
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&data[..8]);
+        Ok(Some(u64::from_be_bytes(bytes)))
+    }
+
+    pub fn clear_export_count_before_reorg(&self) -> Result<()> {
+        if self
+            .chain_info
+            .get(b"ibd_engine_export_count_before_reorg")?
+            .is_some()
+        {
+            self.chain_info
+                .remove(b"ibd_engine_export_count_before_reorg")?;
+        }
+        Ok(())
+    }
+
     /// Test/repair helper: set export UTXO count without a full checkpoint persist.
     pub fn force_set_engine_export_utxo_count(&self, count: u64) -> Result<()> {
         self.chain_info
             .insert(b"ibd_engine_export_utxo_count", &count.to_be_bytes())?;
+        Ok(())
+    }
+
+    /// Set the count and the height it covers in one batch.
+    pub fn force_set_engine_export_utxo_count_through(
+        &self,
+        count: u64,
+        height: u64,
+    ) -> Result<()> {
+        let mut batch = self.chain_info.batch()?;
+        batch.put(b"ibd_engine_export_utxo_count", &count.to_be_bytes());
+        batch.put(b"ibd_engine_export_count_height", &height.to_be_bytes());
+        batch.commit()?;
         Ok(())
     }
 
@@ -798,6 +907,7 @@ impl ChainState {
         batch.put(b"ibd_engine_ckpt_slot", &[slot & 1]);
         batch.put(slot_key, &height.to_be_bytes());
         batch.put(b"ibd_engine_export_utxo_count", &utxo_count.to_be_bytes());
+        batch.put(b"ibd_engine_export_count_height", &height.to_be_bytes());
         batch.put(
             b"ibd_engine_export_wall_secs",
             &export_wall_secs.to_be_bytes(),
@@ -819,6 +929,8 @@ impl ChainState {
         batch.put(b"ibd_engine_ckpt_slot", &[0u8]);
         batch.put(b"ibd_engine_export_utxo_count", &0u64.to_be_bytes());
         batch.put(b"ibd_engine_prev_accepted_utxo_count", &0u64.to_be_bytes());
+        batch.delete(b"ibd_engine_export_count_height");
+        batch.delete(b"ibd_engine_export_count_before_reorg");
         batch.delete(b"ibd_engine_export_muhash");
         batch.delete(b"ibd_engine_validation_tip");
         batch.commit()?;

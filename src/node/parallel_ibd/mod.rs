@@ -9193,11 +9193,20 @@ impl ParallelIBD {
             if resume_seed {
                 let ckpt_slot = storage.chain().get_engine_ckpt_slot().unwrap_or(0);
                 let ckpt_tree_name = crate::storage::ibd_engine::ckpt_tree_for_slot(ckpt_slot);
-                let expected_count = storage
+                let stored_export_count = storage
                     .chain()
                     .get_engine_export_utxo_count()
                     .ok()
                     .flatten();
+                // A tip connect used to move the export height and rewrite the tree
+                // without the coin count. The slot height still names the export.
+                let expected_count = stored_export_count.map(|count| {
+                    crate::node::reorg_executor::export_count_including_unrecorded_connects(
+                        storage.as_ref(),
+                        checkpoint_height as u64,
+                        count,
+                    )
+                });
                 let last_accepted = storage
                     .chain()
                     .get_engine_prev_accepted_utxo_count()
@@ -9270,6 +9279,15 @@ impl ParallelIBD {
                     .with_context(|| {
                         format!("seed engine from {seed_name} at checkpoint h={checkpoint_height}")
                     })?;
+                    if stored_export_count != Some(n as u64) {
+                        storage.chain().force_set_engine_export_utxo_count_through(
+                            n as u64,
+                            checkpoint_height as u64,
+                        )?;
+                        storage
+                            .chain()
+                            .set_engine_ckpt_slot_height(ckpt_slot, checkpoint_height as u64)?;
+                    }
                     let validation_tip_at_open =
                         storage.chain().get_engine_validation_tip().ok().flatten();
                     let chain_tip_at_open = storage.chain().get_height().ok().flatten();
@@ -9349,6 +9367,15 @@ impl ParallelIBD {
                     .with_context(|| {
                         format!("seed engine from {seed_name} at checkpoint h={checkpoint_height}")
                     })?;
+                    if stored_export_count != Some(n as u64) {
+                        storage.chain().force_set_engine_export_utxo_count_through(
+                            n as u64,
+                            checkpoint_height as u64,
+                        )?;
+                        storage
+                            .chain()
+                            .set_engine_ckpt_slot_height(ckpt_slot, checkpoint_height as u64)?;
+                    }
                     let validation_tip_at_open =
                         storage.chain().get_engine_validation_tip().ok().flatten();
                     let chain_tip_at_open = storage.chain().get_height().ok().flatten();
