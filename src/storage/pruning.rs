@@ -267,12 +267,12 @@ impl PruningManager {
 
         // Ensure we keep minimum blocks
         let blocks_to_keep = current_height.saturating_sub(prune_to_height);
-        if let Some(keep) = self.config.keep_window() {
-            if blocks_to_keep < keep {
-                return Err(anyhow!(
-                    "Pruning would leave {blocks_to_keep} blocks, but keep_blocks is {keep}"
-                ));
-            }
+        if let Some(keep) = self.config.keep_window()
+            && blocks_to_keep < keep
+        {
+            return Err(anyhow!(
+                "Pruning would leave {blocks_to_keep} blocks, but keep_blocks is {keep}"
+            ));
         }
 
         info!(

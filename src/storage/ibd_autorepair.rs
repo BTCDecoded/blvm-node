@@ -348,7 +348,7 @@ pub(crate) fn reconcile_ibd_utxo_watermark_with_disk(
                 }
             }
         }
-        return Ok(0);
+        Ok(0)
     }
 }
 
@@ -584,7 +584,7 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
              engine flat state cleared for re-seed; next IBD starts at {}",
             export_height.saturating_add(1)
         );
-        return Ok(());
+        Ok(())
     }
 }
 
