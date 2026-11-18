@@ -854,6 +854,13 @@ pub fn publish_reorg_events(
     }
 }
 
+/// A running-hash read error is not a missing hash.
+pub(crate) fn running_hash_from_read(
+    read: Result<Option<[u8; blvm_muhash::MUHASH_RUNNING_STATE_BYTES]>>,
+) -> Result<Option<[u8; blvm_muhash::MUHASH_RUNNING_STATE_BYTES]>> {
+    read
+}
+
 /// Switch to `candidate_tip` when it carries more work than the active tip.
 #[cfg(feature = "production")]
 pub fn try_activate_heavier_fork(
@@ -913,11 +920,7 @@ pub fn try_activate_heavier_fork(
         None
     };
     let mut live_muhash = if live_tree.is_some() && snapshot.is_some() {
-        storage
-            .chain()
-            .get_ibd_utxo_muhash_running()
-            .ok()
-            .flatten()
+        running_hash_from_read(storage.chain().get_ibd_utxo_muhash_running())?
             .map(|bytes| blvm_muhash::MuHash3072::deserialize_running_state(&bytes))
     } else {
         None
@@ -1517,6 +1520,14 @@ mod snapshot_delta_tests {
         assert_eq!(height, 0);
         assert!(tree.get(SNAPSHOT_REORG_JOURNAL_KEY).unwrap().is_none());
         assert_eq!(storage.chain().get_engine_export_height().unwrap(), Some(0));
+    }
+
+    #[test]
+    fn a_muhash_read_error_is_not_a_missing_hash() {
+        let missing: Result<Option<[u8; blvm_muhash::MUHASH_RUNNING_STATE_BYTES]>> = Ok(None);
+        assert!(running_hash_from_read(missing).unwrap().is_none());
+        let err = running_hash_from_read(Err(anyhow::anyhow!("chain info"))).unwrap_err();
+        assert!(err.to_string().contains("chain info"));
     }
 
     #[test]

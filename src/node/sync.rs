@@ -17,7 +17,8 @@ use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTi
 #[cfg(feature = "production")]
 use crate::node::reorg_executor::{
     commit_utxo_snapshot_delta, note_snapshot_height, read_snapshot_inputs,
-    record_snapshot_coin_delta, snapshot_connect_coin_delta, try_activate_heavier_fork,
+    record_snapshot_coin_delta, running_hash_from_read, snapshot_connect_coin_delta,
+    try_activate_heavier_fork,
 };
 use crate::storage::Storage;
 use crate::storage::blockstore::BlockStore;
@@ -766,12 +767,10 @@ impl SyncCoordinator {
                     // Coins first, then the tip. The journal is in the coin
                     // batch, so a crash here is finished on the next start
                     // instead of validating against coins that are already spent.
-                    let mut muhash = storage
-                        .chain()
-                        .get_ibd_utxo_muhash_running()
-                        .ok()
-                        .flatten()
-                        .map(|bytes| blvm_muhash::MuHash3072::deserialize_running_state(&bytes));
+                    let mut muhash = running_hash_from_read(
+                        storage.chain().get_ibd_utxo_muhash_running(),
+                    )?
+                    .map(|bytes| blvm_muhash::MuHash3072::deserialize_running_state(&bytes));
                     let written = commit_utxo_snapshot_delta(
                         tree.as_ref(),
                         storage.utxo_value_codec(),
