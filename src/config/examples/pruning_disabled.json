@@ -7,11 +7,8 @@
     "database_backend": "auto",
     "data_dir": "data",
     "pruning": {
-      "mode": {
-        "type": "disabled"
-      },
-      "auto_prune": false,
-      "min_blocks_to_keep": 144
+      "mode": "disabled",
+      "auto_prune": false
     }
   }
 }

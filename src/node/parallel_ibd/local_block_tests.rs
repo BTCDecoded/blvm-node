@@ -65,14 +65,10 @@ fn local_gap_fill_allowed_without_contiguous_body_probe() {
 
 #[test]
 fn incremental_ibd_prune_window_is_zero_unless_enabled() {
-    assert_eq!(incremental_ibd_prune_window(false, true, 144, 144), 0);
-    assert_eq!(incremental_ibd_prune_window(true, false, 144, 144), 0);
-    assert_eq!(incremental_ibd_prune_window(true, true, 0, 0), 0);
-    assert_eq!(
-        incremental_ibd_prune_window(true, true, 144, 50_000),
-        50_000
-    );
-    assert_eq!(incremental_ibd_prune_window(true, true, 144, 144), 144);
+    assert_eq!(incremental_ibd_prune_window(false, true, 144), 0);
+    assert_eq!(incremental_ibd_prune_window(true, false, 144), 0);
+    assert_eq!(incremental_ibd_prune_window(true, true, 0), 0);
+    assert_eq!(incremental_ibd_prune_window(true, true, 144), 144);
 }
 
 #[test]
@@ -80,10 +76,10 @@ fn ibd_prune_horizon_and_gc_follow_the_keep_window() {
     assert_eq!(ibd_prune_horizon(961_637, 250_000, 144), 961_493);
     assert_eq!(ibd_prune_horizon(100, 250_000, 144), 249_856);
     assert_eq!(ibd_prune_horizon(961_637, 250_000, 0), 0);
-    assert_eq!(ibd_prune_gc_height(287, 144, 288), 0);
-    assert_eq!(ibd_prune_gc_height(288, 144, 288), 144);
-    assert_eq!(ibd_prune_gc_height(50_000, 50_000, 288), 0);
-    assert_eq!(ibd_prune_gc_height(50_144, 144, 288), 50_000);
+    assert_eq!(ibd_prune_gc_height(287, 288), 0);
+    assert_eq!(ibd_prune_gc_height(288, 288), 0);
+    assert_eq!(ibd_prune_gc_height(289, 288), 1);
+    assert_eq!(ibd_prune_gc_height(50_144, 144), 50_000);
 }
 
 #[test]

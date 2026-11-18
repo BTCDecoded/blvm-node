@@ -310,45 +310,10 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                             info!("Automatic pruning triggered at height {}", current_height);
 
                             // Calculate prune height based on configuration
-                            let prune_height = match &pruning_manager.config.mode {
-                                crate::config::PruningMode::Disabled => None,
-                                crate::config::PruningMode::Normal {
-                                    keep_from_height, ..
-                                } => {
-                                    // Prune to keep_from_height, but ensure we keep min_blocks
-                                    let min_keep = pruning_manager.config.min_blocks_to_keep;
-                                    let effective_keep = (*keep_from_height)
-                                        .max(current_height.saturating_sub(min_keep));
-                                    Some(effective_keep)
-                                }
-                                #[cfg(feature = "utxo-commitments")]
-                                crate::config::PruningMode::Aggressive {
-                                    keep_from_height,
-                                    min_blocks,
-                                    ..
-                                } => {
-                                    // Prune to keep_from_height, respecting min_blocks
-                                    let sub = current_height.saturating_sub(*min_blocks);
-                                    let effective_keep = (*keep_from_height).max(sub);
-                                    Some(effective_keep)
-                                }
-                                #[cfg(not(feature = "utxo-commitments"))]
-                                crate::config::PruningMode::Aggressive { .. } => {
-                                    // Aggressive pruning requires utxo-commitments feature
-                                    // Fall back to no pruning if feature is disabled
-                                    None
-                                }
-                                crate::config::PruningMode::Custom {
-                                    keep_bodies_from_height,
-                                    ..
-                                } => {
-                                    // Prune to keep_bodies_from_height, respecting min_blocks
-                                    let min_keep = pruning_manager.config.min_blocks_to_keep;
-                                    let effective_keep = (*keep_bodies_from_height)
-                                        .max(current_height.saturating_sub(min_keep));
-                                    Some(effective_keep)
-                                }
-                            };
+                            let prune_height = pruning_manager
+                                .config
+                                .keep_window()
+                                .map(|keep| current_height.saturating_sub(keep));
 
                             if let Some(prune_to_height) = prune_height
                                 && prune_to_height < current_height

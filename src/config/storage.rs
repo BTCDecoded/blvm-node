@@ -4,186 +4,104 @@ use serde::{Deserialize, Serialize};
 
 use super::{default_false, default_true};
 
-/// Pruning mode configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+/// How many recent blocks a prune keeps. Blocks between automatic passes.
+pub const PRUNE_KEEP_BLOCKS: u64 = 288;
+pub const AUTO_PRUNE_INTERVAL: u64 = 144;
+
+/// Which bodies a prune keeps. The window is [`PruningConfig::keep_blocks`],
+/// a sibling key in `[storage.pruning]`.
+///
+/// `aggressive` also writes UTXO commitments for the bodies it drops and
+/// drops their witnesses. Headers stay in every mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PruningMode {
-    /// No pruning (keep all blocks)
+    /// Keep every body. `keep_blocks` is ignored.
     Disabled,
-
-    /// Normal pruning (keep recent blocks for verification)
-    Normal {
-        #[serde(default = "default_zero")]
-        keep_from_height: u64,
-        #[serde(default = "default_min_recent_blocks")]
-        min_recent_blocks: u64,
-    },
-
-    /// Aggressive pruning with UTXO commitments
-    Aggressive {
-        #[serde(default = "default_zero")]
-        keep_from_height: u64,
-        #[serde(default = "default_true")]
-        keep_commitments: bool,
-        #[serde(default = "default_false")]
-        keep_filtered_blocks: bool,
-        #[serde(default = "default_min_blocks")]
-        min_blocks: u64,
-    },
-
-    /// Custom pruning configuration
-    Custom {
-        #[serde(default = "default_true")]
-        keep_headers: bool,
-        #[serde(default = "default_zero")]
-        keep_bodies_from_height: u64,
-        #[serde(default = "default_false")]
-        keep_commitments: bool,
-        #[serde(default = "default_false")]
-        keep_filters: bool,
-        #[serde(default = "default_false")]
-        keep_filtered_blocks: bool,
-        #[serde(default = "default_false")]
-        keep_witnesses: bool,
-        #[serde(default = "default_false")]
-        keep_tx_index: bool,
-    },
+    /// Keep the last `keep_blocks` bodies.
+    Normal,
+    /// Keep the last `keep_blocks` bodies, with UTXO commitments.
+    Aggressive,
 }
 
-fn default_zero() -> u64 {
-    0
+fn default_keep_blocks() -> u64 {
+    PRUNE_KEEP_BLOCKS
 }
 
-fn default_min_recent_blocks() -> u64 {
-    288
-}
-
-fn default_min_blocks() -> u64 {
-    288
-}
-
-/// Pruning configuration
+/// Pruning configuration.
+///
+/// `Default` is the file policy: each field uses the same value as a key
+/// omitted from TOML.
+///
+/// One window, `keep_blocks`, beside `mode` in `[storage.pruning]`. Automatic
+/// passes run every [`AUTO_PRUNE_INTERVAL`] blocks when `auto_prune` is set.
+/// Prune deletes a block body this store copied, and only when an undo exists.
+/// With `reuse_core_block_files`, bodies stay in Core `blocks/` and the reader
+/// keeps serving them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PruningConfig {
+    /// `disabled` keeps every body. `normal` keeps `keep_blocks` bodies.
+    /// `aggressive` does that and writes UTXO commitments before the delete.
+    /// It requires the `utxo-commitments` feature. Omitted in a file: `aggressive`.
     #[serde(default = "default_pruning_mode")]
     pub mode: PruningMode,
 
+    /// Trailing bodies `normal` and `aggressive` keep. `disabled` ignores this.
+    /// Omitted in a file: [`PRUNE_KEEP_BLOCKS`].
+    #[serde(default = "default_keep_blocks")]
+    pub keep_blocks: u64,
+
+    /// When true, prune again every [`AUTO_PRUNE_INTERVAL`] blocks.
+    /// Omitted in a file: false.
     #[serde(default = "default_false")]
     pub auto_prune: bool,
 
-    #[serde(default = "default_auto_prune_interval")]
-    pub auto_prune_interval: u64,
-
-    #[serde(default = "default_min_blocks_to_keep")]
-    pub min_blocks_to_keep: u64,
-
-    #[serde(default = "default_false")]
-    pub prune_on_startup: bool,
-
+    /// Parallel IBD skips writing a body that is already outside `keep_blocks`
+    /// when this flag is on and the mode is not `disabled`. Deleting those
+    /// bodies during IBD still requires `aggressive` and UTXO commitments.
+    /// The block-accepted prune does not read this flag. Omitted in a file: false.
     #[serde(default = "default_false")]
     pub incremental_prune_during_ibd: bool,
-
-    #[serde(default = "default_prune_window_size")]
-    pub prune_window_size: u64,
-
-    #[serde(default = "default_min_blocks_for_incremental_prune")]
-    pub min_blocks_for_incremental_prune: u64,
 }
 
 fn default_pruning_mode() -> PruningMode {
-    PruningMode::Aggressive {
-        keep_from_height: 0,
-        keep_commitments: true,
-        keep_filtered_blocks: false,
-        min_blocks: default_min_blocks(),
-    }
-}
-
-fn default_auto_prune_interval() -> u64 {
-    144
-}
-
-fn default_min_blocks_to_keep() -> u64 {
-    288
-}
-
-fn default_prune_window_size() -> u64 {
-    144
-}
-
-fn default_min_blocks_for_incremental_prune() -> u64 {
-    288
+    PruningMode::Aggressive
 }
 
 impl Default for PruningConfig {
     fn default() -> Self {
         Self {
-            mode: PruningMode::Aggressive {
-                keep_from_height: 0,
-                keep_commitments: true,
-                keep_filtered_blocks: false,
-                min_blocks: default_min_blocks(),
-            },
-            auto_prune: true,
-            auto_prune_interval: default_auto_prune_interval(),
-            min_blocks_to_keep: default_min_blocks_to_keep(),
-            prune_on_startup: false,
-            incremental_prune_during_ibd: true,
-            prune_window_size: 144,
-            min_blocks_for_incremental_prune: 288,
+            mode: default_pruning_mode(),
+            keep_blocks: default_keep_blocks(),
+            auto_prune: default_false(),
+            incremental_prune_during_ibd: default_false(),
         }
     }
 }
 
 impl PruningConfig {
+    /// Recent bodies this mode keeps. `None` when pruning is off.
+    pub fn keep_window(&self) -> Option<u64> {
+        match self.mode {
+            PruningMode::Disabled => None,
+            PruningMode::Normal | PruningMode::Aggressive => Some(self.keep_blocks),
+        }
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
-        if let PruningMode::Aggressive { .. } = self.mode {
-            #[cfg(not(feature = "utxo-commitments"))]
-            {
-                return Err(anyhow::anyhow!(
-                    "Aggressive pruning mode requires the 'utxo-commitments' feature to be enabled. \
-                    Please enable it in Cargo.toml or use Normal pruning mode instead."
-                ));
-            }
-        }
-
-        if self.min_blocks_to_keep == 0 {
+        #[cfg(not(feature = "utxo-commitments"))]
+        if self.mode == PruningMode::Aggressive {
             return Err(anyhow::anyhow!(
-                "min_blocks_to_keep must be greater than 0 for safety"
+                "Aggressive pruning mode requires the 'utxo-commitments' feature to be enabled. \
+                Please enable it in Cargo.toml or use Normal pruning mode instead."
             ));
         }
 
-        if self.auto_prune && self.auto_prune_interval == 0 {
+        if self.mode != PruningMode::Disabled && self.keep_blocks == 0 {
             return Err(anyhow::anyhow!(
-                "auto_prune_interval must be greater than 0 when auto_prune is enabled"
+                "keep_blocks must be greater than 0 when pruning is enabled"
             ));
-        }
-
-        match &self.mode {
-            PruningMode::Normal {
-                min_recent_blocks, ..
-            } => {
-                if *min_recent_blocks == 0 {
-                    return Err(anyhow::anyhow!(
-                        "min_recent_blocks must be greater than 0 in Normal pruning mode"
-                    ));
-                }
-            }
-            PruningMode::Aggressive { min_blocks, .. } => {
-                if *min_blocks == 0 {
-                    return Err(anyhow::anyhow!(
-                        "min_blocks must be greater than 0 in Aggressive pruning mode"
-                    ));
-                }
-            }
-            PruningMode::Custom { keep_headers, .. } => {
-                if !keep_headers {
-                    return Err(anyhow::anyhow!(
-                        "keep_headers must be true in Custom pruning mode (required for PoW verification)"
-                    ));
-                }
-            }
-            PruningMode::Disabled => {}
         }
 
         Ok(())
@@ -515,40 +433,38 @@ impl Default for IndexingConfig {
 
 #[cfg(test)]
 mod prune_keep_floor {
-    use super::{PruningConfig, PruningMode};
+    use super::{PRUNE_KEEP_BLOCKS, PruningConfig, PruningMode};
 
     #[test]
-    fn keep_floors_are_288_and_prune_windows_stay_144() {
+    fn omitted_pruning_matches_default_and_keeps_288() {
         let config = PruningConfig::default();
-        let PruningMode::Aggressive { min_blocks, .. } = config.mode else {
-            panic!("default pruning mode is aggressive");
-        };
-        assert_eq!(min_blocks, 288);
-        assert_eq!(config.min_blocks_to_keep, 288);
-        assert_eq!(config.auto_prune_interval, 144);
-        assert_eq!(config.prune_window_size, 144);
-        assert_eq!(config.min_blocks_for_incremental_prune, 288);
+        assert_eq!(config.mode, PruningMode::Aggressive);
+        assert_eq!(config.keep_window(), Some(PRUNE_KEEP_BLOCKS));
+        assert!(!config.auto_prune);
+        assert!(!config.incremental_prune_during_ibd);
 
-        let omitted: PruningConfig = toml::from_str("auto_prune = false").unwrap();
-        let PruningMode::Aggressive {
-            min_blocks: omitted_blocks,
-            ..
-        } = omitted.mode
-        else {
-            panic!("omitted pruning mode is aggressive");
-        };
-        assert_eq!(omitted_blocks, 288);
-        assert_eq!(omitted.min_blocks_to_keep, 288);
-        assert_eq!(omitted.auto_prune_interval, 144);
-        assert_eq!(omitted.prune_window_size, 144);
+        let omitted: PruningConfig = toml::from_str("").unwrap();
+        assert_eq!(omitted.mode, config.mode);
+        assert_eq!(omitted.keep_blocks, config.keep_blocks);
+        assert_eq!(omitted.auto_prune, config.auto_prune);
+        assert_eq!(
+            omitted.incremental_prune_during_ibd,
+            config.incremental_prune_during_ibd
+        );
 
-        let normal: PruningMode = toml::from_str("type = \"normal\"").unwrap();
-        let PruningMode::Normal {
-            min_recent_blocks, ..
-        } = normal
-        else {
-            panic!("normal mode");
-        };
-        assert_eq!(min_recent_blocks, 288);
+        let normal: PruningConfig = toml::from_str("mode = \"normal\"\nkeep_blocks = 144").unwrap();
+        assert_eq!(normal.mode, PruningMode::Normal);
+        assert_eq!(normal.keep_blocks, 144);
+        assert!(toml::from_str::<PruningConfig>("min_blocks_to_keep = 144").is_err());
+        assert!(toml::from_str::<PruningConfig>("[mode]\ntype = \"normal\"\n").is_err());
+        assert!(
+            PruningConfig {
+                mode: PruningMode::Normal,
+                keep_blocks: 0,
+                ..PruningConfig::default()
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

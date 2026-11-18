@@ -1839,20 +1839,16 @@ impl BlockchainRpc {
                 // Determine pruning mode
                 let mode_str = match &config.mode {
                     crate::config::PruningMode::Disabled => "disabled",
-                    crate::config::PruningMode::Normal { .. } => "normal",
-                    #[cfg(feature = "utxo-commitments")]
-                    crate::config::PruningMode::Aggressive { .. } => "aggressive",
-                    crate::config::PruningMode::Custom { .. } => "custom",
-                    #[cfg(not(feature = "utxo-commitments"))]
-                    _ => "unknown", // Fallback for Aggressive if feature not enabled
+                    crate::config::PruningMode::Normal => "normal",
+                    crate::config::PruningMode::Aggressive => "aggressive",
                 };
 
                 Ok(json!({
                     "pruning_enabled": is_pruning_enabled,
                     "mode": mode_str,
                     "auto_prune": config.auto_prune,
-                    "auto_prune_interval": config.auto_prune_interval,
-                    "min_blocks_to_keep": config.min_blocks_to_keep,
+                    "auto_prune_interval": crate::config::AUTO_PRUNE_INTERVAL,
+                    "keep_blocks": config.keep_window(),
                     "current_height": tip_height,
                     "last_prune_height": stats.last_prune_height,
                     "total_blocks_pruned": stats.blocks_pruned,

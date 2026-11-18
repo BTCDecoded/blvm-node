@@ -360,19 +360,16 @@ pub fn pruned_midchain_skip_horizon(header_tip: u64, prune_window: u64) -> u64 {
 /// Sliding keep window for incremental prune on the parallel IBD path.
 ///
 /// `0` leaves archive persist unchanged: pruning disabled, or
-/// `incremental_prune_during_ibd` off. Otherwise the window is
-/// `max(prune_window_size, min_blocks_to_keep)`.
+/// `incremental_prune_during_ibd` off. Otherwise the window is `keep_blocks`.
 pub fn incremental_ibd_prune_window(
     incremental_during_ibd: bool,
     pruning_enabled: bool,
-    prune_window_size: u64,
-    min_blocks_to_keep: u64,
+    keep_blocks: u64,
 ) -> u64 {
-    if !incremental_during_ibd || !pruning_enabled {
+    if !incremental_during_ibd || !pruning_enabled || keep_blocks == 0 {
         return 0;
     }
-    let window = prune_window_size.max(min_blocks_to_keep);
-    if window == 0 { 0 } else { window }
+    keep_blocks
 }
 
 /// Header-tip horizon for the validation flush. `0` means do not skip for prune.
@@ -384,8 +381,8 @@ pub fn ibd_prune_horizon(header_tip: u64, end_height: u64, window: u64) -> u64 {
 }
 
 /// Height whose GAP_PERSIST body just left the keep window. `0` means do not delete.
-pub fn ibd_prune_gc_height(validated: u64, window: u64, min_height: u64) -> u64 {
-    if window == 0 || validated < min_height {
+pub fn ibd_prune_gc_height(validated: u64, window: u64) -> u64 {
+    if window == 0 || validated <= window {
         return 0;
     }
     validated.saturating_sub(window)

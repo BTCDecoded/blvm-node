@@ -138,12 +138,12 @@ data_dir = "/var/lib/blvm"
 database_backend = "auto"
 
 [storage.pruning]
-mode = { type = "normal", keep_from_height = 0, min_recent_blocks = 288 }
+mode = "normal"
+keep_blocks = 288
 auto_prune = true
-min_blocks_to_keep = 144
 ```
 
-**Behavior**: Depends on pruning mode (Normal / Aggressive / Disabled / Custom); see blvm-docs pruning section and feature gates such as **`utxo-commitments`** for aggressive paths.
+**Behavior**: `disabled`, `normal`, or `aggressive`. Aggressive writes UTXO commitments and needs the `utxo-commitments` feature. Automatic passes run every 144 blocks. `keep_blocks` is the trailing window (default 288).
 
 ---
 
@@ -226,7 +226,8 @@ data_dir = "/var/lib/blvm"
 database_backend = "auto"
 
 [storage.pruning]
-mode = { type = "normal", keep_from_height = 0, min_recent_blocks = 288 }
+mode = "normal"
+keep_blocks = 288
  
 [rpc]
 ip_rate_limit_burst = 50

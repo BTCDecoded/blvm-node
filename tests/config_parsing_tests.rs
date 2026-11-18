@@ -559,126 +559,25 @@ fn test_mempool_expiry_hours_that_overflow_seconds_are_rejected() {
 #[test]
 fn test_pruning_config_validate_normal_mode() {
     let config = PruningConfig {
-        mode: PruningMode::Normal {
-            keep_from_height: 0,
-            min_recent_blocks: 10,
-        },
-        min_blocks_to_keep: 100,
-        auto_prune: false,
-        auto_prune_interval: 0,
+        mode: PruningMode::Normal,
+        keep_blocks: 10,
         ..Default::default()
     };
 
-    let result = config.validate();
-    assert!(result.is_ok());
+    assert!(config.validate().is_ok());
 }
 
 #[test]
-fn test_pruning_config_validate_normal_mode_invalid() {
+fn test_pruning_config_validate_keep_blocks_zero() {
     let config = PruningConfig {
-        mode: PruningMode::Normal {
-            keep_from_height: 0,
-            min_recent_blocks: 0, // Invalid: must be > 0
-        },
-        min_blocks_to_keep: 100,
-        auto_prune: false,
-        auto_prune_interval: 0,
+        mode: PruningMode::Normal,
+        keep_blocks: 0,
         ..Default::default()
     };
 
     let result = config.validate();
     assert!(result.is_err());
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("min_recent_blocks")
-    );
-}
-
-#[test]
-fn test_pruning_config_validate_min_blocks_to_keep_zero() {
-    let config = PruningConfig {
-        mode: PruningMode::Disabled,
-        min_blocks_to_keep: 0, // Invalid: must be > 0
-        auto_prune: false,
-        auto_prune_interval: 0,
-        ..Default::default()
-    };
-
-    let result = config.validate();
-    assert!(result.is_err());
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("min_blocks_to_keep")
-    );
-}
-
-#[test]
-fn test_pruning_config_validate_auto_prune_interval_zero() {
-    let config = PruningConfig {
-        mode: PruningMode::Disabled,
-        min_blocks_to_keep: 100,
-        auto_prune: true,
-        auto_prune_interval: 0, // Invalid: must be > 0 when auto_prune is true
-        ..Default::default()
-    };
-
-    let result = config.validate();
-    assert!(result.is_err());
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("auto_prune_interval")
-    );
-}
-
-#[test]
-fn test_pruning_config_validate_custom_mode_keep_headers_false() {
-    let config = PruningConfig {
-        mode: PruningMode::Custom {
-            keep_headers: false, // Invalid: must be true
-            keep_bodies_from_height: 0,
-            keep_commitments: false,
-            keep_filters: false,
-            keep_filtered_blocks: false,
-            keep_witnesses: false,
-            keep_tx_index: false,
-        },
-        min_blocks_to_keep: 100,
-        auto_prune: false,
-        auto_prune_interval: 0,
-        ..Default::default()
-    };
-
-    let result = config.validate();
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("keep_headers"));
-}
-
-#[test]
-fn test_pruning_config_validate_custom_mode_keep_headers_true() {
-    let config = PruningConfig {
-        mode: PruningMode::Custom {
-            keep_headers: true,
-            keep_bodies_from_height: 0,
-            keep_commitments: false,
-            keep_filters: false,
-            keep_filtered_blocks: false,
-            keep_witnesses: false,
-            keep_tx_index: false,
-        },
-        min_blocks_to_keep: 100,
-        auto_prune: false,
-        auto_prune_interval: 0,
-        ..Default::default()
-    };
-
-    let result = config.validate();
-    assert!(result.is_ok());
+    assert!(result.unwrap_err().to_string().contains("keep_blocks"));
 }
 
 #[test]

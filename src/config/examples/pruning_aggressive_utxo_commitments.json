@@ -7,17 +7,9 @@
     "database_backend": "auto",
     "data_dir": "data",
     "pruning": {
-      "mode": {
-        "type": "aggressive",
-        "keep_from_height": 0,
-        "keep_commitments": true,
-        "keep_filtered_blocks": false,
-        "min_blocks": 144
-      },
-      "auto_prune": true,
-      "auto_prune_interval": 144,
-      "min_blocks_to_keep": 144,
-      "prune_on_startup": false
+      "mode": "aggressive",
+      "keep_blocks": 144,
+      "auto_prune": true
     },
     "cache": {
       "block_cache_mb": 50,

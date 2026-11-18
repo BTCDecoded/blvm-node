@@ -3993,10 +3993,8 @@ mod pruning_version_services {
 
         let empty = tempfile::TempDir::new().unwrap();
         let mut config = PruningConfig::default();
-        config.mode = PruningMode::Normal {
-            keep_from_height: 0,
-            min_recent_blocks: 288,
-        };
+        config.mode = PruningMode::Normal;
+        config.keep_blocks = 288;
         let empty_storage = Arc::new(
             Storage::with_backend_and_pruning(empty.path(), default_backend(), Some(config))
                 .unwrap(),

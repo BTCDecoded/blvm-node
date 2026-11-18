@@ -314,18 +314,16 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
     // Incremental prune: keep a sliding body window. Archive dests (pruning
     // disabled, or the flag off) stay at window 0 and pass horizon 0 below.
-    let (incremental_prune_window, incremental_prune_min_height) = storage_clone
+    let incremental_prune_window = storage_clone
         .pruning()
         .map(|pm| {
-            let window = super::local_block::incremental_ibd_prune_window(
+            super::local_block::incremental_ibd_prune_window(
                 pm.config.incremental_prune_during_ibd,
                 pm.is_enabled(),
-                pm.config.prune_window_size,
-                pm.config.min_blocks_to_keep,
-            );
-            (window, pm.config.min_blocks_for_incremental_prune)
+                pm.config.keep_window().unwrap_or(0),
+            )
         })
-        .unwrap_or((0, 0));
+        .unwrap_or(0);
     let startup_horizon = super::local_block::ibd_prune_horizon(
         super::live_header_tip(),
         effective_end_height(),
@@ -334,7 +332,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     super::local_block::publish_ibd_prune_horizon(startup_horizon);
     if incremental_prune_window > 0 {
         info!(
-            "[IBD_PRUNE] incremental window={incremental_prune_window} min_height={incremental_prune_min_height} horizon={startup_horizon} — skip body flush and GAP_PERSIST below horizon"
+            "[IBD_PRUNE] incremental window={incremental_prune_window} horizon={startup_horizon} — skip body flush and GAP_PERSIST below horizon"
         );
     }
 
@@ -3495,11 +3493,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
                 // Update shared validation height (allows download workers to track progress)
                 validation_height.store(next_height, Ordering::Relaxed);
-                let gc_height = super::local_block::ibd_prune_gc_height(
-                    next_height,
-                    incremental_prune_window,
-                    incremental_prune_min_height,
-                );
+                let gc_height =
+                    super::local_block::ibd_prune_gc_height(next_height, incremental_prune_window);
                 // Far below the keep window there is no body to retain. The lookup
                 // and delete take the LMDB writer on this thread; resume12 spent
                 // the validation clock there while GAP_PERSIST held that writer.

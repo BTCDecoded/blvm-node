@@ -63,10 +63,8 @@ fn test_pruning_manager_disabled_mode() {
 fn test_pruning_manager_normal_mode() {
     let (_temp_dir, blockstore) = create_test_blockstore();
     let config = PruningConfig {
-        mode: PruningMode::Normal {
-            keep_from_height: 0,
-            min_recent_blocks: 288, // ~2 days
-        },
+        mode: PruningMode::Normal,
+        keep_blocks: 288,
         ..Default::default()
     };
 
@@ -78,12 +76,8 @@ fn test_pruning_manager_normal_mode() {
 fn test_pruning_manager_aggressive_mode() {
     let (_temp_dir, blockstore) = create_test_blockstore();
     let config = PruningConfig {
-        mode: PruningMode::Aggressive {
-            keep_from_height: 0,
-            keep_commitments: false,
-            keep_filtered_blocks: false,
-            min_blocks: 144, // ~1 day
-        },
+        mode: PruningMode::Aggressive,
+        keep_blocks: 144,
         ..Default::default()
     };
 
@@ -112,44 +106,29 @@ fn test_pruning_stats_default() {
 #[test]
 fn test_pruning_config_clone() {
     let config = PruningConfig {
-        mode: PruningMode::Normal {
-            keep_from_height: 0,
-            min_recent_blocks: 288,
-        },
+        mode: PruningMode::Normal,
+        keep_blocks: 288,
         ..Default::default()
     };
 
-    // Should be able to clone
     let config2 = config.clone();
-    match config2.mode {
-        PruningMode::Normal {
-            min_recent_blocks, ..
-        } => assert_eq!(min_recent_blocks, 288),
-        _ => panic!("Expected Normal mode"),
-    }
+    assert_eq!(config2.mode, PruningMode::Normal);
+    assert_eq!(config2.keep_blocks, 288);
 }
 
 #[test]
 fn test_pruning_mode_variants() {
     // Test all pruning mode variants
-    let modes = vec![
+    let modes = [
         PruningMode::Disabled,
-        PruningMode::Normal {
-            keep_from_height: 0,
-            min_recent_blocks: 288,
-        },
-        PruningMode::Aggressive {
-            keep_from_height: 0,
-            keep_commitments: false,
-            keep_filtered_blocks: false,
-            min_blocks: 144,
-        },
+        PruningMode::Normal,
+        PruningMode::Aggressive,
     ];
 
     for mode in modes {
         let (_temp_dir, blockstore) = create_test_blockstore();
         let config = PruningConfig {
-            mode: mode.clone(),
+            mode,
             ..Default::default()
         };
         let manager = PruningManager::new(config, blockstore);

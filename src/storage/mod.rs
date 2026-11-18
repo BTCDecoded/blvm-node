@@ -658,7 +658,6 @@ impl Storage {
                 Arc::clone(&db),
                 Arc::clone(&blockstore),
                 Arc::clone(&utxostore),
-                Arc::clone(&txindex),
                 network,
             );
 
@@ -678,7 +677,6 @@ impl Storage {
         db: Arc<dyn database::Database>,
         blockstore: Arc<blockstore::BlockStore>,
         utxostore: Arc<utxostore::UtxoStore>,
-        txindex: Arc<txindex::TxIndex>,
         network: blvm_protocol::types::Network,
     ) -> Option<Arc<pruning::PruningManager>> {
         pruning_config.map(|config| {
@@ -686,16 +684,7 @@ impl Storage {
             {
                 let needs_commitments = matches!(
                     config.mode,
-                    crate::config::PruningMode::Aggressive {
-                        keep_commitments: true,
-                        ..
-                    }
-                ) || matches!(
-                    config.mode,
-                    crate::config::PruningMode::Custom {
-                        keep_commitments: true,
-                        ..
-                    }
+                    crate::config::PruningMode::Aggressive
                 );
                 if needs_commitments {
                     let commitment_store = match commitment_store::CommitmentStore::new(Arc::clone(&db))
@@ -708,8 +697,7 @@ impl Storage {
                             );
                             return Arc::new(
                                 pruning::PruningManager::new(config, Arc::clone(&blockstore))
-                                    .with_network(network)
-                                    .with_tx_index(Arc::clone(&txindex)),
+                                    .with_network(network),
                             );
                         }
                     };
@@ -720,14 +708,12 @@ impl Storage {
                             commitment_store,
                             Arc::clone(&utxostore),
                         )
-                        .with_network(network)
-                        .with_tx_index(Arc::clone(&txindex)),
+                        .with_network(network),
                     )
                 } else {
                     Arc::new(
                         pruning::PruningManager::new(config, Arc::clone(&blockstore))
-                            .with_network(network)
-                            .with_tx_index(Arc::clone(&txindex)),
+                            .with_network(network),
                     )
                 }
             }
@@ -735,8 +721,7 @@ impl Storage {
             {
                 Arc::new(
                     pruning::PruningManager::new(config, Arc::clone(&blockstore))
-                        .with_network(network)
-                        .with_tx_index(Arc::clone(&txindex)),
+                        .with_network(network),
                 )
             }
         })
@@ -838,7 +823,6 @@ impl Storage {
             Arc::clone(&db),
             Arc::clone(&blockstore),
             Arc::clone(&utxostore),
-            Arc::clone(&txindex),
             network,
         );
 
