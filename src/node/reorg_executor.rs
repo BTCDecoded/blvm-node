@@ -1603,6 +1603,38 @@ mod snapshot_delta_tests {
     }
 
     #[test]
+    fn a_journal_without_a_header_fails_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        storage
+            .chain()
+            .set_ibd_utxo_canonical_tree("ibd_utxos")
+            .unwrap();
+        let tree = storage.open_tree("ibd_utxos").unwrap();
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [6u8; 32],
+            timestamp: 1_700_000_001,
+            bits: 0x1d00ffff,
+            nonce: 8,
+        };
+        let hash = blvm_consensus::block::block_header_hash(&header);
+        commit_utxo_snapshot_delta(
+            tree.as_ref(),
+            storage.utxo_value_codec(),
+            &[],
+            &[],
+            Some((4, hash)),
+            None,
+        )
+        .unwrap();
+        let err = recover_snapshot_commit(&storage, storage.blocks().as_ref()).unwrap_err();
+        assert!(err.to_string().contains("no header"));
+        assert!(tree.get(SNAPSHOT_REORG_JOURNAL_KEY).unwrap().is_some());
+    }
+
+    #[test]
     fn a_disconnect_without_a_connect_is_restored_on_startup() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::new(dir.path()).unwrap();

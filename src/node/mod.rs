@@ -717,12 +717,10 @@ impl Node {
                 e
             );
         }
-        if let Err(e) = crate::node::reorg_executor::recover_snapshot_commit(
+        crate::node::reorg_executor::recover_snapshot_commit(
             self.storage.as_ref(),
             self.storage.blocks().as_ref(),
-        ) {
-            warn!("[START_COMPONENTS] recover_snapshot_commit failed: {e}");
-        }
+        )?;
 
         // Fresh datadir: no `chain_info` yet — anchor with this network's genesis so RPC mining
         // (`generatetoaddress`, templates) and tip queries work without a prior sync.
