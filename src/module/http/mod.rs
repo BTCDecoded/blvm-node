@@ -418,11 +418,26 @@ pub fn ip_is_loopback_link_local_or_private(ip: IpAddr) -> bool {
             if let Some(v4) = ip.to_ipv4_mapped() {
                 return ipv4_is_loopback_link_local_or_private(v4);
             }
+            if let Some(v4) = nat64_embedded_ipv4(ip) {
+                return ipv4_is_loopback_link_local_or_private(v4);
+            }
             ip.is_loopback()
                 || ip.is_unicast_link_local()
                 || ip.is_unique_local()
                 || ip.is_unspecified()
         }
+    }
+}
+
+/// IPv4 address embedded in the NAT64 well-known prefix `64:ff9b::/96` (RFC 6052).
+fn nat64_embedded_ipv4(ip: std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    let octets = ip.octets();
+    if octets[..12] == [0, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0] {
+        Some(std::net::Ipv4Addr::new(
+            octets[12], octets[13], octets[14], octets[15],
+        ))
+    } else {
+        None
     }
 }
 
@@ -622,18 +637,37 @@ async fn send_post(
     })
 }
 
+#[cfg(feature = "module-http")]
+fn proxy_scheme(policy: &HttpPolicy) -> Option<&str> {
+    policy
+        .proxy
+        .as_deref()
+        .map(|proxy| proxy.split_once("://").map_or("", |(scheme, _)| scheme))
+}
+
 /// True when the proxy resolves hostnames itself (`socks5h`, `socks4a`).
 #[cfg(feature = "module-http")]
 fn proxy_resolves_hostnames(policy: &HttpPolicy) -> bool {
-    policy.proxy.as_deref().is_some_and(|proxy| {
-        let scheme = proxy.split_once("://").map_or("", |(scheme, _)| scheme);
+    proxy_scheme(policy).is_some_and(|scheme| {
         scheme.eq_ignore_ascii_case("socks5h") || scheme.eq_ignore_ascii_case("socks4a")
+    })
+}
+
+/// True for a proxy that is handed the hostname and ignores the pinned address:
+/// `http`, `https`, or no scheme (reqwest treats that as `http`). Only `socks4`
+/// and `socks5` resolve locally through the pinned address.
+#[cfg(feature = "module-http")]
+fn proxy_bypasses_pinned_address(policy: &HttpPolicy) -> bool {
+    proxy_scheme(policy).is_some_and(|scheme| {
+        !scheme.eq_ignore_ascii_case("socks4") && !scheme.eq_ignore_ascii_case("socks5")
     })
 }
 
 /// Address to pin for the connection. `None` leaves the hostname to the proxy.
 /// A looked-up address must pass the same loopback/link-local/private rule as
 /// the listed host, and the client connects to that exact address.
+/// An `http` or `https` proxy resolves the hostname itself and would not use
+/// the pinned address, so a hostname origin through one is refused.
 #[cfg(feature = "module-http")]
 async fn resolve_connect_address(
     policy: &HttpPolicy,
@@ -644,6 +678,12 @@ async fn resolve_connect_address(
     }
     if proxy_resolves_hostnames(policy) {
         return Ok(None);
+    }
+    if proxy_bypasses_pinned_address(policy) {
+        return Err(HttpBrokerError::new(
+            Some(origin.display()),
+            "hostname through an http(s) proxy refused: the proxy resolves it unchecked",
+        ));
     }
     let ip = lookup_first(origin).await?;
     if ip_is_loopback_link_local_or_private(ip)
@@ -757,6 +797,31 @@ mod tests {
             &["https://mempool.space".to_string()],
         );
         assert!(mapped_url.unwrap_err().message.contains("private address"));
+    }
+
+    #[test]
+    fn nat64_embedded_private_address_is_private() {
+        for ip in [
+            "64:ff9b::127.0.0.1",
+            "64:ff9b::10.1.2.3",
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b::100.64.0.1",
+        ] {
+            let ip: IpAddr = ip.parse().unwrap();
+            assert!(ip_is_loopback_link_local_or_private(ip), "{ip}");
+            assert!(!resolved_address_allowed("mempool.space", ip), "{ip}");
+        }
+        let public: IpAddr = "64:ff9b::1.1.1.1".parse().unwrap();
+        assert!(!ip_is_loopback_link_local_or_private(public));
+        assert!(resolved_address_allowed("mempool.space", public));
+        // Outside the /96 well-known prefix: not treated as NAT64.
+        let other: IpAddr = "64:ff9b:1::a00:1".parse().unwrap();
+        assert!(!ip_is_loopback_link_local_or_private(other));
+        let nat64_url = check_url(
+            "https://[64:ff9b::10.1.2.3]/secret",
+            &["https://mempool.space".to_string()],
+        );
+        assert!(nat64_url.unwrap_err().message.contains("private address"));
     }
 
     #[test]
@@ -947,6 +1012,49 @@ mod tests {
             };
             let err = resolve_connect_address(&policy, &origin).await.unwrap_err();
             assert!(err.message.contains("private address"));
+        }
+
+        #[tokio::test]
+        async fn http_proxy_refuses_hostname_origins() {
+            let origin = HttpOrigin {
+                scheme: "https".to_string(),
+                host: "feeds.example".to_string(),
+                port: 443,
+            };
+            // Even a public answer is refused: the proxy would resolve again.
+            lookup_stub::set("feeds.example", "1.1.1.1".parse().unwrap());
+            for proxy in [
+                "http://127.0.0.1:8080",
+                "HTTPS://127.0.0.1:8443",
+                "127.0.0.1:8080",
+            ] {
+                let policy = HttpPolicy {
+                    allow: HashMap::new(),
+                    proxy: Some(proxy.to_string()),
+                };
+                let before = lookup_stub::calls();
+                let err = resolve_connect_address(&policy, &origin).await.unwrap_err();
+                assert!(err.message.contains("http(s) proxy refused"), "{proxy}");
+                assert_eq!(lookup_stub::calls(), before, "{proxy}");
+            }
+            // An address literal is passed to the proxy as is.
+            let literal = HttpOrigin {
+                host: "1.1.1.1".to_string(),
+                ..origin.clone()
+            };
+            let policy = HttpPolicy {
+                allow: HashMap::new(),
+                proxy: Some("http://127.0.0.1:8080".to_string()),
+            };
+            let ip = resolve_connect_address(&policy, &literal).await.unwrap();
+            assert_eq!(ip, Some("1.1.1.1".parse().unwrap()));
+            // socks5 resolves locally through the pinned address and stays allowed.
+            let policy = HttpPolicy {
+                allow: HashMap::new(),
+                proxy: Some("socks5://127.0.0.1:9050".to_string()),
+            };
+            let ip = resolve_connect_address(&policy, &origin).await.unwrap();
+            assert_eq!(ip, Some("1.1.1.1".parse().unwrap()));
         }
     }
 }

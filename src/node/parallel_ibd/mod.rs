@@ -5475,22 +5475,12 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
         && crate::storage::ibd_engine::memory_run::gc_fence_snapshot() == i32::MAX
     {
         let durability = crate::config::ibd::ibd_engine_durability_config(None);
-        let interval = adaptive_checkpoint_interval(
-            engine_stored_export_utxo_count,
-            0.0,
-            0.0,
-            &durability,
-        );
-        let utxo_iv = utxo_scaled_checkpoint_interval(
-            engine_stored_export_utxo_count,
-            0.0,
-            &durability,
-        );
-        let schedule_iv = checkpoint_schedule_interval(
-            interval,
-            utxo_iv,
-            engine_stored_export_utxo_count,
-        );
+        let interval =
+            adaptive_checkpoint_interval(engine_stored_export_utxo_count, 0.0, 0.0, &durability);
+        let utxo_iv =
+            utxo_scaled_checkpoint_interval(engine_stored_export_utxo_count, 0.0, &durability);
+        let schedule_iv =
+            checkpoint_schedule_interval(interval, utxo_iv, engine_stored_export_utxo_count);
         let fence = gc_fence_before_validation(engine_stored_export_height as i32, schedule_iv);
         if fence > 0 {
             crate::storage::ibd_engine::set_next_checkpoint_target(fence);
