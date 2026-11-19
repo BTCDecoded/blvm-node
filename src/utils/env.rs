@@ -29,6 +29,14 @@ where
     std::env::var(key).unwrap_or_else(|_| f())
 }
 
+/// Home directory from `HOME`, then `USERPROFILE`. Empty values are absent.
+pub fn home_dir() -> Option<std::path::PathBuf> {
+    let raw = std::env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()))?;
+    Some(std::path::PathBuf::from(raw))
+}
+
 /// Get environment variable as Option
 ///
 /// Returns `Some(value)` if set, `None` if not set.

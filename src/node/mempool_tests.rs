@@ -1,8 +1,8 @@
 //! Mempool admission, policy, persistence, and reorg tests.
 
 use super::{
-    MempoolManager, decode_persisted_tx, effective_ranked_fee, encode_persisted_tx,
-    replacement_clears_fee_rate,
+    MAX_STANDARD_TX_WEIGHT, MempoolManager, decode_persisted_tx, effective_ranked_fee,
+    encode_persisted_tx, replacement_clears_fee_rate,
 };
 use crate::config::MempoolPolicyConfig;
 use blvm_protocol::serialization::transaction::serialize_transaction;
@@ -285,8 +285,8 @@ fn child_before_parent_dump_is_admitted() {
 fn p2sh_of_op_1() -> (Vec<u8>, Vec<u8>) {
     let mut prevout = vec![0xa9, 0x14];
     prevout.extend_from_slice(&[
-        0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99, 0x71, 0xc7,
-        0x7e, 0xba, 0x30, 0xcd, 0x5a, 0x4b,
+        0xda, 0x17, 0x45, 0xe9, 0xb5, 0x49, 0xbd, 0x0b, 0xfa, 0x1a, 0x56, 0x99, 0x71, 0xc7, 0x7e,
+        0xba, 0x30, 0xcd, 0x5a, 0x4b,
     ]);
     prevout.push(0x87);
     (prevout, vec![0x01, 0x51])
@@ -542,11 +542,9 @@ fn a_snapshot_miss_does_not_read_the_chainstate_table() {
     let tree_name = crate::storage::ibd_engine::ckpt_tree_for_slot(0);
     let tree = storage.open_tree(tree_name).unwrap();
     let key = crate::storage::disk_utxo::outpoint_to_key(&other);
-    let bytes = crate::storage::utxo_value_codec::encode_utxo_with_codec(
-        storage.utxo_value_codec(),
-        &coin,
-    )
-    .unwrap();
+    let bytes =
+        crate::storage::utxo_value_codec::encode_utxo_with_codec(storage.utxo_value_codec(), &coin)
+            .unwrap();
     tree.insert(&key, &bytes).unwrap();
     assert!(storage.open_engine_resume_snapshot().unwrap().is_some());
 
@@ -1383,6 +1381,58 @@ fn op_return_of_84_bytes_is_standard() {
 }
 
 #[test]
+fn default_op_return_budget_is_standard_weight_over_four() {
+    let policy = crate::config::MempoolPolicyConfig::default();
+    assert_eq!(
+        policy.max_op_return_script_bytes,
+        (MAX_STANDARD_TX_WEIGHT / 4) as usize
+    );
+    assert_eq!(
+        MempoolManager::new()
+            .effective_policy()
+            .max_op_return_script_bytes,
+        policy.max_op_return_script_bytes
+    );
+}
+
+#[test]
+fn configured_op_return_limit_is_what_admission_uses() {
+    let carrier = |payload: usize| {
+        let mut s = vec![0x6a, 0x4c, payload as u8];
+        s.extend(std::iter::repeat(0u8).take(payload));
+        s
+    };
+    let admit = |script: Vec<u8>, limit: usize| {
+        let (prevout, script_sig) = p2sh_of_op_1();
+        let mut tx = legacy_empty_script();
+        tx.inputs[0].script_sig = script_sig;
+        tx.outputs[0].value = 0;
+        tx.outputs[0].script_pubkey = script;
+        let mempool = MempoolManager::new();
+        let mut policy = crate::config::MempoolPolicyConfig::default();
+        policy.max_op_return_script_bytes = limit;
+        mempool.set_policy_config(Some(policy));
+        mempool.set_utxo_set_arc(std::sync::Arc::new(tokio::sync::Mutex::new(funded(
+            prevout, 100_000,
+        ))));
+        let script_len = tx.outputs[0].script_pubkey.len();
+        let admitted = mempool.add_transaction(tx).unwrap();
+        assert_eq!(mempool.effective_policy().max_op_return_script_bytes, limit);
+        (script_len, admitted)
+    };
+    let short = carrier(80);
+    let long = carrier(81);
+    assert_eq!(short.len(), 83);
+    assert_eq!(long.len(), 84);
+    let (short_len, short_admitted) = admit(short, 83);
+    let (long_len, long_admitted) = admit(long, 83);
+    assert_eq!(short_len, 83);
+    assert!(short_admitted);
+    assert_eq!(long_len, 84);
+    assert!(!long_admitted);
+}
+
+#[test]
 fn op_return_with_a_non_push_is_not_standard() {
     let admit = |script: Vec<u8>| {
         let (prevout, script_sig) = p2sh_of_op_1();
@@ -1406,9 +1456,7 @@ fn op_return_with_a_non_push_is_not_standard() {
 
 #[test]
 fn p2sh_redeem_with_sixteen_sigops_is_not_standard() {
-    use blvm_protocol::opcodes::{
-        OP_0, OP_1, OP_CHECKSIG, OP_ENDIF, OP_EQUAL, OP_HASH160, OP_IF,
-    };
+    use blvm_protocol::opcodes::{OP_0, OP_1, OP_CHECKSIG, OP_ENDIF, OP_EQUAL, OP_HASH160, OP_IF};
     use ripemd::{Digest, Ripemd160};
     use sha2::Sha256;
 
@@ -1550,9 +1598,7 @@ fn wrapped_p2wsh_data_item_of_81_bytes_is_not_standard() {
     };
     let eighty = admit(80);
     let eighty_one = admit(81);
-    eprintln!(
-        "wrapped 80-byte item admitted={eighty}; wrapped 81-byte item admitted={eighty_one}"
-    );
+    eprintln!("wrapped 80-byte item admitted={eighty}; wrapped 81-byte item admitted={eighty_one}");
     assert!(eighty);
     assert!(!eighty_one);
 }
@@ -1604,9 +1650,7 @@ fn p2wsh_script_of_3601_bytes_is_not_standard() {
     };
     let at_limit = admit(3_600);
     let over = admit(3_601);
-    eprintln!(
-        "3600-byte p2wsh script admitted={at_limit}; 3601-byte p2wsh script admitted={over}"
-    );
+    eprintln!("3600-byte p2wsh script admitted={at_limit}; 3601-byte p2wsh script admitted={over}");
     assert!(at_limit);
     assert!(!over);
 }
@@ -1924,9 +1968,7 @@ fn nonminimal_script_number_in_numequalverify_is_not_standard() {
     };
     let minimal = admit(vec![0x51, 0x51, 0x9d, 0x51]);
     let padded = admit(vec![0x02, 0x01, 0x00, 0x51, 0x9d, 0x51]);
-    eprintln!(
-        "minimal numequalverify admitted={minimal}; padded numequalverify admitted={padded}"
-    );
+    eprintln!("minimal numequalverify admitted={minimal}; padded numequalverify admitted={padded}");
     assert!(minimal);
     assert!(!padded);
 }
@@ -2422,9 +2464,7 @@ fn nonminimal_script_number_in_checkmultisig_is_not_standard() {
     };
     let minimal = admit(with_pubkey(&[0x00, 0x00]));
     let padded = admit(with_pubkey(&[0x00, 0x02, 0x00, 0x00]));
-    eprintln!(
-        "minimal checkmultisig admitted={minimal}; padded checkmultisig admitted={padded}"
-    );
+    eprintln!("minimal checkmultisig admitted={minimal}; padded checkmultisig admitted={padded}");
     assert!(minimal);
     assert!(!padded);
 }
@@ -2478,16 +2518,16 @@ fn nonminimal_script_number_in_checksigadd_is_not_standard() {
     use blvm_protocol::segwit::Witness;
 
     let internal = [
-        0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
-        0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
-        0x16, 0xf8, 0x17, 0x98,
+        0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b,
+        0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8,
+        0x17, 0x98,
     ];
     let mut tapscript = vec![0x20];
     tapscript.extend_from_slice(&internal);
     tapscript.push(0xba);
     let admit = |number: Vec<u8>| {
-        let root = compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT)
-            .unwrap();
+        let root =
+            compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT).unwrap();
         let (output_key, parity) = taproot_output_key_with_parity(&internal, &root).unwrap();
         let mut prevout = vec![0x51, 0x20];
         prevout.extend_from_slice(&output_key);
@@ -3392,12 +3432,11 @@ fn taproot_annex_is_not_standard() {
 
     let tapscript = vec![0x51u8];
     let internal = [
-        0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
-        0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
-        0x16, 0xf8, 0x17, 0x98,
+        0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b,
+        0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8,
+        0x17, 0x98,
     ];
-    let root =
-        compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT).unwrap();
+    let root = compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT).unwrap();
     let (output_key, parity) = taproot_output_key_with_parity(&internal, &root).unwrap();
     let mut prevout = vec![0x51, 0x20];
     prevout.extend_from_slice(&output_key);
@@ -3438,12 +3477,11 @@ fn tapscript_item_of_81_bytes_is_not_standard() {
 
     let tapscript = vec![0x75u8, 0x51];
     let internal = [
-        0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
-        0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
-        0x16, 0xf8, 0x17, 0x98,
+        0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b,
+        0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8,
+        0x17, 0x98,
     ];
-    let root =
-        compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT).unwrap();
+    let root = compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT).unwrap();
     let (output_key, parity) = taproot_output_key_with_parity(&internal, &root).unwrap();
     let mut prevout = vec![0x51, 0x20];
     prevout.extend_from_slice(&output_key);
@@ -3521,9 +3559,7 @@ fn non_empty_failed_signature_is_not_standard() {
 #[test]
 fn high_s_signature_is_not_standard() {
     use blvm_protocol::segwit::Witness;
-    use blvm_secp256k1::ecdsa::{
-        ecdsa_sign_compact_rfc6979, ge_to_compressed, pubkey_from_secret,
-    };
+    use blvm_secp256k1::ecdsa::{ecdsa_sign_compact_rfc6979, ge_to_compressed, pubkey_from_secret};
     use blvm_secp256k1::scalar::Scalar;
     use sha2::{Digest, Sha256};
 
@@ -3688,13 +3724,13 @@ fn tapscript_op_success_is_not_standard() {
     use blvm_protocol::segwit::Witness;
 
     let internal = [
-        0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
-        0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
-        0x16, 0xf8, 0x17, 0x98,
+        0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b,
+        0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8,
+        0x17, 0x98,
     ];
     let admit = |tapscript: Vec<u8>| {
-        let root = compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT)
-            .unwrap();
+        let root =
+            compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT).unwrap();
         let (output_key, parity) = taproot_output_key_with_parity(&internal, &root).unwrap();
         let mut prevout = vec![0x51, 0x20];
         prevout.extend_from_slice(&output_key);
@@ -3730,9 +3766,9 @@ fn unknown_taproot_leaf_is_not_standard() {
 
     let script = vec![0x51u8];
     let internal = [
-        0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
-        0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
-        0x16, 0xf8, 0x17, 0x98,
+        0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b,
+        0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8,
+        0x17, 0x98,
     ];
     let admit = |leaf_version: u8| {
         let root = compute_script_merkle_root(&script, &[], leaf_version).unwrap();
@@ -3946,9 +3982,7 @@ fn nonstandard_prevout_spend_is_not_standard() {
 fn signature_inside_script_code_is_not_standard() {
     use std::sync::Arc;
 
-    use blvm_secp256k1::ecdsa::{
-        ecdsa_sign_compact_rfc6979, ge_to_compressed, pubkey_from_secret,
-    };
+    use blvm_secp256k1::ecdsa::{ecdsa_sign_compact_rfc6979, ge_to_compressed, pubkey_from_secret};
     use blvm_secp256k1::scalar::Scalar;
     use ripemd::{Digest, Ripemd160};
     use sha2::Sha256;
@@ -4047,9 +4081,7 @@ fn signature_inside_script_code_is_not_standard() {
 fn signature_inside_multisig_script_code_is_not_standard() {
     use std::sync::Arc;
 
-    use blvm_secp256k1::ecdsa::{
-        ecdsa_sign_compact_rfc6979, ge_to_compressed, pubkey_from_secret,
-    };
+    use blvm_secp256k1::ecdsa::{ecdsa_sign_compact_rfc6979, ge_to_compressed, pubkey_from_secret};
     use blvm_secp256k1::scalar::Scalar;
     use ripemd::{Digest, Ripemd160};
     use sha2::Sha256;
@@ -4143,9 +4175,7 @@ fn signature_inside_multisig_script_code_is_not_standard() {
     embedded_redeem.push(0x75);
     embedded_redeem.extend_from_slice(&multisig);
     let embedded = admit(embedded_redeem);
-    eprintln!(
-        "clean multisig admitted={clean}; signature in multisig script admitted={embedded}"
-    );
+    eprintln!("clean multisig admitted={clean}; signature in multisig script admitted={embedded}");
     assert!(clean);
     assert!(!embedded);
 }
@@ -4330,9 +4360,9 @@ fn unknown_tapscript_pubkey_is_not_standard() {
     let mut unknown = compressed_x.to_vec();
     unknown.push(0x02);
     let internal = [
-        0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87,
-        0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b,
-        0x16, 0xf8, 0x17, 0x98,
+        0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b,
+        0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8,
+        0x17, 0x98,
     ];
     let script_for = |pubkey: &[u8]| {
         let mut script = vec![pubkey.len() as u8];
@@ -4365,8 +4395,8 @@ fn unknown_tapscript_pubkey_is_not_standard() {
     let sig = schnorr_sign(&seckey, &sighash, &[0u8; 32]).unwrap();
     let admit = |pubkey: &[u8]| {
         let tapscript = script_for(pubkey);
-        let root = compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT)
-            .unwrap();
+        let root =
+            compute_script_merkle_root(&tapscript, &[], TAPROOT_LEAF_VERSION_TAPSCRIPT).unwrap();
         let (output_key, parity) = taproot_output_key_with_parity(&internal, &root).unwrap();
         let mut prevout = vec![0x51, 0x20];
         prevout.extend_from_slice(&output_key);
@@ -4478,9 +4508,7 @@ fn hybrid_pubkey_is_not_standard() {
 
 #[test]
 fn an_empty_snapshot_counts_a_mempool_parents_sigops() {
-    use blvm_protocol::opcodes::{
-        OP_0, OP_1, OP_CHECKSIG, OP_ENDIF, OP_EQUAL, OP_HASH160, OP_IF,
-    };
+    use blvm_protocol::opcodes::{OP_0, OP_1, OP_CHECKSIG, OP_ENDIF, OP_EQUAL, OP_HASH160, OP_IF};
     use ripemd::{Digest, Ripemd160};
     use sha2::Sha256;
     use std::sync::Arc;
@@ -4911,9 +4939,7 @@ fn preview_rejects_a_nonstandard_version() {
 
 #[test]
 fn preview_rejects_a_scriptsig_that_is_not_push_only() {
-    use blvm_secp256k1::ecdsa::{
-        ecdsa_sign_compact_rfc6979, ge_to_compressed, pubkey_from_secret,
-    };
+    use blvm_secp256k1::ecdsa::{ecdsa_sign_compact_rfc6979, ge_to_compressed, pubkey_from_secret};
     use blvm_secp256k1::scalar::Scalar;
 
     fn der_int(value: &[u8]) -> Vec<u8> {
@@ -5756,9 +5782,7 @@ fn mempool_rejects_a_p2sh_witness_redeem_without_a_witness() {
     use std::sync::Arc;
 
     use blvm_protocol::block::calculate_tx_id;
-    use blvm_protocol::opcodes::{
-        OP_0, OP_1, OP_EQUAL, OP_HASH160, PUSH_20_BYTES, PUSH_32_BYTES,
-    };
+    use blvm_protocol::opcodes::{OP_0, OP_1, OP_EQUAL, OP_HASH160, PUSH_20_BYTES, PUSH_32_BYTES};
     use blvm_protocol::segwit::Witness;
     use ripemd::{Digest, Ripemd160};
     use sha2::Sha256;

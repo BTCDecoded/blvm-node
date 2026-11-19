@@ -393,12 +393,12 @@ fn build_tx_wire(
         } else {
             Vec::new()
         };
-        if include_witness && witnesses.iter().all(|stack| stack.is_empty()) {
-            if let Some(from_pool) = mempool_mgr.and_then(|mm| mm.get_transaction_witnesses(hash)) {
-                if from_pool.iter().any(|stack| !stack.is_empty()) {
-                    witnesses = from_pool;
-                }
-            }
+        if include_witness
+            && witnesses.iter().all(|stack| stack.is_empty())
+            && let Some(from_pool) = mempool_mgr.and_then(|mm| mm.get_transaction_witnesses(hash))
+            && from_pool.iter().any(|stack| !stack.is_empty())
+        {
+            witnesses = from_pool;
         }
         let msg = ProtocolMessage::Tx(TxMessage {
             transaction: tx,
@@ -406,19 +406,19 @@ fn build_tx_wire(
         });
         return Ok(Some(ProtocolParser::serialize_message(&msg)?));
     }
-    if let Some(mm) = mempool_mgr {
-        if let Some(tx) = mm.get_transaction(hash) {
-            let witnesses = if include_witness {
-                mm.get_transaction_witnesses(hash).unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-            let msg = ProtocolMessage::Tx(TxMessage {
-                transaction: tx,
-                witnesses,
-            });
-            return Ok(Some(ProtocolParser::serialize_message(&msg)?));
-        }
+    if let Some(mm) = mempool_mgr
+        && let Some(tx) = mm.get_transaction(hash)
+    {
+        let witnesses = if include_witness {
+            mm.get_transaction_witnesses(hash).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let msg = ProtocolMessage::Tx(TxMessage {
+            transaction: tx,
+            witnesses,
+        });
+        return Ok(Some(ProtocolParser::serialize_message(&msg)?));
     }
     Ok(None)
 }

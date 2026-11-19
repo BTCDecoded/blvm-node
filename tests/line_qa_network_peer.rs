@@ -13,9 +13,7 @@ async fn send_message_rejects_a_closed_outbound_channel() {
         Err(err) => {
             let message = err.to_string();
             assert!(
-                message.contains(
-                    "Failed to send message to peer 127.0.0.1:8333: channel closed"
-                ),
+                message.contains("Failed to send message to peer 127.0.0.1:8333: channel closed"),
                 "send_message returned {message}"
             );
         }

@@ -180,14 +180,18 @@ pub struct IbdConfig {
     #[serde(default = "default_ibd_headers_max_failures")]
     pub headers_max_failures: u32,
 
-    /// Treat this node as dedicated to IBD (headless sync): use the larger RSS envelope even
-    /// when MemAvailable/MemTotal < 70%. Also set via `BLVM_DEDICATED_NODE=1` or `BLVM_IBD_EXCLUSIVE=1`.
+    /// Old spelling of `workload = "dedicated"`. Ignored when `workload` is `shared`.
     #[serde(default)]
     pub dedicated: bool,
 
-    /// Age-tiered UTXO engine (default on). Opt out with `BLVM_IBD_ENGINE=0` or `utxo_engine = false`.
-    #[serde(default = "default_utxo_engine")]
-    pub utxo_engine: bool,
+    /// Memory envelope for IBD.
+    ///
+    /// `auto` classifies from MemAvailable after headers. `shared` keeps the smaller
+    /// envelope. `dedicated` asks for the larger envelope and is refused when
+    /// MemAvailable is under 70% of MemTotal. `BLVM_IBD_EXCLUSIVE=1` forces the
+    /// larger envelope and still loses to swap under 15% free.
+    #[serde(default)]
+    pub workload: IbdWorkload,
 
     /// Fixed engine checkpoint interval in blocks. Feeds `ibd_engine_durability_config` only.
     /// `BLVM_IBD_CHECKPOINT_INTERVAL` overrides this. `0` or `adaptive` on that variable
@@ -210,10 +214,6 @@ pub struct IbdConfig {
     /// Blocks between MuHash persists. `BLVM_IBD_ENGINE_MUHASH_INTERVAL` overrides this.
     #[serde(default = "default_muhash_persist_interval")]
     pub muhash_persist_interval: u64,
-}
-
-fn default_utxo_engine() -> bool {
-    true
 }
 
 /// Mode T / archive: listen + answer `getdata`, skip outbound discovery and IBD.
@@ -243,29 +243,18 @@ pub fn ibd_serve_only() -> bool {
 /// flooded LMDB and is not wired. Sync-on-async (tc285) stays banned.
 pub fn getdata_serve_pipe_depth() -> usize {
     latch_env!(usize, {
-        if let Ok(v) = std::env::var("BLVM_GETDATA_SERVE_PIPE") {
-            if let Ok(n) = v.trim().parse::<usize>() {
-                return n.clamp(1, 8);
-            }
+        if let Ok(v) = std::env::var("BLVM_GETDATA_SERVE_PIPE")
+            && let Ok(n) = v.trim().parse::<usize>()
+        {
+            return n.clamp(1, 8);
         }
         if ibd_serve_only() { 4 } else { 1 }
     })
 }
 
-/// Whether parallel IBD uses the age-tiered UTXO engine (default **true**).
-///
-/// Precedence: `BLVM_IBD_ENGINE` env > `[ibd].utxo_engine` > default true.
-pub fn ibd_engine_enabled(config: Option<&IbdConfig>) -> bool {
-    if let Ok(v) = std::env::var("BLVM_IBD_ENGINE") {
-        let v = v.trim();
-        if v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("no") {
-            return false;
-        }
-        if v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes") {
-            return true;
-        }
-    }
-    config.map(|c| c.utxo_engine).unwrap_or(true)
+/// Parallel IBD uses the age-tiered UTXO engine. There is no legacy store opt-out.
+pub fn ibd_engine_enabled(_config: Option<&IbdConfig>) -> bool {
+    true
 }
 
 /// Engine IBD durability tuning (checkpoint export + incremental MuHash persist).
@@ -334,39 +323,35 @@ pub fn ibd_engine_durability_config(config: Option<&IbdConfig>) -> IbdEngineDura
         let v = v.trim();
         if v == "0" || v.eq_ignore_ascii_case("adaptive") {
             d.checkpoint_interval = None;
-        } else if let Ok(n) = v.parse::<i32>() {
-            if n > 0 {
-                d.checkpoint_interval = Some(n);
-            }
+        } else if let Ok(n) = v.parse::<i32>()
+            && n > 0
+        {
+            d.checkpoint_interval = Some(n);
         }
     }
-    if let Ok(v) = std::env::var("BLVM_IBD_CHECKPOINT_MIN_INTERVAL") {
-        if let Ok(n) = v.trim().parse::<i32>() {
-            if n > 0 {
-                d.checkpoint_min_interval = n;
-            }
-        }
+    if let Ok(v) = std::env::var("BLVM_IBD_CHECKPOINT_MIN_INTERVAL")
+        && let Ok(n) = v.trim().parse::<i32>()
+        && n > 0
+    {
+        d.checkpoint_min_interval = n;
     }
-    if let Ok(v) = std::env::var("BLVM_IBD_CHECKPOINT_MAX_INTERVAL") {
-        if let Ok(n) = v.trim().parse::<i32>() {
-            if n > 0 {
-                d.checkpoint_max_interval = n.max(d.checkpoint_min_interval);
-            }
-        }
+    if let Ok(v) = std::env::var("BLVM_IBD_CHECKPOINT_MAX_INTERVAL")
+        && let Ok(n) = v.trim().parse::<i32>()
+        && n > 0
+    {
+        d.checkpoint_max_interval = n.max(d.checkpoint_min_interval);
     }
-    if let Ok(v) = std::env::var("BLVM_IBD_CHECKPOINT_TARGET_SECS") {
-        if let Ok(n) = v.trim().parse::<u64>() {
-            if n > 0 {
-                d.checkpoint_target_secs = n;
-            }
-        }
+    if let Ok(v) = std::env::var("BLVM_IBD_CHECKPOINT_TARGET_SECS")
+        && let Ok(n) = v.trim().parse::<u64>()
+        && n > 0
+    {
+        d.checkpoint_target_secs = n;
     }
-    if let Ok(v) = std::env::var("BLVM_IBD_ENGINE_MUHASH_INTERVAL") {
-        if let Ok(n) = v.trim().parse::<u64>() {
-            if n > 0 {
-                d.muhash_persist_interval = n;
-            }
-        }
+    if let Ok(v) = std::env::var("BLVM_IBD_ENGINE_MUHASH_INTERVAL")
+        && let Ok(n) = v.trim().parse::<u64>()
+        && n > 0
+    {
+        d.muhash_persist_interval = n;
     }
     d
 }
@@ -504,6 +489,43 @@ fn default_muhash_persist_interval() -> u64 {
     200
 }
 
+/// `[ibd] workload`. Omitted means [`IbdWorkload::Auto`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum IbdWorkload {
+    /// Classify from MemAvailable.
+    #[default]
+    Auto,
+    /// Keep the smaller envelope on a host that runs other work.
+    Shared,
+    /// Ask for the larger envelope. Refused below 70% MemAvailable.
+    Dedicated,
+}
+
+/// Resolved file and `BLVM_DEDICATED_NODE` request. `BLVM_IBD_EXCLUSIVE` is applied later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IbdMemoryRequest {
+    #[default]
+    Auto,
+    Shared,
+    Dedicated,
+}
+
+/// `workload = "shared"` wins over `dedicated = true` and `BLVM_DEDICATED_NODE`.
+pub fn resolve_ibd_memory_request(config: Option<&IbdConfig>) -> IbdMemoryRequest {
+    let workload = config.map(|c| c.workload).unwrap_or_default();
+    let dedicated_flag = config.map(|c| c.dedicated).unwrap_or(false);
+    let dedicated_env = std::env::var("BLVM_DEDICATED_NODE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    match workload {
+        IbdWorkload::Shared => IbdMemoryRequest::Shared,
+        IbdWorkload::Dedicated => IbdMemoryRequest::Dedicated,
+        IbdWorkload::Auto if dedicated_flag || dedicated_env => IbdMemoryRequest::Dedicated,
+        IbdWorkload::Auto => IbdMemoryRequest::Auto,
+    }
+}
+
 impl Default for IbdConfig {
     fn default() -> Self {
         Self {
@@ -525,7 +547,7 @@ impl Default for IbdConfig {
             headers_timeout_secs: 30,
             headers_max_failures: 10,
             dedicated: false,
-            utxo_engine: true,
+            workload: IbdWorkload::Auto,
             checkpoint_interval: default_checkpoint_interval(),
             checkpoint_min_interval: default_checkpoint_min_interval(),
             checkpoint_max_interval: default_checkpoint_max_interval(),
@@ -723,29 +745,48 @@ mod ibd_engine_config_tests {
 
     #[serial_test::serial(ibd)]
     #[test]
-    fn ibd_engine_enabled_config_default_true() {
-        assert!(IbdConfig::default().utxo_engine);
-        assert!(!ibd_engine_enabled(Some(&IbdConfig {
-            utxo_engine: false,
-            ..Default::default()
-        })));
+    fn workload_shared_beats_the_old_dedicated_flag() {
+        with_env("BLVM_DEDICATED_NODE", None, || {
+            let auto: IbdConfig = toml::from_str("workload = \"auto\"\n").unwrap();
+            assert_eq!(
+                resolve_ibd_memory_request(Some(&auto)),
+                IbdMemoryRequest::Auto
+            );
+            let old: IbdConfig = toml::from_str("dedicated = true\n").unwrap();
+            assert_eq!(
+                resolve_ibd_memory_request(Some(&old)),
+                IbdMemoryRequest::Dedicated
+            );
+            let shared: IbdConfig =
+                toml::from_str("workload = \"shared\"\ndedicated = true\n").unwrap();
+            assert_eq!(
+                resolve_ibd_memory_request(Some(&shared)),
+                IbdMemoryRequest::Shared
+            );
+        });
+        with_env("BLVM_DEDICATED_NODE", Some("1"), || {
+            let auto = IbdConfig::default();
+            assert_eq!(
+                resolve_ibd_memory_request(Some(&auto)),
+                IbdMemoryRequest::Dedicated
+            );
+            let shared: IbdConfig = toml::from_str("workload = \"shared\"\n").unwrap();
+            assert_eq!(
+                resolve_ibd_memory_request(Some(&shared)),
+                IbdMemoryRequest::Shared
+            );
+        });
     }
 
     #[serial_test::serial(ibd)]
     #[test]
-    fn ibd_engine_enabled_env_overrides_config() {
+    fn ibd_engine_is_always_on() {
+        assert!(ibd_engine_enabled(None));
         with_env("BLVM_IBD_ENGINE", Some("0"), || {
-            assert!(!ibd_engine_enabled(Some(&IbdConfig {
-                utxo_engine: true,
-                ..Default::default()
-            })));
+            assert!(ibd_engine_enabled(Some(&IbdConfig::default())));
         });
-        with_env("BLVM_IBD_ENGINE", Some("1"), || {
-            assert!(ibd_engine_enabled(Some(&IbdConfig {
-                utxo_engine: false,
-                ..Default::default()
-            })));
-        });
+        let parsed: IbdConfig = toml::from_str("utxo_engine = false\n").unwrap();
+        assert!(ibd_engine_enabled(Some(&parsed)));
     }
 
     #[serial_test::serial(ibd)]

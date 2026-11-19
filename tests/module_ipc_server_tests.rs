@@ -481,6 +481,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unissued_module_id_is_rejected() {
+        let (_temp_dir, socket_path) = ipc_harness::setup_ipc_socket();
+        let node_api = Arc::new(MockNodeAPI::new());
+        let mut server_handle =
+            ipc_harness::spawn_ipc_server_with(socket_path.clone(), node_api, |server| server);
+        let mut client =
+            ipc_harness::wait_bound_then_connect(&socket_path, &mut server_handle).await;
+        let correlation_id = client.next_correlation_id();
+        let handshake = RequestMessage {
+            correlation_id,
+            request_type: blvm_node::module::ipc::protocol::MessageType::Handshake,
+            payload: blvm_node::module::ipc::protocol::RequestPayload::Handshake {
+                module_id: "not-issued".to_string(),
+                module_name: "Not Issued".to_string(),
+                version: "1.0.0".to_string(),
+            },
+        };
+        let response = client.request(handshake).await.unwrap();
+        assert!(!response.success);
+        let error = response.error.unwrap_or_default();
+        assert!(error.contains("not issued"), "handshake error was {error}");
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generation_2_rejects_the_published_handshake() {
+        let (_temp_dir, socket_path) = ipc_harness::setup_ipc_socket();
+        let node_api = Arc::new(MockNodeAPI::new());
+        let mut server_handle =
+            ipc_harness::spawn_ipc_server_with(socket_path.clone(), node_api, |server| {
+                server.issue_module_id_with_protocol("gen2", 2);
+                server
+            });
+        let mut client =
+            ipc_harness::wait_bound_then_connect(&socket_path, &mut server_handle).await;
+        let correlation_id = client.next_correlation_id();
+        let handshake = RequestMessage {
+            correlation_id,
+            request_type: blvm_node::module::ipc::protocol::MessageType::Handshake,
+            payload: blvm_node::module::ipc::protocol::RequestPayload::Handshake {
+                module_id: "gen2".to_string(),
+                module_name: "Gen2".to_string(),
+                version: "1.0.0".to_string(),
+            },
+        };
+        let response = client.request(handshake).await.unwrap();
+        assert!(!response.success);
+        let error = response.error.unwrap_or_default();
+        assert!(
+            error.contains("requires HandshakeV2"),
+            "handshake error was {error}"
+        );
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generation_2_accepts_handshake_v2() {
+        let (_temp_dir, socket_path) = ipc_harness::setup_ipc_socket();
+        let node_api = Arc::new(MockNodeAPI::new());
+        let mut server_handle =
+            ipc_harness::spawn_ipc_server_with(socket_path.clone(), node_api, |server| {
+                server.issue_module_id_with_protocol("gen2", 2);
+                server
+            });
+        let mut client =
+            ipc_harness::wait_bound_then_connect(&socket_path, &mut server_handle).await;
+        let correlation_id = client.next_correlation_id();
+        let handshake = RequestMessage {
+            correlation_id,
+            request_type: blvm_node::module::ipc::protocol::MessageType::HandshakeV2,
+            payload: blvm_node::module::ipc::protocol::RequestPayload::HandshakeV2 {
+                module_id: "gen2".to_string(),
+                module_name: "Gen2".to_string(),
+                version: "1.0.0".to_string(),
+                ipc_protocol: 2,
+            },
+        };
+        let response = client.request(handshake).await.unwrap();
+        assert!(response.success, "{response:?}");
+        assert!(matches!(
+            response.payload,
+            Some(ResponsePayload::HandshakeAck { .. })
+        ));
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generation_0_rejects_a_generation_2_handshake() {
+        let (_temp_dir, socket_path) = ipc_harness::setup_ipc_socket();
+        let node_api = Arc::new(MockNodeAPI::new());
+        let mut server_handle =
+            ipc_harness::spawn_ipc_server_with(socket_path.clone(), node_api, |server| {
+                server.issue_module_id("gen0");
+                server
+            });
+        let mut client =
+            ipc_harness::wait_bound_then_connect(&socket_path, &mut server_handle).await;
+        let correlation_id = client.next_correlation_id();
+        let handshake = RequestMessage {
+            correlation_id,
+            request_type: blvm_node::module::ipc::protocol::MessageType::HandshakeV2,
+            payload: blvm_node::module::ipc::protocol::RequestPayload::HandshakeV2 {
+                module_id: "gen0".to_string(),
+                module_name: "Gen0".to_string(),
+                version: "1.0.0".to_string(),
+                ipc_protocol: 2,
+            },
+        };
+        let response = client.request(handshake).await.unwrap();
+        assert!(!response.success);
+        let error = response.error.unwrap_or_default();
+        assert!(
+            error.contains("does not match"),
+            "handshake error was {error}"
+        );
+        server_handle.abort();
+    }
+
+    #[tokio::test]
     async fn test_server_get_block_request() {
         let (_temp_dir, socket_path) = ipc_harness::setup_ipc_socket();
         let node_api = Arc::new(MockNodeAPI::new());
@@ -761,6 +880,7 @@ mod tests {
         let event_mgr_clone = Arc::clone(&event_manager);
         let mut server_handle =
             ipc_harness::spawn_ipc_server_with(socket_path.clone(), node_api, move |s| {
+                s.issue_module_id("test");
                 s.with_event_manager(event_mgr_clone)
             });
 

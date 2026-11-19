@@ -40,6 +40,16 @@ async fn test_getmempoolinfo_with_transaction() {
         mempool.size() as u64
     );
     assert!(info.get("bytes").unwrap().as_u64().unwrap() > 0);
+    assert_eq!(info["policy"]["require_standard"], true);
+    assert_eq!(info["policy"]["max_op_return_script_bytes"], 100_000);
+
+    let mut policy = blvm_node::config::MempoolPolicyConfig::default();
+    policy.require_standard = false;
+    policy.max_op_return_script_bytes = 83;
+    mempool.set_policy_config(Some(policy));
+    let info = rpc.getmempoolinfo(&json!([])).await.unwrap();
+    assert_eq!(info["policy"]["require_standard"], false);
+    assert_eq!(info["policy"]["max_op_return_script_bytes"], 83);
 }
 
 #[tokio::test]

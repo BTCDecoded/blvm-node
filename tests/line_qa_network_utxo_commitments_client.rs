@@ -14,13 +14,8 @@ async fn request_utxo_proof_rejects_an_invalid_peer_id() {
     let manager = NetworkManager::new("127.0.0.1:0".parse::<SocketAddr>().expect("addr"));
     let client = UtxoCommitmentsClient::new(Arc::new(RwLock::new(manager)));
 
-    let call = client.request_utxo_proof(
-        "not-a-peer",
-        [0xab; 32],
-        0,
-        Natural::from(0u64),
-        [0xcd; 32],
-    );
+    let call =
+        client.request_utxo_proof("not-a-peer", [0xab; 32], 0, Natural::from(0u64), [0xcd; 32]);
     match tokio::time::timeout(Duration::from_secs(2), call).await {
         Ok(Err(err)) => {
             let message = err.to_string();

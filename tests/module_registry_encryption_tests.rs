@@ -77,6 +77,7 @@ fn create_test_manifest_with_payment(name: &str) -> ModuleManifest {
         min_node_version: None,
         services: Vec::new(),
         fee_estimators: Vec::new(),
+        ipc_protocol: 0,
         signatures: Some(signature_section),
         payment: Some(payment_section),
     }
@@ -178,6 +179,7 @@ async fn test_handle_get_module_free_module() {
         min_node_version: None,
         services: Vec::new(),
         fee_estimators: Vec::new(),
+        ipc_protocol: 0,
         signatures: None,
         payment: None, // No payment required
     };

@@ -118,7 +118,6 @@ pub fn validation_error_suggests_utxo_repair(err: &anyhow::Error) -> bool {
     }
     let s = err.to_string();
     s.contains("UTXO not found for input")
-        || s.contains("Invalid transaction inputs")
         || s.contains("IBD UTXO mutex poisoned")
         || s.contains("UTXO flush panicked")
         || s.contains("Failed to open IBD UTXO tree")
@@ -247,14 +246,13 @@ pub(crate) fn reconcile_ibd_utxo_watermark_with_disk(
     if watermark_val == 0 {
         return Ok(0);
     }
-    let engine_enabled = crate::config::ibd::ibd_engine_enabled(None);
     // Export height names a snapshot. The active ckpt is that snapshot when it
     // has rows. Phase 3 full watermark export clears both ckpt trees and stores
     // the snapshot in `ibd_utxos` with `ibd_utxo_canonical_tree` set — that key
     // must keep the watermark. Stray `ibd_utxos` rows with the key unset are
     // not a snapshot (testnet4: export_h=155499, ckpt_a empty).
     let mut export_ckpt_missing = false;
-    if engine_enabled {
+    {
         if let Some(eh) = storage
             .chain()
             .get_engine_export_height()?
@@ -314,10 +312,10 @@ pub(crate) fn reconcile_ibd_utxo_watermark_with_disk(
             export_ckpt_missing = true;
         }
         if !export_ckpt_missing {
-            if let Some(root) = storage.data_dir() {
-                if crate::storage::database::legacy_ibd_utxo_standalone_has_data(&root) {
-                    return Ok(watermark_val);
-                }
+            if let Some(root) = storage.data_dir()
+                && crate::storage::database::legacy_ibd_utxo_standalone_has_data(&root)
+            {
+                return Ok(watermark_val);
             }
             let tree = storage.open_tree("ibd_utxos")?;
             if !tree.is_empty()? {
@@ -349,41 +347,8 @@ pub(crate) fn reconcile_ibd_utxo_watermark_with_disk(
                 }
             }
         }
-        return Ok(0);
+        Ok(0)
     }
-    // Legacy path: open standalone LMDB when present to validate watermark against durable rows.
-    let standalone_non_empty: bool = if let Some(root) = storage.data_dir() {
-        let utxo_store_dir = root.join(crate::storage::database::IBD_UTXO_STORE_SUBDIR);
-        if utxo_store_dir.exists() {
-            match crate::storage::database::create_ibd_utxo_standalone_db(&utxo_store_dir) {
-                Ok(db) => match db.open_tree("ibd_utxos") {
-                    Ok(t) => !t.is_empty().unwrap_or(true),
-                    Err(_) => false,
-                },
-                Err(_) => false,
-            }
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    let tree = storage.open_tree("ibd_utxos")?;
-    let main_empty = tree.is_empty()?;
-
-    if standalone_non_empty || !main_empty {
-        // At least one storage location has UTXO data consistent with the watermark.
-        return Ok(watermark_val);
-    }
-    warn!(
-        "[ibd_autorepair] ibd_utxo_watermark={} but ibd_utxos tree is empty in both \
-         standalone store and main storage — resetting watermark to 0 \
-         (watermark likely jumped ahead of durable UTXO flushes)",
-        watermark_val
-    );
-    storage.chain().force_set_ibd_utxo_watermark(0)?;
-    Ok(0)
 }
 
 #[cfg(feature = "production")]
@@ -410,35 +375,21 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
     if aggressive {
         // Destructive path: wipe the UTXO state and reset to height 0. On-disk blocks are
         // kept, so only consensus validation needs to be re-run.
-        let engine_mode = crate::config::ibd::ibd_engine_enabled(None);
-
-        if engine_mode {
-            // Engine mode: checkpoints live in ibd_utxos_ckpt_a/b, not ibd_utxos.
-            // Clear both ping-pong trees, reset engine metadata, then reset watermark.
-            info!(
-                "IBD UTXO autorepair (aggressive, engine mode): clearing checkpoint trees \
-                 (ibd_utxos_ckpt_a + ibd_utxos_ckpt_b) and resetting engine metadata \
-                 (BLVM_IBD_AGGRESSIVE_REPAIR=1, marker was present)"
-            );
-            for tree_name in &["ibd_utxos_ckpt_a", "ibd_utxos_ckpt_b"] {
-                let tree = storage.open_tree(tree_name)?;
-                tree.clear()?;
-            }
-            storage.chain().force_reset_engine_checkpoint_metadata()?;
-        } else {
-            info!(
-                "IBD UTXO autorepair (aggressive): clearing ibd_utxos and forcing \
-                 ibd_utxo_watermark to 0 (BLVM_IBD_AGGRESSIVE_REPAIR=1, marker was present)"
-            );
-            let tree = storage.open_tree("ibd_utxos")?;
+        info!(
+            "IBD UTXO autorepair (aggressive): clearing checkpoint trees \
+             (ibd_utxos_ckpt_a + ibd_utxos_ckpt_b) and resetting engine metadata \
+             (BLVM_IBD_AGGRESSIVE_REPAIR=1, marker was present)"
+        );
+        for tree_name in &["ibd_utxos_ckpt_a", "ibd_utxos_ckpt_b"] {
+            let tree = storage.open_tree(tree_name)?;
             tree.clear()?;
         }
+        storage.chain().force_reset_engine_checkpoint_metadata()?;
         storage.chain().force_set_ibd_utxo_watermark(0)?;
         storage.flush()?;
         clear_ibd_utxo_repair_flag(data_dir)?;
         warn!(
-            "IBD UTXO autorepair applied (aggressive{}); on-disk blocks kept; full re-validation will follow",
-            if engine_mode { ", engine mode" } else { "" }
+            "IBD UTXO autorepair applied (aggressive, engine); on-disk blocks kept; full re-validation will follow"
         );
         return Ok(());
     }
@@ -451,45 +402,25 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
     // Exception: watermark already 0 means a full local replay — stale standalone LMDB from
     // prior wm=0 sessions without a wipe causes fdatasync bloat and ~50 BPS crawl (see
     // docs/IBD_BPS_RESOLUTION_PLAN.md PR-STORE).
-    let engine_mode = crate::config::ibd::ibd_engine_enabled(None);
-    let watermark = storage
+    let watermark = crate::storage::reliability_decisions::watermark_for_repair(
+        storage.chain().get_utxo_watermark(),
+    )?;
+    if watermark == 0 {
+        if let Some(root) = storage.data_dir() {
+            let engine_dir = root.join("ibd_engine");
+            let _ = std::fs::remove_dir_all(&engine_dir);
+        }
+        info!(
+            "[ibd_autorepair] wm=0: cleared ibd_engine/ flat state; \
+             replay from h=1 (block store intact)"
+        );
+    }
+    let export_height = storage
         .chain()
-        .get_utxo_watermark()
+        .get_engine_export_height()
         .unwrap_or(None)
         .unwrap_or(0);
-    if watermark == 0 {
-        if engine_mode {
-            if let Some(root) = storage.data_dir() {
-                let engine_dir = root.join("ibd_engine");
-                let _ = std::fs::remove_dir_all(&engine_dir);
-            }
-            info!(
-                "[ibd_autorepair] engine mode wm=0: cleared ibd_engine/ flat state; \
-                 replay from h=1 (block store intact)"
-            );
-        } else {
-            wipe_standalone_ibd_utxo_store(storage, data_dir)?;
-            info!(
-                "[ibd_autorepair] wiped ibd_utxo_store (dirty wm=0 replay); replay from h=1 \
-                 (block store intact)"
-            );
-        }
-    }
-    let interval = if engine_mode {
-        crate::config::ibd::ibd_engine_checkpoint_interval_for_repair()
-    } else {
-        ibd_defer_checkpoint_interval_for_repair()
-    };
-    let export_height = if engine_mode {
-        storage
-            .chain()
-            .get_engine_export_height()
-            .unwrap_or(None)
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    if engine_mode {
+    {
         let export_utxo_count = storage
             .chain()
             .get_engine_export_utxo_count()
@@ -511,12 +442,11 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
         // passed height/7 and re-seeded poison. Use prev_accepted, else other-slot len.
         let mut gate_last = prev_accepted;
         let other_slot = if active_slot == 0 { 1u8 } else { 0u8 };
-        if gate_last == 0 {
-            if let Ok(tree) =
+        if gate_last == 0
+            && let Ok(tree) =
                 storage.open_tree(crate::storage::ibd_engine::ckpt_tree_for_slot(other_slot))
-            {
-                gate_last = tree.len().unwrap_or(0) as u64;
-            }
+        {
+            gate_last = tree.len().unwrap_or(0) as u64;
         }
         let meta_poisoned = export_height > 0
             && !checkpoint_utxo_count_monotonic(export_height, export_utxo_count, gate_last);
@@ -586,12 +516,12 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
             // No prior good ping-pong slot. Wipe both ckpt trees and reset metadata so the
             // next session replays from genesis over on-disk bodies.
             for tree_name in &["ibd_utxos_ckpt_a", "ibd_utxos_ckpt_b"] {
-                if let Ok(tree) = storage.open_tree(tree_name) {
-                    if let Err(e) = tree.clear() {
-                        warn!("[ibd_autorepair] genesis reset: failed to clear {tree_name}: {e}");
-                        return Err(e)
-                            .context(format!("IBD UTXO autorepair: failed to clear {tree_name}"));
-                    }
+                if let Ok(tree) = storage.open_tree(tree_name)
+                    && let Err(e) = tree.clear()
+                {
+                    warn!("[ibd_autorepair] genesis reset: failed to clear {tree_name}: {e}");
+                    return Err(e)
+                        .context(format!("IBD UTXO autorepair: failed to clear {tree_name}"));
                 }
             }
             storage.chain().force_reset_engine_checkpoint_metadata()?;
@@ -651,29 +581,8 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
              engine flat state cleared for re-seed; next IBD starts at {}",
             export_height.saturating_add(1)
         );
-        return Ok(());
+        Ok(())
     }
-    let rollback_base = watermark;
-    let rolled_back = soft_repair_rollback_watermark(rollback_base, interval);
-    if rolled_back < rollback_base {
-        storage.chain().force_set_ibd_utxo_watermark(rolled_back)?;
-        storage.flush()?;
-        info!(
-            "IBD UTXO autorepair (soft): rolled ibd_utxo_watermark {rollback_base} -> {rolled_back} \
-             (interval={interval}); preserving ibd_utxos — replay from height {} will rebuild \
-             UTXO cache incrementally",
-            rolled_back.saturating_add(1)
-        );
-    } else {
-        info!("IBD UTXO autorepair (soft): watermark already 0; preserving ibd_utxos");
-    }
-    clear_ibd_utxo_repair_flag(data_dir)?;
-    warn!(
-        "IBD UTXO autorepair (soft) applied; if the next IBD attempt re-trips the same UTXO error \
-         and sets the marker again, another interval rollback will run (or set \
-         BLVM_IBD_AGGRESSIVE_REPAIR=1 for the destructive wipe path)"
-    );
-    Ok(())
 }
 
 #[cfg(all(test, feature = "production"))]

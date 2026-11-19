@@ -293,11 +293,11 @@ pub(crate) fn commit_utxo_snapshot_delta(
     if pure_disconnect {
         let mut coins = HashMap::new();
         let mut kept_muhash = None;
-        if let Some(existing) = tree.get(SNAPSHOT_REORG_ROLLBACK_KEY)? {
-            if let Some((prior, saved)) = decode_rollback(&existing) {
-                coins = saved;
-                kept_muhash = prior;
-            }
+        if let Some(existing) = tree.get(SNAPSHOT_REORG_ROLLBACK_KEY)?
+            && let Some((prior, saved)) = decode_rollback(&existing)
+        {
+            coins = saved;
+            kept_muhash = prior;
         }
         if kept_muhash.is_none() {
             kept_muhash = prior_muhash.map(|bytes| bytes.to_vec());
@@ -325,6 +325,7 @@ pub(crate) fn commit_utxo_snapshot_delta(
 pub(crate) fn note_snapshot_height(storage: &Storage, height: u64) -> Result<()> {
     storage.chain().set_utxo_watermark(height)?;
     storage.chain().persist_engine_export_height(height)?;
+    align_snapshot_slot_height(storage, height)?;
     Ok(())
 }
 
@@ -336,7 +337,165 @@ pub(crate) fn note_snapshot_height(storage: &Storage, height: u64) -> Result<()>
 pub(crate) fn rewind_snapshot_height(storage: &Storage, height: u64) -> Result<()> {
     storage.chain().force_set_ibd_utxo_watermark(height)?;
     storage.chain().force_set_engine_export_height(height)?;
+    align_snapshot_slot_height(storage, height)?;
     Ok(())
+}
+
+/// Net coins a connect applies: new outputs minus spent ones, after replacements collapse.
+///
+/// Same last-write rule as [`commit_utxo_snapshot_delta`]. Disconnecting a block is the
+/// negation of connecting its undo.
+pub(crate) fn snapshot_connect_coin_delta(logs_low_to_high: &[&BlockUndoLog]) -> i64 {
+    let mut net: HashMap<[u8; 40], (bool, bool)> = HashMap::new();
+    for undo in logs_low_to_high {
+        for entry in undo.entries.iter().rev() {
+            let present = if entry.new_utxo.is_some() {
+                true
+            } else if entry.previous_utxo.is_some() {
+                false
+            } else {
+                continue;
+            };
+            let key = outpoint_to_key(&entry.outpoint);
+            net.entry(key)
+                .and_modify(|(_, ends_present)| *ends_present = present)
+                .or_insert((entry.previous_utxo.is_some(), present));
+        }
+    }
+    net.values()
+        .map(|(existed, present)| match (existed, present) {
+            (false, true) => 1,
+            (true, false) => -1,
+            _ => 0,
+        })
+        .sum()
+}
+
+pub(crate) fn snapshot_batch_coin_delta(
+    disconnect_tip_first: &[&BlockUndoLog],
+    connect_low_to_high: &[&BlockUndoLog],
+) -> i64 {
+    let mut delta = 0i64;
+    for undo in disconnect_tip_first {
+        delta -= snapshot_connect_coin_delta(&[undo]);
+    }
+    delta += snapshot_connect_coin_delta(connect_low_to_high);
+    delta
+}
+
+pub(crate) fn record_snapshot_coin_delta(
+    storage: &Storage,
+    delta: i64,
+    through_height: Option<u64>,
+) -> Result<()> {
+    storage
+        .chain()
+        .add_engine_export_utxo_count(delta, through_height)
+}
+
+/// Heights whose connects rewrote the snapshot after the export count was stored.
+///
+/// The baseline is the count's covered height when that field exists, and the
+/// slot height for a checkpoint written before it did. A gap wider than 64
+/// blocks is not the one-block label move this repairs.
+pub(crate) fn unrecorded_snapshot_heights(
+    slot_height: u64,
+    export_height: u64,
+) -> Option<std::ops::RangeInclusive<u64>> {
+    if slot_height == 0 || export_height <= slot_height {
+        return None;
+    }
+    let gap = export_height - slot_height;
+    if gap > 64 {
+        return None;
+    }
+    Some((slot_height + 1)..=export_height)
+}
+
+fn export_count_baseline(storage: &Storage) -> u64 {
+    let covered = storage
+        .chain()
+        .get_engine_export_count_height()
+        .unwrap_or(0);
+    if covered > 0 {
+        return covered;
+    }
+    let slot = storage.chain().get_engine_ckpt_slot().unwrap_or(0);
+    storage
+        .chain()
+        .get_engine_ckpt_slot_height(slot)
+        .unwrap_or(0)
+}
+
+/// `None` when the gap is absent or an undo is missing. `Some(0)` is a real
+/// block that created as many coins as it spent.
+pub(crate) fn unrecorded_connect_net(storage: &Storage, export_height: u64) -> Result<Option<i64>> {
+    #[cfg(not(feature = "production"))]
+    {
+        let _ = (storage, export_height);
+        return Ok(None);
+    }
+    #[cfg(feature = "production")]
+    {
+        let Some(heights) =
+            unrecorded_snapshot_heights(export_count_baseline(storage), export_height)
+        else {
+            return Ok(None);
+        };
+        let mut net = 0i64;
+        for height in heights {
+            let Some(hash) = crate::node::reliability_decisions::connect_gap_read(
+                storage.blocks().get_hash_by_height(height),
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(undo) = crate::node::reliability_decisions::connect_gap_read(
+                storage.blocks().get_undo_log(&hash),
+            )?
+            else {
+                return Ok(None);
+            };
+            net += snapshot_connect_coin_delta(&[&undo]);
+        }
+        Ok(Some(net))
+    }
+}
+
+pub(crate) fn export_count_including_unrecorded_connects(
+    storage: &Storage,
+    export_height: u64,
+    stored_count: u64,
+) -> Result<u64> {
+    Ok(match unrecorded_connect_net(storage, export_height)? {
+        Some(net) => (stored_count as i64).saturating_add(net).max(0) as u64,
+        None => stored_count,
+    })
+}
+
+fn include_unrecorded_connects(storage: &Storage, height: u64) -> Result<()> {
+    let Some(net) = unrecorded_connect_net(storage, height)? else {
+        return Ok(());
+    };
+    record_snapshot_coin_delta(storage, net, Some(height))
+}
+
+fn align_snapshot_slot_height(storage: &Storage, height: u64) -> Result<()> {
+    let slot = storage.chain().get_engine_ckpt_slot().unwrap_or(0);
+    let covered = storage
+        .chain()
+        .get_engine_export_count_height()
+        .unwrap_or(0);
+    // A journal finish must not move the slot past blocks the count does not
+    // include. That would hide the gap from the next seed.
+    let slot_height = if covered > 0 && height > covered {
+        covered
+    } else {
+        height
+    };
+    storage
+        .chain()
+        .set_engine_ckpt_slot_height(slot, slot_height)
 }
 
 /// Finish a snapshot commit whose tip update did not reach disk.
@@ -362,14 +521,17 @@ pub(crate) fn recover_snapshot_commit(storage: &Storage, blockstore: &BlockStore
                 batch.delete(SNAPSHOT_REORG_ROLLBACK_KEY);
                 batch.delete(SNAPSHOT_MUHASH_KEY);
                 batch.commit()?;
-                if let Some(bytes) = prior_muhash {
-                    if bytes.len() == blvm_muhash::MUHASH_RUNNING_STATE_BYTES {
-                        let mut running = [0u8; blvm_muhash::MUHASH_RUNNING_STATE_BYTES];
-                        running.copy_from_slice(&bytes);
-                        storage
-                            .chain()
-                            .persist_ibd_utxo_muhash_running_only(&running)?;
-                    }
+                if let Some(count) = storage.chain().take_export_count_before_reorg()? {
+                    storage.chain().force_set_engine_export_utxo_count(count)?;
+                }
+                if let Some(bytes) = prior_muhash
+                    && bytes.len() == blvm_muhash::MUHASH_RUNNING_STATE_BYTES
+                {
+                    let mut running = [0u8; blvm_muhash::MUHASH_RUNNING_STATE_BYTES];
+                    running.copy_from_slice(&bytes);
+                    storage
+                        .chain()
+                        .persist_ibd_utxo_muhash_running_only(&running)?;
                 }
             } else {
                 tree.remove(SNAPSHOT_REORG_ROLLBACK_KEY)?;
@@ -408,6 +570,8 @@ pub(crate) fn recover_snapshot_commit(storage: &Storage, blockstore: &BlockStore
         refresh_active_height_index(storage, blockstore, &hash)?;
         info!("[REORG] finished committed snapshot journal at height {height}");
     }
+    include_unrecorded_connects(storage, height)?;
+    let _ = storage.chain().clear_export_count_before_reorg();
     rewind_snapshot_height(storage, height)?;
     tree.remove(SNAPSHOT_REORG_JOURNAL_KEY)?;
     Ok(())
@@ -704,6 +868,34 @@ pub fn publish_reorg_events(
     }
 }
 
+/// A running-hash read error is not a missing hash.
+pub(crate) fn running_hash_from_read(
+    read: Result<Option<[u8; blvm_muhash::MUHASH_RUNNING_STATE_BYTES]>>,
+) -> Result<Option<[u8; blvm_muhash::MUHASH_RUNNING_STATE_BYTES]>> {
+    read
+}
+
+/// Finish the steps after a committed snapshot coin batch.
+///
+/// `Ok(false)` means every step succeeded. `Ok(true)` means a step failed and
+/// recovery finished the journal, so the caller continues the connect.
+/// Recovery's own error is `snapshot journal unfinished`.
+pub(crate) fn recover_if_snapshot_step_failed(
+    step: Result<()>,
+    recover: impl FnOnce() -> Result<()>,
+) -> Result<bool> {
+    match step {
+        Ok(()) => Ok(false),
+        Err(step_err) => {
+            recover().map_err(|e| anyhow::anyhow!("snapshot journal unfinished: {e:#}"))?;
+            warn!(
+                "snapshot connect step failed after the coin batch; journal finished: {step_err:#}"
+            );
+            Ok(true)
+        }
+    }
+}
+
 /// Switch to `candidate_tip` when it carries more work than the active tip.
 #[cfg(feature = "production")]
 pub fn try_activate_heavier_fork(
@@ -763,11 +955,7 @@ pub fn try_activate_heavier_fork(
         None
     };
     let mut live_muhash = if live_tree.is_some() && snapshot.is_some() {
-        storage
-            .chain()
-            .get_ibd_utxo_muhash_running()
-            .ok()
-            .flatten()
+        running_hash_from_read(storage.chain().get_ibd_utxo_muhash_running())?
             .map(|bytes| blvm_muhash::MuHash3072::deserialize_running_state(&bytes))
     } else {
         None
@@ -798,7 +986,16 @@ pub fn try_activate_heavier_fork(
                 window,
                 live_muhash.as_mut(),
             ) {
-                Ok(undos) => disconnected_undos.extend(undos),
+                Ok(undos) => {
+                    storage.chain().remember_export_count_before_reorg()?;
+                    let refs: Vec<&BlockUndoLog> = undos.iter().collect();
+                    record_snapshot_coin_delta(
+                        storage,
+                        snapshot_batch_coin_delta(&refs, &[]),
+                        None,
+                    )?;
+                    disconnected_undos.extend(undos);
+                }
                 Err(error) => {
                     restore_disconnected_coins(
                         tree.as_ref(),
@@ -806,6 +1003,13 @@ pub fn try_activate_heavier_fork(
                         &disconnected_undos,
                         live_muhash.as_mut(),
                     )?;
+                    let restored: Vec<&BlockUndoLog> = disconnected_undos.iter().rev().collect();
+                    record_snapshot_coin_delta(
+                        storage,
+                        snapshot_batch_coin_delta(&[], &restored),
+                        None,
+                    )?;
+                    storage.chain().clear_export_count_before_reorg()?;
                     if let Some(mh) = live_muhash.as_ref() {
                         storage
                             .chain()
@@ -957,6 +1161,13 @@ pub fn try_activate_heavier_fork(
                     &disconnected_undos,
                     live_muhash.as_mut(),
                 )?;
+                let restored: Vec<&BlockUndoLog> = disconnected_undos.iter().rev().collect();
+                record_snapshot_coin_delta(
+                    storage,
+                    snapshot_batch_coin_delta(&[], &restored),
+                    None,
+                )?;
+                storage.chain().clear_export_count_before_reorg()?;
                 if let Some(mh) = live_muhash.as_ref() {
                     storage
                         .chain()
@@ -996,6 +1207,12 @@ pub fn try_activate_heavier_fork(
             Some((new_height, new_tip_hash)),
             live_muhash.as_mut(),
         )?;
+        record_snapshot_coin_delta(
+            storage,
+            snapshot_batch_coin_delta(&[], &connect_refs),
+            Some(new_height),
+        )?;
+        storage.chain().clear_export_count_before_reorg()?;
         info!("[REORG] wrote {written} connect rows on the live store");
         if let Some(mh) = live_muhash.as_ref() {
             storage
@@ -1171,6 +1388,8 @@ mod snapshot_delta_tests {
                 },
             ],
         };
+        let before = tree.len().unwrap();
+        let delta = snapshot_batch_coin_delta(&[&disconnect], &[&connect]);
         commit_utxo_snapshot_delta(
             tree.as_ref(),
             codec,
@@ -1180,6 +1399,8 @@ mod snapshot_delta_tests {
             None,
         )
         .unwrap();
+        assert_eq!(tree.len().unwrap() as i64 - before as i64, delta);
+        assert_eq!(delta, -1);
 
         assert!(
             tree.get(SNAPSHOT_REORG_ROLLBACK_KEY).unwrap().is_none(),
@@ -1337,6 +1558,98 @@ mod snapshot_delta_tests {
     }
 
     #[test]
+    fn a_muhash_read_error_is_not_a_missing_hash() {
+        let missing: Result<Option<[u8; blvm_muhash::MUHASH_RUNNING_STATE_BYTES]>> = Ok(None);
+        assert!(running_hash_from_read(missing).unwrap().is_none());
+        let err = running_hash_from_read(Err(anyhow::anyhow!("chain info"))).unwrap_err();
+        assert!(err.to_string().contains("chain info"));
+    }
+
+    #[test]
+    fn a_post_batch_error_finishes_the_journal() {
+        let skipped = recover_if_snapshot_step_failed(Ok(()), || {
+            panic!("recovery ran after a successful step");
+        })
+        .unwrap();
+        assert!(!skipped);
+
+        let wrapped = recover_if_snapshot_step_failed(Err(anyhow::anyhow!("note height")), || {
+            Err(anyhow::anyhow!("no header"))
+        })
+        .unwrap_err();
+        assert!(wrapped.to_string().contains("snapshot journal unfinished"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        storage
+            .chain()
+            .set_ibd_utxo_canonical_tree("ibd_utxos")
+            .unwrap();
+        let tree = storage.open_tree("ibd_utxos").unwrap();
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [5u8; 32],
+            timestamp: 1_700_000_000,
+            bits: 0x1d00ffff,
+            nonce: 7,
+        };
+        let hash = blvm_consensus::block::block_header_hash(&header);
+        storage.blocks().store_header(&hash, &header).unwrap();
+        commit_utxo_snapshot_delta(
+            tree.as_ref(),
+            storage.utxo_value_codec(),
+            &[],
+            &[],
+            Some((0, hash)),
+            None,
+        )
+        .unwrap();
+        let recovered =
+            recover_if_snapshot_step_failed(Err(anyhow::anyhow!("note height")), || {
+                recover_snapshot_commit(&storage, storage.blocks().as_ref())
+            })
+            .unwrap();
+        assert!(recovered);
+        let (tip, height) = storage.chain().get_tip_hash_and_height().unwrap();
+        assert_eq!(tip, hash);
+        assert_eq!(height, 0);
+        assert!(tree.get(SNAPSHOT_REORG_JOURNAL_KEY).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_journal_without_a_header_fails_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        storage
+            .chain()
+            .set_ibd_utxo_canonical_tree("ibd_utxos")
+            .unwrap();
+        let tree = storage.open_tree("ibd_utxos").unwrap();
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [6u8; 32],
+            timestamp: 1_700_000_001,
+            bits: 0x1d00ffff,
+            nonce: 8,
+        };
+        let hash = blvm_consensus::block::block_header_hash(&header);
+        commit_utxo_snapshot_delta(
+            tree.as_ref(),
+            storage.utxo_value_codec(),
+            &[],
+            &[],
+            Some((4, hash)),
+            None,
+        )
+        .unwrap();
+        let err = recover_snapshot_commit(&storage, storage.blocks().as_ref()).unwrap_err();
+        assert!(err.to_string().contains("no header"));
+        assert!(tree.get(SNAPSHOT_REORG_JOURNAL_KEY).unwrap().is_some());
+    }
+
+    #[test]
     fn a_disconnect_without_a_connect_is_restored_on_startup() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::new(dir.path()).unwrap();
@@ -1354,6 +1667,15 @@ mod snapshot_delta_tests {
         let key = outpoint_to_key(&created);
         tree.insert(&key, &encode_utxo_with_codec(codec, &utxo).unwrap())
             .unwrap();
+        storage
+            .chain()
+            .force_set_engine_export_utxo_count(10)
+            .unwrap();
+        storage
+            .chain()
+            .remember_export_count_before_reorg()
+            .unwrap();
+        record_snapshot_coin_delta(&storage, -1, None).unwrap();
         let disconnect = create_undo(created, utxo);
         commit_utxo_snapshot_delta(tree.as_ref(), codec, &[&disconnect], &[], None, None).unwrap();
         assert!(tree.get(&key).unwrap().is_none());
@@ -1365,5 +1687,196 @@ mod snapshot_delta_tests {
         assert_eq!(restored.value, 50);
         assert_eq!(restored.height, 3);
         assert!(tree.get(SNAPSHOT_REORG_ROLLBACK_KEY).unwrap().is_none());
+        assert_eq!(
+            storage.chain().get_engine_export_utxo_count().unwrap(),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn a_connect_undo_net_is_creates_minus_spends() {
+        let created = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        let spent = OutPoint {
+            hash: [2u8; 32],
+            index: 1,
+        };
+        let connect = BlockUndoLog {
+            entries: vec![
+                blvm_consensus::reorganization::UndoEntry {
+                    outpoint: spent,
+                    previous_utxo: Some(Arc::new(coin(10, 2))),
+                    new_utxo: None,
+                },
+                blvm_consensus::reorganization::UndoEntry {
+                    outpoint: created,
+                    previous_utxo: None,
+                    new_utxo: Some(Arc::new(coin(20, 3))),
+                },
+            ],
+        };
+        assert_eq!(snapshot_connect_coin_delta(&[&connect]), 0);
+        assert_eq!(snapshot_batch_coin_delta(&[&connect], &[]), 0);
+        let only_create = create_undo(created, coin(20, 3));
+        let only_spend = spend_undo(spent, coin(10, 2));
+        assert_eq!(snapshot_connect_coin_delta(&[&only_create]), 1);
+        assert_eq!(snapshot_connect_coin_delta(&[&only_spend]), -1);
+        assert_eq!(
+            snapshot_batch_coin_delta(&[&only_create], &[&only_spend]),
+            -2
+        );
+    }
+
+    #[test]
+    fn unrecorded_connects_are_the_short_gap_after_the_slot() {
+        assert_eq!(
+            unrecorded_snapshot_heights(330796, 330797),
+            Some(330797..=330797)
+        );
+        assert_eq!(unrecorded_snapshot_heights(330797, 330797), None);
+        assert_eq!(unrecorded_snapshot_heights(0, 330797), None);
+        assert_eq!(unrecorded_snapshot_heights(100, 165), None);
+    }
+
+    #[test]
+    fn a_snapshot_connect_moves_the_export_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        storage
+            .chain()
+            .force_set_engine_export_utxo_count(100)
+            .unwrap();
+        record_snapshot_coin_delta(
+            &storage,
+            snapshot_connect_coin_delta(&[&create_undo(
+                OutPoint {
+                    hash: [4u8; 32],
+                    index: 0,
+                },
+                coin(1, 1),
+            )]),
+            Some(8),
+        )
+        .unwrap();
+        assert_eq!(
+            storage.chain().get_engine_export_utxo_count().unwrap(),
+            Some(101)
+        );
+        assert_eq!(storage.chain().get_engine_export_count_height().unwrap(), 8);
+        note_snapshot_height(&storage, 8).unwrap();
+        assert_eq!(storage.chain().get_engine_ckpt_slot_height(0).unwrap(), 8);
+    }
+
+    #[cfg(feature = "production")]
+    fn header_at(nonce: u64) -> (Hash, BlockHeader) {
+        let header = BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [5u8; 32],
+            timestamp: 1_700_000_000,
+            bits: 0x1d00ffff,
+            nonce,
+        };
+        let hash = blvm_consensus::block::block_header_hash(&header);
+        (hash, header)
+    }
+
+    #[test]
+    #[cfg(feature = "production")]
+    fn a_one_block_gap_uses_the_undo_until_the_count_covers_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        storage
+            .chain()
+            .force_set_engine_export_utxo_count(10)
+            .unwrap();
+        storage.chain().set_engine_ckpt_slot_height(0, 7).unwrap();
+        let (hash, header) = header_at(8);
+        storage.blocks().store_header(&hash, &header).unwrap();
+        storage.blocks().store_height(8, &hash).unwrap();
+        storage
+            .blocks()
+            .store_undo_log(
+                &hash,
+                &create_undo(
+                    OutPoint {
+                        hash: [4u8; 32],
+                        index: 0,
+                    },
+                    coin(1, 1),
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(
+            export_count_including_unrecorded_connects(&storage, 8, 10).unwrap(),
+            11
+        );
+        storage
+            .chain()
+            .force_set_engine_export_utxo_count_through(11, 8)
+            .unwrap();
+        assert_eq!(
+            export_count_including_unrecorded_connects(&storage, 8, 11).unwrap(),
+            11
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "production")]
+    fn a_journal_crash_adds_the_connect_before_the_slot_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path()).unwrap();
+        storage
+            .chain()
+            .set_ibd_utxo_canonical_tree("ibd_utxos")
+            .unwrap();
+        storage
+            .chain()
+            .force_set_engine_export_utxo_count(10)
+            .unwrap();
+        storage.chain().set_engine_ckpt_slot_height(0, 7).unwrap();
+        let tree = storage.open_tree("ibd_utxos").unwrap();
+        let (hash, header) = header_at(11);
+        storage.blocks().store_header(&hash, &header).unwrap();
+        storage.blocks().store_height(8, &hash).unwrap();
+        storage
+            .blocks()
+            .store_undo_log(
+                &hash,
+                &create_undo(
+                    OutPoint {
+                        hash: [6u8; 32],
+                        index: 0,
+                    },
+                    coin(1, 8),
+                ),
+            )
+            .unwrap();
+        commit_utxo_snapshot_delta(
+            tree.as_ref(),
+            storage.utxo_value_codec(),
+            &[],
+            &[],
+            Some((8, hash)),
+            None,
+        )
+        .unwrap();
+        storage
+            .chain()
+            .store_chainwork(&header.prev_block_hash, blvm_consensus::pow::U256::zero())
+            .unwrap();
+
+        recover_snapshot_commit(&storage, storage.blocks().as_ref()).unwrap();
+
+        assert_eq!(
+            storage.chain().get_engine_export_utxo_count().unwrap(),
+            Some(11)
+        );
+        assert_eq!(storage.chain().get_engine_export_count_height().unwrap(), 8);
+        assert_eq!(storage.chain().get_engine_ckpt_slot_height(0).unwrap(), 8);
+        assert_eq!(storage.chain().get_engine_export_height().unwrap(), Some(8));
     }
 }

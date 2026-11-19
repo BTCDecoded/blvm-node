@@ -26,6 +26,7 @@ fn manifest_with_threshold(threshold: &str) -> ModuleManifest {
         min_node_version: None,
         services: Vec::new(),
         fee_estimators: Vec::new(),
+        ipc_protocol: 0,
         signatures: Some(SignatureSection {
             threshold: Some(threshold.into()),
             maintainers: vec![MaintainerSignature {

@@ -475,18 +475,18 @@ pub(crate) async fn start_iroh_listener(
                             .await
                             .insert(placeholder_socket, iroh_addr_clone.clone());
 
-                        if let TransportAddr::Iroh(ref node_id_bytes) = iroh_addr_clone {
-                            if node_id_bytes.len() == 32 {
-                                use iroh::PublicKey;
-                                let mut key_array = [0u8; 32];
-                                key_array.copy_from_slice(node_id_bytes);
-                                if let Ok(public_key) = PublicKey::from_bytes(&key_array) {
-                                    let address_db_clone = address_database_clone.clone();
-                                    tokio::spawn(async move {
-                                        let mut db = address_db_clone.write().await;
-                                        db.add_iroh_address(public_key, 0);
-                                    });
-                                }
+                        if let TransportAddr::Iroh(ref node_id_bytes) = iroh_addr_clone
+                            && node_id_bytes.len() == 32
+                        {
+                            use iroh::PublicKey;
+                            let mut key_array = [0u8; 32];
+                            key_array.copy_from_slice(node_id_bytes);
+                            if let Ok(public_key) = PublicKey::from_bytes(&key_array) {
+                                let address_db_clone = address_database_clone.clone();
+                                tokio::spawn(async move {
+                                    let mut db = address_db_clone.write().await;
+                                    db.add_iroh_address(public_key, 0);
+                                });
                             }
                         }
 

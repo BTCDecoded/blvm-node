@@ -814,11 +814,10 @@ impl Actor {
                     }
                 }
                 event = chain_rx.recv() => {
-                    if let Some(event) = event {
-                        if self.config.enabled {
+                    if let Some(event) = event
+                        && self.config.enabled {
                             self.on_chain(event);
                         }
-                    }
                 }
             }
         }
@@ -980,10 +979,10 @@ impl Actor {
                 "key required for this create mode".into(),
             ));
         }
-        if let Some(key) = spec.key.clone() {
-            if let Some(existing) = self.keys.get(&(owner.clone(), key)).copied() {
-                return self.create_existing(existing, spec, mode);
-            }
+        if let Some(key) = spec.key.clone()
+            && let Some(existing) = self.keys.get(&(owner.clone(), key)).copied()
+        {
+            return self.create_existing(existing, spec, mode);
         }
         self.enforce_quota(&owner, &spec)?;
         let info = self.insert_new(owner, spec, false);
@@ -1327,10 +1326,10 @@ impl Actor {
     }
 
     fn detach(&mut self, name: &str, module_id: Option<&str>) {
-        if let Some(id) = module_id {
-            if self.attached.get(name).map(String::as_str) != Some(id) {
-                return;
-            }
+        if let Some(id) = module_id
+            && self.attached.get(name).map(String::as_str) != Some(id)
+        {
+            return;
         }
         if let Some(current) = self.attached.remove(name) {
             self.by_module_id.remove(&current);
@@ -1475,12 +1474,11 @@ impl Actor {
             }
             let is_last = once || hits_max;
             self.emit(id, planned, planned, 0, 0, is_last, 1, true);
-            if is_last {
-                if let Some(timer) = self.timers.get_mut(&id) {
-                    if timer.in_flight == 0 {
-                        timer.state = TimerState::Done;
-                    }
-                }
+            if is_last
+                && let Some(timer) = self.timers.get_mut(&id)
+                && timer.in_flight == 0
+            {
+                timer.state = TimerState::Done;
             }
             return;
         }
@@ -1738,7 +1736,7 @@ impl Actor {
     fn next_unit(&mut self) -> f64 {
         self.rng_draws = self.rng_draws.saturating_add(1);
         if !self.rng_fixed
-            && (self.rng_draws % (1 << 20) == 0
+            && (self.rng_draws.is_multiple_of(1 << 20)
                 || self.rng_reseed.elapsed() >= Duration::from_secs(3600))
         {
             self.rng = StdRng::from_entropy();
@@ -1801,10 +1799,9 @@ impl Actor {
         if let (Some(until), Some(next)) = (
             until,
             self.planned(id, next_k.saturating_add(u64::from(additional))),
-        ) {
-            if next > until {
-                return true;
-            }
+        ) && next > until
+        {
+            return true;
         }
         false
     }
@@ -1842,10 +1839,10 @@ impl Actor {
             .and_then(|t| t.until)
             .is_some_and(|until| when > until)
         {
-            if let Some(timer) = self.timers.get_mut(&id) {
-                if timer.state == TimerState::Active {
-                    timer.state = TimerState::Expired;
-                }
+            if let Some(timer) = self.timers.get_mut(&id)
+                && timer.state == TimerState::Active
+            {
+                timer.state = TimerState::Expired;
             }
             return;
         }
@@ -2346,10 +2343,10 @@ impl Actor {
         if let Some(count) = self.counts.get_mut(&timer.owner) {
             *count = count.saturating_sub(1);
         }
-        if matches!(timer.spec.persist, Persist::Durable { .. }) {
-            if let Some(count) = self.durable_counts.get_mut(&timer.owner) {
-                *count = count.saturating_sub(1);
-            }
+        if matches!(timer.spec.persist, Persist::Durable { .. })
+            && let Some(count) = self.durable_counts.get_mut(&timer.owner)
+        {
+            *count = count.saturating_sub(1);
         }
         if let Some(in_flight) = self.inflight.get_mut(&timer.owner) {
             *in_flight = in_flight.saturating_sub(timer.in_flight);
@@ -2487,10 +2484,10 @@ impl Actor {
             self.stamp_unix(id, anchor_ms, wall_now);
             let is_last = true;
             self.emit(id, now, now, 0, 0, is_last, 1, true);
-            if let Some(timer) = self.timers.get_mut(&id) {
-                if timer.in_flight == 0 {
-                    timer.state = TimerState::Done;
-                }
+            if let Some(timer) = self.timers.get_mut(&id)
+                && timer.in_flight == 0
+            {
+                timer.state = TimerState::Done;
             }
             return;
         }
@@ -2687,10 +2684,10 @@ impl Actor {
             .get(&id)
             .map(|timer| timer.spec.missed)
             .unwrap_or(Missed::Skip);
-        if let Some(timer) = self.timers.get_mut(&id) {
-            if let Some(sched) = timer.chain.as_mut() {
-                sched.next_height = next_height;
-            }
+        if let Some(timer) = self.timers.get_mut(&id)
+            && let Some(sched) = timer.chain.as_mut()
+        {
+            sched.next_height = next_height;
         }
         if crossings > 1 && matches!(policy, Missed::Skip) {
             if let Some(timer) = self.timers.get_mut(&id) {
@@ -2735,12 +2732,11 @@ impl Actor {
         }
         let now = Instant::now();
         self.emit(id, now, now, missed, 0, is_last, 1, true);
-        if is_last {
-            if let Some(timer) = self.timers.get_mut(&id) {
-                if timer.in_flight == 0 {
-                    timer.state = TimerState::Done;
-                }
-            }
+        if is_last
+            && let Some(timer) = self.timers.get_mut(&id)
+            && timer.in_flight == 0
+        {
+            timer.state = TimerState::Done;
         }
     }
 
@@ -2802,11 +2798,11 @@ impl Actor {
             timer.last_persist
         };
         let now = Instant::now();
-        if let Some(last) = last {
-            if now.saturating_duration_since(last) < Duration::from_secs(1) {
-                self.schedule_persist(id, last + Duration::from_secs(1));
-                return;
-            }
+        if let Some(last) = last
+            && now.saturating_duration_since(last) < Duration::from_secs(1)
+        {
+            self.schedule_persist(id, last + Duration::from_secs(1));
+            return;
         }
         self.write_record(id);
     }
@@ -3118,10 +3114,10 @@ impl Actor {
         } else {
             None
         };
-        if let Some(height) = saved.next_due_height {
-            if let Some(sched) = chain.as_mut() {
-                sched.next_height = height;
-            }
+        if let Some(height) = saved.next_due_height
+            && let Some(sched) = chain.as_mut()
+        {
+            sched.next_height = height;
         }
         self.keys.insert((owner.clone(), key), id);
         *self.counts.entry(owner.clone()).or_insert(0) += 1;

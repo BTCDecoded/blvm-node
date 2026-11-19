@@ -523,6 +523,25 @@ fn session_fill_utxo_set_non_prod(session: &SpendSession, map: &mut blvm_protoco
     }
 }
 
+/// Copy only coinbase prevouts into `out` (F75). The lookup arm does not fill
+/// the scratch set. BIP30 still decrements a spent coinbase when that prevout
+/// is present. Non-coinbase spends stay on the lookup path, and new coinbase
+/// outputs still come from the overlay additions.
+pub fn session_fill_coinbase_utxos(session: &SpendSession, out: &mut blvm_protocol::UtxoSet) {
+    out.clear();
+    for (key, idx) in &session.key_to_idx {
+        let utxo = &session.details[*idx].utxo;
+        if utxo.is_coinbase {
+            out.insert(output_key_to_outpoint(key), Arc::clone(utxo));
+        }
+    }
+    for (key, detail) in &session.local_spends {
+        if detail.utxo.is_coinbase {
+            out.insert(output_key_to_outpoint(key), Arc::clone(&detail.utxo));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::database::UtxoDatabase;
@@ -674,5 +693,51 @@ mod tests {
             session_lookup_matches_fill(&session),
             "SpendSessionLookup must match fill (N28 gate)"
         );
+    }
+
+    #[test]
+    fn coinbase_fill_keeps_only_coinbase_prevouts() {
+        use super::super::types::{OutputHeader, output_detail_from_parts};
+        let coinbase = output_detail_from_parts(
+            OutputHeader {
+                height: 1,
+                flags: 1,
+                amount: 50,
+            },
+            SharedByteString::from(vec![1]),
+        );
+        let other = output_detail_from_parts(
+            OutputHeader {
+                height: 1,
+                flags: 0,
+                amount: 10,
+            },
+            SharedByteString::from(vec![2]),
+        );
+        let coinbase_key = [1u8; 36];
+        let other_key = [2u8; 36];
+        let mut key_to_idx = FxHashMap::default();
+        key_to_idx.insert(coinbase_key, 0);
+        key_to_idx.insert(other_key, 1);
+        let session = SpendSession {
+            details: vec![coinbase, other],
+            key_to_idx,
+            local_spends: FxHashMap::default(),
+            query_ms: 0,
+            ages_ms: 0,
+            disk_ms: 0,
+            disk_preads: 0,
+            disk_pread_kb: 0,
+            disk_max_pread_kb: 0,
+            disk_cands: 0,
+            disk_segs: 0,
+            fetch_ms: 0,
+            map_ms: 0,
+        };
+        let mut set = blvm_protocol::UtxoSet::default();
+        session_fill_coinbase_utxos(&session, &mut set);
+        assert_eq!(set.len(), 1);
+        let op = output_key_to_outpoint(&coinbase_key);
+        assert!(set.get(&op).unwrap().is_coinbase);
     }
 }

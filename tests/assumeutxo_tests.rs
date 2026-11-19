@@ -82,10 +82,10 @@ fn test_background_validated_marker() {
 #[test]
 fn test_node_config_assumeutxo_blockhash() {
     let hash = [0xab; 32];
-    let config = NodeConfig {
-        assumeutxo_blockhash: Some(hash),
-        ..Default::default()
-    };
+    // Integration tests are another crate. A struct update cannot copy
+    // `assume_valid_seed_rejected`, which is not a config key.
+    let mut config = NodeConfig::default();
+    config.assumeutxo_blockhash = Some(hash);
     assert_eq!(config.assumeutxo_blockhash, Some(hash));
 }
 

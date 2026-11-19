@@ -278,6 +278,14 @@ impl FeeEstimator {
             .counts
     }
 
+    /// Sequence published with the last connected block.
+    ///
+    /// `hook_counts().blocks` is not visible until this value has moved, so a
+    /// reader cannot observe a new block count against the previous table.
+    pub(crate) fn published_block_seq(&self) -> u64 {
+        self.block_seq.load(Ordering::Acquire)
+    }
+
     pub(crate) fn hook_events(&self) -> Vec<HookEvent> {
         self.inner
             .lock()
@@ -301,13 +309,13 @@ impl FeeEstimator {
                 from_package: admission.from_package,
             });
         }
-        if history_eligible {
-            if let Some(rate) = history::fee_sat_per_kvb(admission.fee_sats, admission.vsize) {
-                let best_seen = inner.best_seen_height;
-                inner
-                    .history
-                    .admit(admission.txid, admission.admit_height, rate, best_seen);
-            }
+        if history_eligible
+            && let Some(rate) = history::fee_sat_per_kvb(admission.fee_sats, admission.vsize)
+        {
+            let best_seen = inner.best_seen_height;
+            inner
+                .history
+                .admit(admission.txid, admission.admit_height, rate, best_seen);
         }
         inner.tracked.insert(
             admission.txid,
@@ -325,15 +333,15 @@ impl FeeEstimator {
     pub fn on_tx_removed(&self, txid: &Hash) {
         let mut inner = self.inner.lock().unwrap_or_else(|err| err.into_inner());
         inner.counts.removed = inner.counts.removed.saturating_add(1);
-        if let Some(tx) = inner.tracked.remove(txid) {
-            if tx.history_eligible {
-                let best_seen = inner.best_seen_height;
-                inner.history.remove(txid, best_seen);
-                if let Some(blocks_ago) = blocks_since_admission(best_seen, tx.admit_height) {
-                    if blocks_ago >= history::SHORT_SCALE {
-                        inner.counts.failed = inner.counts.failed.saturating_add(1);
-                    }
-                }
+        if let Some(tx) = inner.tracked.remove(txid)
+            && tx.history_eligible
+        {
+            let best_seen = inner.best_seen_height;
+            inner.history.remove(txid, best_seen);
+            if let Some(blocks_ago) = blocks_since_admission(best_seen, tx.admit_height)
+                && blocks_ago >= history::SHORT_SCALE
+            {
+                inner.counts.failed = inner.counts.failed.saturating_add(1);
             }
         }
         if inner.trace {
@@ -415,9 +423,12 @@ impl FeeEstimator {
             inner.events.push(HookEvent::Block { height: obs.height });
         }
         let accepted_blocks = inner.counts.blocks;
-        drop(inner);
+        // Move the published sequence before releasing `inner`. `hook_counts`
+        // takes that lock, so a reader cannot see the new block count while
+        // `table()` still considers the previous sequence current.
         self.block_seq.fetch_add(1, Ordering::AcqRel);
         self.generation.fetch_add(1, Ordering::AcqRel);
+        drop(inner);
         if let (Some(path), Some(line)) = (eval_path, eval_line) {
             self.schedule_eval_append(path, line);
         }
@@ -556,7 +567,7 @@ impl FeeEstimator {
             .unwrap_or_else(|err| err.into_inner())
             .clone();
         let interval = u64::from(cfg.persist_interval_blocks);
-        if interval == 0 || accepted_blocks % interval != 0 {
+        if interval == 0 || !accepted_blocks.is_multiple_of(interval) {
             return;
         }
         let Ok(handle) = tokio::runtime::Handle::try_current() else {

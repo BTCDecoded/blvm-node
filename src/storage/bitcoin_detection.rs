@@ -89,7 +89,7 @@ impl BitcoinCoreDetection {
         let mut paths = Vec::new();
 
         // Standard home directory paths
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::utils::home_dir() {
             let base = home.join(".bitcoin");
             if network == CoreDataNetwork::Mainnet {
                 paths.push(Some(base.clone()));
@@ -196,13 +196,13 @@ impl BitcoinCoreDetection {
         }
 
         // Check parent directory for additional context
-        if let Some(parent) = data_dir.parent() {
-            if let Some(parent_name) = parent.file_name().and_then(|n| n.to_str()) {
-                // If parent is .bitcoin, the given path is a network subdir
-                if parent_name == ".bitcoin" {
-                    // Already checked known names above; if we're here, it's unrecognized
-                    return None;
-                }
+        if let Some(parent) = data_dir.parent()
+            && let Some(parent_name) = parent.file_name().and_then(|n| n.to_str())
+        {
+            // If parent is .bitcoin, the given path is a network subdir
+            if parent_name == ".bitcoin" {
+                // Already checked known names above; if we're here, it's unrecognized
+                return None;
             }
         }
 
@@ -269,10 +269,10 @@ impl BitcoinCoreDetection {
         marker_network: Option<&str>,
         node_network: Option<CoreDataNetwork>,
     ) -> Result<CoreDataNetwork> {
-        if let Some(dir_name) = core_dir.file_name().and_then(|n| n.to_str()) {
-            if Self::is_custom_signet_dir_name(dir_name) {
-                return Err(Self::custom_signet_error(dir_name));
-            }
+        if let Some(dir_name) = core_dir.file_name().and_then(|n| n.to_str())
+            && Self::is_custom_signet_dir_name(dir_name)
+        {
+            return Err(Self::custom_signet_error(dir_name));
         }
 
         let marker = match marker_network.map(str::trim).filter(|s| !s.is_empty()) {

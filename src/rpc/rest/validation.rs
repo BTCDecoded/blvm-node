@@ -24,7 +24,7 @@ pub fn validate_hex_string(hex: &str, max_length: Option<usize>) -> Result<Strin
     }
 
     // Validate hex format (even length, valid hex chars)
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err("Hex string must be even-length".to_string());
     }
 

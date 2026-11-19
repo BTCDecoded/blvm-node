@@ -246,7 +246,7 @@ Returns pruning information.
 }
 ```
 
-With a pruning manager, the object also includes `auto_prune_interval`, `min_blocks_to_keep`, `last_prune_height`, `total_blocks_pruned`, `total_blocks_kept`, `total_headers_kept`, and `total_storage_freed_bytes`.
+With a pruning manager, the object also includes `auto_prune_interval` (144), `keep_blocks`, `last_prune_height`, `total_blocks_pruned`, `total_blocks_kept`, `total_headers_kept`, and `total_storage_freed_bytes`.
 
 ---
 

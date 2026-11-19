@@ -12,13 +12,11 @@ data_dir = "~/.local/share/blvm-testnet"
 database_backend = "auto"
 
 [storage.pruning]
-mode = { type = "normal", keep_from_height = 0, min_recent_blocks = 144 }
-incremental_prune_during_ibd = true
-prune_window_size = 144
-min_blocks_for_incremental_prune = 288
+# Normal drops block bodies behind keep_blocks. incremental_prune_during_ibd
+# skips writes for normal and aggressive. Deleting during IBD requires aggressive.
 auto_prune = true
-auto_prune_interval = 144
-min_blocks_to_keep = 144
+mode = "normal"
+keep_blocks = 144
 
 [logging]
 level = "info"

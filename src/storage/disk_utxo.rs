@@ -98,23 +98,23 @@ pub(crate) fn load_keys_from_disk(
     // heed3 zero-copy fast path: read mmap'd LMDB pages directly — no Vec<u8> per value.
     // Guard: only valid when all rows were written with the rkyv codec.
     #[cfg(feature = "heed3")]
-    if codec == crate::storage::utxo_value_codec::ValueCodec::Rkyv {
-        if let Some(heed3_tree) = disk.as_heed3_tree() {
-            let rtxn = heed3_tree.env().read_txn()?;
-            let slices = heed3_tree.get_many_heed3(&key_refs, &rtxn)?;
-            let mut result = FxHashMap::with_capacity_and_hasher(keys.len(), Default::default());
-            for (key, opt_bytes) in keys.iter().zip(slices) {
-                if let Some(bytes) = opt_bytes {
-                    let archived = crate::storage::rkyv_codec::access_utxo(bytes)
-                        .map_err(|err| anyhow::anyhow!("damaged UTXO row: {err}"))?;
-                    result.insert(
-                        *key,
-                        crate::storage::rkyv_codec::utxo_from_archived(archived),
-                    );
-                }
+    if codec == crate::storage::utxo_value_codec::ValueCodec::Rkyv
+        && let Some(heed3_tree) = disk.as_heed3_tree()
+    {
+        let rtxn = heed3_tree.env().read_txn()?;
+        let slices = heed3_tree.get_many_heed3(&key_refs, &rtxn)?;
+        let mut result = FxHashMap::with_capacity_and_hasher(keys.len(), Default::default());
+        for (key, opt_bytes) in keys.iter().zip(slices) {
+            if let Some(bytes) = opt_bytes {
+                let archived = crate::storage::rkyv_codec::access_utxo(bytes)
+                    .map_err(|err| anyhow::anyhow!("damaged UTXO row: {err}"))?;
+                result.insert(
+                    *key,
+                    crate::storage::rkyv_codec::utxo_from_archived(archived),
+                );
             }
-            return Ok((result, keys));
         }
+        return Ok((result, keys));
     }
 
     let values = disk.get_many_no_cache(&key_refs)?;

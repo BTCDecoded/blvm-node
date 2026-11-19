@@ -39,6 +39,12 @@ use libmimalloc_sys;
 /// 50 k × 56 B ≈ 2.8 MB per batch; channel holds 2 batches ≈ 5.6 MB total.
 const SEED_BATCH: usize = 50_000;
 
+/// A failed heed3 scan may fall back to `tree.iter` only before the first batch.
+/// A later fallback would import those keys a second time.
+fn heed3_scan_falls_back(scan_failed: bool, imported: usize) -> bool {
+    scan_failed && imported == 0
+}
+
 fn push_seed_batch(
     db: &UtxoDatabase,
     checkpoint_height: i32,
@@ -52,6 +58,14 @@ fn push_seed_batch(
     }
     entry_buf.clear();
     db.import_utxos(batch_items, checkpoint_height, entry_buf)?;
+    // Same-height seed entries never reach the background flusher. Flush each
+    // batch so the script tail stays one batch, then drop anything still
+    // unflushed if this seed is refused or the process is stopping.
+    db.flush_table_tail()?;
+    if crate::node::parallel_ibd::IBD_SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Acquire)
+    {
+        anyhow::bail!("IBD shutdown requested during seed");
+    }
     *total += batch_items.len();
     batch_items.clear();
     for kv in entry_buf.drain(..) {
@@ -77,6 +91,55 @@ fn seed_entry_from_utxo(
 
 /// Refuse truncated / poisoned snapshots before `finalize_seed`.
 /// dest-ak 8.2M@516k vs last_accepted 16.8M must not re-seed.
+fn abandon_refused_seed(db: &UtxoDatabase) {
+    db.discard_unflushed_tail();
+    release_seed_allocator();
+}
+
+/// Drops when `seed_from_ibd_utxos` returns. Failure frees the script tail the
+/// health check used to leave resident. Success runs after `flush_table_tail`,
+/// so the drop purges the pages that flush just released.
+struct RefusedSeedGuard<'a> {
+    db: &'a UtxoDatabase,
+}
+
+impl Drop for RefusedSeedGuard<'_> {
+    fn drop(&mut self) {
+        abandon_refused_seed(self.db);
+    }
+}
+
+fn release_seed_allocator() {
+    #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
+    unsafe {
+        libmimalloc_sys::mi_collect(true);
+    }
+    #[cfg(all(feature = "jemalloc", not(target_os = "windows"), not(test)))]
+    unsafe {
+        use std::os::raw::c_void;
+        unsafe extern "C" {
+            fn _rjem_mallctl(
+                name: *const std::ffi::c_char,
+                oldp: *mut c_void,
+                oldlenp: *mut usize,
+                newp: *mut c_void,
+                newlen: usize,
+            ) -> i32;
+        }
+        _rjem_mallctl(
+            c"arena.4294967295.purge".as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        );
+    }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 fn seed_count_must_be_healthy(
     checkpoint_height: i32,
     total: usize,
@@ -88,24 +151,25 @@ fn seed_count_must_be_healthy(
             "checkpoint tree empty at height {checkpoint_height} — export incomplete or wrong slot"
         );
     }
-    if let Some(expected) = expected_count {
-        if expected > 0 && total as u64 != expected {
-            let delta = (total as u64).abs_diff(expected);
-            // Live 2026-07-16: tree 98581399 vs meta 98581401 (Δ=2) after
-            // Emergency checkpoint race — exact match refused seed forever.
-            const MAX_EXPORT_META_SLACK: u64 = 16;
-            if delta > MAX_EXPORT_META_SLACK {
-                anyhow::bail!(
-                    "IBD engine seed: imported {total} UTXOs but chain_info expected {expected} \
+    if let Some(expected) = expected_count
+        && expected > 0
+        && total as u64 != expected
+    {
+        let delta = (total as u64).abs_diff(expected);
+        // Live 2026-07-16: tree 98581399 vs meta 98581401 (Δ=2) after
+        // Emergency checkpoint race — exact match refused seed forever.
+        const MAX_EXPORT_META_SLACK: u64 = 16;
+        if delta > MAX_EXPORT_META_SLACK {
+            anyhow::bail!(
+                "IBD engine seed: imported {total} UTXOs but chain_info expected {expected} \
                      at height {checkpoint_height} (Δ={delta}) — checkpoint incomplete/poisoned (refusing seed)"
-                );
-            }
-            warn!(
-                "IBD engine seed: imported {} UTXOs vs chain_info expected {} at h={} \
-                 (Δ={}) — accepting within slack {}",
-                total, expected, checkpoint_height, delta, MAX_EXPORT_META_SLACK
             );
         }
+        warn!(
+            "IBD engine seed: imported {} UTXOs vs chain_info expected {} at h={} \
+                 (Δ={}) — accepting within slack {}",
+            total, expected, checkpoint_height, delta, MAX_EXPORT_META_SLACK
+        );
     }
     if !crate::storage::ibd_autorepair::checkpoint_utxo_count_monotonic(
         checkpoint_height as u64,
@@ -118,6 +182,38 @@ fn seed_count_must_be_healthy(
         );
     }
     Ok(())
+}
+
+/// Joins the seed writer when `seed_from_ibd_utxos` returns early.
+/// Dropping a `JoinHandle` detaches the thread (F60). The sender is closed
+/// first so `write_from_iter` sees end-of-iterator and the join cannot block.
+/// `finish` takes the handle so the success path does not join twice.
+struct SeedWriterJoin<T> {
+    tx: Option<std::sync::mpsc::SyncSender<T>>,
+    handle: Option<std::thread::JoinHandle<anyhow::Result<DiskSegment>>>,
+}
+
+impl<T> SeedWriterJoin<T> {
+    fn sender(&self) -> &std::sync::mpsc::SyncSender<T> {
+        self.tx.as_ref().expect("seed writer sender")
+    }
+
+    fn finish(&mut self) -> anyhow::Result<DiskSegment> {
+        self.tx.take();
+        let handle = self.handle.take().expect("seed writer already joined");
+        handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("ibd-seed-writer thread panicked"))?
+    }
+}
+
+impl<T> Drop for SeedWriterJoin<T> {
+    fn drop(&mut self) {
+        self.tx.take();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 /// Rebuild engine state from the durable checkpoint tree at `checkpoint_height`.
@@ -134,6 +230,7 @@ pub fn seed_from_ibd_utxos(
     last_accepted: u64,
     codec: ValueCodec,
 ) -> Result<usize> {
+    let _release_tail = RefusedSeedGuard { db };
     use std::cell::Cell;
     use std::sync::mpsc;
     use std::thread;
@@ -152,11 +249,15 @@ pub fn seed_from_ibd_utxos(
 
     // Writer thread: receives OutputKVs from the channel and writes a single disk segment.
     // RocksDB iterates keys in byte order; all entries are same-height Adds — already sorted.
-    let writer = thread::Builder::new()
+    let handle = thread::Builder::new()
         .name("ibd-seed-writer".to_string())
         .spawn(move || -> anyhow::Result<DiskSegment> {
             DiskSegment::write_from_iter(&seg_dir, seg_idx, capacity, rx.into_iter())
         })?;
+    let mut writer = SeedWriterJoin {
+        tx: Some(tx),
+        handle: Some(handle),
+    };
 
     // Producer: iterate tree → import to flat table → send OutputKVs to writer.
     let mut total = 0usize;
@@ -167,116 +268,114 @@ pub fn seed_from_ibd_utxos(
 
     #[cfg(feature = "heed3")]
     {
-        if codec == ValueCodec::Rkyv {
-            if let Some(h3) = tree.as_heed3_tree() {
-                let scan = h3.scan_heed3(|key_bytes, val_bytes| {
-                    if key_bytes.len() != 40 {
-                        return Ok(());
-                    }
-                    let mut op_key = [0u8; 40];
-                    op_key.copy_from_slice(key_bytes);
-                    let op = key_to_outpoint(&op_key);
-                    let out_key = outpoint_to_output_key(&op);
-                    let archived = access_utxo(val_bytes)?;
-                    let header = OutputHeader {
-                        height: u64::from(archived.height).min(i32::MAX as u64) as i32,
-                        flags: if archived.is_coinbase { 1 } else { 0 },
-                        amount: archived.value.into(),
-                    };
-                    batch_items.push((out_key, header, archived.script_pubkey.to_vec()));
-                    if batch_items.len() >= SEED_BATCH
-                        && push_seed_batch(
-                            db,
-                            checkpoint_height,
-                            &mut batch_items,
-                            &mut entry_buf,
-                            &tx,
-                            &mut total,
-                        )?
-                    {
-                        channel_closed.set(true);
-                        return Ok(());
-                    }
-                    Ok(())
-                });
-                if let Err(e) = scan {
-                    warn!(
-                        "IBD engine seed: heed3 scan failed ({e:#}); falling back to tree.iter()"
-                    );
-                } else if !channel_closed.get() {
-                    if push_seed_batch(
+        if codec == ValueCodec::Rkyv
+            && let Some(h3) = tree.as_heed3_tree()
+        {
+            let scan = h3.scan_heed3(|key_bytes, val_bytes| {
+                if key_bytes.len() != 40 {
+                    return Ok(());
+                }
+                let mut op_key = [0u8; 40];
+                op_key.copy_from_slice(key_bytes);
+                let op = key_to_outpoint(&op_key);
+                let out_key = outpoint_to_output_key(&op);
+                let archived = access_utxo(val_bytes)?;
+                let header = OutputHeader {
+                    height: u64::from(archived.height).min(i32::MAX as u64) as i32,
+                    flags: if archived.is_coinbase { 1 } else { 0 },
+                    amount: archived.value.into(),
+                };
+                batch_items.push((out_key, header, archived.script_pubkey.to_vec()));
+                if batch_items.len() >= SEED_BATCH
+                    && push_seed_batch(
                         db,
                         checkpoint_height,
                         &mut batch_items,
                         &mut entry_buf,
-                        &tx,
+                        writer.sender(),
                         &mut total,
-                    )? {
-                        channel_closed.set(true);
-                    }
-                    if !channel_closed.get() {
-                        drop(tx);
-                        let seg = writer
-                            .join()
-                            .map_err(|_| anyhow::anyhow!("ibd-seed-writer thread panicked"))??;
-                        seed_count_must_be_healthy(
-                            checkpoint_height,
-                            total,
-                            expected_count,
-                            last_accepted,
-                        )?;
-                        db.finalize_seed(seg, checkpoint_height);
-                        db.flush_table_tail()?;
-                        #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
-                        unsafe {
-                            libmimalloc_sys::mi_collect(true);
-                        }
-                        #[cfg(target_os = "linux")]
-                        unsafe {
-                            libc::malloc_trim(0);
-                        }
-                        info!(
-                            "IBD engine: seeded {} UTXOs from checkpoint h={} in {:.1}s \
-                             (heed3 zero-copy scan, peak UTXO buffer ≈ 6 MB)",
-                            total,
-                            checkpoint_height,
-                            t0.elapsed().as_secs_f64()
-                        );
-                        return Ok(total);
-                    }
-                } else {
+                    )?
+                {
+                    channel_closed.set(true);
+                    return Ok(());
+                }
+                Ok(())
+            });
+            if let Err(e) = scan {
+                if !heed3_scan_falls_back(true, total) {
+                    return Err(anyhow::anyhow!(
+                        "IBD engine seed: heed3 scan failed after a partial import: {e:#}"
+                    ));
+                }
+                batch_items.clear();
+                warn!("IBD engine seed: heed3 scan failed ({e:#}); falling back to tree.iter()");
+            } else if !channel_closed.get() {
+                if push_seed_batch(
+                    db,
+                    checkpoint_height,
+                    &mut batch_items,
+                    &mut entry_buf,
+                    writer.sender(),
+                    &mut total,
+                )? {
+                    channel_closed.set(true);
                     send_err = true;
                 }
+                if !channel_closed.get() {
+                    let seg = writer.finish()?;
+                    seed_count_must_be_healthy(
+                        checkpoint_height,
+                        total,
+                        expected_count,
+                        last_accepted,
+                    )?;
+                    db.finalize_seed(seg, checkpoint_height);
+                    db.flush_table_tail()?;
+                    info!(
+                        "IBD engine: seeded {} UTXOs from checkpoint h={} in {:.1}s \
+                             (heed3 zero-copy scan, peak UTXO buffer ≈ 6 MB)",
+                        total,
+                        checkpoint_height,
+                        t0.elapsed().as_secs_f64()
+                    );
+                    return Ok(total);
+                }
+            } else {
+                send_err = true;
             }
         }
     }
 
-    'outer: for kv in tree.iter() {
-        let (key_bytes, val_bytes) = kv?;
-        if key_bytes.len() != 40 {
-            continue;
-        }
-        let mut op_key = [0u8; 40];
-        op_key.copy_from_slice(&key_bytes);
-        // ibd_utxos keys write vout as u64 BE; go via OutPoint to avoid corruption.
-        let op = key_to_outpoint(&op_key);
-        let out_key = outpoint_to_output_key(&op);
+    // A partial heed3 import already committed batches. Scanning the tree
+    // again would import those keys a second time (F3).
+    if total == 0 {
+        'outer: for kv in tree.iter() {
+            let (key_bytes, val_bytes) = kv?;
+            if key_bytes.len() != 40 {
+                continue;
+            }
+            let mut op_key = [0u8; 40];
+            op_key.copy_from_slice(&key_bytes);
+            // ibd_utxos keys write vout as u64 BE; go via OutPoint to avoid corruption.
+            let op = key_to_outpoint(&op_key);
+            let out_key = outpoint_to_output_key(&op);
 
-        let utxo: UTXO = decode_utxo_with_codec(codec, &val_bytes)?;
-        seed_entry_from_utxo(out_key, &utxo, &mut batch_items);
+            let utxo: UTXO = decode_utxo_with_codec(codec, &val_bytes)?;
+            seed_entry_from_utxo(out_key, &utxo, &mut batch_items);
 
-        if batch_items.len() >= SEED_BATCH
-            && push_seed_batch(
-                db,
-                checkpoint_height,
-                &mut batch_items,
-                &mut entry_buf,
-                &tx,
-                &mut total,
-            )?
-        {
-            send_err = true;
-            break 'outer;
+            if batch_items.len() >= SEED_BATCH
+                && push_seed_batch(
+                    db,
+                    checkpoint_height,
+                    &mut batch_items,
+                    &mut entry_buf,
+                    writer.sender(),
+                    &mut total,
+                )?
+            {
+                send_err = true;
+                break 'outer;
+            }
         }
     }
 
@@ -286,7 +385,7 @@ pub fn seed_from_ibd_utxos(
             checkpoint_height,
             &mut batch_items,
             &mut entry_buf,
-            &tx,
+            writer.sender(),
             &mut total,
         )?
     {
@@ -294,10 +393,7 @@ pub fn seed_from_ibd_utxos(
     }
 
     // Close sender → writer thread sees end-of-iterator → finalises segment file.
-    drop(tx);
-    let seg = writer
-        .join()
-        .map_err(|_| anyhow::anyhow!("ibd-seed-writer thread panicked"))??;
+    let seg = writer.finish()?;
 
     if send_err {
         anyhow::bail!("ibd-seed-writer thread exited early; disk segment may be incomplete");
@@ -313,16 +409,6 @@ pub fn seed_from_ibd_utxos(
     // so it never fires. Without this call, ~12 GB of script data stays in anonymous
     // memory until the process exits.
     db.flush_table_tail()?;
-
-    // Explicitly return freed pages to the OS before validation starts.
-    #[cfg(all(not(target_os = "windows"), feature = "mimalloc"))]
-    unsafe {
-        libmimalloc_sys::mi_collect(true);
-    }
-    #[cfg(target_os = "linux")]
-    unsafe {
-        libc::malloc_trim(0);
-    }
 
     info!(
         "IBD engine: seeded {} UTXOs from checkpoint h={} in {:.1}s \
@@ -445,6 +531,7 @@ pub fn bootstrap_ckpt_from_legacy_standalone(
 #[cfg(test)]
 mod tests {
     use super::seed_count_must_be_healthy;
+    use super::{OutputHeader, RefusedSeedGuard, SeedWriterJoin, UtxoDatabase};
 
     #[test]
     fn seed_refuses_dest_ak_drop_vs_last_accepted() {
@@ -461,5 +548,77 @@ mod tests {
         );
         assert!(seed_count_must_be_healthy(340_000, 16_800_000, Some(16_800_000), 0).is_ok());
         assert!(seed_count_must_be_healthy(0, 0, None, 0).is_ok());
+    }
+
+    #[test]
+    fn a_flushed_batch_and_the_refusal_guard_leave_no_script_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("utxo_table.bin");
+        let db = UtxoDatabase::open(&path, 0).unwrap();
+        let header = OutputHeader {
+            height: 1,
+            flags: 0,
+            amount: 1,
+        };
+        let items = vec![([7u8; 36], header, vec![1, 2, 3, 4])];
+        let mut entries = Vec::new();
+        db.import_utxos(&items, 10, &mut entries).unwrap();
+        let (_, _, before) = db.mem_usage_bytes();
+        assert!(before > 0, "the imported script must sit in the tail");
+        db.flush_table_tail().unwrap();
+        let (_, _, flushed) = db.mem_usage_bytes();
+        assert_eq!(flushed, 0, "one flushed batch must release the script tail");
+        db.import_utxos(&items, 10, &mut entries).unwrap();
+        let (_, _, again) = db.mem_usage_bytes();
+        assert!(again > 0, "a second batch must refill the tail");
+        {
+            let _guard = RefusedSeedGuard { db: &db };
+        }
+        let (_, _, after) = db.mem_usage_bytes();
+        assert_eq!(after, 0, "the refusal guard must drop an unflushed tail");
+    }
+
+    #[test]
+    fn a_partial_heed3_scan_does_not_fall_back() {
+        assert!(super::heed3_scan_falls_back(true, 0));
+        assert!(!super::heed3_scan_falls_back(true, 1));
+        assert!(!super::heed3_scan_falls_back(false, 0));
+    }
+
+    #[test]
+    fn dropping_the_seed_writer_joins_after_the_sender_closes() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<u8>(1);
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&finished);
+        let handle = std::thread::spawn(move || {
+            let _ = rx.recv();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            flag.store(true, std::sync::atomic::Ordering::Release);
+            Err(anyhow::anyhow!("stopped"))
+        });
+        drop(SeedWriterJoin {
+            tx: Some(tx),
+            handle: Some(handle),
+        });
+        assert!(
+            finished.load(std::sync::atomic::Ordering::Acquire),
+            "dropping the guard must join the writer before it returns"
+        );
+    }
+
+    #[test]
+    fn finish_joins_the_seed_writer_once() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<u8>(1);
+        let handle = std::thread::spawn(move || {
+            let _ = rx.recv();
+            Err(anyhow::anyhow!("stopped"))
+        });
+        let mut writer = SeedWriterJoin {
+            tx: Some(tx),
+            handle: Some(handle),
+        };
+        let err = writer.finish().unwrap_err();
+        assert!(err.to_string().contains("stopped"));
+        drop(writer);
     }
 }

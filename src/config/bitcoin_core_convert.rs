@@ -183,21 +183,21 @@ pub fn parse_bitcoin_conf(path: &Path) -> std::io::Result<BitcoinCoreConfig> {
 /// A result that still contains `..` is left unexpanded.
 fn expand_tilde(path: &str) -> String {
     if path == "~" {
-        return dirs::home_dir()
+        return crate::utils::home_dir()
             .map(|h| h.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string());
     }
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            let joined = home.join(rest);
-            if joined
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                return path.to_string();
-            }
-            return joined.to_string_lossy().into_owned();
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = crate::utils::home_dir()
+    {
+        let joined = home.join(rest);
+        if joined
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return path.to_string();
         }
+        return joined.to_string_lossy().into_owned();
     }
     path.to_string()
 }
@@ -253,7 +253,7 @@ pub fn write_private_config(path: &Path, contents: &str) -> std::io::Result<()> 
 }
 
 fn default_core_datadir_base() -> Option<String> {
-    dirs::home_dir().map(|h| h.join(".bitcoin").to_string_lossy().into_owned())
+    crate::utils::home_dir().map(|h| h.join(".bitcoin").to_string_lossy().into_owned())
 }
 
 /// Resolve Core `datadir=` plus network flags to the directory containing `chainstate/`.
@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn effective_datadir_expands_tilde() {
-        let home = dirs::home_dir().expect("home");
+        let home = crate::utils::home_dir().expect("home");
         let mut cfg = BitcoinCoreConfig::default();
         cfg.datadir = Some("~/.bitcoin".to_string());
         assert_eq!(

@@ -105,17 +105,10 @@ async fn test_node_with_pruning_storage_config() {
     let rpc_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let mut storage_config = StorageConfig::default();
     storage_config.pruning = Some(PruningConfig {
-        mode: PruningMode::Normal {
-            keep_from_height: 0,
-            min_recent_blocks: 50,
-        },
+        mode: PruningMode::Normal,
+        keep_blocks: 50,
         auto_prune: true,
-        auto_prune_interval: 100,
-        min_blocks_to_keep: 50,
-        prune_on_startup: false,
-        incremental_prune_during_ibd: false,
-        prune_window_size: 50,
-        min_blocks_for_incremental_prune: 288,
+        ..PruningConfig::default()
     });
 
     let mut node = Node::with_storage_config(

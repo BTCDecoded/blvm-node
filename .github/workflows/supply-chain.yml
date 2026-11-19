@@ -1,0 +1,49 @@
+name: Supply chain
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deny:
+    name: cargo-deny
+    runs-on: [self-hosted, Linux, X64, builds]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: cargo deny
+        run: cargo deny check
+
+  semver:
+    name: cargo-semver-checks
+    if: github.event_name == 'pull_request'
+    runs-on: [self-hosted, Linux, X64, builds]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Strip [patch.crates-io] for crates.io-only CI
+        uses: BTCDecoded/rust-ci/strip-patch-crates-io@main
+
+      - name: Install Rust
+        uses: BTCDecoded/rust-ci/install-rust-toolchain@main
+
+      - name: Install cargo-semver-checks
+        run: cargo install cargo-semver-checks --locked
+
+      - name: API breaks require a version bump
+        run: cargo semver-checks --baseline-rev origin/${{ github.base_ref }}

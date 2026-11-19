@@ -32,13 +32,13 @@ impl NetworkManager {
             let empty = crate::network::protocol::ProtocolMessage::Addr(
                 crate::network::protocol::AddrMessage { addresses: vec![] },
             );
-            if let Ok(wire) = crate::network::protocol::ProtocolParser::serialize_message(&empty) {
-                if let Err(e) = self.send_to_peer(peer_addr, wire).await {
-                    warn!(
-                        "GetAddr from {}: failed to send empty already-answered response: {}",
-                        peer_addr, e
-                    );
-                }
+            if let Ok(wire) = crate::network::protocol::ProtocolParser::serialize_message(&empty)
+                && let Err(e) = self.send_to_peer(peer_addr, wire).await
+            {
+                warn!(
+                    "GetAddr from {}: failed to send empty already-answered response: {}",
+                    peer_addr, e
+                );
             }
             return Ok(());
         }

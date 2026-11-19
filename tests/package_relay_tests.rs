@@ -266,9 +266,8 @@ fn test_package_relay_mark_accepted() {
 
     relay.mark_accepted(&package_id);
 
-    // Package should still be retrievable
     let retrieved = relay.get_package(&package_id);
-    assert!(retrieved.is_some());
+    assert!(retrieved.is_none());
 }
 
 #[test]
@@ -281,9 +280,8 @@ fn test_package_relay_mark_rejected() {
 
     relay.mark_rejected(&package_id, PackageRejectReason::FeeRateTooLow);
 
-    // Package should still be retrievable
     let retrieved = relay.get_package(&package_id);
-    assert!(retrieved.is_some());
+    assert!(retrieved.is_none());
 }
 
 #[test]

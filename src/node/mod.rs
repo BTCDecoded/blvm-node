@@ -19,6 +19,7 @@ pub mod miner;
 #[cfg(feature = "production")]
 pub mod parallel_ibd;
 pub mod performance;
+pub mod reliability_decisions;
 #[cfg(feature = "production")]
 pub mod reorg_executor;
 pub mod run_loop;
@@ -165,7 +166,11 @@ impl Node {
             .with_profiler(Arc::clone(&profiler_arc))
             .with_dependencies(Arc::clone(&storage_arc), Arc::clone(&mempool_manager_arc))
             .with_network_manager(Arc::clone(&network_arc))
-            .with_protocol_engine(Arc::clone(&protocol_arc));
+            .with_protocol_engine(Arc::clone(&protocol_arc))
+            .with_node_shutdown(Arc::new(|| {
+                crate::utils::request_shutdown();
+                Ok(())
+            }));
         // Note: EventPublisher will be set later in start_components() after it's created
         let mut sync_coordinator = sync::SyncCoordinator::default();
         sync_coordinator.set_mempool(Some(Arc::clone(&mempool_manager_arc)));
@@ -272,22 +277,22 @@ impl Node {
         #[cfg(feature = "production")]
         blvm_protocol::consensus_config::init_rayon_for_script_verification();
 
-        if self.protocol_version == ProtocolVersion::Signet {
-            if let Some(ref hex) = config.signet_challenge {
-                match crate::config::parse_signet_challenge_hex(hex) {
-                    Ok(bytes) => {
-                        let override_script = if bytes.is_empty() { None } else { Some(bytes) };
-                        let engine = BitcoinProtocolEngine::new(self.protocol_version)?
-                            .with_signet_challenge(override_script);
-                        crate::network::protocol::ProtocolParser::set_network_magic(
-                            engine.get_network_params().magic_bytes,
-                        );
-                        self.protocol = Arc::new(engine);
-                        info!("Signet challenge script loaded from config");
-                    }
-                    Err(e) => {
-                        warn!("Invalid signet_challenge in config: {e}");
-                    }
+        if self.protocol_version == ProtocolVersion::Signet
+            && let Some(ref hex) = config.signet_challenge
+        {
+            match crate::config::parse_signet_challenge_hex(hex) {
+                Ok(bytes) => {
+                    let override_script = if bytes.is_empty() { None } else { Some(bytes) };
+                    let engine = BitcoinProtocolEngine::new(self.protocol_version)?
+                        .with_signet_challenge(override_script);
+                    crate::network::protocol::ProtocolParser::set_network_magic(
+                        engine.get_network_params().magic_bytes,
+                    );
+                    self.protocol = Arc::new(engine);
+                    info!("Signet challenge script loaded from config");
+                }
+                Err(e) => {
+                    warn!("Invalid signet_challenge in config: {e}");
                 }
             }
         }
@@ -296,13 +301,14 @@ impl Node {
         #[cfg(feature = "governance")]
         {
             // Spawn async task to check governance server health (if in async runtime)
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                if let Some(ref gov_config) = config.governance {
-                    if !gov_config.enabled {
-                        if let Some(ref commons_url) = gov_config.commons_url {
-                            let url = commons_url.clone();
-                            let api_key = gov_config.resolved_api_key();
-                            handle.spawn(async move {
+            if let Ok(handle) = tokio::runtime::Handle::try_current()
+                && let Some(ref gov_config) = config.governance
+                && !gov_config.enabled
+                && let Some(ref commons_url) = gov_config.commons_url
+            {
+                let url = commons_url.clone();
+                let api_key = gov_config.resolved_api_key();
+                handle.spawn(async move {
                                 // Check if governance server is reachable
                                 let client = reqwest::Client::builder()
                                     .timeout(std::time::Duration::from_secs(5))
@@ -317,16 +323,12 @@ impl Node {
                                             format!("Bearer {key}"),
                                         );
                                     }
-                                    if let Ok(response) = request.send().await {
-                                        if response.status().is_success() {
+                                    if let Ok(response) = request.send().await
+                                        && response.status().is_success() {
                                             info!("Governance server detected at {}, consider setting governance.enabled = true", url);
                                         }
-                                    }
                                 }
                             });
-                        }
-                    }
-                }
             }
         }
 
@@ -380,9 +382,12 @@ impl Node {
             self.mempool_manager
                 .set_policy_config(Some(mempool_policy.clone()));
             if mempool_policy.persist_mempool {
-                let path = std::path::Path::new(&mempool_policy.mempool_persistence_path);
+                let path = crate::config::resolve_mempool_persistence_path(
+                    &self.data_dir,
+                    &mempool_policy.mempool_persistence_path,
+                );
                 if path.exists() {
-                    match self.mempool_manager.load_from_disk(path) {
+                    match self.mempool_manager.load_from_disk(&path) {
                         Ok(()) => info!("Loaded mempool from {}", path.display()),
                         Err(e) => warn!("Failed to load mempool from {}: {}", path.display(), e),
                     }
@@ -493,6 +498,7 @@ impl Node {
     /// Start the node
     pub async fn start(&mut self) -> Result<()> {
         info!("[NODE] Starting node");
+        crate::utils::sd_notify::start_runtime_watchdog();
 
         // Start all components
         info!("[NODE] Calling start_components()...");
@@ -577,14 +583,13 @@ impl Node {
         }
 
         #[cfg(feature = "rest-api")]
-        if let Some(ref config) = self.config {
-            if let Some(ref rest_cfg) = config.rest_api {
-                if rest_cfg.enabled {
-                    let bind = rest_cfg.resolve_bind_addr(self.rpc.rpc_addr());
-                    self.rpc.enable_rest_api(bind);
-                    info!("[START_COMPONENTS] REST API enabled on {}", bind);
-                }
-            }
+        if let Some(ref config) = self.config
+            && let Some(ref rest_cfg) = config.rest_api
+            && rest_cfg.enabled
+        {
+            let bind = rest_cfg.resolve_bind_addr(self.rpc.rpc_addr());
+            self.rpc.enable_rest_api(bind);
+            info!("[START_COMPONENTS] REST API enabled on {}", bind);
         }
         #[cfg(not(feature = "rest-api"))]
         if self
@@ -598,15 +603,14 @@ impl Node {
             );
         }
 
-        if let Some(ref config) = self.config {
-            if config
+        if let Some(ref config) = self.config
+            && config
                 .modules
                 .as_ref()
                 .is_some_and(|m| m.marketplace_fetch_enabled)
-            {
-                self.rpc.set_marketplace_fetch(true);
-                info!("[START_COMPONENTS] loadmodule marketplace auto-fetch enabled");
-            }
+        {
+            self.rpc.set_marketplace_fetch(true);
+            info!("[START_COMPONENTS] loadmodule marketplace auto-fetch enabled");
         }
 
         // Start RPC server
@@ -714,12 +718,10 @@ impl Node {
                 e
             );
         }
-        if let Err(e) = crate::node::reorg_executor::recover_snapshot_commit(
+        crate::node::reorg_executor::recover_snapshot_commit(
             self.storage.as_ref(),
             self.storage.blocks().as_ref(),
-        ) {
-            warn!("[START_COMPONENTS] recover_snapshot_commit failed: {e}");
-        }
+        )?;
 
         // Fresh datadir: no `chain_info` yet — anchor with this network's genesis so RPC mining
         // (`generatetoaddress`, templates) and tip queries work without a prior sync.
@@ -744,23 +746,23 @@ impl Node {
 
         // Header sync starts at height 1 and anchors GetHeaders on `get_hash_by_height(0)`.
         // Fresh `initialize_from_network_metadata` only wrote chain_info — index genesis here.
-        if let Ok(Some(info)) = self.storage.chain().load_chain_info() {
-            if info.height == 0 {
-                let bs = self.storage.blocks();
-                if matches!(bs.get_hash_by_height(0), Ok(None)) {
-                    match bs
-                        .store_header(&info.tip_hash, &info.tip_header)
-                        .and_then(|_| bs.store_height(0, &info.tip_hash))
-                        .and_then(|_| bs.store_recent_header(0, &info.tip_header))
-                    {
-                        Ok(()) => info!(
-                            "[START_COMPONENTS] Indexed genesis header in blockstore (height 0)"
-                        ),
-                        Err(e) => warn!(
-                            "[START_COMPONENTS] Failed to index genesis in blockstore: {}",
-                            e
-                        ),
+        if let Ok(Some(info)) = self.storage.chain().load_chain_info()
+            && info.height == 0
+        {
+            let bs = self.storage.blocks();
+            if matches!(bs.get_hash_by_height(0), Ok(None)) {
+                match bs
+                    .store_header(&info.tip_hash, &info.tip_header)
+                    .and_then(|_| bs.store_height(0, &info.tip_hash))
+                    .and_then(|_| bs.store_recent_header(0, &info.tip_header))
+                {
+                    Ok(()) => {
+                        info!("[START_COMPONENTS] Indexed genesis header in blockstore (height 0)")
                     }
+                    Err(e) => warn!(
+                        "[START_COMPONENTS] Failed to index genesis in blockstore: {}",
+                        e
+                    ),
                 }
             }
         }
@@ -784,52 +786,51 @@ impl Node {
             }
         };
         let mut initial_utxo_set = blvm_protocol::UtxoSet::default();
-        if current_height == 0 {
-            if let Some(block_hash) = self.config_sub(|c| c.assumeutxo_blockhash.as_ref()) {
-                use crate::storage::assumeutxo::{
-                    open_trust_anchor_snapshot, write_base_blockhash_marker,
-                };
-                let network = self
-                    .config
-                    .as_ref()
-                    .and_then(|c| c.protocol_version.as_deref())
-                    .unwrap_or("regtest");
-                let data_dir = std::path::Path::new(&self.data_dir);
-                match open_trust_anchor_snapshot(data_dir, network, block_hash) {
-                    Ok(Some((utxo_set, metadata))) => {
-                        if let Err(e) = self
-                            .storage
-                            .load_assumeutxo_snapshot(&utxo_set, &metadata, None)
+        if current_height == 0
+            && let Some(block_hash) = self.config_sub(|c| c.assumeutxo_blockhash.as_ref())
+        {
+            use crate::storage::assumeutxo::{
+                open_trust_anchor_snapshot, write_base_blockhash_marker,
+            };
+            let network = self
+                .config
+                .as_ref()
+                .and_then(|c| c.protocol_version.as_deref())
+                .unwrap_or("regtest");
+            let data_dir = std::path::Path::new(&self.data_dir);
+            match open_trust_anchor_snapshot(data_dir, network, block_hash) {
+                Ok(Some((utxo_set, metadata))) => {
+                    if let Err(e) = self
+                        .storage
+                        .load_assumeutxo_snapshot(&utxo_set, &metadata, None)
+                    {
+                        warn!(
+                            "AssumeUTXO: failed to load snapshot into storage: {}. Falling back to full IBD.",
+                            e
+                        );
+                    } else {
+                        current_height = metadata.block_height;
+                        initial_utxo_set = utxo_set;
+                        if let Err(e) = write_base_blockhash_marker(data_dir, &metadata.block_hash)
                         {
                             warn!(
-                                "AssumeUTXO: failed to load snapshot into storage: {}. Falling back to full IBD.",
+                                "AssumeUTXO: failed to write chainstate_snapshot marker: {}",
                                 e
                             );
-                        } else {
-                            current_height = metadata.block_height;
-                            initial_utxo_set = utxo_set;
-                            if let Err(e) =
-                                write_base_blockhash_marker(data_dir, &metadata.block_hash)
-                            {
-                                warn!(
-                                    "AssumeUTXO: failed to write chainstate_snapshot marker: {}",
-                                    e
-                                );
-                            }
-                            info!(
-                                "AssumeUTXO: loaded snapshot at height {}, continuing sync from tip",
-                                current_height
-                            );
                         }
-                    }
-                    Ok(None) => {
-                        warn!(
-                            "AssumeUTXO: block hash not in chainparams. Add to MAINNET_ASSUMEUTXO_DATA or REGTEST_ASSUMEUTXO_DATA. Falling back to full IBD."
+                        info!(
+                            "AssumeUTXO: loaded snapshot at height {}, continuing sync from tip",
+                            current_height
                         );
                     }
-                    Err(e) => {
-                        warn!("AssumeUTXO: {e}. Falling back to full IBD.");
-                    }
+                }
+                Ok(None) => {
+                    warn!(
+                        "AssumeUTXO: block hash not in chainparams. Add to MAINNET_ASSUMEUTXO_DATA or REGTEST_ASSUMEUTXO_DATA. Falling back to full IBD."
+                    );
+                }
+                Err(e) => {
+                    warn!("AssumeUTXO: {e}. Falling back to full IBD.");
                 }
             }
         }
@@ -855,24 +856,24 @@ impl Node {
                     "assumeutxo active chainstate refused: commitment status is Failed"
                 ));
             }
-            if let Ok(Some(base_blockhash)) = read_base_blockhash_marker(data_dir) {
-                if !is_background_validated(data_dir, &base_blockhash) {
-                    let network = self
-                        .config
-                        .as_ref()
-                        .and_then(|c| c.protocol_version.as_deref())
-                        .unwrap_or("regtest");
-                    if let Some(base_height) = height_for_blockhash(network, &base_blockhash) {
-                        crate::node::background_validation::spawn_assumeutxo_background_validation(
-                            data_dir,
-                            base_blockhash,
-                            base_height,
-                            network,
-                            Arc::clone(&self.protocol),
-                            Arc::clone(&self.network),
-                            peer_addresses.clone(),
-                        );
-                    }
+            if let Ok(Some(base_blockhash)) = read_base_blockhash_marker(data_dir)
+                && !is_background_validated(data_dir, &base_blockhash)
+            {
+                let network = self
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.protocol_version.as_deref())
+                    .unwrap_or("regtest");
+                if let Some(base_height) = height_for_blockhash(network, &base_blockhash) {
+                    crate::node::background_validation::spawn_assumeutxo_background_validation(
+                        data_dir,
+                        base_blockhash,
+                        base_height,
+                        network,
+                        Arc::clone(&self.protocol),
+                        Arc::clone(&self.network),
+                        peer_addresses.clone(),
+                    );
                 }
             }
         }
@@ -896,97 +897,88 @@ impl Node {
         // Also select the ckpt slot that still holds height `h` (inactive slot after a
         // later export) — otherwise seed loads the active tip ckpt and skips the band.
         // Serve-only archives must not rewrite watermarks / export pins.
-        if !serve_only {
-            if let Ok(v) = std::env::var("BLVM_IBD_FORCE_RESUME_HEIGHT") {
-                if let Ok(h) = v.trim().parse::<u64>() {
-                    if h > 0 {
-                        let mut slot_note = String::new();
-                        let active = self.storage.chain().get_engine_ckpt_slot().unwrap_or(0);
-                        let mut chosen: Option<u8> = None;
-                        for slot in [0u8, 1u8] {
-                            if self.storage.chain().get_engine_ckpt_slot_height(slot).ok()
-                                == Some(h)
-                            {
-                                chosen = Some(slot);
-                                break;
-                            }
-                        }
-                        if chosen.is_none() {
-                            // Slot-height metadata may be missing on the inactive tree; if the
-                            // active export is ahead of `h`, prefer the other non-empty slot.
-                            let active_export = self
-                                .storage
-                                .chain()
-                                .get_engine_export_height()
-                                .ok()
-                                .flatten()
-                                .unwrap_or(0);
-                            if active_export > h {
-                                let other = active ^ 1;
-                                let other_name =
-                                    crate::storage::ibd_engine::ckpt_tree_for_slot(other);
-                                if let Ok(tree) = self.storage.open_tree(other_name) {
-                                    if !tree.is_empty().unwrap_or(true) {
-                                        chosen = Some(other);
-                                    }
-                                }
-                            }
-                        }
-                        if let Some(slot) = chosen {
-                            if let Err(e) = self.storage.chain().force_set_engine_ckpt_slot(slot) {
-                                warn!(
-                                    "[IBD_FORCE_RESUME] force_set_engine_ckpt_slot({slot}): {e:#}"
-                                );
-                            } else {
-                                let _ = self.storage.chain().set_engine_ckpt_slot_height(slot, h);
-                                // Tip export left chain_info.utxo_count at the *newer* rung;
-                                // seed refuses unless expected count matches the prior-rung tree.
-                                let tree_name =
-                                    crate::storage::ibd_engine::ckpt_tree_for_slot(slot);
-                                if let Ok(tree) = self.storage.open_tree(tree_name) {
-                                    if let Ok(n) = tree.len() {
-                                        if n > 0 {
-                                            let _ = self
-                                                .storage
-                                                .chain()
-                                                .force_set_engine_export_utxo_count(n as u64);
-                                            slot_note = format!(
-                                                " ckpt_slot={slot} (was {active}) utxo_count={n}"
-                                            );
-                                        } else {
-                                            slot_note = format!(" ckpt_slot={slot} (was {active})");
-                                        }
-                                    } else {
-                                        slot_note = format!(" ckpt_slot={slot} (was {active})");
-                                    }
-                                } else {
-                                    slot_note = format!(" ckpt_slot={slot} (was {active})");
-                                }
-                            }
-                        }
-                        match (
-                            self.storage.chain().force_set_ibd_utxo_watermark(h),
-                            self.storage.chain().force_set_engine_export_height(h),
-                            self.storage.chain().force_set_engine_validation_tip(h),
-                        ) {
-                            (Ok(()), Ok(()), Ok(())) => {
-                                warn!(
-                                    "[IBD_FORCE_RESUME] pinned watermark/export/validation_tip → {} \
-                                 (BLVM_IBD_FORCE_RESUME_HEIGHT){}",
-                                    h, slot_note
-                                );
-                            }
-                            (e1, e2, e3) => {
-                                warn!(
-                                    "[IBD_FORCE_RESUME] failed to pin height {}: wm={:?} export={:?} tip={:?}",
-                                    h,
-                                    e1.err(),
-                                    e2.err(),
-                                    e3.err()
-                                );
-                            }
-                        }
+        if !serve_only
+            && let Ok(v) = std::env::var("BLVM_IBD_FORCE_RESUME_HEIGHT")
+            && let Ok(h) = v.trim().parse::<u64>()
+            && h > 0
+        {
+            let mut slot_note = String::new();
+            let active = self.storage.chain().get_engine_ckpt_slot().unwrap_or(0);
+            let mut chosen: Option<u8> = None;
+            for slot in [0u8, 1u8] {
+                if self.storage.chain().get_engine_ckpt_slot_height(slot).ok() == Some(h) {
+                    chosen = Some(slot);
+                    break;
+                }
+            }
+            if chosen.is_none() {
+                // Slot-height metadata may be missing on the inactive tree; if the
+                // active export is ahead of `h`, prefer the other non-empty slot.
+                let active_export = self
+                    .storage
+                    .chain()
+                    .get_engine_export_height()
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0);
+                if active_export > h {
+                    let other = active ^ 1;
+                    let other_name = crate::storage::ibd_engine::ckpt_tree_for_slot(other);
+                    if let Ok(tree) = self.storage.open_tree(other_name)
+                        && !tree.is_empty().unwrap_or(true)
+                    {
+                        chosen = Some(other);
                     }
+                }
+            }
+            if let Some(slot) = chosen {
+                if let Err(e) = self.storage.chain().force_set_engine_ckpt_slot(slot) {
+                    warn!("[IBD_FORCE_RESUME] force_set_engine_ckpt_slot({slot}): {e:#}");
+                } else {
+                    let _ = self.storage.chain().set_engine_ckpt_slot_height(slot, h);
+                    // Tip export left chain_info.utxo_count at the *newer* rung;
+                    // seed refuses unless expected count matches the prior-rung tree.
+                    let tree_name = crate::storage::ibd_engine::ckpt_tree_for_slot(slot);
+                    if let Ok(tree) = self.storage.open_tree(tree_name) {
+                        if let Ok(n) = tree.len() {
+                            if n > 0 {
+                                let _ = self
+                                    .storage
+                                    .chain()
+                                    .force_set_engine_export_utxo_count(n as u64);
+                                slot_note =
+                                    format!(" ckpt_slot={slot} (was {active}) utxo_count={n}");
+                            } else {
+                                slot_note = format!(" ckpt_slot={slot} (was {active})");
+                            }
+                        } else {
+                            slot_note = format!(" ckpt_slot={slot} (was {active})");
+                        }
+                    } else {
+                        slot_note = format!(" ckpt_slot={slot} (was {active})");
+                    }
+                }
+            }
+            match (
+                self.storage.chain().force_set_ibd_utxo_watermark(h),
+                self.storage.chain().force_set_engine_export_height(h),
+                self.storage.chain().force_set_engine_validation_tip(h),
+            ) {
+                (Ok(()), Ok(()), Ok(())) => {
+                    warn!(
+                        "[IBD_FORCE_RESUME] pinned watermark/export/validation_tip → {} \
+                                 (BLVM_IBD_FORCE_RESUME_HEIGHT){}",
+                        h, slot_note
+                    );
+                }
+                (e1, e2, e3) => {
+                    warn!(
+                        "[IBD_FORCE_RESUME] failed to pin height {}: wm={:?} export={:?} tip={:?}",
+                        h,
+                        e1.err(),
+                        e2.err(),
+                        e3.err()
+                    );
                 }
             }
         } // !serve_only — skip FORCE_RESUME watermark rewrite
@@ -1063,12 +1055,12 @@ impl Node {
                 tokio::time::Instant::now() + tokio::time::Duration::from_millis(wait_ms);
             while tokio::time::Instant::now() < deadline {
                 tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-                if let Some(h) = self.network.get_highest_peer_start_height_async().await {
-                    if h > synced_tip {
-                        peer_ahead = Some(h);
-                        info!("[START_COMPONENTS] peer start_height={h} after Version wait");
-                        break;
-                    }
+                if let Some(h) = self.network.get_highest_peer_start_height_async().await
+                    && h > synced_tip
+                {
+                    peer_ahead = Some(h);
+                    info!("[START_COMPONENTS] peer start_height={h} after Version wait");
+                    break;
                 }
             }
         }
@@ -1141,7 +1133,16 @@ impl Node {
                         &peer_addresses,
                     );
                 let min_peers = ibd_session_config.min_peers_for_ibd();
-                if peer_addresses.len() >= min_peers {
+                let skip_refused_seed = reliability_decisions::startup_skips_refused_seed(
+                    self.storage.chain().get_engine_export_height(),
+                    read_refused_seed_height(self.data_dir.as_path()),
+                )?;
+                if skip_refused_seed {
+                    CATCH_UP_SEED_BLOCKED.store(true, std::sync::atomic::Ordering::Release);
+                    info!(
+                        "[START_COMPONENTS] refused seed matches the stored export height; not starting IBD"
+                    );
+                } else if peer_addresses.len() >= min_peers {
                     info!(
                         "[START_COMPONENTS] Attempting parallel IBD with {} peers",
                         peer_addresses.len()
@@ -1236,81 +1237,6 @@ impl Node {
         }
 
         info!("[START_COMPONENTS] Component startup complete");
-
-        // Prune on startup if configured
-        if let Some(pruning_manager) = self.storage.pruning() {
-            let config = &pruning_manager.config;
-            if config.prune_on_startup {
-                let current_height = self.storage.chain().get_height()?.unwrap_or(0);
-                let is_ibd = current_height == 0;
-
-                if !is_ibd && pruning_manager.is_enabled() {
-                    info!("Prune on startup enabled, checking if pruning is needed...");
-
-                    // Calculate prune height based on configuration
-                    let prune_height = match &config.mode {
-                        crate::config::PruningMode::Disabled => {
-                            // Skip if disabled
-                            None
-                        }
-                        crate::config::PruningMode::Normal {
-                            keep_from_height, ..
-                        } => {
-                            // Prune up to keep_from_height
-                            Some(keep_from_height)
-                        }
-                        #[cfg(feature = "utxo-commitments")]
-                        crate::config::PruningMode::Aggressive {
-                            keep_from_height, ..
-                        } => {
-                            // Prune up to keep_from_height
-                            Some(keep_from_height)
-                        }
-                        #[cfg(not(feature = "utxo-commitments"))]
-                        crate::config::PruningMode::Aggressive { .. } => {
-                            // Aggressive pruning requires utxo-commitments feature
-                            // Fall back to no pruning if feature is disabled
-                            None
-                        }
-                        crate::config::PruningMode::Custom {
-                            keep_bodies_from_height,
-                            ..
-                        } => {
-                            // Prune up to keep_bodies_from_height
-                            Some(keep_bodies_from_height)
-                        }
-                    };
-
-                    if let Some(prune_to_height) = prune_height {
-                        if *prune_to_height < current_height {
-                            match pruning_manager.prune_to_height(
-                                *prune_to_height,
-                                current_height,
-                                is_ibd,
-                            ) {
-                                Ok(stats) => {
-                                    info!(
-                                        "Startup pruning completed: {} blocks pruned, {} blocks kept",
-                                        stats.blocks_pruned, stats.blocks_kept
-                                    );
-                                    // Flush storage to persist pruning changes
-                                    use crate::utils::log_error;
-                                    log_error(
-                                        || self.storage.flush(),
-                                        "Failed to flush storage after startup pruning",
-                                    );
-                                }
-                                Err(e) => {
-                                    warn!("Startup pruning failed: {}", e);
-                                }
-                            }
-                        }
-                    }
-                } else if is_ibd {
-                    info!("Skipping startup pruning: initial block download in progress");
-                }
-            }
-        }
 
         // Initialize module registry before borrowing module_manager (avoids overlapping mutable borrows)
         use crate::utils::env_or_default;
@@ -1726,17 +1652,17 @@ impl Node {
                 // Regtest doesn't use DNS seeds
                 info!("Regtest network: skipping DNS seed discovery");
                 // Still connect to persistent peers if configured
-                if let Some(ref config) = self.config {
-                    if !config.persistent_peers.is_empty() {
-                        let persistent_peers =
-                            crate::config::persistent_peer_sockets(&config.persistent_peers);
-                        if let Err(e) = self
-                            .network
-                            .connect_persistent_peers(&persistent_peers)
-                            .await
-                        {
-                            warn!("Failed to connect to some persistent peers: {}", e);
-                        }
+                if let Some(ref config) = self.config
+                    && !config.persistent_peers.is_empty()
+                {
+                    let persistent_peers =
+                        crate::config::persistent_peer_sockets(&config.persistent_peers);
+                    if let Err(e) = self
+                        .network
+                        .connect_persistent_peers(&persistent_peers)
+                        .await
+                    {
+                        warn!("Failed to connect to some persistent peers: {}", e);
                     }
                 }
                 return Ok(());
@@ -1785,6 +1711,21 @@ impl Node {
         match self.storage.chain().get_height() {
             Ok(None) => Ok((0u64, 0u64)),
             Ok(Some(chain_tip)) => {
+                match crate::node::parallel_ibd::headers::discard_nonextending_successor(
+                    self.storage.blocks().as_ref(),
+                    chain_tip,
+                ) {
+                    Ok(true) => warn!(
+                        "[IBD_RESUME] height {} does not extend block tip {} — removed that \
+                         body and height index. Header sync will store the block that does.",
+                        chain_tip + 1,
+                        chain_tip
+                    ),
+                    Ok(false) => {}
+                    Err(e) => warn!(
+                        "[IBD_RESUME] could not drop a non-extending successor of {chain_tip}: {e:#}"
+                    ),
+                }
                 let watermark_val = match self.storage.chain().get_utxo_watermark() {
                     Ok(Some(w)) => w,
                     Ok(None) => 0,
@@ -1908,31 +1849,26 @@ impl Node {
                 // Never advance resume past export_h from sidecar/segment_max — live 2026-07-11:
                 // clean cl=698719 skip-reseed → Invalid inputs at 699221 → autorepair to 640k.
                 let resume_tip = durable_watermark;
-                if engine_enabled {
-                    if let Some(data_dir) = self.storage.data_dir() {
-                        let engine_path =
-                            crate::config::ibd::ibd_engine_path(Some(data_dir.as_path()));
-                        let dirty =
-                            crate::storage::ibd_engine::engine_dirty_flag_path(&engine_path)
-                                .exists();
-                        if dirty {
-                            info!(
-                                "[IBD_RESUME] engine .dirty set — resume from export_h={} \
+                if engine_enabled && let Some(data_dir) = self.storage.data_dir() {
+                    let engine_path = crate::config::ibd::ibd_engine_path(Some(data_dir.as_path()));
+                    let dirty =
+                        crate::storage::ibd_engine::engine_dirty_flag_path(&engine_path).exists();
+                    if dirty {
+                        info!(
+                            "[IBD_RESUME] engine .dirty set — resume from export_h={} \
                                  (will re-seed; segment_max is not a complete UTXO set)",
+                            durable_watermark
+                        );
+                    } else {
+                        let sidecar_cl = crate::storage::ibd_engine::read_contiguous_length_sidecar(
+                            &engine_path,
+                        );
+                        if let Some(cl) = sidecar_cl.filter(|&c| c as u64 > durable_watermark) {
+                            info!(
+                                "[IBD_RESUME] clean shutdown sidecar_cl={cl} > export_h={} — \
+                                     still resume from export_h (ages are RAM-only; will re-seed)",
                                 durable_watermark
                             );
-                        } else {
-                            let sidecar_cl =
-                                crate::storage::ibd_engine::read_contiguous_length_sidecar(
-                                    &engine_path,
-                                );
-                            if let Some(cl) = sidecar_cl.filter(|&c| c as u64 > durable_watermark) {
-                                info!(
-                                    "[IBD_RESUME] clean shutdown sidecar_cl={cl} > export_h={} — \
-                                     still resume from export_h (ages are RAM-only; will re-seed)",
-                                    durable_watermark
-                                );
-                            }
                         }
                     }
                 }
@@ -2000,84 +1936,125 @@ impl Node {
                     0
                 } else if durable_watermark > chain_tip {
                     // The UTXO watermark is ahead of the block store tip. This happens when
-                    // MDB_NOSYNC + SIGKILL (or an abrupt process exit) persisted UTXO checkpoints
-                    // for blocks that were never durably written to the block store (heed3/).
+                    // MDB_NOSYNC + SIGKILL persisted a checkpoint for a block whose body never
+                    // reached heed3. Resuming AT the watermark connects the next block against
+                    // a parent that is not stored.
                     //
-                    // We cannot safely resume at `durable_watermark` because:
-                    //   1. Block bodies for h=(chain_tip+1)..=durable_watermark are missing.
-                    //   2. sync_chain_info_to_height used to synthesize a *fake* header with a
-                    //      wrong hash for `durable_watermark` (now refuses; still do not call it).
-                    //   3. The next block (durable_watermark+1) has a prevhash that references
-                    //      the REAL durable_watermark hash — validation rejects it immediately,
-                    //      causing an infinite feeder-stall freeze.
-                    //
-                    // The safe recovery: wipe the standalone UTXO store and reset the watermark
-                    // to 0. The block store (heed3/) is preserved, so the IBD performs a fast
-                    // local-replay (typically 5–10 min) to rebuild UTXO state from the on-disk
-                    // blocks, then continues downloading from chain_tip+1.
-                    //
-                    // Root cause prevention: watermark advances are clamped to durable
-                    // chain_tip; SIGTERM drains pending block flushes before watermark.
-                    // Abrupt SIGKILL can still leave watermark ahead of tip — this path
-                    // recovers safely via local replay.
-                    warn!(
-                        "[IBD_RESUME] UTXO watermark ({wm}) > block store tip ({tip}): \
-                         block bodies for h={tip1}..={wm} are missing (MDB_NOSYNC + abrupt exit). \
-                         Synthesising a fake header would corrupt the prevhash chain — \
-                         resetting UTXO state to 0 and rebuilding via local replay \
-                         (block store h=0..={tip} is intact; replay will be fast). \
-                         Prefer SIGTERM so pending block flushes complete before exit.",
-                        wm = durable_watermark,
-                        tip = chain_tip,
-                        tip1 = chain_tip + 1,
-                    );
-                    // Wipe the standalone ibd_utxo_store directory (contains UTXOs that are
-                    // inconsistent above chain_tip). The main heed3/ block store is untouched.
-                    if let Some(data_dir) = self.storage.data_dir() {
-                        let utxo_store_dir =
-                            data_dir.join(crate::storage::database::IBD_UTXO_STORE_SUBDIR);
-                        if utxo_store_dir.exists()
-                            && crate::config::path_is_strictly_within(
-                                data_dir.as_path(),
-                                &utxo_store_dir,
-                            )
+                    // The snapshot that is still at or below the block tip is a real UTXO set.
+                    // Resume from that slot and re-validate only the gap. Do not delete it.
+                    // A snapshot labeled above the tip applied a block we do not have; it is
+                    // not a resume point. Wiping back to genesis is only the case where no
+                    // labeled checkpoint is at or below the tip.
+                    let slots = [0u8, 1u8].map(|slot| {
+                        let height = self
+                            .storage
+                            .chain()
+                            .get_engine_ckpt_slot_height(slot)
+                            .unwrap_or(0);
+                        let has_rows = self
+                            .storage
+                            .open_tree(crate::storage::ibd_engine::ckpt_tree_for_slot(slot))
+                            .ok()
+                            .and_then(|tree| tree.len().ok())
+                            .unwrap_or(0)
+                            > 0;
+                        (slot, height, has_rows)
+                    });
+                    if let Some((slot, height)) =
+                        crate::storage::reliability_decisions::checkpoint_at_or_below_tip(
+                            chain_tip, slots,
+                        )
+                    {
+                        warn!(
+                            "[IBD_RESUME] UTXO watermark ({wm}) > block store tip ({tip}): \
+                             resuming from checkpoint slot {slot} at height {height}. \
+                             The block store stays. Snapshots are not deleted.",
+                            wm = durable_watermark,
+                            tip = chain_tip,
+                        );
+                        if let Err(e) = self.storage.chain().force_set_engine_ckpt_slot(slot) {
+                            warn!("[IBD_RESUME] force_set_engine_ckpt_slot({slot}): {e:#}");
+                        }
+                        let _ = self
+                            .storage
+                            .chain()
+                            .set_engine_ckpt_slot_height(slot, height);
+                        let _ = self.storage.chain().force_set_engine_export_height(height);
+                        let _ = self.storage.chain().force_set_ibd_utxo_watermark(height);
+                        let _ = self.storage.chain().force_set_engine_validation_tip(height);
+                        if let Ok(tree) = self
+                            .storage
+                            .open_tree(crate::storage::ibd_engine::ckpt_tree_for_slot(slot))
+                            && let Ok(n) = tree.len()
+                            && n > 0
                         {
-                            if let Err(e) = std::fs::remove_dir_all(&utxo_store_dir) {
-                                warn!(
-                                    "[IBD_RESUME] failed to remove {}: {} — continuing anyway",
-                                    utxo_store_dir.display(),
-                                    e
-                                );
-                            } else {
-                                info!(
-                                    "[IBD_RESUME] removed {} (UTXO state reset for safe replay)",
-                                    utxo_store_dir.display()
-                                );
+                            let _ = self
+                                .storage
+                                .chain()
+                                .force_set_engine_export_utxo_count(n as u64);
+                        }
+                        let _ = self.storage.flush();
+                        height
+                    } else {
+                        warn!(
+                            "[IBD_RESUME] UTXO watermark ({wm}) > block store tip ({tip}) and no \
+                         checkpoint is at or below that tip. Block bodies for h={tip1}..={wm} \
+                         are missing. Rebuilding the UTXO set from the block store. \
+                         Prefer SIGTERM so pending block flushes complete before exit.",
+                            wm = durable_watermark,
+                            tip = chain_tip,
+                            tip1 = chain_tip + 1,
+                        );
+                        // Wipe the standalone ibd_utxo_store directory (contains UTXOs that are
+                        // inconsistent above chain_tip). The main heed3/ block store is untouched.
+                        if let Some(data_dir) = self.storage.data_dir() {
+                            let utxo_store_dir =
+                                data_dir.join(crate::storage::database::IBD_UTXO_STORE_SUBDIR);
+                            if utxo_store_dir.exists()
+                                && crate::config::path_is_strictly_within(
+                                    data_dir.as_path(),
+                                    &utxo_store_dir,
+                                )
+                            {
+                                if let Err(e) = std::fs::remove_dir_all(&utxo_store_dir) {
+                                    warn!(
+                                        "[IBD_RESUME] failed to remove {}: {} — continuing anyway",
+                                        utxo_store_dir.display(),
+                                        e
+                                    );
+                                } else {
+                                    info!(
+                                        "[IBD_RESUME] removed {} (UTXO state reset for safe replay)",
+                                        utxo_store_dir.display()
+                                    );
+                                }
                             }
                         }
+                        // The label reset is not enough. `open_engine_resume_snapshot`
+                        // follows whichever checkpoint still has rows, so a leftover
+                        // `ibd_utxos_ckpt_*` stays spendable after the replay starts.
+                        self.storage.clear_ibd_snapshot_trees();
+                        if let Err(e) = self.storage.chain().force_set_ibd_utxo_watermark(0) {
+                            warn!("[IBD_RESUME] force_set_ibd_utxo_watermark(0) failed: {e}");
+                        }
+                        // Stale engine export height (e.g. 460k) would otherwise claim a checkpoint
+                        // that no longer matches the wiped UTXO state / block tip.
+                        if let Err(e) = self
+                            .storage
+                            .chain()
+                            .force_reset_engine_checkpoint_metadata()
+                        {
+                            warn!(
+                                "[IBD_RESUME] force_reset_engine_checkpoint_metadata failed: {e}"
+                            );
+                        }
+                        let _ = self.storage.flush();
+                        // UTXO store is now empty → must start from genesis (h=0) so the
+                        // validation loop rebuilds UTXO state from scratch.  The block store
+                        // (heed3/) is intact, so h=1..=chain_tip will be served via local
+                        // replay (fast) and only h=chain_tip+1 onward needs downloading.
+                        0
                     }
-                    // The label reset is not enough. `open_engine_resume_snapshot`
-                    // follows whichever checkpoint still has rows, so a leftover
-                    // `ibd_utxos_ckpt_*` stays spendable after the replay starts.
-                    self.storage.clear_ibd_snapshot_trees();
-                    if let Err(e) = self.storage.chain().force_set_ibd_utxo_watermark(0) {
-                        warn!("[IBD_RESUME] force_set_ibd_utxo_watermark(0) failed: {e}");
-                    }
-                    // Stale engine export height (e.g. 460k) would otherwise claim a checkpoint
-                    // that no longer matches the wiped UTXO state / block tip.
-                    if let Err(e) = self
-                        .storage
-                        .chain()
-                        .force_reset_engine_checkpoint_metadata()
-                    {
-                        warn!("[IBD_RESUME] force_reset_engine_checkpoint_metadata failed: {e}");
-                    }
-                    let _ = self.storage.flush();
-                    // UTXO store is now empty → must start from genesis (h=0) so the
-                    // validation loop rebuilds UTXO state from scratch.  The block store
-                    // (heed3/) is intact, so h=1..=chain_tip will be served via local
-                    // replay (fast) and only h=chain_tip+1 onward needs downloading.
-                    0
                 } else {
                     let tip = chain_tip.min(resume_tip);
                     if tip < chain_tip && !crate::config::ibd_serve_only() {
@@ -2115,6 +2092,7 @@ impl Node {
 
         static CATCH_UP_LAST_FAIL_SECS: AtomicU64 = AtomicU64::new(0);
         static CATCH_UP_FAIL_STREAK: AtomicU32 = AtomicU32::new(0);
+        static CATCH_UP_FORK_RETRY_SECS: AtomicU64 = AtomicU64::new(0);
 
         // Mode T archive: never catch-up IBD / DNS reseed while serving getdata.
         if crate::config::ibd_serve_only() {
@@ -2122,6 +2100,29 @@ impl Node {
         }
 
         if PARALLEL_IBD_SESSION_ACTIVE.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        // A refused checkpoint is the same tree on every retry. Re-importing it
+        // walks the whole UTXO snapshot into RSS and cannot succeed. The file
+        // survives a restart; a newer export height is a different checkpoint.
+        if let Some(blocked) = read_refused_seed_height(&self.data_dir) {
+            let current = self
+                .storage
+                .chain()
+                .get_engine_export_height()
+                .ok()
+                .flatten();
+            if current == Some(blocked) {
+                CATCH_UP_SEED_BLOCKED.store(true, Ordering::Release);
+                info!(
+                    "catch-up skipped: checkpoint seed already refused at export height {blocked}"
+                );
+                return Ok(());
+            }
+            let _ = std::fs::remove_file(refused_seed_height_path(&self.data_dir));
+        }
+        if CATCH_UP_SEED_BLOCKED.load(Ordering::Acquire) {
             return Ok(());
         }
 
@@ -2147,6 +2148,21 @@ impl Node {
             }
         }
 
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let last = CATCH_UP_FORK_RETRY_SECS.load(Ordering::Relaxed);
+            if !catch_up_fork_retry_elapsed(last, now) {
+                debug!(
+                    "[CATCH_UP] skip — heavier fork retry {}s left",
+                    30u64.saturating_sub(now.saturating_sub(last))
+                );
+                return Ok(());
+            }
+        }
+
         let (synced_tip, ibd_first_block_height) = self.ibd_resume_heights()?;
         let mut peer_height = match self.network.get_highest_peer_start_height_async().await {
             Some(h) => h,
@@ -2167,65 +2183,78 @@ impl Node {
         };
 
         // Version start_height and inv bumps are stale; always probe headers for the live tip.
-        if let Ok((tip_hash, _)) = self.storage.chain().get_tip_hash_and_height() {
-            if let Ok(Some(probed)) = self
+        if let Ok((tip_hash, _)) = self.storage.chain().get_tip_hash_and_height()
+            && let Ok(Some(probed)) = self
                 .network
                 .refresh_peer_tip_via_headers(synced_tip, tip_hash)
                 .await
-            {
-                peer_height = peer_height.max(probed.peer_height);
-                // A short heavier fork must not start parallel IBD at tip+1.
-                // That path reseeds the UTXO snapshot and downloads whatever hash
-                // already claimed the next height, which is the lighter chain.
-                if probed.heavier_than_tip && probed.forks_before_tip {
-                    warn!(
-                        "[CATCH_UP] headers fork before {} and have more work ({} missing bodies) — not starting parallel IBD",
+        {
+            peer_height = peer_height.max(probed.peer_height);
+            // A short heavier fork must not start parallel IBD at tip+1.
+            // That path reseeds the UTXO snapshot and downloads whatever hash
+            // already claimed the next height, which is the lighter chain.
+            if probed.heavier_than_tip && probed.forks_before_tip {
+                warn!(
+                    "[CATCH_UP] headers fork before {} and have more work ({} missing bodies) — not starting parallel IBD",
+                    synced_tip,
+                    probed.missing_bodies.len()
+                );
+                if probed.missing_bodies.is_empty() {
+                    let disconnect_from = probed.disconnect_from.unwrap_or(synced_tip);
+                    if let Err(e) = crate::node::undo_repair::repair_missing_active_undo(
+                        &self.network,
+                        &self.storage,
                         synced_tip,
-                        probed.missing_bodies.len()
-                    );
-                    if probed.missing_bodies.is_empty() {
-                        let disconnect_from = probed.disconnect_from.unwrap_or(synced_tip);
-                        if let Err(e) = crate::node::undo_repair::repair_missing_active_undo(
-                            &self.network,
-                            &self.storage,
-                            synced_tip,
-                            disconnect_from,
-                        )
-                        .await
-                        {
-                            warn!("[UNDO_REPAIR] heavier fork not activated: {e:#}");
-                            return Ok(());
-                        }
-                        if let Some(candidate) = probed.heavier_tip {
-                            match crate::node::reorg_executor::try_activate_heavier_fork(
-                                &self.storage,
-                                self.storage.blocks().as_ref(),
-                                &self.protocol,
-                                &candidate,
-                                utxo_set,
-                                None,
-                                Some(self.mempool_manager.as_ref()),
-                            ) {
-                                Ok(true) => warn!(
-                                    "[CATCH_UP] activated heavier tip {}",
-                                    hex::encode(candidate)
-                                ),
-                                Ok(false) => warn!(
-                                    "[CATCH_UP] heavier tip {} did not activate",
-                                    hex::encode(candidate)
-                                ),
-                                Err(e) => warn!("[CATCH_UP] heavier tip activate failed: {e:#}"),
-                            }
-                        }
-                    } else if let Err(e) = self
-                        .network
-                        .request_header_chain_bodies(probed.peer, &probed.missing_bodies)
-                        .await
+                        disconnect_from,
+                    )
+                    .await
                     {
-                        warn!("[CATCH_UP] heavier-fork getdata failed: {e}");
+                        warn!("[UNDO_REPAIR] heavier fork not activated: {e:#}");
+                        CATCH_UP_FORK_RETRY_SECS.store(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0),
+                            Ordering::Relaxed,
+                        );
+                        return Ok(());
                     }
-                    return Ok(());
+                    if let Some(candidate) = probed.heavier_tip {
+                        match crate::node::reorg_executor::try_activate_heavier_fork(
+                            &self.storage,
+                            self.storage.blocks().as_ref(),
+                            &self.protocol,
+                            &candidate,
+                            utxo_set,
+                            None,
+                            Some(self.mempool_manager.as_ref()),
+                        ) {
+                            Ok(true) => warn!(
+                                "[CATCH_UP] activated heavier tip {}",
+                                hex::encode(candidate)
+                            ),
+                            Ok(false) => warn!(
+                                "[CATCH_UP] heavier tip {} did not activate",
+                                hex::encode(candidate)
+                            ),
+                            Err(e) => warn!("[CATCH_UP] heavier tip activate failed: {e:#}"),
+                        }
+                    }
+                } else if let Err(e) = self
+                    .network
+                    .request_header_chain_bodies(probed.peer, &probed.missing_bodies)
+                    .await
+                {
+                    warn!("[CATCH_UP] heavier-fork getdata failed: {e}");
                 }
+                CATCH_UP_FORK_RETRY_SECS.store(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                    Ordering::Relaxed,
+                );
+                return Ok(());
             }
         }
 
@@ -2387,7 +2416,26 @@ impl Node {
             Err(e) => {
                 // Live 2026-07-16: seed-from-ckpt failures under memory pressure retried every
                 // ~5–12s for hours (629 dirty wipe+reseed loops) — burn RAM + hide root cause.
-                warn!("[CATCH_UP] Parallel IBD failed: {:#}", e);
+                // Live 2026-11-14: the same Δ=70 refusal was retried 1422 times across four
+                // days. Backoff caps at 10 minutes, so the import never stopped.
+                let rendered = format!("{e:#}");
+                if catch_up_failure_is_terminal(&rendered) {
+                    if let Some(h) = self
+                        .storage
+                        .chain()
+                        .get_engine_export_height()
+                        .ok()
+                        .flatten()
+                    {
+                        record_refused_seed_height(&self.data_dir, h);
+                    }
+                    CATCH_UP_SEED_BLOCKED.store(true, Ordering::Release);
+                    warn!(
+                        "[CATCH_UP] checkpoint seed refused — this process will not import it again: {rendered}"
+                    );
+                    return Ok(());
+                }
+                warn!("[CATCH_UP] Parallel IBD failed: {rendered}");
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
@@ -2658,18 +2706,21 @@ impl Node {
     /// Stop the node
     pub async fn stop(&mut self) -> Result<()> {
         info!("Stopping node");
-        if let Some(policy) = self.config.as_ref().and_then(|cfg| cfg.mempool.as_ref()) {
-            if policy.persist_mempool {
-                let path = std::path::Path::new(&policy.mempool_persistence_path);
-                if let Some(parent) = path.parent() {
-                    if !parent.as_os_str().is_empty() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                }
-                match self.mempool_manager.save_to_disk(path) {
-                    Ok(()) => info!("Saved mempool to {}", path.display()),
-                    Err(e) => warn!("Failed to save mempool to {}: {}", path.display(), e),
-                }
+        if let Some(policy) = self.config.as_ref().and_then(|cfg| cfg.mempool.as_ref())
+            && policy.persist_mempool
+        {
+            let path = crate::config::resolve_mempool_persistence_path(
+                &self.data_dir,
+                &policy.mempool_persistence_path,
+            );
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match self.mempool_manager.save_to_disk(&path) {
+                Ok(()) => info!("Saved mempool to {}", path.display()),
+                Err(e) => warn!("Failed to save mempool to {}: {}", path.display(), e),
             }
         }
         if let Some(estimator) = self.mempool_manager.fee_estimator() {
@@ -2861,12 +2912,124 @@ impl Node {
     }
 }
 
+#[cfg(feature = "production")]
+static CATCH_UP_SEED_BLOCKED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "production")]
+pub(crate) fn catch_up_seed_is_blocked() -> bool {
+    CATCH_UP_SEED_BLOCKED.load(std::sync::atomic::Ordering::Acquire)
+}
+
+#[cfg(all(test, feature = "production"))]
+fn reset_catch_up_seed_blocked() {
+    CATCH_UP_SEED_BLOCKED.store(false, std::sync::atomic::Ordering::Release);
+}
+
+/// A heavier fork is retried on a fixed 30s gap. `last_secs == 0` is the first probe.
+pub(crate) fn catch_up_fork_retry_elapsed(last_secs: u64, now: u64) -> bool {
+    last_secs == 0 || now.saturating_sub(last_secs) >= 30
+}
+
+/// A checkpoint the importer already refused will fail the same way on the next
+/// attempt. Peer loss and a short IBD error stay retriable.
+pub(crate) fn catch_up_failure_is_terminal(err: &str) -> bool {
+    err.contains("refusing seed")
+        || err.contains("checkpoint incomplete/poisoned")
+        || err.contains("checkpoint poisoned")
+        || err.contains("checkpoint tree empty")
+        || err.contains("ibd-seed-writer thread exited early")
+        || err.contains("ibd-seed-writer thread panicked")
+}
+
+fn refused_seed_height_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("seed_refused_height")
+}
+
+pub(crate) fn record_refused_seed_height(data_dir: &std::path::Path, height: u64) {
+    let _ = std::fs::write(refused_seed_height_path(data_dir), format!("{height}\n"));
+}
+
+pub(crate) fn read_refused_seed_height(data_dir: &std::path::Path) -> Option<u64> {
+    std::fs::read_to_string(refused_seed_height_path(data_dir))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 #[cfg(test)]
 mod resume_snapshot_tests {
     use super::*;
     use blvm_protocol::BlockHeader;
     use blvm_protocol::types::{OutPoint, UTXO};
     use std::net::SocketAddr;
+
+    #[test]
+    fn a_refused_checkpoint_seed_is_not_retried() {
+        let refused = "seed engine from ibd_utxos_ckpt_a at checkpoint h=330797: \
+                       IBD engine seed: imported 91605408 UTXOs but chain_info expected 91605478 \
+                       at height 330797 (Δ=70) — checkpoint incomplete/poisoned (refusing seed)";
+        assert!(catch_up_failure_is_terminal(refused));
+        assert!(catch_up_failure_is_terminal(
+            "checkpoint tree empty at height 330797 — export incomplete or wrong slot"
+        ));
+        assert!(catch_up_failure_is_terminal(
+            "fails monotonicity (last_accepted=1) — checkpoint poisoned (refusing seed)"
+        ));
+        assert!(!catch_up_failure_is_terminal("peer disconnected"));
+        assert!(!catch_up_failure_is_terminal(
+            "[CATCH_UP] Parallel IBD failed: connection reset"
+        ));
+        assert!(catch_up_failure_is_terminal(
+            "ibd-seed-writer thread exited early"
+        ));
+        assert!(catch_up_failure_is_terminal(
+            "ibd-seed-writer thread panicked: boom"
+        ));
+        assert!(!catch_up_failure_is_terminal(
+            "IBD shutdown requested during seed"
+        ));
+        assert!(!catch_up_failure_is_terminal(
+            "IBD engine seed: heed3 scan failed after a partial import: boom"
+        ));
+        assert!(!catch_up_fork_retry_elapsed(1_000, 1_029));
+        assert!(catch_up_fork_retry_elapsed(1_000, 1_030));
+        assert!(catch_up_fork_retry_elapsed(0, 1_000));
+        let dir = tempfile::tempdir().unwrap();
+        record_refused_seed_height(dir.path(), 330797);
+        assert_eq!(read_refused_seed_height(dir.path()), Some(330797));
+    }
+
+    #[cfg(feature = "production")]
+    #[tokio::test]
+    async fn a_refused_export_height_sets_the_catch_up_stop() {
+        super::reset_catch_up_seed_blocked();
+        let temp = tempfile::TempDir::new().unwrap();
+        let network: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let rpc: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let mut node = Node::new(
+            temp.path().to_str().unwrap(),
+            network,
+            rpc,
+            Some(ProtocolVersion::Regtest),
+        )
+        .unwrap();
+        node.storage()
+            .chain()
+            .force_set_engine_export_height(7)
+            .unwrap();
+        record_refused_seed_height(temp.path(), 7);
+        let mut utxo = blvm_protocol::UtxoSet::default();
+        node.try_catch_up_ibd(&mut utxo).await.unwrap();
+        assert!(catch_up_seed_is_blocked());
+        assert_eq!(read_refused_seed_height(temp.path()), Some(7));
+        std::fs::remove_file(super::refused_seed_height_path(temp.path())).unwrap();
+        node.try_catch_up_ibd(&mut utxo).await.unwrap();
+        assert!(catch_up_seed_is_blocked());
+        assert!(read_refused_seed_height(temp.path()).is_none());
+        super::reset_catch_up_seed_blocked();
+    }
 
     fn put_ckpt(storage: &Storage, tree: &str, prevout: &OutPoint, utxo: &UTXO) {
         let tree = storage.open_tree(tree).unwrap();
@@ -2954,5 +3117,86 @@ mod resume_snapshot_tests {
         assert!(storage.utxos().get_utxo(&table_coin).unwrap().is_some());
         assert_eq!(storage.chain().get_utxo_watermark().unwrap(), Some(0));
         assert_eq!(storage.chain().get_engine_export_height().unwrap(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn watermark_above_the_block_tip_resumes_from_the_slot_at_the_tip() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let network: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let rpc: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let node = Node::new(
+            temp.path().to_str().unwrap(),
+            network,
+            rpc,
+            Some(ProtocolVersion::Regtest),
+        )
+        .unwrap();
+        let storage = node.storage();
+        let bits = 0x1d00ffffu64;
+        let mut prev = [0u8; 32];
+        let mut tip_hash = [0u8; 32];
+        let mut tip_header = BlockHeader {
+            version: 1,
+            prev_block_hash: prev,
+            merkle_root: [0u8; 32],
+            timestamp: 1_700_000_000,
+            bits,
+            nonce: 0,
+        };
+        for nonce in 0..3u64 {
+            let hdr = BlockHeader {
+                version: 1,
+                prev_block_hash: prev,
+                merkle_root: [0u8; 32],
+                timestamp: 1_700_000_000,
+                bits,
+                nonce,
+            };
+            let hash = storage.chain().calculate_hash(&hdr);
+            storage.blocks().store_header(&hash, &hdr).unwrap();
+            storage.blocks().store_height(nonce, &hash).unwrap();
+            tip_hash = hash;
+            tip_header = hdr;
+            prev = hash;
+        }
+        storage.ensure_parent_chainwork(&tip_header, 2).unwrap();
+        storage
+            .chain()
+            .update_tip(&tip_hash, &tip_header, 2)
+            .unwrap();
+        storage.chain().set_engine_ckpt_slot_height(0, 2).unwrap();
+        storage.chain().set_engine_ckpt_slot_height(1, 5).unwrap();
+        storage.chain().force_set_engine_ckpt_slot(1).unwrap();
+        storage.chain().force_set_ibd_utxo_watermark(5).unwrap();
+        storage.chain().force_set_engine_export_height(5).unwrap();
+
+        let at_tip = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let ahead = OutPoint {
+            hash: [5u8; 32],
+            index: 0,
+        };
+        let utxo = UTXO {
+            value: 50_000,
+            script_pubkey: vec![0x51].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        put_ckpt(storage, "ibd_utxos_ckpt_a", &at_tip, &utxo);
+        put_ckpt(storage, "ibd_utxos_ckpt_b", &ahead, &utxo);
+
+        let (synced, next) = node.ibd_resume_heights().unwrap();
+
+        assert_eq!(synced, 2);
+        assert_eq!(next, 3);
+        assert_eq!(storage.chain().get_utxo_watermark().unwrap(), Some(2));
+        assert_eq!(storage.chain().get_engine_export_height().unwrap(), Some(2));
+        assert_eq!(storage.chain().get_engine_ckpt_slot().unwrap(), 0);
+        assert!(storage.read_chain_prevout(&at_tip).unwrap().is_some());
+        let ahead_tree = storage.open_tree("ibd_utxos_ckpt_b").unwrap();
+        let ahead_key = crate::storage::disk_utxo::outpoint_to_key(&ahead);
+        assert!(ahead_tree.get(&ahead_key).unwrap().is_some());
     }
 }

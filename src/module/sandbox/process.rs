@@ -477,25 +477,25 @@ pub struct ResourceUsage {
 impl ResourceUsage {
     /// Check if resource usage exceeds limits
     pub fn exceeds_limits(&self, limits: &ResourceLimits) -> bool {
-        if let Some(max_cpu) = limits.max_cpu_percent {
-            if self.cpu_percent > max_cpu as f64 {
-                return true;
-            }
+        if let Some(max_cpu) = limits.max_cpu_percent
+            && self.cpu_percent > max_cpu as f64
+        {
+            return true;
         }
-        if let Some(max_memory) = limits.max_memory_bytes {
-            if self.memory_bytes > max_memory {
-                return true;
-            }
+        if let Some(max_memory) = limits.max_memory_bytes
+            && self.memory_bytes > max_memory
+        {
+            return true;
         }
-        if let Some(max_fds) = limits.max_file_descriptors {
-            if self.file_descriptors > max_fds {
-                return true;
-            }
+        if let Some(max_fds) = limits.max_file_descriptors
+            && self.file_descriptors > max_fds
+        {
+            return true;
         }
-        if let Some(max_children) = limits.max_child_processes {
-            if self.child_processes > max_children {
-                return true;
-            }
+        if let Some(max_children) = limits.max_child_processes
+            && self.child_processes > max_children
+        {
+            return true;
         }
         false
     }

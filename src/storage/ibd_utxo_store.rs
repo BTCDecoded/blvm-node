@@ -854,7 +854,7 @@ impl IbdUtxoStore {
         // sits 3-4× above the live entry count from a past burst insertion.  At h=447k
         // in prior sessions cache_cap jumped to 30 M with only 8 M live entries and
         // never shrank, wasting ~14 GB of backing DashMap structure.
-        if current_height % 1_000 == 0 {
+        if current_height.is_multiple_of(1_000) {
             let physical_cap = self.cache.capacity();
             let live_len = self.cache.len();
             if physical_cap > live_len.saturating_mul(4)
@@ -1662,10 +1662,10 @@ impl IbdUtxoStore {
         }
         for (key, value) in &batch.inserts {
             self.cache_put(*key, Arc::clone(value), h);
-            if self.eviction_strategy == EvictionStrategy::Dynamic {
-                if let Ok(mut recent) = self.recently_accessed.lock() {
-                    recent.insert(*key);
-                }
+            if self.eviction_strategy == EvictionStrategy::Dynamic
+                && let Ok(mut recent) = self.recently_accessed.lock()
+            {
+                recent.insert(*key);
             }
         }
         let total = batch.deletes.len() + batch.inserts.len();
@@ -1792,13 +1792,11 @@ impl IbdUtxoStore {
         // At h=300k+ blocks have ~8000 outputs → 8000 mutex acquires per block; the
         // ibd-retire thread spent 96% CPU on these lock churns alone, capping BPS.
         // One lock per delta is O(N) work but ~O(1) lock contention.
-        if dynamic {
-            if let Ok(mut recent) = self.recently_accessed.lock() {
-                recent.reserve(delta.additions.len());
-                for op in delta.additions.keys() {
-                    let key = outpoint_to_key(op);
-                    recent.insert(key);
-                }
+        if dynamic && let Ok(mut recent) = self.recently_accessed.lock() {
+            recent.reserve(delta.additions.len());
+            for op in delta.additions.keys() {
+                let key = outpoint_to_key(op);
+                recent.insert(key);
             }
         }
     }
@@ -2576,83 +2574,83 @@ impl IbdUtxoStore {
             if chunk.is_empty() {
                 continue;
             }
-            if ibd_per_op_muhash_enabled() {
-                if let Some(mhref) = muhash.as_mut() {
-                    // Parallel MuHash: each rayon task computes a local sub-accumulator for its
-                    // row, then `try_reduce` combines them with `multiply` (commutative ⇒ order-
-                    // independent). Insert rows deserialise from the in-memory slab (CPU-bound);
-                    // delete rows do a single point-read from RocksDB (cheap from block cache).
-                    // Using rayon here collapses ~8 seconds of sequential SHA-256 + ChaCha20 +
-                    // 3072-bit multiply per 200 k rows into ~0.8 seconds on a 10-core host.
-                    #[cfg(feature = "rayon")]
-                    {
-                        use blvm_protocol::rayon::prelude::*;
-                        let disk = &self.disk;
-                        let chunk_sub_mh = chunk
-                            .par_iter()
-                            .try_fold(
-                                MuHash3072::new,
-                                |mut acc, (key, value_opt)| -> anyhow::Result<MuHash3072> {
-                                    match value_opt {
-                                        Some((start, len)) => {
-                                            let utxo: UTXO =
-                                                self.decode_slab_utxo(slab, *start, *len)?;
-                                            let op = key_to_outpoint(key);
-                                            let pre = utxo_muhash_preimage_ibd(&op, &utxo);
-                                            acc.insert_mut(&pre);
-                                        }
-                                        None => {
-                                            // Persisted `ibd_utxos` has no row: net delete. The disk
-                                            // batch still removes the key; MuHash must not subtract a
-                                            // coin that was never durably inserted.
-                                            let Some(disk_bytes) = disk.get(key.as_slice())? else {
-                                                return Ok(acc);
-                                            };
-                                            let utxo: UTXO = self.decode_utxo_bytes(&disk_bytes)?;
-                                            let op = key_to_outpoint(key);
-                                            let pre = utxo_muhash_preimage_ibd(&op, &utxo);
-                                            acc.remove_mut(&pre);
-                                        }
+            if ibd_per_op_muhash_enabled()
+                && let Some(mhref) = muhash.as_mut()
+            {
+                // Parallel MuHash: each rayon task computes a local sub-accumulator for its
+                // row, then `try_reduce` combines them with `multiply` (commutative ⇒ order-
+                // independent). Insert rows deserialise from the in-memory slab (CPU-bound);
+                // delete rows do a single point-read from RocksDB (cheap from block cache).
+                // Using rayon here collapses ~8 seconds of sequential SHA-256 + ChaCha20 +
+                // 3072-bit multiply per 200 k rows into ~0.8 seconds on a 10-core host.
+                #[cfg(feature = "rayon")]
+                {
+                    use blvm_protocol::rayon::prelude::*;
+                    let disk = &self.disk;
+                    let chunk_sub_mh = chunk
+                        .par_iter()
+                        .try_fold(
+                            MuHash3072::new,
+                            |mut acc, (key, value_opt)| -> anyhow::Result<MuHash3072> {
+                                match value_opt {
+                                    Some((start, len)) => {
+                                        let utxo: UTXO =
+                                            self.decode_slab_utxo(slab, *start, *len)?;
+                                        let op = key_to_outpoint(key);
+                                        let pre = utxo_muhash_preimage_ibd(&op, &utxo);
+                                        acc.insert_mut(&pre);
                                     }
-                                    Ok(acc)
-                                },
-                            )
-                            .try_reduce(MuHash3072::new, |a, b| Ok(a.multiply(&b)))?;
-                        let old_mh = std::mem::take(&mut **mhref);
-                        **mhref = old_mh.multiply(&chunk_sub_mh);
-                    }
-                    #[cfg(not(feature = "rayon"))]
-                    {
-                        // Sequential fallback (non-production builds without rayon).
-                        for (key, value_opt) in chunk {
-                            match value_opt {
-                                Some((start, len)) => {
-                                    let utxo: UTXO =
-                                        crate::storage::utxo_value_codec::decode_utxo_with_codec(
-                                            codec,
-                                            &slab[*start as usize..][..*len as usize],
-                                        )?;
-                                    let op = key_to_outpoint(key);
-                                    let pre = utxo_muhash_preimage_ibd(&op, &utxo);
-                                    mhref.insert_mut(&pre);
+                                    None => {
+                                        // Persisted `ibd_utxos` has no row: net delete. The disk
+                                        // batch still removes the key; MuHash must not subtract a
+                                        // coin that was never durably inserted.
+                                        let Some(disk_bytes) = disk.get(key.as_slice())? else {
+                                            return Ok(acc);
+                                        };
+                                        let utxo: UTXO = self.decode_utxo_bytes(&disk_bytes)?;
+                                        let op = key_to_outpoint(key);
+                                        let pre = utxo_muhash_preimage_ibd(&op, &utxo);
+                                        acc.remove_mut(&pre);
+                                    }
                                 }
-                                None => {
-                                    let Some(disk_bytes) = self.disk.get(key.as_slice())? else {
-                                        debug!(
-                                            "IbdUtxoStore: MuHash skip delete (no SST row; net-no-op vs durable set), key_prefix={}",
-                                            hex::encode(&key[..8])
-                                        );
-                                        continue;
-                                    };
-                                    let utxo: UTXO =
-                                        crate::storage::utxo_value_codec::decode_utxo_with_codec(
-                                            codec,
-                                            &disk_bytes,
-                                        )?;
-                                    let op = key_to_outpoint(key);
-                                    let pre = utxo_muhash_preimage_ibd(&op, &utxo);
-                                    mhref.remove_mut(&pre);
-                                }
+                                Ok(acc)
+                            },
+                        )
+                        .try_reduce(MuHash3072::new, |a, b| Ok(a.multiply(&b)))?;
+                    let old_mh = std::mem::take(&mut **mhref);
+                    **mhref = old_mh.multiply(&chunk_sub_mh);
+                }
+                #[cfg(not(feature = "rayon"))]
+                {
+                    // Sequential fallback (non-production builds without rayon).
+                    for (key, value_opt) in chunk {
+                        match value_opt {
+                            Some((start, len)) => {
+                                let utxo: UTXO =
+                                    crate::storage::utxo_value_codec::decode_utxo_with_codec(
+                                        codec,
+                                        &slab[*start as usize..][..*len as usize],
+                                    )?;
+                                let op = key_to_outpoint(key);
+                                let pre = utxo_muhash_preimage_ibd(&op, &utxo);
+                                mhref.insert_mut(&pre);
+                            }
+                            None => {
+                                let Some(disk_bytes) = self.disk.get(key.as_slice())? else {
+                                    debug!(
+                                        "IbdUtxoStore: MuHash skip delete (no SST row; net-no-op vs durable set), key_prefix={}",
+                                        hex::encode(&key[..8])
+                                    );
+                                    continue;
+                                };
+                                let utxo: UTXO =
+                                    crate::storage::utxo_value_codec::decode_utxo_with_codec(
+                                        codec,
+                                        &disk_bytes,
+                                    )?;
+                                let op = key_to_outpoint(key);
+                                let pre = utxo_muhash_preimage_ibd(&op, &utxo);
+                                mhref.remove_mut(&pre);
                             }
                         }
                     }
@@ -2915,7 +2913,7 @@ impl IbdUtxoStore {
             if batch.len() >= MAX_BATCH_OPS {
                 total += flush_batch(&batch)?;
                 batch.clear();
-                if total % (MAX_BATCH_OPS * 50) == 0 {
+                if total.is_multiple_of(MAX_BATCH_OPS * 50) {
                     info!("[IBD_UTXO_STORE] flush_full_cache_to_lmdb: {total}/{len} written…");
                 }
             }

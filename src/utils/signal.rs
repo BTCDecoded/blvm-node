@@ -15,26 +15,45 @@ struct ShutdownWatch {
 }
 
 static SHUTDOWN: OnceLock<ShutdownWatch> = OnceLock::new();
+static GRACE_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn shutdown_watch() -> &'static ShutdownWatch {
     SHUTDOWN.get_or_init(|| {
         let (tx, rx) = watch::channel(false);
-        let notify_tx = tx.clone();
         tokio::spawn(async move {
             wait_for_shutdown_signal().await;
-            #[cfg(feature = "production")]
-            crate::node::parallel_ibd::IBD_SHUTDOWN_REQUESTED.store(true, Ordering::Release);
-            let _ = notify_tx.send(true);
-            // If the runtime is blocked on sync RocksDB / UTXO / IBD flush drain, `node.start()`
-            // may not yield for minutes. Bound forced exit, but give IBD enough time to join
-            // block flushes + watermark (30s was too short — process kept validating and then
-            // `exit(0)` skipped durable tip advance).
-            tokio::time::sleep(std::time::Duration::from_secs(180)).await;
-            warn!("Shutdown grace period elapsed — forcing process exit");
-            std::process::exit(0);
+            begin_shutdown();
         });
         ShutdownWatch { tx, _rx: rx }
     })
+}
+
+/// Set the process shutdown watch and arm the 180-second backstop once.
+///
+/// SIGTERM and RPC `stop` both come through here. The main loop's 30-second
+/// exit still runs first when a worker can poll. Unit tests do not arm the
+/// process exit: a 180-second `exit(0)` would kill `cargo test`.
+fn begin_shutdown() {
+    #[cfg(feature = "production")]
+    crate::node::parallel_ibd::IBD_SHUTDOWN_REQUESTED.store(true, Ordering::Release);
+    let _ = shutdown_watch().tx.send(true);
+    if GRACE_ARMED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    #[cfg(not(test))]
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(180)).await;
+        warn!("Shutdown grace period elapsed — forcing process exit");
+        std::process::exit(0);
+    });
+}
+
+/// Ask the process to shut down the same way SIGTERM does.
+///
+/// Safe to call more than once. The RPC `stop` callback uses this.
+pub fn request_shutdown() {
+    let _ = shutdown_watch();
+    begin_shutdown();
 }
 
 /// Wait for shutdown signal (SIGTERM, SIGINT, or Ctrl+C)
@@ -80,7 +99,9 @@ pub async fn wait_for_shutdown_signal() {
 
     #[cfg(not(unix))]
     {
-        // On non-Unix systems, just use Ctrl+C
+        // Console Ctrl+C and the WinSW sample's service stop both land here.
+        // WinSW sends Ctrl+C. There is no service-control handler, so
+        // `sc.exe stop` does not reach this watch.
         match signal::ctrl_c().await {
             Ok(()) => {
                 info!("Received Ctrl+C, shutting down gracefully...");

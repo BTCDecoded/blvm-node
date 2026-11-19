@@ -14,6 +14,7 @@ use zstd;
 #[cfg(test)]
 thread_local! {
     static GET_ALL_UTXOS_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static REPLACEMENT_BATCHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -88,14 +89,70 @@ impl UtxoStore {
         crate::storage::utxo_value_codec::decode_utxo_with_codec(self.value_codec, bytes)
     }
 
+    /// Delete the previous rows and write the new rows in one batch.
+    ///
+    /// `clear()` commits on its own. A later put batch can then fail and leave
+    /// the table empty under the old tip.
+    fn commit_replacement(&self, pairs: Vec<(Vec<u8>, Vec<u8>)>) -> Result<()> {
+        let mut old_keys = Vec::new();
+        for item in self.utxos.iter() {
+            old_keys.push(item?.0);
+        }
+        let mut batch = self.utxos.batch()?;
+        for key in &old_keys {
+            batch.delete(key);
+        }
+        for (key, value) in &pairs {
+            batch.put(key, value);
+        }
+        batch.commit()?;
+        #[cfg(test)]
+        REPLACEMENT_BATCHES.with(|calls| calls.set(calls.get() + 1));
+        Ok(())
+    }
+
+    fn encode_stored_utxo(&self, value: Vec<u8>) -> Result<Vec<u8>> {
+        #[cfg(feature = "utxo-compression")]
+        {
+            if self.compression_enabled {
+                return zstd::encode_all(&value[..], self.compression_level as i32)
+                    .map_err(|e| anyhow::anyhow!("UTXO compression failed: {}", e));
+            }
+        }
+        Ok(value)
+    }
+
+    /// Spend and create outpoints in one batch. `None` deletes the current and legacy keys.
+    pub(crate) fn commit_outpoint_batch(&self, ops: &[(&OutPoint, Option<&UTXO>)]) -> Result<()> {
+        let mut encoded = Vec::with_capacity(ops.len());
+        for (outpoint, utxo) in ops {
+            match utxo {
+                None => {
+                    encoded.push((self.outpoint_key(outpoint), None));
+                    encoded.push((self.legacy_outpoint_key(outpoint).to_vec(), None));
+                }
+                Some(utxo) => {
+                    let value = self.encode_stored_utxo(self.serialize_utxo(utxo)?)?;
+                    encoded.push((self.outpoint_key(outpoint), Some(value)));
+                }
+            }
+        }
+        let mut batch = self.utxos.batch()?;
+        for (key, value) in &encoded {
+            match value {
+                Some(bytes) => batch.put(key, bytes),
+                None => batch.delete(key),
+            }
+        }
+        batch.commit()?;
+        Ok(())
+    }
+
     /// Store the entire UTXO set
     ///
     /// Performance optimization: Caches serialized UTXO bytes to avoid re-serialization
     /// Performance optimization: Parallelizes serialization and caching for large UTXO sets
     pub fn store_utxo_set(&self, utxo_set: &UtxoSet) -> Result<()> {
-        // Clear existing UTXOs
-        self.utxos.clear()?;
-
         // Optimization: For large UTXO sets, parallelize serialization
         #[cfg(feature = "production")]
         {
@@ -111,26 +168,10 @@ impl UtxoStore {
                 .map(|(outpoint, utxo)| {
                     let key = self.outpoint_key(outpoint);
                     let value = self.serialize_utxo(utxo.as_ref())?;
-                    Ok((key, value))
+                    Ok((key, self.encode_stored_utxo(value)?))
                 })
                 .collect::<Result<Vec<(Vec<u8>, Vec<u8>)>>>()?;
-
-            let mut batch = self.utxos.batch()?;
-            for (key, value) in serialized_utxos {
-                #[cfg(feature = "utxo-compression")]
-                let data_to_store = if self.compression_enabled {
-                    zstd::encode_all(&value[..], self.compression_level as i32)
-                        .map_err(|e| anyhow::anyhow!("UTXO compression failed: {}", e))?
-                } else {
-                    value
-                };
-
-                #[cfg(not(feature = "utxo-compression"))]
-                let data_to_store = value;
-
-                batch.put(&key, &data_to_store);
-            }
-            batch.commit()?;
+            self.commit_replacement(serialized_utxos)?;
         }
 
         #[cfg(not(feature = "production"))]
@@ -138,25 +179,10 @@ impl UtxoStore {
             let mut pairs = Vec::new();
             for (outpoint, utxo) in utxo_set {
                 let key = self.outpoint_key(outpoint);
-                let value = self.serialize_utxo(utxo.as_ref())?;
+                let value = self.encode_stored_utxo(self.serialize_utxo(utxo.as_ref())?)?;
                 pairs.push((key, value));
             }
-            let mut batch = self.utxos.batch()?;
-            for (key, value) in pairs {
-                #[cfg(feature = "utxo-compression")]
-                let data_to_store = if self.compression_enabled {
-                    zstd::encode_all(&value[..], self.compression_level as i32)
-                        .map_err(|e| anyhow::anyhow!("UTXO compression failed: {}", e))?
-                } else {
-                    value
-                };
-
-                #[cfg(not(feature = "utxo-compression"))]
-                let data_to_store = value;
-
-                batch.put(&key, &data_to_store);
-            }
-            batch.commit()?;
+            self.commit_replacement(pairs)?;
         }
 
         Ok(())
@@ -228,22 +254,21 @@ impl UtxoStore {
         // skips the Vec<u8> allocation from Tree::get and the full rkyv deserialize pass.
         // Not compatible with utxo-compression (rkyv + zstd don't co-exist).
         #[cfg(all(feature = "heed3", not(feature = "utxo-compression")))]
-        if self.value_codec == crate::storage::utxo_value_codec::ValueCodec::Rkyv {
-            if let Some(heed3_tree) = self.utxos.as_heed3_tree() {
-                let rtxn = heed3_tree.env().read_txn()?;
-                let legacy = self.legacy_outpoint_key(outpoint);
-                let slices =
-                    heed3_tree.get_many_heed3(&[key.as_slice(), legacy.as_slice()], &rtxn)?;
-                return match slices.into_iter().flatten().next() {
-                    Some(bytes) => {
-                        let archived = crate::storage::rkyv_codec::access_utxo(bytes)?;
-                        Ok(Some(crate::storage::rkyv_codec::utxo_from_archived(
-                            archived,
-                        )))
-                    }
-                    None => Ok(None),
-                };
-            }
+        if self.value_codec == crate::storage::utxo_value_codec::ValueCodec::Rkyv
+            && let Some(heed3_tree) = self.utxos.as_heed3_tree()
+        {
+            let rtxn = heed3_tree.env().read_txn()?;
+            let legacy = self.legacy_outpoint_key(outpoint);
+            let slices = heed3_tree.get_many_heed3(&[key.as_slice(), legacy.as_slice()], &rtxn)?;
+            return match slices.into_iter().flatten().next() {
+                Some(bytes) => {
+                    let archived = crate::storage::rkyv_codec::access_utxo(bytes)?;
+                    Ok(Some(crate::storage::rkyv_codec::utxo_from_archived(
+                        archived,
+                    )))
+                }
+                None => Ok(None),
+            };
         }
 
         let legacy = self.legacy_outpoint_key(outpoint);
@@ -649,6 +674,86 @@ mod tests {
                 .value,
             222
         );
+    }
+
+    #[test]
+    fn store_utxo_set_keeps_the_old_rows_until_the_new_batch_commits() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = crate::storage::Storage::new(temp.path()).unwrap();
+        let utxos = storage.utxos();
+        let first = OutPoint {
+            hash: [1u8; 32],
+            index: 0,
+        };
+        let second = OutPoint {
+            hash: [2u8; 32],
+            index: 0,
+        };
+        let kept = OutPoint {
+            hash: [3u8; 32],
+            index: 0,
+        };
+        let old = UTXO {
+            value: 10,
+            script_pubkey: vec![OP_1].into(),
+            height: 1,
+            is_coinbase: false,
+        };
+        let new_coin = UTXO {
+            value: 20,
+            script_pubkey: vec![OP_1].into(),
+            height: 2,
+            is_coinbase: false,
+        };
+        utxos.add_utxo(&first, &old).unwrap();
+        utxos.add_utxo(&second, &old).unwrap();
+        let mut set = UtxoSet::default();
+        set.insert(kept, std::sync::Arc::new(new_coin));
+        REPLACEMENT_BATCHES.with(|calls| calls.set(0));
+        utxos.store_utxo_set(&set).unwrap();
+        assert_eq!(REPLACEMENT_BATCHES.with(|calls| calls.get()), 1);
+        assert!(utxos.get_utxo(&first).unwrap().is_none());
+        assert!(utxos.get_utxo(&second).unwrap().is_none());
+        assert_eq!(utxos.get_utxo(&kept).unwrap().unwrap().value, 20);
+    }
+
+    #[test]
+    fn chainstate_undo_is_one_batch() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let storage = crate::storage::Storage::new(temp.path()).unwrap();
+        let utxos = storage.utxos();
+        let spent = OutPoint {
+            hash: [4u8; 32],
+            index: 0,
+        };
+        let kept = OutPoint {
+            hash: [5u8; 32],
+            index: 1,
+        };
+        let created = OutPoint {
+            hash: [6u8; 32],
+            index: 0,
+        };
+        let coin = UTXO {
+            value: 30,
+            script_pubkey: vec![OP_1].into(),
+            height: 3,
+            is_coinbase: false,
+        };
+        let created_coin = UTXO {
+            value: 40,
+            script_pubkey: vec![OP_1].into(),
+            height: 4,
+            is_coinbase: false,
+        };
+        utxos.add_utxo(&spent, &coin).unwrap();
+        utxos.add_utxo(&kept, &coin).unwrap();
+        utxos
+            .commit_outpoint_batch(&[(&spent, None), (&created, Some(&created_coin))])
+            .unwrap();
+        assert!(utxos.get_utxo(&spent).unwrap().is_none());
+        assert_eq!(utxos.get_utxo(&kept).unwrap().unwrap().value, 30);
+        assert_eq!(utxos.get_utxo(&created).unwrap().unwrap().value, 40);
     }
 
     #[test]

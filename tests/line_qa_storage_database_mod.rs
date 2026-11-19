@@ -3,6 +3,7 @@
 use blvm_node::config::DatabaseBackendConfig;
 use blvm_node::storage::database::backend_from_config;
 
+#[cfg(not(feature = "redb"))]
 #[test]
 fn backend_from_config_rejects_redb_when_the_feature_is_off() {
     match backend_from_config(DatabaseBackendConfig::Redb) {

@@ -25,6 +25,7 @@ async fn load_module_rejects_a_missing_dependency() {
         dependencies,
         optional_dependencies: HashMap::new(),
         entry_point: "demo".to_string(),
+        ipc_protocol: 0,
     };
 
     match manager

@@ -1433,3 +1433,109 @@ impl ResponseMessage {
         }
     }
 }
+
+#[cfg(test)]
+mod generation0_layout {
+    use super::*;
+    use crate::module::traits::EventType;
+
+    fn index(bytes: &[u8]) -> u32 {
+        u32::from_le_bytes(bytes[..4].try_into().unwrap())
+    }
+
+    /// Published module binaries bake these bincode discriminants in. Append
+    /// variants after `HttpPost`. Do not insert, reorder, or add a field to a
+    /// variant those binaries already send.
+    #[test]
+    fn published_module_wire_indices_stay_put() {
+        let handshake = RequestPayload::Handshake {
+            module_id: String::new(),
+            module_name: String::new(),
+            version: String::new(),
+        };
+        let handshake_bytes = bincode::serialize(&handshake).unwrap();
+        assert_eq!(handshake_bytes, vec![0u8; 28]);
+
+        assert_eq!(
+            index(&bincode::serialize(&RequestPayload::GetChainTip).unwrap()),
+            5
+        );
+        assert_eq!(
+            index(
+                &bincode::serialize(&RequestPayload::SubscribeEvents {
+                    event_types: vec![]
+                })
+                .unwrap()
+            ),
+            8
+        );
+        assert_eq!(
+            index(
+                &bincode::serialize(&RequestPayload::HandshakeV2 {
+                    module_id: String::new(),
+                    module_name: String::new(),
+                    version: String::new(),
+                    ipc_protocol: 2,
+                })
+                .unwrap()
+            ),
+            78
+        );
+        assert_eq!(
+            index(
+                &bincode::serialize(&RequestPayload::HttpPost {
+                    url: String::new(),
+                    content_type: String::new(),
+                    body: Vec::new(),
+                    timeout_ms: 0,
+                    authorization: None,
+                })
+                .unwrap()
+            ),
+            86
+        );
+        assert_eq!(
+            index(&bincode::serialize(&MessageType::Handshake).unwrap()),
+            8
+        );
+        assert_eq!(
+            index(&bincode::serialize(&MessageType::HandshakeV2).unwrap()),
+            84
+        );
+        assert_eq!(
+            index(
+                &bincode::serialize(&ModuleMessage::Request(RequestMessage {
+                    correlation_id: 0,
+                    request_type: MessageType::Handshake,
+                    payload: RequestPayload::GetChainTip,
+                }))
+                .unwrap()
+            ),
+            0
+        );
+        assert_eq!(
+            index(
+                &bincode::serialize(&ModuleMessage::Response(ResponseMessage::error(
+                    0,
+                    String::new()
+                )))
+                .unwrap()
+            ),
+            1
+        );
+        assert_eq!(
+            index(
+                &bincode::serialize(&ResponsePayload::HandshakeAck {
+                    node_version: String::new(),
+                })
+                .unwrap()
+            ),
+            0
+        );
+        assert_eq!(
+            index(&bincode::serialize(&EventPayload::ReservedPaymentRequestCreated).unwrap()),
+            4
+        );
+        assert_eq!(index(&bincode::serialize(&EventType::NewBlock).unwrap()), 0);
+    }
+}

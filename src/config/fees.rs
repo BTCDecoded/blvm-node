@@ -236,12 +236,13 @@ impl FeeEstimatorConfig {
             );
         }
         for (name, over) in &self.external.by_name {
-            if let Some(mode) = over.mode.as_deref() {
-                if mode != "lower_only" && mode != "replace" {
-                    anyhow::bail!(
-                        "fees.external.{name}.mode must be lower_only or replace, got {mode}"
-                    );
-                }
+            if let Some(mode) = over.mode.as_deref()
+                && mode != "lower_only"
+                && mode != "replace"
+            {
+                anyhow::bail!(
+                    "fees.external.{name}.mode must be lower_only or replace, got {mode}"
+                );
             }
         }
         Ok(())

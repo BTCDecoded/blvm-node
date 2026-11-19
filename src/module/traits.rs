@@ -51,6 +51,9 @@ pub struct ModuleMetadata {
     pub optional_dependencies: HashMap<String, String>,
     /// Module entry point (binary name or path)
     pub entry_point: String,
+    /// `0` is the published-binary sandbox. `2` is Unix-only. Omitted manifests are `0`.
+    #[serde(default)]
+    pub ipc_protocol: u32,
 }
 
 /// Module information for discovery

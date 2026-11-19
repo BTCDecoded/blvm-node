@@ -5,9 +5,9 @@
 //! 1. **This file** — tip-hole / sole-peer / gap-persist DNA. Not TOML.
 //!    Production returns the KEEP constant. Values are the r29od / peel-go KEEP
 //!    table (S11 240/205.6).
-//! 2. **`[ibd]` TOML** — operator surface: peers, mode, chunk_size, engine opt-out,
+//! 2. **`[ibd]` TOML** — operator surface: peers, mode, chunk_size,
 //!    `max_blocks_in_transit_per_peer`, timeouts, dump_dir.
-//! 3. **Emergency / debug env** — `BLVM_IBD_ENGINE=0`, `BLVM_IBD_DUMP_DIR`,
+//! 3. **Emergency / debug env** — `BLVM_IBD_DUMP_DIR`,
 //!    `BLVM_IBD_JEMALLOC_DUMP`, `BLVM_SERVE_ONLY`, `BLVM_IBD_PEERS` pin.
 //!
 //! Production does not read the KEEP-table env vars. `#[cfg(test)]` still does,

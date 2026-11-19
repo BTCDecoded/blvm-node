@@ -11,7 +11,8 @@ use tokio::sync::Mutex;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_block_height_rejects_a_closed_connection() {
-    let dir = tempfile::TempDir::new().expect("tempdir");
+    // AF_UNIX paths must be shorter than SUN_LEN; CI points TMPDIR at a long path.
+    let dir = tempfile::TempDir::new_in("/tmp").expect("tempdir");
     let path = dir.path().join("ipc.sock");
     let listener = UnixListener::bind(&path).expect("bind");
     tokio::spawn(async move {

@@ -89,7 +89,7 @@ fn default_auth_required() -> bool {
 }
 
 /// RPC authentication configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RpcAuthConfig {
     /// Require authentication for RPC requests. Omitted TOML is true.
     #[serde(default = "default_auth_required")]
@@ -138,6 +138,37 @@ pub struct RpcAuthConfig {
 
     #[serde(default = "default_ip_rate_limit_rate")]
     pub ip_rate_limit_rate: u32,
+}
+
+impl std::fmt::Debug for RpcAuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RpcAuthConfig")
+            .field("required", &self.required)
+            .field(
+                "tokens",
+                &format_args!("redacted ({} entries)", self.tokens.len()),
+            )
+            .field("token_file", &self.token_file.as_ref().map(|_| "redacted"))
+            .field(
+                "admin_tokens",
+                &format_args!("redacted ({} entries)", self.admin_tokens.len()),
+            )
+            .field(
+                "certificates",
+                &format_args!("redacted ({} entries)", self.certificates.len()),
+            )
+            .field("username", &self.username.as_ref().map(|_| "redacted"))
+            .field("password", &self.password.as_ref().map(|_| "redacted"))
+            .field("rate_limit_burst", &self.rate_limit_burst)
+            .field("rate_limit_rate", &self.rate_limit_rate)
+            .field(
+                "rate_limit_when_auth_disabled",
+                &self.rate_limit_when_auth_disabled,
+            )
+            .field("ip_rate_limit_burst", &self.ip_rate_limit_burst)
+            .field("ip_rate_limit_rate", &self.ip_rate_limit_rate)
+            .finish()
+    }
 }
 
 impl Default for RpcAuthConfig {
@@ -275,5 +306,38 @@ mod auth_required_default {
     fn omitted_required_is_true() {
         let config: RpcAuthConfig = serde_json::from_str("{}").unwrap();
         assert!(config.required);
+    }
+}
+
+#[cfg(test)]
+mod secret_debug {
+    use super::RpcAuthConfig;
+
+    #[test]
+    fn debug_output_does_not_contain_tokens_or_the_password() {
+        let config = RpcAuthConfig {
+            tokens: vec!["rpc-token-should-not-leak".to_string()],
+            admin_tokens: vec!["admin-token-should-not-leak".to_string()],
+            password: Some("rpc-password-should-not-leak".to_string()),
+            username: Some("rpc-user-should-not-leak".to_string()),
+            token_file: Some("/var/lib/blvm/rpc.cookie".to_string()),
+            certificates: vec!["cert-fingerprint-should-not-leak".to_string()],
+            ..RpcAuthConfig::default()
+        };
+        let rendered = format!("{config:?}");
+        for secret in [
+            "rpc-token-should-not-leak",
+            "admin-token-should-not-leak",
+            "rpc-password-should-not-leak",
+            "rpc-user-should-not-leak",
+            "cert-fingerprint-should-not-leak",
+            "/var/lib/blvm/rpc.cookie",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "Debug rendered a secret ({secret}): {rendered}"
+            );
+        }
+        assert!(rendered.contains("redacted"));
     }
 }

@@ -379,3 +379,32 @@ async fn concurrent_admissions_removals_and_tables_match_block_seq() {
     .await;
     assert!(finished.is_ok(), "hammer timed out");
 }
+
+#[test]
+fn block_count_is_not_visible_ahead_of_block_seq() {
+    let (_mempool, estimator) = wired(&[]);
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer_est = Arc::clone(&estimator);
+    let writer_stop = Arc::clone(&stop);
+    let writer = std::thread::spawn(move || {
+        let mut height = 1u64;
+        while !writer_stop.load(Ordering::Relaxed) {
+            writer_est.on_block_connected(&observation(height, [height as u8; 32]));
+            height = height.saturating_add(1);
+        }
+    });
+    for _ in 0..4_000 {
+        let blocks = estimator.hook_counts().blocks;
+        let seq = estimator.published_block_seq();
+        assert!(
+            seq >= blocks,
+            "block_seq {seq} lagged the visible block count {blocks}"
+        );
+    }
+    stop.store(true, Ordering::Relaxed);
+    writer.join().expect("block thread");
+    assert_eq!(
+        estimator.published_block_seq(),
+        estimator.hook_counts().blocks
+    );
+}

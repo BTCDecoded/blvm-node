@@ -80,12 +80,63 @@ async fn test_spawn_nonexistent_binary() {
     let context = create_test_context();
     let fake_binary = PathBuf::from("/nonexistent/binary");
 
-    let result = spawner.spawn("test-module", &fake_binary, context).await;
+    let result = spawner.spawn("test-module", &fake_binary, context, 0).await;
 
     // Should fail with an error
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn spawn_rejects_an_unknown_ipc_protocol_before_launch() {
+    let (_temp_dir, spawner) = create_test_spawner();
+    let context = create_test_context();
+    let result = spawner
+        .spawn("test-module", &PathBuf::from("/bin/true"), context, 1)
+        .await;
+    let text = match result {
+        Err(err) => format!("{err}"),
+        Ok(_) => panic!("protocol 1 must not spawn"),
+    };
+    assert!(text.contains("not a supported generation"), "{text}");
     // Error type should be ModuleError (which implements Debug)
     // We don't need to match on the specific error variant for this test
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn spawn_error_omits_module_config() {
+    // spawn_log_does_not_include_module_config locks the log line. This locks
+    // the error returned to the caller, the other place a Command debug dump
+    // would leak MODULE_CONFIG values.
+    let (temp_dir, _) = create_test_spawner();
+    let config = ModuleResourceLimitsConfig {
+        default_max_cpu_percent: 50,
+        default_max_memory_bytes: 512 * 1024 * 1024,
+        default_max_file_descriptors: 256,
+        default_max_child_processes: 10,
+        module_startup_wait_millis: 1,
+        module_socket_timeout_seconds: 1,
+        module_socket_check_interval_millis: 10,
+        module_socket_max_attempts: 2,
+    };
+    let spawner = ModuleProcessSpawner::with_config(
+        temp_dir.path().join("modules"),
+        temp_dir.path().join("data"),
+        temp_dir.path().join("sockets"),
+        Some(&config),
+    );
+    let mut context = create_test_context();
+    context
+        .config
+        .insert("api_key".to_string(), "super-secret-value".to_string());
+    let result = spawner
+        .spawn("test-module", &PathBuf::from("/bin/true"), context, 0)
+        .await;
+    let text = match result {
+        Err(err) => format!("{err}"),
+        Ok(_) => panic!("true is not a module"),
+    };
+    assert!(!text.contains("super-secret-value"), "{text}");
+    assert!(!text.contains("MODULE_CONFIG"), "{text}");
 }
 
 // Note: ModuleProcess has private fields, so we can't construct it directly in tests.
