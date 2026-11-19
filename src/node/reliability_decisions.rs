@@ -117,18 +117,36 @@ mod tests {
     #[test]
     fn a_failed_export_height_does_not_select_the_chainstate_table() {
         assert!(export_height_is_set::<&str>(Err("read")).is_err());
-        assert_eq!(export_height_is_set(Ok::<Option<u64>, &str>(None)).unwrap(), false);
-        assert_eq!(export_height_is_set(Ok::<Option<u64>, &str>(Some(0))).unwrap(), false);
-        assert_eq!(export_height_is_set(Ok::<Option<u64>, &str>(Some(8))).unwrap(), true);
+        assert_eq!(
+            export_height_is_set(Ok::<Option<u64>, &str>(None)).unwrap(),
+            false
+        );
+        assert_eq!(
+            export_height_is_set(Ok::<Option<u64>, &str>(Some(0))).unwrap(),
+            false
+        );
+        assert_eq!(
+            export_height_is_set(Ok::<Option<u64>, &str>(Some(8))).unwrap(),
+            true
+        );
     }
 
     #[test]
     fn a_failed_export_height_does_not_wipe_the_engine() {
         assert!(stored_export_height::<&str>(Err("read")).is_err());
-        assert_eq!(stored_export_height(Ok::<Option<u64>, &str>(None)).unwrap(), None);
+        assert_eq!(
+            stored_export_height(Ok::<Option<u64>, &str>(None)).unwrap(),
+            None
+        );
         assert!(stored_export_height_or_zero::<&str>(Err("read")).is_err());
-        assert_eq!(stored_export_height_or_zero(Ok::<Option<u64>, &str>(None)).unwrap(), 0);
-        assert_eq!(stored_export_height_or_zero(Ok::<Option<u64>, &str>(Some(9))).unwrap(), 9);
+        assert_eq!(
+            stored_export_height_or_zero(Ok::<Option<u64>, &str>(None)).unwrap(),
+            0
+        );
+        assert_eq!(
+            stored_export_height_or_zero(Ok::<Option<u64>, &str>(Some(9))).unwrap(),
+            9
+        );
         let src = include_str!("parallel_ibd/mod.rs");
         assert_eq!(src.matches("stored_export_height_or_zero(").count(), 2);
         assert_eq!(src.matches("stored_export_height(").count(), 1);
@@ -156,11 +174,23 @@ mod tests {
     #[test]
     fn a_failed_undo_read_keeps_the_snapshot_journal() {
         assert!(connect_gap_read::<u64, &str>(Err("undo")).is_err());
-        assert_eq!(connect_gap_read(Ok::<Option<u64>, &str>(None)).unwrap(), None);
-        assert_eq!(connect_gap_read(Ok::<Option<u64>, &str>(Some(3))).unwrap(), Some(3));
+        assert_eq!(
+            connect_gap_read(Ok::<Option<u64>, &str>(None)).unwrap(),
+            None
+        );
+        assert_eq!(
+            connect_gap_read(Ok::<Option<u64>, &str>(Some(3))).unwrap(),
+            Some(3)
+        );
         let src = include_str!("reorg_executor.rs");
-        assert!(src.contains("connect_gap_read(\n                storage.blocks().get_hash_by_height(height),"));
-        assert!(src.contains("connect_gap_read(\n                storage.blocks().get_undo_log(&hash),"));
+        assert!(src.contains(
+            "connect_gap_read(\n                storage.blocks().get_hash_by_height(height),"
+        ));
+        assert!(
+            src.contains(
+                "connect_gap_read(\n                storage.blocks().get_undo_log(&hash),"
+            )
+        );
     }
 
     #[test]
@@ -174,7 +204,10 @@ mod tests {
             startup_skips_refused_seed(Ok::<Option<u64>, &str>(Some(9)), Some(10)).unwrap(),
             false
         );
-        assert_eq!(startup_skips_refused_seed(Ok::<Option<u64>, &str>(None), None).unwrap(), false);
+        assert_eq!(
+            startup_skips_refused_seed(Ok::<Option<u64>, &str>(None), None).unwrap(),
+            false
+        );
     }
 
     #[test]
@@ -213,7 +246,10 @@ mod tests {
         let src = include_str!("parallel_ibd/headers.rs");
         let at_cap = src.find("header_timeout_stops(").expect("cap check");
         let stop = src[at_cap..].find("return Err").expect("cap returns");
-        assert!(src[at_cap..at_cap + stop].contains("Too many header failures") || src[at_cap + stop..].contains("Too many header failures"));
+        assert!(
+            src[at_cap..at_cap + stop].contains("Too many header failures")
+                || src[at_cap + stop..].contains("Too many header failures")
+        );
         assert!(
             !src[at_cap..at_cap + stop].contains("consecutive_failures = 0"),
             "the header cap still resets and continues"
@@ -225,10 +261,19 @@ mod tests {
         assert!(resume_seed_slot::<&str>(Err("slot")).is_err());
         assert_eq!(resume_seed_slot(Ok::<u8, &str>(0u8)).unwrap(), 0);
         assert!(resume_seed_count::<&str>(Err("count")).is_err());
-        assert_eq!(resume_seed_count(Ok::<Option<u64>, &str>(None)).unwrap(), None);
+        assert_eq!(
+            resume_seed_count(Ok::<Option<u64>, &str>(None)).unwrap(),
+            None
+        );
         assert!(resume_seed_accepted::<&str>(Err("prev")).is_err());
-        assert_eq!(resume_seed_accepted(Ok::<Option<u64>, &str>(None)).unwrap(), 0);
-        assert_eq!(resume_seed_accepted(Ok::<Option<u64>, &str>(Some(6))).unwrap(), 6);
+        assert_eq!(
+            resume_seed_accepted(Ok::<Option<u64>, &str>(None)).unwrap(),
+            0
+        );
+        assert_eq!(
+            resume_seed_accepted(Ok::<Option<u64>, &str>(Some(6))).unwrap(),
+            6
+        );
         let src = include_str!("parallel_ibd/mod.rs");
         assert!(src.contains(
             "resume_seed_slot(\n                    storage.chain().get_engine_ckpt_slot(),\n                )?;"
@@ -264,10 +309,7 @@ mod tests {
 
     #[test]
     fn a_dirty_flag_write_failure_is_not_a_clean_engine() {
-        let dir = std::env::temp_dir().join(format!(
-            "blvm-dirty-flag-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("blvm-dirty-flag-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("engine.dirty");
         assert!(mark_engine_dirty(&path).is_ok());

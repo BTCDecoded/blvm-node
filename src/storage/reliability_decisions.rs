@@ -68,17 +68,35 @@ mod tests {
     #[test]
     fn a_failed_watermark_read_does_not_delete_the_engine() {
         assert!(watermark_for_repair::<&str>(Err("read")).is_err());
-        assert_eq!(watermark_for_repair(Ok::<Option<u64>, &str>(None)).unwrap(), 0);
-        assert_eq!(watermark_for_repair(Ok::<Option<u64>, &str>(Some(0))).unwrap(), 0);
-        assert_eq!(watermark_for_repair(Ok::<Option<u64>, &str>(Some(4))).unwrap(), 4);
+        assert_eq!(
+            watermark_for_repair(Ok::<Option<u64>, &str>(None)).unwrap(),
+            0
+        );
+        assert_eq!(
+            watermark_for_repair(Ok::<Option<u64>, &str>(Some(0))).unwrap(),
+            0
+        );
+        assert_eq!(
+            watermark_for_repair(Ok::<Option<u64>, &str>(Some(4))).unwrap(),
+            4
+        );
     }
 
     #[test]
     fn a_failed_storage_count_is_not_within_bounds() {
         assert!(count_within_cap::<&str>(Err("len"), 100).is_err());
-        assert_eq!(count_within_cap(Ok::<usize, &str>(0usize), 100).unwrap(), true);
-        assert_eq!(count_within_cap(Ok::<usize, &str>(79usize), 100).unwrap(), true);
-        assert_eq!(count_within_cap(Ok::<usize, &str>(80usize), 100).unwrap(), false);
+        assert_eq!(
+            count_within_cap(Ok::<usize, &str>(0usize), 100).unwrap(),
+            true
+        );
+        assert_eq!(
+            count_within_cap(Ok::<usize, &str>(79usize), 100).unwrap(),
+            true
+        );
+        assert_eq!(
+            count_within_cap(Ok::<usize, &str>(80usize), 100).unwrap(),
+            false
+        );
     }
 
     #[test]
@@ -99,8 +117,14 @@ mod tests {
 
     #[test]
     fn a_nonempty_checkpoint_is_not_cleared_before_export() {
-        assert_eq!(should_clear_checkpoint(Ok::<bool, &str>(true)).unwrap(), true);
-        assert_eq!(should_clear_checkpoint(Ok::<bool, &str>(false)).unwrap(), false);
+        assert_eq!(
+            should_clear_checkpoint(Ok::<bool, &str>(true)).unwrap(),
+            true
+        );
+        assert_eq!(
+            should_clear_checkpoint(Ok::<bool, &str>(false)).unwrap(),
+            false
+        );
         assert!(should_clear_checkpoint::<&str>(Err("empty")).is_err());
     }
 

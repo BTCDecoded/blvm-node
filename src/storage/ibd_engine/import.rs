@@ -349,34 +349,34 @@ pub fn seed_from_ibd_utxos(
     // A partial heed3 import already committed batches. Scanning the tree
     // again would import those keys a second time (F3).
     if total == 0 {
-    'outer: for kv in tree.iter() {
-        let (key_bytes, val_bytes) = kv?;
-        if key_bytes.len() != 40 {
-            continue;
-        }
-        let mut op_key = [0u8; 40];
-        op_key.copy_from_slice(&key_bytes);
-        // ibd_utxos keys write vout as u64 BE; go via OutPoint to avoid corruption.
-        let op = key_to_outpoint(&op_key);
-        let out_key = outpoint_to_output_key(&op);
+        'outer: for kv in tree.iter() {
+            let (key_bytes, val_bytes) = kv?;
+            if key_bytes.len() != 40 {
+                continue;
+            }
+            let mut op_key = [0u8; 40];
+            op_key.copy_from_slice(&key_bytes);
+            // ibd_utxos keys write vout as u64 BE; go via OutPoint to avoid corruption.
+            let op = key_to_outpoint(&op_key);
+            let out_key = outpoint_to_output_key(&op);
 
-        let utxo: UTXO = decode_utxo_with_codec(codec, &val_bytes)?;
-        seed_entry_from_utxo(out_key, &utxo, &mut batch_items);
+            let utxo: UTXO = decode_utxo_with_codec(codec, &val_bytes)?;
+            seed_entry_from_utxo(out_key, &utxo, &mut batch_items);
 
-        if batch_items.len() >= SEED_BATCH
-            && push_seed_batch(
-                db,
-                checkpoint_height,
-                &mut batch_items,
-                &mut entry_buf,
-                writer.sender(),
-                &mut total,
-            )?
-        {
-            send_err = true;
-            break 'outer;
+            if batch_items.len() >= SEED_BATCH
+                && push_seed_batch(
+                    db,
+                    checkpoint_height,
+                    &mut batch_items,
+                    &mut entry_buf,
+                    writer.sender(),
+                    &mut total,
+                )?
+            {
+                send_err = true;
+                break 'outer;
+            }
         }
-    }
     }
 
     if !send_err

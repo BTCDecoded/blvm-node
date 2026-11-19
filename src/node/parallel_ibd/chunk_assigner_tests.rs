@@ -3989,7 +3989,10 @@ async fn a_download_join_aborts_a_stuck_worker() {
         Some(value) => unsafe { std::env::set_var("BLVM_IBD_DOWNLOAD_JOIN_SECS", value) },
         None => unsafe { std::env::remove_var("BLVM_IBD_DOWNLOAD_JOIN_SECS") },
     }
-    assert!(finished.is_ok(), "dropping the worker handle left it running");
+    assert!(
+        finished.is_ok(),
+        "dropping the worker handle left it running"
+    );
 }
 
 #[serial_test::serial(ibd)]

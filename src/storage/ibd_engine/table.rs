@@ -825,7 +825,10 @@ mod tests {
                 .append_outputs(&block, &[tx_id], 100, &mut entries)
                 .unwrap();
             table.commit_before(i32::MAX).unwrap();
-            entries.into_iter().map(|entry| entry.id).collect::<Vec<_>>()
+            entries
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>()
         };
 
         let table = UtxoTable::open(&path).unwrap();

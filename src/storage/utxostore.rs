@@ -749,10 +749,7 @@ mod tests {
         utxos.add_utxo(&spent, &coin).unwrap();
         utxos.add_utxo(&kept, &coin).unwrap();
         utxos
-            .commit_outpoint_batch(&[
-                (&spent, None),
-                (&created, Some(&created_coin)),
-            ])
+            .commit_outpoint_batch(&[(&spent, None), (&created, Some(&created_coin))])
             .unwrap();
         assert!(utxos.get_utxo(&spent).unwrap().is_none());
         assert_eq!(utxos.get_utxo(&kept).unwrap().unwrap().value, 30);

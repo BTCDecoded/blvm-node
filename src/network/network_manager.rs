@@ -635,7 +635,9 @@ impl NetworkManager {
             inventory: Arc::new(std::sync::Mutex::new(
                 super::inventory::InventoryManager::new(),
             )),
-            package_relay: Arc::new(std::sync::Mutex::new(super::package_relay::PackageRelay::new())),
+            package_relay: Arc::new(std::sync::Mutex::new(
+                super::package_relay::PackageRelay::new(),
+            )),
             consensus: ConsensusProof::new(),
             utxo_set: Arc::new(Mutex::new(UtxoSet::default())),
             mempool: Arc::new(Mutex::new(Mempool::new())),
@@ -2043,11 +2045,8 @@ impl NetworkManager {
         // A task that still holds this lock after a failed IBD must not freeze the
         // run loop. Five seconds is far longer than a peer-table read. On timeout
         // the caller continues with the local tip and retries.
-        let Ok(pm) = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            self.peer_manager.lock(),
-        )
-        .await
+        let Ok(pm) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), self.peer_manager.lock()).await
         else {
             warn!(
                 "[CATCH_UP] peer manager lock held for more than 5s — continuing without a peer height"
@@ -4217,7 +4216,7 @@ mod ban_reload_tests {
 
 #[cfg(test)]
 mod reconnect_ban_tests {
-    use super::{reconnect_ban_decision, NetworkManager, ReconnectBan};
+    use super::{NetworkManager, ReconnectBan, reconnect_ban_decision};
     use std::net::SocketAddr;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

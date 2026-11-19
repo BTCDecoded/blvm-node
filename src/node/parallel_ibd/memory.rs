@@ -3273,10 +3273,7 @@ mod memory_tier_tests {
         let full = 100_000_000usize;
         let base = 2_000usize;
         let total_mb = 64 * 1024;
-        assert_eq!(
-            MemoryGuard::feeder_bytes_for(full, base, total_mb, 0),
-            full
-        );
+        assert_eq!(MemoryGuard::feeder_bytes_for(full, base, total_mb, 0), full);
         assert_eq!(
             MemoryGuard::feeder_bytes_for(full, base, total_mb, 400_000),
             58_000_000

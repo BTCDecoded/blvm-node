@@ -429,10 +429,7 @@ fn export_count_baseline(storage: &Storage) -> u64 {
 
 /// `None` when the gap is absent or an undo is missing. `Some(0)` is a real
 /// block that created as many coins as it spent.
-pub(crate) fn unrecorded_connect_net(
-    storage: &Storage,
-    export_height: u64,
-) -> Result<Option<i64>> {
+pub(crate) fn unrecorded_connect_net(storage: &Storage, export_height: u64) -> Result<Option<i64>> {
     #[cfg(not(feature = "production"))]
     {
         let _ = (storage, export_height);
@@ -1608,10 +1605,11 @@ mod snapshot_delta_tests {
             None,
         )
         .unwrap();
-        let recovered = recover_if_snapshot_step_failed(Err(anyhow::anyhow!("note height")), || {
-            recover_snapshot_commit(&storage, storage.blocks().as_ref())
-        })
-        .unwrap();
+        let recovered =
+            recover_if_snapshot_step_failed(Err(anyhow::anyhow!("note height")), || {
+                recover_snapshot_commit(&storage, storage.blocks().as_ref())
+            })
+            .unwrap();
         assert!(recovered);
         let (tip, height) = storage.chain().get_tip_hash_and_height().unwrap();
         assert_eq!(tip, hash);

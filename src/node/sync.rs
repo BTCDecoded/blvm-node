@@ -829,17 +829,14 @@ impl SyncCoordinator {
                         anyhow::bail!("connect refused: IBD UTXO snapshot is empty");
                     }
                     chainstate_undo_before_tip(Self::apply_connect_undo_to_chainstate(
-                        storage,
-                        &undo_log,
+                        storage, &undo_log,
                     ))?;
                     storage
                         .chain()
                         .update_tip(&block_hash, &block.header, connect_height)?;
                     *utxo_set = UtxoSet::default();
                 } else {
-                    memory_set_store_before_tip(
-                        storage.utxos().store_utxo_set(&connected_utxo),
-                    )?;
+                    memory_set_store_before_tip(storage.utxos().store_utxo_set(&connected_utxo))?;
                     storage
                         .chain()
                         .update_tip(&block_hash, &block.header, connect_height)?;

@@ -734,9 +734,7 @@ impl NetworkManager {
     pub async fn connect_to_peer(&self, addr: SocketAddr) -> Result<()> {
         let ban_decision = {
             let ban_list = self.ban_list().read().await;
-            let unban = ban_list
-                .get(&SocketAddr::new(addr.ip(), 0))
-                .copied();
+            let unban = ban_list.get(&SocketAddr::new(addr.ip(), 0)).copied();
             reconnect_ban_decision(unban, current_timestamp())
         };
         if ban_decision != ReconnectBan::Dial {
@@ -849,9 +847,7 @@ impl NetworkManager {
             }
             let ban_decision = {
                 let ban_list = nm.ban_list().read().await;
-                let unban = ban_list
-                    .get(&SocketAddr::new(addr.ip(), 0))
-                    .copied();
+                let unban = ban_list.get(&SocketAddr::new(addr.ip(), 0)).copied();
                 reconnect_ban_decision(unban, current_timestamp())
             };
             if ban_decision != ReconnectBan::Dial {

@@ -1395,10 +1395,14 @@ impl Storage {
         let tx_count = self.txindex.transaction_count()?;
 
         // Check if we're approaching limits (80% threshold)
-        let blocks_ok =
-            reliability_decisions::count_within_cap(Ok::<usize, anyhow::Error>(block_count), MAX_BLOCKS)?;
-        let utxos_ok =
-            reliability_decisions::count_within_cap(Ok::<usize, anyhow::Error>(utxo_count), MAX_UTXOS)?;
+        let blocks_ok = reliability_decisions::count_within_cap(
+            Ok::<usize, anyhow::Error>(block_count),
+            MAX_BLOCKS,
+        )?;
+        let utxos_ok = reliability_decisions::count_within_cap(
+            Ok::<usize, anyhow::Error>(utxo_count),
+            MAX_UTXOS,
+        )?;
         let txs_ok =
             reliability_decisions::count_within_cap(Ok::<usize, anyhow::Error>(tx_count), MAX_TXS)?;
 

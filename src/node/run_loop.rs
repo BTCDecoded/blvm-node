@@ -379,9 +379,7 @@ pub(crate) async fn run(node: &mut super::Node) -> Result<()> {
                     if snapshot_journal_failure_stops(&e.to_string()) {
                         warn!("Error processing block: {e}");
                         if let Err(stop_err) = node.stop().await {
-                            warn!(
-                                "shutdown after unfinished snapshot journal failed: {stop_err}"
-                            );
+                            warn!("shutdown after unfinished snapshot journal failed: {stop_err}");
                         }
                         return Err(e);
                     }

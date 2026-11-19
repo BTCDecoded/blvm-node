@@ -4795,22 +4795,23 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     // This read is after the coordinator, download workers, and prefetch threads
     // exist, and before the feeder starts. A failed read must stop those workers
     // before it returns. It must not start the feeder or take the UTXO set.
-    let engine_stored_export_height = match crate::node::reliability_decisions::stored_export_height_or_zero(
-        storage.chain().get_engine_export_height(),
-    ) {
-        Ok(height) => height,
-        Err(e) => {
-            assigner.request_shutdown();
-            coord_handle.abort();
-            drop(prefetch_input_tx_v2);
-            drop(gap_fill_tx_v2);
-            for handle in prefetch_join_handles.drain(..) {
-                let _ = handle.join();
+    let engine_stored_export_height =
+        match crate::node::reliability_decisions::stored_export_height_or_zero(
+            storage.chain().get_engine_export_height(),
+        ) {
+            Ok(height) => height,
+            Err(e) => {
+                assigner.request_shutdown();
+                coord_handle.abort();
+                drop(prefetch_input_tx_v2);
+                drop(gap_fill_tx_v2);
+                for handle in prefetch_join_handles.drain(..) {
+                    let _ = handle.join();
+                }
+                join_download_handles_after_grace(download_handles).await;
+                return Err(e);
             }
-            join_download_handles_after_grace(download_handles).await;
-            return Err(e);
-        }
-    };
+        };
     // Block feeder: drains ready_rx into shared buffer so validation can run while buffer fills.
     // Feeder runs on std::thread (crossbeam recv is blocking). Buffer fills while validation works.
     // feeder_state was created earlier (before coordinator spawn) so the coordinator could reference it.
@@ -5758,9 +5759,7 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
                     )
                     .context("persist Phase 3 catch-up checkpoint")?;
                 if !stored_checkpoint {
-                    anyhow::bail!(
-                        "Phase 3 catch-up refused checkpoint at height {tip_u}"
-                    );
+                    anyhow::bail!("Phase 3 catch-up refused checkpoint at height {tip_u}");
                 }
                 storage
                     .chain()
@@ -9613,9 +9612,9 @@ impl ParallelIBD {
                 None => guard_limit,
             }
         };
-        if let Some(peer_id) = missing_peer_semaphore(&filtered_peers, |id| {
-            self.peer_semaphores.contains_key(id)
-        }) {
+        if let Some(peer_id) =
+            missing_peer_semaphore(&filtered_peers, |id| self.peer_semaphores.contains_key(id))
+        {
             return Err(anyhow::anyhow!(
                 "Peer {peer_id} not found in peer_semaphores"
             ));
