@@ -41,6 +41,7 @@ fn coordinator_inject_returns_false_when_body_missing() {
         &already,
         &mut logged,
         false,
+        usize::MAX,
     )
     .unwrap();
     assert!(!ok);
