@@ -30,6 +30,8 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
   CARGO_INCREMENTAL: '0'
+  # Full debuginfo makes the test target larger than the free space on this host.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   # The runner image has a distro rustc on PATH and no rustup. The installer
   # refuses that unless this is set, which fails the job before compile.
   RUSTUP_INIT_SKIP_PATH_CHECK: 'yes'
