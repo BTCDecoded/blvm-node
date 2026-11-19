@@ -81,6 +81,7 @@ impl NetworkManager {
     pub(crate) fn start_request_cleanup_task(&self) {
         let pending_requests = Arc::clone(self.pending_requests());
         let inventory = Arc::clone(self.inventory());
+        let package_relay = Arc::clone(self.package_relay());
         let timeout_config = Arc::clone(self.request_timeout_config());
 
         tokio::spawn(async move {
@@ -109,6 +110,9 @@ impl NetworkManager {
                 drop(pending);
                 let mut inv = inventory.lock().unwrap_or_else(|e| e.into_inner());
                 inv.cleanup_old_requests(max_age);
+                drop(inv);
+                let mut packages = package_relay.lock().unwrap_or_else(|e| e.into_inner());
+                packages.cleanup_old_packages(max_age);
             }
         });
     }

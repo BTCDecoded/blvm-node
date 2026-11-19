@@ -1,3 +1,5 @@
+use anyhow::Context;
+
 /// Heights where a duplicate coinbase must update the index before the next block is dispatched.
 pub(crate) fn duplicate_coinbase_serial_height(height: u64) -> bool {
     height == 91842 || height == 91880
@@ -2353,13 +2355,24 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             // requeue recover owners — do NOT tear down IBD.
                             // Genesis has `local_replay_max_height=0`; the old `> 0 &&` gate
                             // aborted true WAN crawls after ~1080s (live: h=262716).
-                            if next_validation_height > local_replay_max_height {
+                            // A fatal single-peer download does not reset, including past the replay tip.
+                            let past_replay = next_validation_height > local_replay_max_height;
+                            let download_fatal = crate::node::parallel_ibd::IBD_DOWNLOAD_FATAL
+                                .load(std::sync::atomic::Ordering::Acquire);
+                            if crate::node::reliability_decisions::stall_resets(
+                                download_fatal,
+                                past_replay,
+                            ) {
                                 warn!(
                                     "[IBD_STALL] WAN tip gap: {} feeder stalls at h={} — \
                                      resetting counter (tip-SLA/force requeue; no IBD abort)",
                                     feeder_stall_count, next_validation_height
                                 );
                                 feeder_stall_count = 0;
+                            } else if download_fatal {
+                                return Err(anyhow::anyhow!(
+                                    "IBD download stopped after {feeder_stall_count} feeder stalls at h={next_validation_height}: single peer exceeded chunk failures"
+                                ));
                             } else {
                                 let stall_secs =
                                     feeder_wait_timeout.as_secs() * u64::from(MAX_FEEDER_STALLS);
@@ -4214,9 +4227,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             IbdBlockFlushOpts::shutdown_sync(),
         )?;
     }
-    if let Err(e) = storage_clone.flush() {
-        warn!("IBD shutdown: storage.flush after block drain failed: {e}");
-    }
+    crate::node::reliability_decisions::shutdown_step(storage_clone.flush())
+        .context("IBD shutdown: storage.flush after block drain failed")?;
 
     // Same order as a periodic checkpoint: spends are durable before the watermark.
     // A crash after the spend flush and before the watermark replays those blocks.
@@ -4242,23 +4254,31 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             if let Some(ref db) = utxo_engine {
                 db.flush_contiguous_length_sidecar();
             }
-            if let Some(data_dir) = storage_clone.data_dir() {
-                let engine_path = crate::config::ibd::ibd_engine_path(Some(data_dir.as_path()));
-                crate::storage::ibd_engine::clear_engine_dirty_flag(&engine_path);
-            }
-            if utxo_engine.is_some() {
-                if let Err(e) = storage_clone
-                    .chain()
-                    .persist_engine_validation_tip(last_validated)
-                {
-                    warn!(
-                        "IBD shutdown: failed to persist engine validation tip at h={last_validated}: {e:#}"
-                    );
+            let steps = if utxo_engine.is_some() {
+                crate::node::reliability_decisions::shutdown_step(
+                    storage_clone
+                        .chain()
+                        .persist_engine_validation_tip(last_validated),
+                )
+                .with_context(|| {
+                    format!(
+                        "IBD shutdown: failed to persist engine validation tip at h={last_validated}"
+                    )
+                })
+                .and_then(|_| {
+                    crate::node::reliability_decisions::shutdown_step(storage_clone.flush()).context(
+                        "IBD shutdown: storage flush after engine resume hint failed",
+                    )
+                })
+            } else {
+                Ok(())
+            };
+            crate::node::reliability_decisions::clear_dirty_after_shutdown(steps, || {
+                if let Some(data_dir) = storage_clone.data_dir() {
+                    let engine_path = crate::config::ibd::ibd_engine_path(Some(data_dir.as_path()));
+                    crate::storage::ibd_engine::clear_engine_dirty_flag(&engine_path);
                 }
-                if let Err(e) = storage_clone.flush() {
-                    warn!("IBD shutdown: storage flush after engine resume hint failed: {e:#}");
-                }
-            }
+            })?;
             info!(
                 "IBD shutdown: graceful stop at height {} (target {}); block store flushed",
                 last_validated,
@@ -4272,27 +4292,29 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             effective_end_height()
         ));
     }
-    if let Err(e) = ibd_store_v2_for_validation.flush_disk() {
-        warn!(
-            "Failed to flush ibd_utxos memtable at final shutdown (height {}): {}",
-            last_validated, e
-        );
-    }
-
     // Do not advance `ibd_utxo_watermark` from chain tip here. During parallel IBD the block index
     // can reach `chain_tip` before UTXO flush workers persist `ibd_utxos` through that height.
     // Watermark must advance only from flush worker paths after `flush_disk` (see
     // `push_utxo_flush_from_retire`). Bumping from tip caused resume at height H with an empty or
     // partial `ibd_utxos` tree → immediate `UTXO not found for input`.
-
-    if let Some(ref db) = utxo_engine {
-        db.flush_contiguous_length_sidecar();
-    }
-    if let Some(data_dir) = storage_clone.data_dir() {
-        let engine_path = crate::config::ibd::ibd_engine_path(Some(data_dir.as_path()));
-        crate::storage::ibd_engine::clear_engine_dirty_flag(&engine_path);
-    }
-    info!("IBD shutdown: validation loop complete");
+    crate::node::reliability_decisions::clear_dirty_after_shutdown(
+        crate::node::reliability_decisions::shutdown_step(ibd_store_v2_for_validation.flush_disk())
+            .with_context(|| {
+                format!(
+                    "Failed to flush ibd_utxos memtable at final shutdown (height {last_validated})"
+                )
+            }),
+        || {
+            if let Some(ref db) = utxo_engine {
+                db.flush_contiguous_length_sidecar();
+            }
+            if let Some(data_dir) = storage_clone.data_dir() {
+                let engine_path = crate::config::ibd::ibd_engine_path(Some(data_dir.as_path()));
+                crate::storage::ibd_engine::clear_engine_dirty_flag(&engine_path);
+            }
+            info!("IBD shutdown: validation loop complete");
+        },
+    )?;
     Ok(())
 }
 

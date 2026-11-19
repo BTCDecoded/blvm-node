@@ -819,13 +819,10 @@ impl SyncCoordinator {
                     info!("[CONNECT] wrote {written} UTXO rows in snapshot {name}");
                     *utxo_set = UtxoSet::default();
                 } else if from_disk {
-                    let export_height_set = storage
-                        .chain()
-                        .get_engine_export_height()
-                        .ok()
-                        .flatten()
-                        .unwrap_or(0)
-                        > 0;
+                    let export_height_set =
+                        crate::node::reliability_decisions::export_height_is_set(
+                            storage.chain().get_engine_export_height(),
+                        )?;
                     if crate::node::reorg_executor::disk_utxo_source(false, export_height_set)
                         == crate::node::reorg_executor::DiskUtxoSource::MissingSnapshot
                     {

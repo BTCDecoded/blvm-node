@@ -1286,15 +1286,13 @@ impl Storage {
     /// trees still holding a full UTXO snapshot alongside blocks.
     pub fn prepare_heed3_for_tip_utxo_export(&self) -> Result<()> {
         for name in ["ibd_utxos_ckpt_a", "ibd_utxos_ckpt_b"] {
-            match self.open_tree(name) {
-                Ok(tree) => {
-                    if let Err(e) = tree.clear() {
-                        warn!("prepare tip export: clear {name} failed: {e:#}");
-                    } else {
-                        info!("[HEED3] cleared {name} before tip UTXO export (reclaim freelist)");
-                    }
-                }
-                Err(e) => warn!("prepare tip export: open {name} failed: {e:#}"),
+            let tree = self
+                .open_tree(name)
+                .with_context(|| format!("prepare tip export: open {name}"))?;
+            if reliability_decisions::should_clear_checkpoint(tree.is_empty())? {
+                tree.clear()
+                    .with_context(|| format!("prepare tip export: clear {name}"))?;
+                info!("[HEED3] cleared empty {name} before tip UTXO export (reclaim freelist)");
             }
         }
         // Force freelist visibility before grow/write.
@@ -1392,14 +1390,17 @@ impl Storage {
         const MAX_UTXOS: usize = 1_000_000_000; // 1B UTXOs
         const MAX_TXS: usize = 1_000_000_000; // 1B transactions
 
-        let block_count = self.blockstore.block_count().unwrap_or(0);
-        let utxo_count = self.utxostore.utxo_count().unwrap_or(0);
-        let tx_count = self.txindex.transaction_count().unwrap_or(0);
+        let block_count = self.blockstore.block_count()?;
+        let utxo_count = self.utxostore.utxo_count()?;
+        let tx_count = self.txindex.transaction_count()?;
 
         // Check if we're approaching limits (80% threshold)
-        let blocks_ok = block_count < (MAX_BLOCKS * 8 / 10);
-        let utxos_ok = utxo_count < (MAX_UTXOS * 8 / 10);
-        let txs_ok = tx_count < (MAX_TXS * 8 / 10);
+        let blocks_ok =
+            reliability_decisions::count_within_cap(Ok::<usize, anyhow::Error>(block_count), MAX_BLOCKS)?;
+        let utxos_ok =
+            reliability_decisions::count_within_cap(Ok::<usize, anyhow::Error>(utxo_count), MAX_UTXOS)?;
+        let txs_ok =
+            reliability_decisions::count_within_cap(Ok::<usize, anyhow::Error>(tx_count), MAX_TXS)?;
 
         if !blocks_ok {
             warn!(

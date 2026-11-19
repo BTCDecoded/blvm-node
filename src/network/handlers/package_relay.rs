@@ -43,14 +43,18 @@ impl NetworkManager {
             _ => return Err(anyhow::anyhow!("Expected PkgTxn message")),
         };
 
-        let mut relay = PackageRelay::new();
-        let reject = {
-            let utxo = self.utxo_set_arc();
-            let utxo_guard = utxo.lock().await;
+        let utxo = self.utxo_set_arc();
+        let utxo_guard = utxo.lock().await;
+        let (reject, registered) = {
+            let mut relay = self
+                .package_relay()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let reject = handle_pkgtxn(&mut relay, &request, Some(&utxo_guard))?;
-            drop(utxo_guard);
-            reject
+            let registered = relay.last_registered();
+            (reject, registered)
         };
+        drop(utxo_guard);
         if let Some(reject) = reject {
             let response_wire =
                 ProtocolParser::serialize_message(&ProtocolMessage::PkgTxnReject(reject))?;
@@ -72,6 +76,13 @@ impl NetworkManager {
             }
         }
         let _ = self.submit_transactions_to_mempool(&txs).await;
+        if let Some(id) = registered {
+            let mut relay = self
+                .package_relay()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            relay.mark_accepted(&id);
+        }
         Ok(())
     }
 }

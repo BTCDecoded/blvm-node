@@ -19,6 +19,7 @@ pub mod miner;
 #[cfg(feature = "production")]
 pub mod parallel_ibd;
 pub mod performance;
+pub mod reliability_decisions;
 #[cfg(feature = "production")]
 pub mod reorg_executor;
 pub mod run_loop;
@@ -1132,7 +1133,16 @@ impl Node {
                         &peer_addresses,
                     );
                 let min_peers = ibd_session_config.min_peers_for_ibd();
-                if peer_addresses.len() >= min_peers {
+                let skip_refused_seed = reliability_decisions::startup_skips_refused_seed(
+                    self.storage.chain().get_engine_export_height(),
+                    read_refused_seed_height(self.data_dir.as_path()),
+                )?;
+                if skip_refused_seed {
+                    CATCH_UP_SEED_BLOCKED.store(true, std::sync::atomic::Ordering::Release);
+                    info!(
+                        "[START_COMPONENTS] refused seed matches the stored export height; not starting IBD"
+                    );
+                } else if peer_addresses.len() >= min_peers {
                     info!(
                         "[START_COMPONENTS] Attempting parallel IBD with {} peers",
                         peer_addresses.len()
@@ -1965,13 +1975,13 @@ impl Node {
                         if let Err(e) = self.storage.chain().force_set_engine_ckpt_slot(slot) {
                             warn!("[IBD_RESUME] force_set_engine_ckpt_slot({slot}): {e:#}");
                         }
+                        let _ = self.storage.chain().set_engine_ckpt_slot_height(slot, height);
+                        let _ = self.storage.chain().force_set_engine_export_height(height);
+                        let _ = self.storage.chain().force_set_ibd_utxo_watermark(height);
                         let _ = self
                             .storage
                             .chain()
-                            .set_engine_ckpt_slot_height(slot, height);
-                        let _ = self.storage.chain().force_set_engine_export_height(height);
-                        let _ = self.storage.chain().force_set_ibd_utxo_watermark(height);
-                        let _ = self.storage.chain().force_set_engine_validation_tip(height);
+                            .force_set_engine_validation_tip(height);
                         if let Ok(tree) = self
                             .storage
                             .open_tree(crate::storage::ibd_engine::ckpt_tree_for_slot(slot))
@@ -1986,64 +1996,62 @@ impl Node {
                         let _ = self.storage.flush();
                         height
                     } else {
-                        warn!(
-                            "[IBD_RESUME] UTXO watermark ({wm}) > block store tip ({tip}) and no \
-                             checkpoint is at or below that tip. Block bodies for h={tip1}..={wm} \
-                             are missing. Rebuilding the UTXO set from the block store. \
-                             Prefer SIGTERM so pending block flushes complete before exit.",
-                            wm = durable_watermark,
-                            tip = chain_tip,
-                            tip1 = chain_tip + 1,
-                        );
-                        // Wipe the standalone ibd_utxo_store directory (contains UTXOs that are
-                        // inconsistent above chain_tip). The main heed3/ block store is untouched.
-                        if let Some(data_dir) = self.storage.data_dir() {
-                            let utxo_store_dir =
-                                data_dir.join(crate::storage::database::IBD_UTXO_STORE_SUBDIR);
-                            if utxo_store_dir.exists()
-                                && crate::config::path_is_strictly_within(
-                                    data_dir.as_path(),
-                                    &utxo_store_dir,
-                                )
-                            {
-                                if let Err(e) = std::fs::remove_dir_all(&utxo_store_dir) {
-                                    warn!(
-                                        "[IBD_RESUME] failed to remove {}: {} — continuing anyway",
-                                        utxo_store_dir.display(),
-                                        e
-                                    );
-                                } else {
-                                    info!(
-                                        "[IBD_RESUME] removed {} (UTXO state reset for safe replay)",
-                                        utxo_store_dir.display()
-                                    );
-                                }
+                    warn!(
+                        "[IBD_RESUME] UTXO watermark ({wm}) > block store tip ({tip}) and no \
+                         checkpoint is at or below that tip. Block bodies for h={tip1}..={wm} \
+                         are missing. Rebuilding the UTXO set from the block store. \
+                         Prefer SIGTERM so pending block flushes complete before exit.",
+                        wm = durable_watermark,
+                        tip = chain_tip,
+                        tip1 = chain_tip + 1,
+                    );
+                    // Wipe the standalone ibd_utxo_store directory (contains UTXOs that are
+                    // inconsistent above chain_tip). The main heed3/ block store is untouched.
+                    if let Some(data_dir) = self.storage.data_dir() {
+                        let utxo_store_dir =
+                            data_dir.join(crate::storage::database::IBD_UTXO_STORE_SUBDIR);
+                        if utxo_store_dir.exists()
+                            && crate::config::path_is_strictly_within(
+                                data_dir.as_path(),
+                                &utxo_store_dir,
+                            )
+                        {
+                            if let Err(e) = std::fs::remove_dir_all(&utxo_store_dir) {
+                                warn!(
+                                    "[IBD_RESUME] failed to remove {}: {} — continuing anyway",
+                                    utxo_store_dir.display(),
+                                    e
+                                );
+                            } else {
+                                info!(
+                                    "[IBD_RESUME] removed {} (UTXO state reset for safe replay)",
+                                    utxo_store_dir.display()
+                                );
                             }
                         }
-                        // The label reset is not enough. `open_engine_resume_snapshot`
-                        // follows whichever checkpoint still has rows, so a leftover
-                        // `ibd_utxos_ckpt_*` stays spendable after the replay starts.
-                        self.storage.clear_ibd_snapshot_trees();
-                        if let Err(e) = self.storage.chain().force_set_ibd_utxo_watermark(0) {
-                            warn!("[IBD_RESUME] force_set_ibd_utxo_watermark(0) failed: {e}");
-                        }
-                        // Stale engine export height (e.g. 460k) would otherwise claim a checkpoint
-                        // that no longer matches the wiped UTXO state / block tip.
-                        if let Err(e) = self
-                            .storage
-                            .chain()
-                            .force_reset_engine_checkpoint_metadata()
-                        {
-                            warn!(
-                                "[IBD_RESUME] force_reset_engine_checkpoint_metadata failed: {e}"
-                            );
-                        }
-                        let _ = self.storage.flush();
-                        // UTXO store is now empty → must start from genesis (h=0) so the
-                        // validation loop rebuilds UTXO state from scratch.  The block store
-                        // (heed3/) is intact, so h=1..=chain_tip will be served via local
-                        // replay (fast) and only h=chain_tip+1 onward needs downloading.
-                        0
+                    }
+                    // The label reset is not enough. `open_engine_resume_snapshot`
+                    // follows whichever checkpoint still has rows, so a leftover
+                    // `ibd_utxos_ckpt_*` stays spendable after the replay starts.
+                    self.storage.clear_ibd_snapshot_trees();
+                    if let Err(e) = self.storage.chain().force_set_ibd_utxo_watermark(0) {
+                        warn!("[IBD_RESUME] force_set_ibd_utxo_watermark(0) failed: {e}");
+                    }
+                    // Stale engine export height (e.g. 460k) would otherwise claim a checkpoint
+                    // that no longer matches the wiped UTXO state / block tip.
+                    if let Err(e) = self
+                        .storage
+                        .chain()
+                        .force_reset_engine_checkpoint_metadata()
+                    {
+                        warn!("[IBD_RESUME] force_reset_engine_checkpoint_metadata failed: {e}");
+                    }
+                    let _ = self.storage.flush();
+                    // UTXO store is now empty → must start from genesis (h=0) so the
+                    // validation loop rebuilds UTXO state from scratch.  The block store
+                    // (heed3/) is intact, so h=1..=chain_tip will be served via local
+                    // replay (fast) and only h=chain_tip+1 onward needs downloading.
+                    0
                     }
                 } else {
                     let tip = chain_tip.min(resume_tip);

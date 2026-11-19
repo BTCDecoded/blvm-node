@@ -98,10 +98,13 @@ fn a_body_that_does_not_extend_its_parent_is_removed() {
     };
     let child_hash = blockstore.get_block_hash(&child);
     blockstore.store_height(2, &child_hash).unwrap();
-    blockstore.store_block_with_witness(&child, &[], 2).unwrap();
+    blockstore
+        .store_block_with_witness(&child, &[], 2)
+        .unwrap();
 
     assert!(
-        crate::node::parallel_ibd::headers::discard_nonextending_successor(&blockstore, 1).unwrap()
+        crate::node::parallel_ibd::headers::discard_nonextending_successor(&blockstore, 1)
+            .unwrap()
     );
     assert!(blockstore.get_hash_by_height(2).unwrap().is_none());
     assert!(!blockstore.has_block_body(&child_hash).unwrap());

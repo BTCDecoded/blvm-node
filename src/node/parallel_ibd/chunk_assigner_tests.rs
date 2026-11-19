@@ -3951,6 +3951,49 @@ fn is_done_when_validation_reaches_ibd_end_despite_wan_tip_gap() {
 
 #[serial_test::serial(ibd)]
 #[test]
+fn a_download_worker_stops_when_shutdown_is_requested() {
+    super::super::tip_stage::clear_tip_failover();
+    let vh = Arc::new(AtomicU64::new(900));
+    let assigner = ChunkAssigner::new(
+        vec![(880, 1000)],
+        vec!["p1".into()],
+        Arc::clone(&vh),
+        880,
+        true,
+    );
+    assigner.mark_bootstrap_complete();
+    assigner.set_tip_gap_missing(true);
+    assert!(!assigner.is_done());
+    assigner.request_shutdown();
+    assert!(assigner.is_done());
+    assert!(assigner.get_work("p1", 1000).is_none());
+    super::super::tip_stage::clear_tip_failover();
+    let src = include_str!("mod.rs");
+    assert!(
+        src.contains("join_download_handles_after_grace(download_handles).await;"),
+        "an IBD error return drops the download workers"
+    );
+}
+
+#[tokio::test]
+async fn a_download_join_aborts_a_stuck_worker() {
+    let previous = std::env::var("BLVM_IBD_DOWNLOAD_JOIN_SECS").ok();
+    unsafe { std::env::set_var("BLVM_IBD_DOWNLOAD_JOIN_SECS", "0") };
+    let handle = tokio::spawn(std::future::pending());
+    let finished = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        super::super::join_download_handles_after_grace(vec![(0, handle)]),
+    )
+    .await;
+    match previous {
+        Some(value) => unsafe { std::env::set_var("BLVM_IBD_DOWNLOAD_JOIN_SECS", value) },
+        None => unsafe { std::env::remove_var("BLVM_IBD_DOWNLOAD_JOIN_SECS") },
+    }
+    assert!(finished.is_ok(), "dropping the worker handle left it running");
+}
+
+#[serial_test::serial(ibd)]
+#[test]
 fn p0b_wan_stall_retry_blocked_without_owner() {
     super::super::tip_stage::clear_tip_failover();
     let vh = Arc::new(AtomicU64::new(900));

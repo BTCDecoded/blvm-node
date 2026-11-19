@@ -1064,45 +1064,13 @@ pub(crate) async fn download_headers(
             }
         }
 
-        if consecutive_failures >= headers_max_failures {
-            warn!(
-                "Too many failures ({}), refreshing peers",
-                consecutive_failures
-            );
-            consecutive_failures = 0;
-            peer_addrs = network.get_connected_peer_addresses().await;
-            if peer_addrs.is_empty() {
-                // Actively trigger archive peer discovery before waiting — don't just
-                // sit idle for 5 s then give up. The address DB may be drained of
-                // full-history peers after mass evictions; seed it explicitly.
-                warn!("Header sync: no connected peers — triggering archive peer re-discovery");
-                // Fire both archive and regular DNS seeds in parallel for speed.
-                let default_ban = Default::default();
-                let (arc_res, _) = tokio::join!(network.discover_archive_peers_from_dns(), {
-                    let (net_name, port) =
-                        crate::network::protocol::ProtocolParser::dns_seed_network();
-                    network.discover_peers_from_dns(net_name, port, &default_ban)
-                },);
-                let _ = arc_res;
-                let _ = network.connect_peers_from_database(16).await;
-                // Wait up to 15 s in 2-second slices for a peer to connect.
-                for _ in 0..8 {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    peer_addrs = network.get_connected_peer_addresses().await;
-                    if !peer_addrs.is_empty() {
-                        info!(
-                            "Header sync: {} peer(s) reconnected, resuming",
-                            peer_addrs.len()
-                        );
-                        break;
-                    }
-                }
-                if peer_addrs.is_empty() {
-                    return Err(anyhow::anyhow!(
-                        "No peers available after 70s wait + re-discovery"
-                    ));
-                }
-            }
+        if crate::node::reliability_decisions::header_timeout_stops(
+            consecutive_failures,
+            headers_max_failures,
+        ) {
+            return Err(anyhow::anyhow!(
+                "Too many header failures ({consecutive_failures})"
+            ));
         }
     }
 

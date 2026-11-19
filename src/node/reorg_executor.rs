@@ -429,22 +429,39 @@ fn export_count_baseline(storage: &Storage) -> u64 {
 
 /// `None` when the gap is absent or an undo is missing. `Some(0)` is a real
 /// block that created as many coins as it spent.
-pub(crate) fn unrecorded_connect_net(storage: &Storage, export_height: u64) -> Option<i64> {
+pub(crate) fn unrecorded_connect_net(
+    storage: &Storage,
+    export_height: u64,
+) -> Result<Option<i64>> {
     #[cfg(not(feature = "production"))]
     {
         let _ = (storage, export_height);
-        return None;
+        return Ok(None);
     }
     #[cfg(feature = "production")]
     {
-        let heights = unrecorded_snapshot_heights(export_count_baseline(storage), export_height)?;
+        let Some(heights) =
+            unrecorded_snapshot_heights(export_count_baseline(storage), export_height)
+        else {
+            return Ok(None);
+        };
         let mut net = 0i64;
         for height in heights {
-            let hash = storage.blocks().get_hash_by_height(height).ok().flatten()?;
-            let undo = storage.blocks().get_undo_log(&hash).ok().flatten()?;
+            let Some(hash) = crate::node::reliability_decisions::connect_gap_read(
+                storage.blocks().get_hash_by_height(height),
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(undo) = crate::node::reliability_decisions::connect_gap_read(
+                storage.blocks().get_undo_log(&hash),
+            )?
+            else {
+                return Ok(None);
+            };
             net += snapshot_connect_coin_delta(&[&undo]);
         }
-        Some(net)
+        Ok(Some(net))
     }
 }
 
@@ -452,15 +469,15 @@ pub(crate) fn export_count_including_unrecorded_connects(
     storage: &Storage,
     export_height: u64,
     stored_count: u64,
-) -> u64 {
-    match unrecorded_connect_net(storage, export_height) {
+) -> Result<u64> {
+    Ok(match unrecorded_connect_net(storage, export_height)? {
         Some(net) => (stored_count as i64).saturating_add(net).max(0) as u64,
         None => stored_count,
-    }
+    })
 }
 
 fn include_unrecorded_connects(storage: &Storage, height: u64) -> Result<()> {
-    let Some(net) = unrecorded_connect_net(storage, height) else {
+    let Some(net) = unrecorded_connect_net(storage, height)? else {
         return Ok(());
     };
     record_snapshot_coin_delta(storage, net, Some(height))
@@ -1796,7 +1813,7 @@ mod snapshot_delta_tests {
             .unwrap();
 
         assert_eq!(
-            export_count_including_unrecorded_connects(&storage, 8, 10),
+            export_count_including_unrecorded_connects(&storage, 8, 10).unwrap(),
             11
         );
         storage
@@ -1804,7 +1821,7 @@ mod snapshot_delta_tests {
             .force_set_engine_export_utxo_count_through(11, 8)
             .unwrap();
         assert_eq!(
-            export_count_including_unrecorded_connects(&storage, 8, 11),
+            export_count_including_unrecorded_connects(&storage, 8, 11).unwrap(),
             11
         );
     }

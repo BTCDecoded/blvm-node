@@ -135,6 +135,16 @@ fn validation_error_suggests_utxo_repair_matching_substrings() {
 }
 
 #[test]
+fn a_consensus_input_failure_does_not_arm_utxo_repair() {
+    assert!(!validation_error_suggests_utxo_repair(&anyhow::anyhow!(
+        "Invalid transaction inputs at index 0"
+    )));
+    assert!(validation_error_suggests_utxo_repair(&anyhow::anyhow!(
+        "UTXO not found for input 0"
+    )));
+}
+
+#[test]
 fn block_spends_prevout_matches_the_parent_input() {
     use blvm_protocol::{Block, BlockHeader, OutPoint, Transaction, TransactionInput};
     let txid = [0x99u8; 32];

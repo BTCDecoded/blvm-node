@@ -118,7 +118,6 @@ pub fn validation_error_suggests_utxo_repair(err: &anyhow::Error) -> bool {
     }
     let s = err.to_string();
     s.contains("UTXO not found for input")
-        || s.contains("Invalid transaction inputs")
         || s.contains("IBD UTXO mutex poisoned")
         || s.contains("UTXO flush panicked")
         || s.contains("Failed to open IBD UTXO tree")
@@ -403,11 +402,9 @@ pub fn apply_ibd_utxo_autorepair_if_needed(
     // Exception: watermark already 0 means a full local replay — stale standalone LMDB from
     // prior wm=0 sessions without a wipe causes fdatasync bloat and ~50 BPS crawl (see
     // docs/IBD_BPS_RESOLUTION_PLAN.md PR-STORE).
-    let watermark = storage
-        .chain()
-        .get_utxo_watermark()
-        .unwrap_or(None)
-        .unwrap_or(0);
+    let watermark = crate::storage::reliability_decisions::watermark_for_repair(
+        storage.chain().get_utxo_watermark(),
+    )?;
     if watermark == 0 {
         if let Some(root) = storage.data_dir() {
             let engine_dir = root.join("ibd_engine");

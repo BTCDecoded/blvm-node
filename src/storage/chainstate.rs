@@ -620,6 +620,31 @@ impl ChainState {
         Ok(())
     }
 
+    /// One `chain_info` batch: canonical tree name and export height.
+    /// A height above the block tip writes neither key.
+    pub fn persist_canonical_tree_and_export_height(&self, name: &str, height: u64) -> Result<()> {
+        anyhow::ensure!(
+            crate::storage::ibd_engine::is_ibd_utxo_tree_name(name),
+            "invalid ibd utxo canonical tree name: {name}"
+        );
+        let block_tip = self.get_height()?.unwrap_or(0);
+        if !super::reliability_decisions::canonical_export_writes_both(true, height, block_tip) {
+            tracing::warn!(
+                "refusing canonical tree and export height {height} (block store tip={block_tip})"
+            );
+            return Ok(());
+        }
+        let current = self.get_engine_export_height()?.unwrap_or(0);
+        let mut batch = self.chain_info.batch()?;
+        batch.put(b"ibd_utxo_canonical_tree", name.as_bytes());
+        batch.put(
+            b"ibd_engine_export_height",
+            &height.max(current).to_be_bytes(),
+        );
+        batch.commit()?;
+        Ok(())
+    }
+
     /// Height recorded for a ping-pong slot's last successful export (0 = unknown/empty).
     pub fn get_engine_ckpt_slot_height(&self, slot: u8) -> Result<u64> {
         let key: &[u8] = if slot & 1 == 0 {
@@ -866,24 +891,25 @@ impl ChainState {
         utxo_count: u64,
         export_wall_secs: u64,
         muhash_running: &[u8; MUHASH_RUNNING_STATE_BYTES],
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let current = self.get_engine_export_height()?.unwrap_or(0);
         let block_tip = self.get_height()?.unwrap_or(0);
-        if height > block_tip {
-            tracing::warn!(
-                "refusing engine checkpoint at height {height} (block store tip={block_tip}) — \
-                 snapshot must not be labeled below the scan height"
-            );
+        if super::reliability_decisions::checkpoint_complete_decision(height, block_tip, current)
+            == super::reliability_decisions::CheckpointComplete::Refuse
+        {
+            if height > block_tip {
+                tracing::warn!(
+                    "refusing engine checkpoint at height {height} (block store tip={block_tip}) — \
+                     snapshot must not be labeled below the scan height"
+                );
+            } else {
+                tracing::warn!(
+                    "engine checkpoint complete ignored at height {height} (durable export is {current})"
+                );
+            }
             // Refresh MuHash only; do not advance export/watermark or flip ckpt slot.
             self.persist_ibd_utxo_muhash_running_only(muhash_running)?;
-            return Ok(());
-        }
-        if height <= current {
-            tracing::warn!(
-                "engine checkpoint complete ignored at height {height} (durable export is {current})"
-            );
-            self.persist_ibd_utxo_muhash_running_only(muhash_running)?;
-            return Ok(());
+            return Ok(false);
         }
         let prev_count = self.get_engine_export_utxo_count()?.unwrap_or(0);
         let current_wm = self.get_utxo_watermark()?.unwrap_or(0);
@@ -914,7 +940,7 @@ impl ChainState {
         );
         batch.put(b"ibd_engine_export_muhash", muhash_running.as_slice());
         batch.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     /// Reset all engine checkpoint metadata to "no checkpoint" state.

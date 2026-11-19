@@ -194,6 +194,8 @@ pub struct NetworkManager {
     filter_service: crate::network::filter_service::BlockFilterService,
     /// Peer inventory tracking (inv relay)
     inventory: Arc<std::sync::Mutex<super::inventory::InventoryManager>>,
+    /// Packages registered by `handle_pkgtxn` until accept, reject, or age-out.
+    package_relay: Arc<std::sync::Mutex<super::package_relay::PackageRelay>>,
     /// Consensus engine for mempool acceptance
     consensus: ConsensusProof,
     /// Shared UTXO snapshot for mempool fee checks (synced from chainstate storage).
@@ -633,6 +635,7 @@ impl NetworkManager {
             inventory: Arc::new(std::sync::Mutex::new(
                 super::inventory::InventoryManager::new(),
             )),
+            package_relay: Arc::new(std::sync::Mutex::new(super::package_relay::PackageRelay::new())),
             consensus: ConsensusProof::new(),
             utxo_set: Arc::new(Mutex::new(UtxoSet::default())),
             mempool: Arc::new(Mutex::new(Mempool::new())),
@@ -3000,6 +3003,12 @@ impl NetworkManager {
     /// Get filter service reference
     pub fn filter_service(&self) -> &crate::network::filter_service::BlockFilterService {
         &self.filter_service
+    }
+
+    pub(crate) fn package_relay(
+        &self,
+    ) -> &Arc<std::sync::Mutex<super::package_relay::PackageRelay>> {
+        &self.package_relay
     }
 
     pub(crate) fn inventory(&self) -> &Arc<std::sync::Mutex<super::inventory::InventoryManager>> {
