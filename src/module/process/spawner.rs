@@ -79,6 +79,7 @@ impl ModuleProcessSpawner {
         module_name: &str,
         binary_path: &Path,
         context: ModuleContext,
+        ipc_protocol: u32,
     ) -> Result<ModuleProcess, ModuleError> {
         info!("Spawning module process: {}", module_name);
 
@@ -112,6 +113,7 @@ impl ModuleProcessSpawner {
             .stderr(Stdio::piped())
             .env("MODULE_NAME", module_name)
             .env("MODULE_ID", &context.module_id)
+            .env("MODULE_IPC_PROTOCOL", ipc_protocol.to_string())
             .env("SOCKET_PATH", &socket_path)
             .env("DATA_DIR", &module_data_dir);
 
@@ -128,11 +130,21 @@ impl ModuleProcessSpawner {
 
         #[cfg(target_os = "linux")]
         {
+            let generation =
+                crate::module::sandbox::landlock::SandboxGeneration::from_ipc_protocol(
+                    ipc_protocol,
+                )
+                .map_err(|e| {
+                    ModuleError::InitializationError(format!(
+                        "refusing to spawn module {module_name}: {e}"
+                    ))
+                })?;
             let landlock = crate::module::sandbox::landlock::ModuleLandlock::prepare(
                 binary_path,
                 &module_data_dir,
                 &socket_path,
                 &self.modules_dir,
+                generation,
             )
             .map_err(|e| {
                 ModuleError::InitializationError(format!(

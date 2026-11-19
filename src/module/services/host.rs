@@ -679,7 +679,7 @@ mod tests {
             pending_invocations: Arc::clone(&pending),
             next_invocation_id: Arc::new(AtomicU64::new(1)),
             cli_registry: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            issued_module_ids: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
+            issued_module_ids: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         };
         let pending_reply = Arc::clone(&pending);
         let reply = tokio::spawn(async move {

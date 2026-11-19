@@ -73,7 +73,7 @@ async fn test_monitor_with_shared_process() {
     // Try to spawn the process
     // Note: This will fail if the binary doesn't match ModuleProcess expectations,
     // but we can test the infrastructure
-    let result = spawner.spawn("test_module", &binary_path, context).await;
+    let result = spawner.spawn("test_module", &binary_path, context, 0).await;
 
     // If spawning fails (expected for non-module binaries), that's OK
     // We're testing the monitor infrastructure, not the actual module spawning

@@ -30,6 +30,7 @@ fn create_test_manifest(name: &str, deps: HashMap<String, String>) -> ModuleMani
         min_node_version: None,
         services: Vec::new(),
         fee_estimators: Vec::new(),
+        ipc_protocol: 0,
         signatures: None,
         payment: None,
     }

@@ -229,6 +229,11 @@ pub struct ModuleManifest {
     /// Informational estimator declarations. `listfeeestimators` is a later phase.
     #[serde(default)]
     pub fee_estimators: Vec<toml::Value>,
+
+    /// Sandbox generation. Omitted means `0` (published binaries keep stream TCP).
+    /// `2` is the Unix-only domain and requires `HandshakeV2`.
+    #[serde(default)]
+    pub ipc_protocol: u32,
 }
 
 /// `[[services]]` in module.toml.
@@ -267,6 +272,12 @@ impl ModuleManifest {
                 "Entry point cannot be empty".to_string(),
             ));
         }
+        if manifest.ipc_protocol != 0 && manifest.ipc_protocol != 2 {
+            return Err(ModuleError::InvalidManifest(format!(
+                "module ipc_protocol {} is not a supported generation; use 0 or 2",
+                manifest.ipc_protocol
+            )));
+        }
 
         Ok(manifest)
     }
@@ -290,6 +301,7 @@ impl ModuleManifest {
             dependencies: self.dependencies.clone(),
             optional_dependencies: self.optional_dependencies.clone(),
             entry_point: self.entry_point.clone(),
+            ipc_protocol: self.ipc_protocol,
         }
     }
 
@@ -350,6 +362,44 @@ impl ModuleManifest {
                 .as_ref()
                 .map(|s| !s.maintainers.is_empty())
                 .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModuleManifest;
+
+    #[test]
+    fn omitted_ipc_protocol_is_generation_0_and_1_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("blvm-ipc-proto-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("module.toml");
+        std::fs::write(
+            &path,
+            "name = \"m\"\nversion = \"0.1.0\"\nentry_point = \"m\"\n",
+        )
+        .unwrap();
+        let manifest = ModuleManifest::from_file(&path).unwrap();
+        assert_eq!(manifest.ipc_protocol, 0);
+        std::fs::write(
+            &path,
+            "name = \"m\"\nversion = \"0.1.0\"\nentry_point = \"m\"\nipc_protocol = 1\n",
+        )
+        .unwrap();
+        let err = ModuleManifest::from_file(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("not a supported generation"),
+            "{err}"
+        );
+        std::fs::write(
+            &path,
+            "name = \"m\"\nversion = \"0.1.0\"\nentry_point = \"m\"\nipc_protocol = 2\n",
+        )
+        .unwrap();
+        let strict = ModuleManifest::from_file(&path).unwrap();
+        assert_eq!(strict.ipc_protocol, 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -52,16 +52,32 @@ impl ModuleIntegration {
         let mut ipc_client = ModuleIpcClient::connect(&socket_path).await?;
         info!("Connected to IPC socket");
 
-        // Handshake
+        // The node sets MODULE_IPC_PROTOCOL from the manifest. Published binaries
+        // ignore the variable and still send Handshake. A rebuilt module sends
+        // HandshakeV2 only when the manifest says generation 2.
         let correlation_id = ipc_client.next_correlation_id();
-        let request = RequestMessage {
-            correlation_id,
-            request_type: MessageType::Handshake,
-            payload: RequestPayload::Handshake {
-                module_id: module_id.clone(),
-                module_name,
-                version,
-            },
+        let strict = std::env::var("MODULE_IPC_PROTOCOL").ok().as_deref() == Some("2");
+        let request = if strict {
+            RequestMessage {
+                correlation_id,
+                request_type: MessageType::HandshakeV2,
+                payload: RequestPayload::HandshakeV2 {
+                    module_id: module_id.clone(),
+                    module_name,
+                    version,
+                    ipc_protocol: 2,
+                },
+            }
+        } else {
+            RequestMessage {
+                correlation_id,
+                request_type: MessageType::Handshake,
+                payload: RequestPayload::Handshake {
+                    module_id: module_id.clone(),
+                    module_name,
+                    version,
+                },
+            }
         };
 
         let response = ipc_client.request(request).await?;

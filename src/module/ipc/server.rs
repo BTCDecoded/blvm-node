@@ -5,7 +5,7 @@
 //! Unix: Unix domain sockets. Windows: named pipes.
 
 use futures::{SinkExt, StreamExt};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -94,8 +94,9 @@ pub struct ModuleIpcServer {
     wasm_invoker: Option<Arc<dyn WasmInvoker>>,
     /// Timer service notified when a module connects and disconnects.
     timer_service: Option<crate::module::timers::TimerService>,
-    /// Module ids this node minted. Handshake rejects every other id.
-    issued_module_ids: Arc<std::sync::RwLock<HashSet<String>>>,
+    /// Module ids this node minted, and the sandbox generation from the manifest.
+    /// Handshake rejects every other id. Generation 2 rejects a v1 handshake.
+    issued_module_ids: Arc<std::sync::RwLock<HashMap<String, u32>>>,
 }
 
 /// Active connection to a module (generic over stream read half)
@@ -161,8 +162,8 @@ pub struct ModuleIpcHandle {
         Arc<tokio::sync::Mutex<HashMap<u64, oneshot::Sender<InvocationResultMessage>>>>,
     pub(crate) next_invocation_id: Arc<AtomicU64>,
     pub(crate) cli_registry: Arc<tokio::sync::RwLock<HashMap<String, CliSpec>>>,
-    /// Module ids the node minted. A handshake for any other id is rejected.
-    pub(crate) issued_module_ids: Arc<std::sync::RwLock<HashSet<String>>>,
+    /// Module ids the node minted, with the manifest `ipc_protocol`.
+    pub(crate) issued_module_ids: Arc<std::sync::RwLock<HashMap<String, u32>>>,
 }
 
 impl ModuleIpcHandle {
@@ -181,10 +182,15 @@ impl ModuleIpcHandle {
     ///
     /// Safe to call while `start` holds the server mutex: the set is its own lock.
     pub fn issue_module_id(&self, module_id: &str) {
+        self.issue_module_id_with_protocol(module_id, 0);
+    }
+
+    /// Record an id and the manifest generation. `0` keeps stream TCP. `2` requires `HandshakeV2`.
+    pub fn issue_module_id_with_protocol(&self, module_id: &str, ipc_protocol: u32) {
         self.issued_module_ids
             .write()
             .expect("issued module ids")
-            .insert(module_id.to_string());
+            .insert(module_id.to_string(), ipc_protocol);
     }
 
     /// Invoke a subprocess module's registered ModuleAPI method (node → module).
@@ -452,16 +458,21 @@ impl ModuleIpcServer {
             #[cfg(feature = "wasm-modules")]
             wasm_invoker: None,
             timer_service: None,
-            issued_module_ids: Arc::new(std::sync::RwLock::new(HashSet::new())),
+            issued_module_ids: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
 
     /// Record an id this node minted. See [`ModuleIpcHandle::issue_module_id`].
     pub fn issue_module_id(&self, module_id: &str) {
+        self.issue_module_id_with_protocol(module_id, 0);
+    }
+
+    /// Record an id and the manifest generation. `0` keeps stream TCP. `2` requires `HandshakeV2`.
+    pub fn issue_module_id_with_protocol(&self, module_id: &str, ipc_protocol: u32) {
         self.issued_module_ids
             .write()
             .expect("issued module ids")
-            .insert(module_id.to_string());
+            .insert(module_id.to_string(), ipc_protocol);
     }
 
     /// Notify this service when modules connect and disconnect.
@@ -866,7 +877,7 @@ struct ConnectionCtx {
         >,
     >,
     timer_service: Option<crate::module::timers::TimerService>,
-    issued_module_ids: Arc<std::sync::RwLock<HashSet<String>>>,
+    issued_module_ids: Arc<std::sync::RwLock<HashMap<String, u32>>>,
 }
 
 impl ModuleIpcServer {
@@ -911,6 +922,7 @@ impl ConnectionCtx {
 
                 match message {
                     ModuleMessage::Request(request) => {
+                        // `None` is the v1 handshake every published binary sends.
                         let accepted = match &request.payload {
                             RequestPayload::Handshake {
                                 module_id,
@@ -921,7 +933,7 @@ impl ConnectionCtx {
                                     "Module handshake: id={}, name={}, version={}",
                                     module_id, module_name, version
                                 );
-                                Some((module_id.clone(), module_name.clone()))
+                                Some((module_id.clone(), module_name.clone(), None))
                             }
                             RequestPayload::HandshakeV2 {
                                 module_id,
@@ -929,28 +941,22 @@ impl ConnectionCtx {
                                 version,
                                 ipc_protocol,
                             } => {
-                                if *ipc_protocol
-                                    != crate::module::timers::types::IPC_PROTOCOL_VERSION
-                                {
-                                    return Err(ModuleError::IpcError(format!(
-                                        "unsupported ipc protocol version {ipc_protocol}"
-                                    )));
-                                }
                                 info!(
                                     "Module handshake v2: id={}, name={}, version={}, ipc={}",
                                     module_id, module_name, version, ipc_protocol
                                 );
-                                Some((module_id.clone(), module_name.clone()))
+                                Some((module_id.clone(), module_name.clone(), Some(*ipc_protocol)))
                             }
                             _ => None,
                         };
-                        if let Some((module_id, module_name)) = accepted {
-                            let issued = self
+                        if let Some((module_id, module_name, presented)) = accepted {
+                            let expected = self
                                 .issued_module_ids
                                 .read()
                                 .expect("issued module ids")
-                                .contains(&module_id);
-                            if !issued {
+                                .get(&module_id)
+                                .copied();
+                            if expected.is_none() {
                                 let nak = ResponseMessage::error(
                                     request.correlation_id,
                                     "module id was not issued by the node".to_string(),
@@ -970,6 +976,36 @@ impl ConnectionCtx {
                                 return Err(ModuleError::IpcError(
                                     "module id was not issued by the node".to_string(),
                                 ));
+                            }
+                            let expected = expected.expect("issued id");
+                            let generation_ok = match presented {
+                                None => expected == 0,
+                                Some(got) => got == expected,
+                            };
+                            if !generation_ok {
+                                let reason = match presented {
+                                    None => {
+                                        "module ipc_protocol 2 requires HandshakeV2".to_string()
+                                    }
+                                    Some(got) => format!(
+                                        "handshake ipc protocol {got} does not match manifest ipc_protocol {expected}"
+                                    ),
+                                };
+                                let nak =
+                                    ResponseMessage::error(request.correlation_id, reason.clone());
+                                let nak_bytes = bincode::serialize(&ModuleMessage::Response(nak))
+                                    .map_err(|e| {
+                                    ModuleError::SerializationError(e.to_string())
+                                })?;
+                                writer
+                                    .send(bytes::Bytes::from(nak_bytes))
+                                    .await
+                                    .map_err(|e| {
+                                        ModuleError::IpcError(format!(
+                                            "Failed to send handshake rejection: {e}"
+                                        ))
+                                    })?;
+                                return Err(ModuleError::IpcError(reason));
                             }
                             let ack = ResponseMessage {
                                 correlation_id: request.correlation_id,
@@ -2241,7 +2277,7 @@ mod timer_invoke_tests {
             pending_invocations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             next_invocation_id: Arc::new(AtomicU64::new(1)),
             cli_registry: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            issued_module_ids: Arc::new(std::sync::RwLock::new(HashSet::new())),
+            issued_module_ids: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let err = handle

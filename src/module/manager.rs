@@ -530,6 +530,7 @@ impl ModuleManager {
                     dependencies: HashMap::new(),
                     optional_dependencies: HashMap::new(),
                     entry_point: name.to_string(),
+                    ipc_protocol: 0,
                 },
                 process: None,
                 state: ModuleState::Stopped,
@@ -1210,11 +1211,11 @@ impl ModuleManager {
         // unix-only; Windows has no module IPC server to register it with.
         #[cfg(unix)]
         if let Some(handle) = &self.ipc_handle {
-            handle.issue_module_id(&module_id);
+            handle.issue_module_id_with_protocol(&module_id, metadata.ipc_protocol);
         }
         let process = self
             .spawner
-            .spawn(module_name, binary_path, context)
+            .spawn(module_name, binary_path, context, metadata.ipc_protocol)
             .await?;
         let process_id = process.id();
         let shared_process = Arc::new(tokio::sync::Mutex::new(process));
@@ -2613,6 +2614,7 @@ mod tests {
             dependencies: HashMap::new(),
             optional_dependencies: HashMap::new(),
             entry_point: "fake".to_string(),
+            ipc_protocol: 0,
         };
 
         let err = manager
@@ -2722,6 +2724,7 @@ entry_point = "{name}"
                         dependencies: HashMap::new(),
                         optional_dependencies: HashMap::new(),
                         entry_point: "fees".into(),
+                        ipc_protocol: 0,
                     },
                     process: None,
                     state: ModuleState::Stopped,

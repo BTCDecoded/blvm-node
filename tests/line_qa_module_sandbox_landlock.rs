@@ -12,6 +12,7 @@ fn prepare_rejects_a_missing_data_directory() {
         data,
         Path::new("/tmp/blvm-line-qa-landlock-missing-sock/node.sock"),
         Path::new("/tmp"),
+        blvm_node::module::sandbox::landlock::SandboxGeneration::Compat,
     ) {
         Err(err) => {
             let message = err.to_string();

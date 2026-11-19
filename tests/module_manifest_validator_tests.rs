@@ -25,6 +25,7 @@ fn create_valid_manifest() -> ModuleManifest {
         min_node_version: None,
         services: Vec::new(),
         fee_estimators: Vec::new(),
+        ipc_protocol: 0,
         signatures: None,
         payment: None,
     }

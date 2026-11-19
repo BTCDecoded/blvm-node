@@ -80,10 +80,24 @@ async fn test_spawn_nonexistent_binary() {
     let context = create_test_context();
     let fake_binary = PathBuf::from("/nonexistent/binary");
 
-    let result = spawner.spawn("test-module", &fake_binary, context).await;
+    let result = spawner.spawn("test-module", &fake_binary, context, 0).await;
 
     // Should fail with an error
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn spawn_rejects_an_unknown_ipc_protocol_before_launch() {
+    let (_temp_dir, spawner) = create_test_spawner();
+    let context = create_test_context();
+    let result = spawner
+        .spawn("test-module", &PathBuf::from("/bin/true"), context, 1)
+        .await;
+    let text = match result {
+        Err(err) => format!("{err}"),
+        Ok(_) => panic!("protocol 1 must not spawn"),
+    };
+    assert!(text.contains("not a supported generation"), "{text}");
     // Error type should be ModuleError (which implements Debug)
     // We don't need to match on the specific error variant for this test
 }
@@ -116,7 +130,7 @@ async fn spawn_log_omits_module_config() {
         .config
         .insert("api_key".to_string(), "super-secret-value".to_string());
     let fake_binary = PathBuf::from("/bin/true");
-    let result = spawner.spawn("test-module", &fake_binary, context).await;
+    let result = spawner.spawn("test-module", &fake_binary, context, 0).await;
     drop(_guard);
 
     assert!(result.is_err());
