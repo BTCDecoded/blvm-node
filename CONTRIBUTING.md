@@ -34,7 +34,7 @@ This project follows the [Rust Code of Conduct](https://www.rust-lang.org/polici
 
 **crates.io / CI (no monorepo path patches):** Like other `blvm-*` crates, `blvm-muhash` is declared as `>=0.1, <1`. The crates.io release you depend on must include the MuHash APIs this tree uses (`serialize_running_state` / `deserialize_running_state`, `insert_mut` / `remove_mut` on the IBD flush hot path). Publish [`blvm-muhash`](https://crates.io/crates/blvm-muhash) before or with any `blvm-node` release that needs newer APIs.
 
-Root **`Cargo.lock`** is **gitignored** and not tracked. **CI** runs **`cargo … --locked`** using a lockfile present on the **runner workspace** (generated or cached there). For **local** **`--locked`** builds, run **`cargo generate-lockfile`** or a normal **`cargo build`** / **`cargo test`** first so **`Cargo.lock`** exists beside **`Cargo.toml`**. Dependency resolution in CI follows **`Cargo.toml`** after stripping **`[patch.crates-io]`**, consistent with crates.io builds.
+Root **`Cargo.lock`** is committed. It is generated with **`[patch.crates-io]`** stripped, the same way CI builds, so it pins crates.io versions of the **`blvm-*`** crates. With the monorepo path patches active, Cargo rewrites it locally; do not commit that rewrite. Dependency resolution in CI follows **`Cargo.toml`** after stripping **`[patch.crates-io]`**, consistent with crates.io builds.
 
 ```bash
 git clone https://github.com/BTCDecoded/blvm-node.git
