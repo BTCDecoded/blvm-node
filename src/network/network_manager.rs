@@ -413,6 +413,27 @@ impl PendingRequest {
     }
 }
 
+/// Whether a reconnect may dial this ban record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReconnectBan {
+    /// No ban, or the ban time has passed.
+    Dial,
+    /// A temporary ban is still in force. Leave any queue entry.
+    Wait,
+    /// A permanent ban. Remove the queue entry and do not dial.
+    Drop,
+}
+
+/// `None` and an expired timestamp dial. A future timestamp waits. `u64::MAX` drops.
+pub(crate) fn reconnect_ban_decision(unban: Option<u64>, now: u64) -> ReconnectBan {
+    match unban {
+        None => ReconnectBan::Dial,
+        Some(u64::MAX) => ReconnectBan::Drop,
+        Some(until) if now < until => ReconnectBan::Wait,
+        Some(_) => ReconnectBan::Dial,
+    }
+}
+
 impl NetworkManager {
     /// Create a new network manager with default TCP-only transport
     pub fn new(_listen_addr: SocketAddr) -> Self {
@@ -4169,5 +4190,48 @@ mod ban_reload_tests {
         };
         let day = 24 * 60 * 60;
         assert!(ts >= before + day && ts <= after + day);
+    }
+}
+
+#[cfg(test)]
+mod reconnect_ban_tests {
+    use super::{reconnect_ban_decision, NetworkManager, ReconnectBan};
+    use std::net::SocketAddr;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_permanent_ban_blocks_reconnect() {
+        let now = 1_700_000_000u64;
+        assert_eq!(
+            reconnect_ban_decision(Some(u64::MAX), now),
+            ReconnectBan::Drop
+        );
+        assert_eq!(
+            reconnect_ban_decision(Some(now + 10), now),
+            ReconnectBan::Wait
+        );
+        assert_eq!(reconnect_ban_decision(Some(now), now), ReconnectBan::Dial);
+        assert_eq!(reconnect_ban_decision(None, now), ReconnectBan::Dial);
+
+        let nm = std::sync::Arc::new(NetworkManager::new("127.0.0.1:0".parse().unwrap()));
+        let permanent: SocketAddr = "203.0.113.9:8333".parse().unwrap();
+        nm.ban_peer(permanent, 0);
+        let err = nm.connect_to_peer(permanent).await.unwrap_err();
+        assert!(err.to_string().contains("banned"), "{err}");
+
+        let temporary: SocketAddr = "203.0.113.10:8333".parse().unwrap();
+        nm.ban_peer(
+            temporary,
+            crate::utils::current_timestamp().saturating_add(3600),
+        );
+        let err = nm.connect_to_peer(temporary).await.unwrap_err();
+        assert!(err.to_string().contains("banned"), "{err}");
+
+        std::sync::Arc::clone(&nm).spawn_outbound_reconnect_attempt(permanent);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let queue = nm.peer_reconnection_queue().lock().await;
+        assert!(
+            !queue.contains_key(&permanent),
+            "a permanent ban queued a reconnect"
+        );
     }
 }

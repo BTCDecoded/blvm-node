@@ -3,7 +3,7 @@
 //! Extracted from network_manager.rs to reduce file size.
 
 use crate::network::NetworkMessage;
-use crate::network::network_manager::NetworkManager;
+use crate::network::network_manager::{NetworkManager, ReconnectBan, reconnect_ban_decision};
 use crate::network::peer;
 use crate::network::transport::{Transport, TransportAddr, TransportType};
 use crate::utils::current_timestamp;
@@ -732,6 +732,16 @@ impl NetworkManager {
 
     /// Connect to a peer at the given address
     pub async fn connect_to_peer(&self, addr: SocketAddr) -> Result<()> {
+        let ban_decision = {
+            let ban_list = self.ban_list().read().await;
+            let unban = ban_list
+                .get(&SocketAddr::new(addr.ip(), 0))
+                .copied();
+            reconnect_ban_decision(unban, current_timestamp())
+        };
+        if ban_decision != ReconnectBan::Dial {
+            return Err(anyhow::anyhow!("peer {addr} is banned"));
+        }
         if dial_is_cooled(addr) {
             return Err(anyhow::anyhow!("dial cooled"));
         }
@@ -835,6 +845,17 @@ impl NetworkManager {
                     "IBD: skipping reconnect to {} — IP evicted (NODE_NETWORK_LIMITED)",
                     addr
                 );
+                return;
+            }
+            let ban_decision = {
+                let ban_list = nm.ban_list().read().await;
+                let unban = ban_list
+                    .get(&SocketAddr::new(addr.ip(), 0))
+                    .copied();
+                reconnect_ban_decision(unban, current_timestamp())
+            };
+            if ban_decision != ReconnectBan::Dial {
+                debug!("skipping reconnect to {addr} — banned");
                 return;
             }
             if dial_is_cooled(addr) {

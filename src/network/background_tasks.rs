@@ -4,7 +4,7 @@
 //! peer eviction, ping, ping timeout, peer reconnection.
 
 use crate::network::NetworkMessage;
-use crate::network::network_manager::NetworkManager;
+use crate::network::network_manager::{NetworkManager, ReconnectBan, reconnect_ban_decision};
 use crate::network::peer::Peer;
 use crate::network::transport::TransportAddr;
 use crate::utils::{BACKGROUND_TASK_BACKOFF_SLEEP, current_timestamp};
@@ -508,12 +508,16 @@ impl NetworkManager {
                     }
                     {
                         let ban_list_guard = ban_list.read().await;
-                        if let Some(unban_timestamp) =
-                            ban_list_guard.get(&std::net::SocketAddr::new(addr.ip(), 0))
-                            && *unban_timestamp != u64::MAX
-                            && now < *unban_timestamp
-                        {
-                            continue;
+                        let unban = ban_list_guard
+                            .get(&std::net::SocketAddr::new(addr.ip(), 0))
+                            .copied();
+                        match reconnect_ban_decision(unban, now) {
+                            ReconnectBan::Drop => {
+                                queue.remove(addr);
+                                continue;
+                            }
+                            ReconnectBan::Wait => continue,
+                            ReconnectBan::Dial => {}
                         }
                     }
 
