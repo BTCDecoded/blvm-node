@@ -379,7 +379,7 @@ async fn send_block_getdata_with_retry(
                         )
                     });
                 }
-                if attempt <= 3 || attempt % 5 == 0 {
+                if attempt <= 3 || attempt.is_multiple_of(5) {
                     warn!(
                         "GetData send failed for height {} (attempt {}/{}): {} — retrying in {}ms",
                         height, attempt, MAX_ATTEMPTS, e, wait_ms

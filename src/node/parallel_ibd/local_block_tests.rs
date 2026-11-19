@@ -58,6 +58,83 @@ fn leftover_stall_try_load_hits_stored_body() {
 }
 
 #[test]
+fn a_body_that_does_not_extend_its_parent_is_removed() {
+    let blockstore = temp_blockstore();
+    let parent = Block {
+        header: BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [1u8; 32],
+            timestamp: 1_600_000_000,
+            bits: 0,
+            nonce: 1,
+        },
+        transactions: vec![Transaction {
+            version: 1,
+            inputs: blvm_protocol::tx_inputs![],
+            outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                value: 50_0000_0000,
+                script_pubkey: vec![0x51],
+            }],
+            lock_time: 0,
+        }]
+        .into(),
+    };
+    let parent_hash = blockstore.get_block_hash(&parent);
+    blockstore.store_height(1, &parent_hash).unwrap();
+    blockstore
+        .store_block_with_witness(&parent, &[], 1)
+        .unwrap();
+    let child = Block {
+        header: BlockHeader {
+            version: 1,
+            prev_block_hash: [9u8; 32],
+            merkle_root: [2u8; 32],
+            timestamp: 1_600_000_001,
+            bits: 0,
+            nonce: 2,
+        },
+        transactions: parent.transactions.clone(),
+    };
+    let child_hash = blockstore.get_block_hash(&child);
+    blockstore.store_height(2, &child_hash).unwrap();
+    blockstore.store_block_with_witness(&child, &[], 2).unwrap();
+
+    assert!(
+        crate::node::parallel_ibd::headers::discard_nonextending_successor(&blockstore, 1).unwrap()
+    );
+    assert!(blockstore.get_hash_by_height(2).unwrap().is_none());
+    assert!(!blockstore.has_block_body(&child_hash).unwrap());
+    assert_eq!(
+        blockstore.get_hash_by_height(1).unwrap().as_ref(),
+        Some(&parent_hash)
+    );
+
+    let linked = Block {
+        header: BlockHeader {
+            prev_block_hash: parent_hash,
+            merkle_root: [3u8; 32],
+            nonce: 3,
+            ..child.header
+        },
+        transactions: parent.transactions.clone(),
+    };
+    let linked_hash = blockstore.get_block_hash(&linked);
+    blockstore.store_height(2, &linked_hash).unwrap();
+    blockstore
+        .store_block_with_witness(&linked, &[], 2)
+        .unwrap();
+    assert!(
+        !crate::node::parallel_ibd::headers::discard_nonextending_successor(&blockstore, 1)
+            .unwrap()
+    );
+    assert_eq!(
+        blockstore.get_hash_by_height(2).unwrap().as_ref(),
+        Some(&linked_hash)
+    );
+}
+
+#[test]
 fn local_gap_fill_allowed_without_contiguous_body_probe() {
     assert!(height_eligible_for_local_gap_fill(338_305, 0));
     assert!(!height_eligible_for_local_gap_fill(0, 0));
@@ -65,14 +142,10 @@ fn local_gap_fill_allowed_without_contiguous_body_probe() {
 
 #[test]
 fn incremental_ibd_prune_window_is_zero_unless_enabled() {
-    assert_eq!(incremental_ibd_prune_window(false, true, 144, 144), 0);
-    assert_eq!(incremental_ibd_prune_window(true, false, 144, 144), 0);
-    assert_eq!(incremental_ibd_prune_window(true, true, 0, 0), 0);
-    assert_eq!(
-        incremental_ibd_prune_window(true, true, 144, 50_000),
-        50_000
-    );
-    assert_eq!(incremental_ibd_prune_window(true, true, 144, 144), 144);
+    assert_eq!(incremental_ibd_prune_window(false, true, 144), 0);
+    assert_eq!(incremental_ibd_prune_window(true, false, 144), 0);
+    assert_eq!(incremental_ibd_prune_window(true, true, 0), 0);
+    assert_eq!(incremental_ibd_prune_window(true, true, 144), 144);
 }
 
 #[test]
@@ -80,10 +153,10 @@ fn ibd_prune_horizon_and_gc_follow_the_keep_window() {
     assert_eq!(ibd_prune_horizon(961_637, 250_000, 144), 961_493);
     assert_eq!(ibd_prune_horizon(100, 250_000, 144), 249_856);
     assert_eq!(ibd_prune_horizon(961_637, 250_000, 0), 0);
-    assert_eq!(ibd_prune_gc_height(287, 144, 288), 0);
-    assert_eq!(ibd_prune_gc_height(288, 144, 288), 144);
-    assert_eq!(ibd_prune_gc_height(50_000, 50_000, 288), 0);
-    assert_eq!(ibd_prune_gc_height(50_144, 144, 288), 50_000);
+    assert_eq!(ibd_prune_gc_height(287, 288), 0);
+    assert_eq!(ibd_prune_gc_height(288, 288), 0);
+    assert_eq!(ibd_prune_gc_height(289, 288), 1);
+    assert_eq!(ibd_prune_gc_height(50_144, 144), 50_000);
 }
 
 #[test]
@@ -606,6 +679,7 @@ fn persist_gap_block_enables_local_inject() {
             &already_dispatched,
             &mut log_miss,
             false,
+            usize::MAX,
         )
         .unwrap()
     );
@@ -1070,6 +1144,7 @@ fn inject_past_start_confirmed_body_cap_when_uncapped() {
             &already_dispatched,
             &mut log_miss,
             false,
+            usize::MAX,
         )
         .unwrap()
     );
@@ -1119,6 +1194,7 @@ fn inject_skips_already_dispatched_heights() {
             &already_dispatched,
             &mut log_miss,
             true,
+            usize::MAX,
         )
         .unwrap()
     );
@@ -1180,6 +1256,7 @@ fn inject_chain_skips_counting_already_present_heights() {
             &already_dispatched,
             &mut log_miss,
             true,
+            usize::MAX,
         )
         .unwrap()
     );
@@ -1234,7 +1311,8 @@ fn inject_tip_not_in_pipeline_reloads_from_disk() {
             &mut reorder_buffer,
             &already_dispatched,
             &mut log_miss,
-            false, // tip not confirmed in pipeline
+            false, // tip not confirmed in pipeline,
+            usize::MAX,
         )
         .unwrap()
     );
@@ -1262,6 +1340,7 @@ fn filled_gap_miss_leaves_the_log_and_the_cursor_drops_old_keys() {
             &already_dispatched,
             &mut log_miss,
             true,
+            usize::MAX,
         )
         .unwrap()
     );
@@ -1301,6 +1380,7 @@ fn filled_gap_miss_leaves_the_log_and_the_cursor_drops_old_keys() {
             &already_dispatched,
             &mut log_miss,
             true,
+            usize::MAX,
         )
         .unwrap()
     );
@@ -1324,6 +1404,7 @@ fn filled_gap_miss_leaves_the_log_and_the_cursor_drops_old_keys() {
             &dispatched,
             &mut log_miss,
             true,
+            usize::MAX,
         )
         .unwrap()
     );
@@ -1378,4 +1459,63 @@ fn witness_repair_stores_row_key_when_body_exists() {
     assert!(blockstore.has_witness_blob(&hash).unwrap());
     let loaded = blockstore.get_witness(&hash).unwrap().unwrap();
     assert!(has_real_witnesses(&loaded));
+}
+
+#[test]
+fn inject_chain_stops_when_the_reorder_buffer_is_at_its_limit() {
+    let blockstore = temp_blockstore();
+    let vh = Arc::new(AtomicU64::new(499));
+    let block = Block {
+        header: BlockHeader {
+            version: 4,
+            timestamp: 1_600_000_000,
+            ..Default::default()
+        },
+        transactions: vec![Transaction {
+            version: 1,
+            inputs: blvm_protocol::tx_inputs![],
+            outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                value: 50_0000_0000,
+                script_pubkey: vec![0x51],
+            }],
+            lock_time: 0,
+        }]
+        .into(),
+    };
+    let hash = blockstore.get_block_hash(&block);
+    blockstore.store_height(500, &hash).unwrap();
+    assert!(
+        try_persist_gap_block_for_local_inject(
+            &blockstore,
+            Some(&vh),
+            500,
+            hash,
+            &block,
+            &[],
+            ProtocolVersion::BitcoinV1,
+        )
+        .unwrap()
+    );
+    let mut reorder_buffer: std::collections::BTreeMap<u64, (SharedBlock, SharedWitnesses)> =
+        std::collections::BTreeMap::new();
+    reorder_buffer.insert(1, (Arc::new(block), Arc::new(Vec::new())));
+    let already_dispatched = rustc_hash::FxHashSet::default();
+    let mut log_miss = rustc_hash::FxHashSet::default();
+    assert!(
+        !coordinator_inject_local_gap(
+            &blockstore,
+            ProtocolVersion::BitcoinV1,
+            500,
+            0,
+            499,
+            &mut reorder_buffer,
+            &already_dispatched,
+            &mut log_miss,
+            false,
+            1,
+        )
+        .unwrap()
+    );
+    assert!(!reorder_buffer.contains_key(&500));
+    assert_eq!(reorder_buffer.len(), 1);
 }

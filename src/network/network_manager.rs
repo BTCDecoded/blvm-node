@@ -194,6 +194,8 @@ pub struct NetworkManager {
     filter_service: crate::network::filter_service::BlockFilterService,
     /// Peer inventory tracking (inv relay)
     inventory: Arc<std::sync::Mutex<super::inventory::InventoryManager>>,
+    /// Packages registered by `handle_pkgtxn` until accept, reject, or age-out.
+    package_relay: Arc<std::sync::Mutex<super::package_relay::PackageRelay>>,
     /// Consensus engine for mempool acceptance
     consensus: ConsensusProof,
     /// Shared UTXO snapshot for mempool fee checks (synced from chainstate storage).
@@ -413,6 +415,27 @@ impl PendingRequest {
     }
 }
 
+/// Whether a reconnect may dial this ban record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReconnectBan {
+    /// No ban, or the ban time has passed.
+    Dial,
+    /// A temporary ban is still in force. Leave any queue entry.
+    Wait,
+    /// A permanent ban. Remove the queue entry and do not dial.
+    Drop,
+}
+
+/// `None` and an expired timestamp dial. A future timestamp waits. `u64::MAX` drops.
+pub(crate) fn reconnect_ban_decision(unban: Option<u64>, now: u64) -> ReconnectBan {
+    match unban {
+        None => ReconnectBan::Dial,
+        Some(u64::MAX) => ReconnectBan::Drop,
+        Some(until) if now < until => ReconnectBan::Wait,
+        Some(_) => ReconnectBan::Dial,
+    }
+}
+
 impl NetworkManager {
     /// Create a new network manager with default TCP-only transport
     pub fn new(_listen_addr: SocketAddr) -> Self {
@@ -611,6 +634,9 @@ impl NetworkManager {
             filter_service: crate::network::filter_service::BlockFilterService::new(),
             inventory: Arc::new(std::sync::Mutex::new(
                 super::inventory::InventoryManager::new(),
+            )),
+            package_relay: Arc::new(std::sync::Mutex::new(
+                super::package_relay::PackageRelay::new(),
             )),
             consensus: ConsensusProof::new(),
             utxo_set: Arc::new(Mutex::new(UtxoSet::default())),
@@ -999,17 +1025,17 @@ impl NetworkManager {
                 let current_count = *violation_count;
                 drop(violations);
 
-                if let Some(ban_config) = self.spam_ban_config.as_ref() {
-                    if current_count >= ban_config.spam_ban_threshold {
-                        let unban_timestamp = crate::utils::current_timestamp()
-                            + ban_config.spam_ban_duration_seconds;
-                        warn!(
-                            "Auto-banning peer {} for spam violations ({} violations, unban at {})",
-                            peer_addr, current_count, unban_timestamp
-                        );
-                        self.ban_peer(peer_addr, unban_timestamp);
-                        return true;
-                    }
+                if let Some(ban_config) = self.spam_ban_config.as_ref()
+                    && current_count >= ban_config.spam_ban_threshold
+                {
+                    let unban_timestamp =
+                        crate::utils::current_timestamp() + ban_config.spam_ban_duration_seconds;
+                    warn!(
+                        "Auto-banning peer {} for spam violations ({} violations, unban at {})",
+                        peer_addr, current_count, unban_timestamp
+                    );
+                    self.ban_peer(peer_addr, unban_timestamp);
+                    return true;
                 }
 
                 debug!(
@@ -1315,10 +1341,10 @@ impl NetworkManager {
     /// Key for block request matching: IpAddr so inbound (diff port) matches outbound
     fn block_request_key(addr: SocketAddr) -> IpAddr {
         let ip = addr.ip();
-        if let std::net::IpAddr::V6(v6) = ip {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return std::net::IpAddr::V4(v4);
-            }
+        if let std::net::IpAddr::V6(v6) = ip
+            && let Some(v4) = v6.to_ipv4_mapped()
+        {
+            return std::net::IpAddr::V4(v4);
         }
         ip
     }
@@ -2016,7 +2042,17 @@ impl NetworkManager {
 
     /// Async variant for use from the node run loop (avoids block_in_place inside async tasks).
     pub async fn get_highest_peer_start_height_async(&self) -> Option<u64> {
-        let pm = self.peer_manager.lock().await;
+        // A task that still holds this lock after a failed IBD must not freeze the
+        // run loop. Five seconds is far longer than a peer-table read. On timeout
+        // the caller continues with the local tip and retries.
+        let Ok(pm) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), self.peer_manager.lock()).await
+        else {
+            warn!(
+                "[CATCH_UP] peer manager lock held for more than 5s — continuing without a peer height"
+            );
+            return None;
+        };
         let mut max_height: Option<u64> = None;
         for (_addr, peer) in pm.peers().iter() {
             let from_version = peer.start_height().max(0) as u64;
@@ -2592,7 +2628,7 @@ impl NetworkManager {
 
             // Update metrics periodically (every 100 messages or 10 seconds)
             let now = std::time::SystemTime::now();
-            let should_update = message_count % 100 == 0
+            let should_update = message_count.is_multiple_of(100)
                 || now
                     .duration_since(last_metrics_update)
                     .unwrap_or_else(|_| std::time::Duration::from_secs(0))
@@ -2739,13 +2775,12 @@ impl NetworkManager {
         }
 
         // R-304: hash 80-byte header before deserialize. Default-off is a no-op.
-        if crate::network::parse_offload::is_block_frame(&data) {
-            if let Some(hash) =
+        if crate::network::parse_offload::is_block_frame(&data)
+            && let Some(hash) =
                 crate::node::parallel_ibd::wire_hash_gate::try_skip_obsolete_block_frame(&data)
-            {
-                self.cancel_block_request_force(peer_addr, hash);
-                return Ok(());
-            }
+        {
+            self.cancel_block_request_force(peer_addr, hash);
+            return Ok(());
         }
 
         let parsed = {
@@ -2786,10 +2821,10 @@ impl NetworkManager {
             });
         }
 
-        if let ProtocolMessage::Tx(_) = &parsed {
-            if self.should_drop_tx(peer_addr, &data).await {
-                return Ok(());
-            }
+        if let ProtocolMessage::Tx(_) = &parsed
+            && self.should_drop_tx(peer_addr, &data).await
+        {
+            return Ok(());
         }
 
         if let ProtocolMessage::Block(block_msg) = parsed {
@@ -2969,6 +3004,12 @@ impl NetworkManager {
         &self.filter_service
     }
 
+    pub(crate) fn package_relay(
+        &self,
+    ) -> &Arc<std::sync::Mutex<super::package_relay::PackageRelay>> {
+        &self.package_relay
+    }
+
     pub(crate) fn inventory(&self) -> &Arc<std::sync::Mutex<super::inventory::InventoryManager>> {
         &self.inventory
     }
@@ -3062,18 +3103,17 @@ impl NetworkManager {
                     ep.publish_peer_banned(&addr.to_string(), "ban", ban_duration_secs)
                         .await;
                 }
-                if let Some(cfg) = self.ban_list_sharing_config.as_ref() {
-                    if cfg.shares()
-                        && matches!(cfg.share_mode, crate::config::BanShareMode::Immediate)
-                    {
-                        super::handlers::ban_list::broadcast_ban_list(
-                            self.ban_list().as_ref(),
-                            self.peer_manager_mutex().as_ref(),
-                            cfg.min_ban_duration_to_share,
-                            self.event_publisher(),
-                        )
-                        .await;
-                    }
+                if let Some(cfg) = self.ban_list_sharing_config.as_ref()
+                    && cfg.shares()
+                    && matches!(cfg.share_mode, crate::config::BanShareMode::Immediate)
+                {
+                    super::handlers::ban_list::broadcast_ban_list(
+                        self.ban_list().as_ref(),
+                        self.peer_manager_mutex().as_ref(),
+                        cfg.min_ban_duration_to_share,
+                        self.event_publisher(),
+                    )
+                    .await;
                 }
             })
         })
@@ -3111,6 +3151,13 @@ impl NetworkManager {
     pub async fn advertise_self(&self, listen_addr: SocketAddr, services: u64) -> Result<()> {
         if !self.enable_self_advertisement {
             return Ok(()); // Self-advertisement disabled
+        }
+        if !crate::config::profiles::listen_address_can_be_advertised(listen_addr) {
+            tracing::info!(
+                "not advertising {}: a loopback or unspecified address is not reachable by peers",
+                listen_addr
+            );
+            return Ok(());
         }
 
         use crate::network::protocol::{
@@ -3988,10 +4035,8 @@ mod pruning_version_services {
 
         let empty = tempfile::TempDir::new().unwrap();
         let mut config = PruningConfig::default();
-        config.mode = PruningMode::Normal {
-            keep_from_height: 0,
-            min_recent_blocks: 288,
-        };
+        config.mode = PruningMode::Normal;
+        config.keep_blocks = 288;
         let empty_storage = Arc::new(
             Storage::with_backend_and_pruning(empty.path(), default_backend(), Some(config))
                 .unwrap(),
@@ -4166,5 +4211,48 @@ mod ban_reload_tests {
         };
         let day = 24 * 60 * 60;
         assert!(ts >= before + day && ts <= after + day);
+    }
+}
+
+#[cfg(test)]
+mod reconnect_ban_tests {
+    use super::{NetworkManager, ReconnectBan, reconnect_ban_decision};
+    use std::net::SocketAddr;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_permanent_ban_blocks_reconnect() {
+        let now = 1_700_000_000u64;
+        assert_eq!(
+            reconnect_ban_decision(Some(u64::MAX), now),
+            ReconnectBan::Drop
+        );
+        assert_eq!(
+            reconnect_ban_decision(Some(now + 10), now),
+            ReconnectBan::Wait
+        );
+        assert_eq!(reconnect_ban_decision(Some(now), now), ReconnectBan::Dial);
+        assert_eq!(reconnect_ban_decision(None, now), ReconnectBan::Dial);
+
+        let nm = std::sync::Arc::new(NetworkManager::new("127.0.0.1:0".parse().unwrap()));
+        let permanent: SocketAddr = "203.0.113.9:8333".parse().unwrap();
+        nm.ban_peer(permanent, 0);
+        let err = nm.connect_to_peer(permanent).await.unwrap_err();
+        assert!(err.to_string().contains("banned"), "{err}");
+
+        let temporary: SocketAddr = "203.0.113.10:8333".parse().unwrap();
+        nm.ban_peer(
+            temporary,
+            crate::utils::current_timestamp().saturating_add(3600),
+        );
+        let err = nm.connect_to_peer(temporary).await.unwrap_err();
+        assert!(err.to_string().contains("banned"), "{err}");
+
+        std::sync::Arc::clone(&nm).spawn_outbound_reconnect_attempt(permanent);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let queue = nm.peer_reconnection_queue().lock().await;
+        assert!(
+            !queue.contains_key(&permanent),
+            "a permanent ban queued a reconnect"
+        );
     }
 }

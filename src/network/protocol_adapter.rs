@@ -102,10 +102,10 @@ impl ProtocolAdapter {
             let cache_key = calculate_message_cache_key(msg, transport);
 
             // Try to get from cache
-            if let Ok(cached) = cache.read() {
-                if let Some(serialized) = cached.peek(&cache_key) {
-                    return Ok(serialized.clone()); // Clone cached result
-                }
+            if let Ok(cached) = cache.read()
+                && let Some(serialized) = cached.peek(&cache_key)
+            {
+                return Ok(serialized.clone()); // Clone cached result
             }
 
             // Cache miss - serialize and cache

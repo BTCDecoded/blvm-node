@@ -254,15 +254,15 @@ fn force_merge_spill_to_disk(source_bytes: u64, merged_len: usize) -> bool {
 
 /// `BLVM_IBD_ENGINE_EVICTION_AGE` overrides auto-detection.
 fn choose_eviction_age(avail_mb: u64) -> usize {
-    if let Ok(s) = std::env::var("BLVM_IBD_ENGINE_EVICTION_AGE") {
-        if let Ok(n) = s.trim().parse::<usize>() {
-            let clamped = n.clamp(K_MUTABLE_AGES, K_AGES);
-            tracing::info!(
-                "UTXO engine: eviction age = {} (from BLVM_IBD_ENGINE_EVICTION_AGE)",
-                clamped
-            );
-            return clamped;
-        }
+    if let Ok(s) = std::env::var("BLVM_IBD_ENGINE_EVICTION_AGE")
+        && let Ok(n) = s.trim().parse::<usize>()
+    {
+        let clamped = n.clamp(K_MUTABLE_AGES, K_AGES);
+        tracing::info!(
+            "UTXO engine: eviction age = {} (from BLVM_IBD_ENGINE_EVICTION_AGE)",
+            clamped
+        );
+        return clamped;
     }
 
     // Use available RAM (MemAvailable from /proc/meminfo) as the headroom budget.
@@ -371,10 +371,20 @@ impl Compacter {
         let _ = self.tx.try_send(age_idx);
     }
 
-    fn shutdown(&self) {
-        for _ in 0..K_COMPACTER_THREADS {
-            let _ = self.tx.send(usize::MAX);
-        }
+    fn shutdown(&mut self) {
+        join_compacter_threads(&self.tx, &mut self._threads);
+    }
+}
+
+fn join_compacter_threads(
+    tx: &crossbeam_channel::Sender<usize>,
+    handles: &mut Vec<std::thread::JoinHandle<()>>,
+) {
+    for _ in 0..handles.len() {
+        let _ = tx.send(usize::MAX);
+    }
+    for handle in handles.drain(..) {
+        let _ = handle.join();
     }
 }
 
@@ -588,16 +598,16 @@ impl UtxoIndex {
             }
         }
         let mut restored_cl = restored_cl;
-        if let Some(tp) = table_path {
-            if let Some(file_cl) = super::meta::read_contiguous_length_sidecar(tp) {
-                if restored_cl < 0 && file_cl >= 0 {
-                    restored_cl = file_cl;
-                } else if file_cl > restored_cl {
-                    tracing::warn!(
-                        "UTXO engine: contiguous_length sidecar={file_cl} > segment max={restored_cl} \
+        if let Some(tp) = table_path
+            && let Some(file_cl) = super::meta::read_contiguous_length_sidecar(tp)
+        {
+            if restored_cl < 0 && file_cl >= 0 {
+                restored_cl = file_cl;
+            } else if file_cl > restored_cl {
+                tracing::warn!(
+                    "UTXO engine: contiguous_length sidecar={file_cl} > segment max={restored_cl} \
                          — clamping to segment max (in-memory tail not persisted)"
-                    );
-                }
+                );
             }
         }
         let contiguous_length = AtomicI32::new(restored_cl);
@@ -1761,5 +1771,29 @@ mod tests {
             std::env::remove_var("BLVM_IBD_ENGINE_EVICTION_AGE");
         }
         std::mem::forget(tmp);
+    }
+
+    #[test]
+    fn shutdown_joins_the_compacter_threads() {
+        let (tx, rx) = crossbeam_channel::unbounded::<usize>();
+        let flags = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let rx = rx.clone();
+            let flags = std::sync::Arc::clone(&flags);
+            handles.push(std::thread::spawn(move || {
+                while let Ok(age) = rx.recv() {
+                    if age == usize::MAX {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        flags.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        break;
+                    }
+                }
+            }));
+        }
+        drop(rx);
+        join_compacter_threads(&tx, &mut handles);
+        assert_eq!(flags.load(std::sync::atomic::Ordering::SeqCst), 5);
+        assert!(handles.is_empty());
     }
 }

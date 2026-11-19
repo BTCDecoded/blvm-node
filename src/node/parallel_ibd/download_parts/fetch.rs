@@ -709,13 +709,12 @@ pub(crate) async fn download_chunk(
         }
         // W2/N11: adapt fill depth to byte budget × recent block size (opt-in).
         let byte_budget = download_byte_budget();
-        if let Some(budget) = byte_budget {
-            if !tip_glue {
+        if let Some(budget) = byte_budget
+            && !tip_glue {
                 let est = download_est_block_bytes();
                 let by_bytes = (budget / est).max(2) as usize;
                 fill_depth = by_bytes.clamp(2, pipeline_depth);
             }
-        }
         let sole_scan_end = if tip_glue {
             tip_needed
                 .saturating_add((fill_depth as u64).saturating_sub(1))
@@ -2141,7 +2140,7 @@ pub(crate) async fn download_chunk(
                         Some(height),
                         block_size,
                     );
-                    if empty_witness_hits <= 3 || empty_witness_hits % 8 == 0 {
+                    if empty_witness_hits <= 3 || empty_witness_hits.is_multiple_of(8) {
                         warn!(
                             "[IBD_EMPTY_WITNESS] height {}: rejecting empty-witness payload — re-requesting MSG_WITNESS_BLOCK (hit={}/{})",
                             height, empty_witness_hits, max_empty_witness_hits
@@ -2275,13 +2274,11 @@ pub(crate) async fn download_chunk(
                     height,
                     (Arc::clone(&block_arc), Arc::clone(&wit_arc)),
                 );
-                if !from_local {
-                    if let Some(ref a) = tip_enter {
-                        if a.peer_lookahead_covers(peer_id, height) {
+                if !from_local
+                    && let Some(ref a) = tip_enter
+                        && a.peer_lookahead_covers(peer_id, height) {
                             a.note_lookahead_stream(peer_id);
                         }
-                    }
-                }
                 trim_download_received(
                     &mut received,
                     blockstore,
@@ -2309,11 +2306,10 @@ pub(crate) async fn download_chunk(
                         // Land E: fresh STREAM arms tip-crawl supply-healthy hold.
                         super::tip_stage::note_tip_local_stream();
                     }
-                } else if let Some(ref a) = tip_enter {
-                    if tip_adjacent_for_credit {
+                } else if let Some(ref a) = tip_enter
+                    && tip_adjacent_for_credit {
                         a.note_wan_tip_stream(peer_id);
                     }
-                }
                 // KEEP: persist on the download path, then STREAM immediately.
                 if try_stream_validation_gap(
                     validation_height.as_ref(),
@@ -2591,8 +2587,8 @@ pub(crate) async fn download_chunk(
                 // found it via `try_load_local_ibd_block` before sending anything; re-arm
                 // must too, or the stripe sticks on a height that is already satisfied
                 // (R-330: busy 8 / ready 44, RESEND up, bands 57.7 / 55.0 vs 98.9 / 65.4).
-                if *rearms < ahead_rearm_max() {
-                    if let Some((block, block_witnesses)) = try_load_local_ibd_block(
+                if *rearms < ahead_rearm_max()
+                    && let Some((block, block_witnesses)) = try_load_local_ibd_block(
                         blockstore,
                         height,
                         block_hash,
@@ -2616,7 +2612,6 @@ pub(crate) async fn download_chunk(
                         }));
                         continue;
                     }
-                }
                 if *rearms < ahead_rearm_max() && network.is_peer_connected(peer_addr).await {
                     *rearms += 1;
                     let n = *rearms;
@@ -2718,13 +2713,12 @@ pub(crate) async fn download_chunk(
                 }
             }
             let tip_need = tip_need_from(validation_height.as_ref());
-            if let Some(need) = tip_need {
-                if next_to_send > need.saturating_add(super::local_body_ahead_cap()) {
+            if let Some(need) = tip_need
+                && next_to_send > need.saturating_add(super::local_body_ahead_cap()) {
                     // Keep leftover cheese in `received` for GAP_STREAM when tip arrives
                     // (live: sequential dump of 70657–70701 while next was ~70k).
                     break;
                 }
-            }
             let Some((block, block_witnesses)) = received_take(&mut received, next_to_send) else {
                 break;
             };

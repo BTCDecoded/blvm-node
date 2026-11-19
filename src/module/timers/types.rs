@@ -527,10 +527,10 @@ pub fn validate_spec(
     {
         return Err(TimerError::Invalid("ack_timeout out of range".into()));
     }
-    if let OnFailure::Retry { max, .. } = &spec.delivery.on_failure {
-        if *max > 10 {
-            return Err(TimerError::Invalid("retry max exceeds 10".into()));
-        }
+    if let OnFailure::Retry { max, .. } = &spec.delivery.on_failure
+        && *max > 10
+    {
+        return Err(TimerError::Invalid("retry max exceeds 10".into()));
     }
     match spec.overlap {
         Overlap::Queue { max } if max > 64 => {

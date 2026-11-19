@@ -78,7 +78,7 @@ impl Drop for AssignerGetWorkTimer {
         ASSIGNER_GW_WAIT_NS.fetch_add(self.wait_ns, Ordering::Relaxed);
         ASSIGNER_GW_HOLD_NS.fetch_add(hold_ns, Ordering::Relaxed);
         let n = ASSIGNER_GW_SAMPLES.fetch_add(1, Ordering::Relaxed) + 1;
-        if n % 4096 == 0 {
+        if n.is_multiple_of(4096) {
             let wait = ASSIGNER_GW_WAIT_NS.load(Ordering::Relaxed);
             let hold = ASSIGNER_GW_HOLD_NS.load(Ordering::Relaxed);
             tracing::info!(
@@ -108,10 +108,10 @@ fn note_in_flight_holder(site: &'static str, peer: &str, next: u64) -> InFlightL
 
 impl Drop for InFlightLockOwner {
     fn drop(&mut self) {
-        if let Ok(mut g) = IN_FLIGHT_LOCK_SITE.lock() {
-            if g.as_ref().is_some_and(|(s, ..)| *s == self.site) {
-                *g = None;
-            }
+        if let Ok(mut g) = IN_FLIGHT_LOCK_SITE.lock()
+            && g.as_ref().is_some_and(|(s, ..)| *s == self.site)
+        {
+            *g = None;
         }
     }
 }

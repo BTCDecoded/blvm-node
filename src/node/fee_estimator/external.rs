@@ -132,11 +132,11 @@ impl ExternalRegistry {
             tracing::debug!(module_id, "fee table rejected: height lag");
             return Err(SubmitFeeTableError::HeightLag);
         }
-        if let Some(last) = state.last_accept.get(module_id) {
-            if now.saturating_duration_since(*last) < Duration::from_secs(1) {
-                tracing::debug!(module_id, "fee table rejected: rate limited");
-                return Err(SubmitFeeTableError::RateLimited);
-            }
+        if let Some(last) = state.last_accept.get(module_id)
+            && now.saturating_duration_since(*last) < Duration::from_secs(1)
+        {
+            tracing::debug!(module_id, "fee table rejected: rate limited");
+            return Err(SubmitFeeTableError::RateLimited);
         }
         let name = table.estimator.clone();
         state.tables.insert(
@@ -377,10 +377,10 @@ fn check_spec(
     if spec.modes.is_empty() {
         return Err(FeeNameError::EmptyModes);
     }
-    if let Some(existing) = specs.get(&spec.name) {
-        if existing.module_id != module_id {
-            return Err(FeeNameError::Taken);
-        }
+    if let Some(existing) = specs.get(&spec.name)
+        && existing.module_id != module_id
+    {
+        return Err(FeeNameError::Taken);
     }
     Ok(())
 }

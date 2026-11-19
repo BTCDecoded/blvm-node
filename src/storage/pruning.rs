@@ -2,16 +2,14 @@
 //!
 //! Implements configurable pruning modes:
 //! - Disabled: No pruning (archival node)
-//! - Normal: Conservative pruning (keep recent blocks)
-//! - Aggressive: Prune with UTXO commitments (requires utxo-commitments feature)
-//! - Custom: Fine-grained control over what to keep
+//! - Normal: Keep the trailing `keep_blocks` bodies
+//! - Aggressive: Same window, and write UTXO commitments (requires utxo-commitments)
 
 use crate::config::{PruningConfig, PruningMode};
 use crate::network::filter_service::BlockFilterService;
 use crate::storage::blockstore::BlockStore;
 #[cfg(feature = "utxo-commitments")]
 use crate::storage::commitment_store::CommitmentStore;
-use crate::storage::txindex::TxIndex;
 #[cfg(feature = "utxo-commitments")]
 use crate::storage::utxostore::UtxoStore;
 use anyhow::{Result, anyhow};
@@ -37,8 +35,8 @@ pub struct PruningStats {
     pub last_prune_height: Option<u64>,
 }
 
-pub(crate) fn incremental_prune_target(current_height: u64, window: u64, floor: u64) -> u64 {
-    current_height.saturating_sub(window.max(floor))
+pub(crate) fn incremental_prune_target(current_height: u64, keep_blocks: u64) -> u64 {
+    current_height.saturating_sub(keep_blocks)
 }
 
 /// Pruning manager
@@ -51,7 +49,6 @@ pub struct PruningManager {
     #[cfg(feature = "utxo-commitments")]
     utxostore: Option<Arc<UtxoStore>>,
     filter_service: Option<Arc<BlockFilterService>>,
-    tx_index: Option<Arc<TxIndex>>,
     stats: std::sync::Mutex<PruningStats>,
 }
 
@@ -73,15 +70,8 @@ impl PruningManager {
             #[cfg(feature = "utxo-commitments")]
             utxostore: None,
             filter_service: None,
-            tx_index: None,
             stats: std::sync::Mutex::new(PruningStats::default()),
         }
-    }
-
-    /// Attach the transaction index so custom prune can drop it.
-    pub fn with_tx_index(mut self, tx_index: Arc<TxIndex>) -> Self {
-        self.tx_index = Some(tx_index);
-        self
     }
 
     /// Set the network for consensus-sensitive operations (e.g. UTXO reconstruction).
@@ -105,7 +95,6 @@ impl PruningManager {
             commitment_store: Some(commitment_store),
             utxostore: Some(utxostore),
             filter_service: None,
-            tx_index: None,
             stats: std::sync::Mutex::new(PruningStats::default()),
         }
     }
@@ -127,7 +116,6 @@ impl PruningManager {
             #[cfg(feature = "utxo-commitments")]
             utxostore,
             filter_service,
-            tx_index: None,
             stats: std::sync::Mutex::new(PruningStats::default()),
         }
     }
@@ -161,11 +149,9 @@ impl PruningManager {
         }
 
         if let Some(last_height) = last_prune_height {
-            // Check if we've reached the auto-prune interval
-            current_height >= last_height + self.config.auto_prune_interval
+            current_height >= last_height + crate::config::AUTO_PRUNE_INTERVAL
         } else {
-            // First auto-prune after reaching interval
-            current_height >= self.config.auto_prune_interval
+            current_height >= crate::config::AUTO_PRUNE_INTERVAL
         }
     }
 
@@ -178,14 +164,7 @@ impl PruningManager {
             let has_commitments = self.commitment_store.is_some() && self.utxostore.is_some();
 
             // Check if mode supports incremental pruning
-            let mode_supports = matches!(
-                &self.config.mode,
-                PruningMode::Aggressive { .. }
-                    | PruningMode::Custom {
-                        keep_commitments: true,
-                        ..
-                    }
-            );
+            let mode_supports = self.config.mode == PruningMode::Aggressive;
 
             has_commitments && mode_supports
         }
@@ -223,18 +202,10 @@ impl PruningManager {
             return Ok(None);
         }
 
-        // Check if we have enough blocks to start pruning
-        if current_height < self.config.min_blocks_for_incremental_prune {
+        let Some(keep_blocks) = self.config.keep_window() else {
             return Ok(None);
-        }
-
-        // The window can be smaller than the keep floor. Subtracting only the window
-        // makes prune_to_height refuse the call. Keep at least min_blocks_to_keep.
-        let prune_to_height = incremental_prune_target(
-            current_height,
-            self.config.prune_window_size,
-            self.config.min_blocks_to_keep,
-        );
+        };
+        let prune_to_height = incremental_prune_target(current_height, keep_blocks);
 
         // Don't prune if window size is larger than current height
         if prune_to_height == 0 || prune_to_height >= current_height {
@@ -242,8 +213,8 @@ impl PruningManager {
         }
 
         info!(
-            "Incremental pruning during IBD: current_height={}, prune_to_height={}, window_size={}",
-            current_height, prune_to_height, self.config.prune_window_size
+            "Incremental pruning during IBD: current_height={}, prune_to_height={}, keep_blocks={}",
+            current_height, prune_to_height, keep_blocks
         );
 
         // Perform pruning
@@ -276,22 +247,13 @@ impl PruningManager {
             // Allow incremental pruning during IBD if:
             // 1. Incremental pruning is explicitly enabled
             // 2. UTXO commitments are available (for state verification)
-            // 3. Aggressive or Custom mode with commitments enabled
+            // 3. Aggressive mode, which writes commitments
             let can_incremental_prune =
                 self.config.incremental_prune_during_ibd && self.can_incremental_prune_during_ibd();
 
             if !can_incremental_prune {
                 return Err(anyhow!(
-                    "Cannot prune during initial block download. Wait for IBD to complete, or enable incremental_prune_during_ibd with UTXO commitments."
-                ));
-            }
-
-            // For incremental pruning during IBD, ensure we have enough blocks
-            if current_height < self.config.min_blocks_for_incremental_prune {
-                return Err(anyhow!(
-                    "Cannot prune during IBD until at least {} blocks are synced (currently at {})",
-                    self.config.min_blocks_for_incremental_prune,
-                    current_height
+                    "Cannot prune during initial block download. Wait for IBD to complete, or enable incremental_prune_during_ibd on aggressive mode."
                 ));
             }
         }
@@ -305,11 +267,11 @@ impl PruningManager {
 
         // Ensure we keep minimum blocks
         let blocks_to_keep = current_height.saturating_sub(prune_to_height);
-        if blocks_to_keep < self.config.min_blocks_to_keep {
+        if let Some(keep) = self.config.keep_window()
+            && blocks_to_keep < keep
+        {
             return Err(anyhow!(
-                "Pruning would leave {} blocks, but minimum is {}",
-                blocks_to_keep,
-                self.config.min_blocks_to_keep
+                "Pruning would leave {blocks_to_keep} blocks, but keep_blocks is {keep}"
             ));
         }
 
@@ -322,65 +284,21 @@ impl PruningManager {
             PruningMode::Disabled => {
                 return Err(anyhow!("Pruning is disabled"));
             }
-            PruningMode::Normal {
-                keep_from_height,
-                min_recent_blocks,
-            } => self.prune_normal(
-                prune_to_height,
-                current_height,
-                *keep_from_height,
-                *min_recent_blocks,
-            )?,
-            PruningMode::Aggressive {
-                keep_from_height,
-                keep_commitments,
-                keep_filtered_blocks,
-                min_blocks,
-            } => {
+            PruningMode::Normal => {
+                self.prune_normal(prune_to_height, current_height, self.config.keep_blocks)?
+            }
+            PruningMode::Aggressive => {
                 #[cfg(feature = "utxo-commitments")]
                 {
-                    self.prune_aggressive(
-                        prune_to_height,
-                        current_height,
-                        *keep_from_height,
-                        *keep_commitments,
-                        *keep_filtered_blocks,
-                        *min_blocks,
-                    )?
+                    self.prune_aggressive(prune_to_height, current_height, self.config.keep_blocks)?
                 }
                 #[cfg(not(feature = "utxo-commitments"))]
                 {
-                    // Suppress unused variable warnings when feature is disabled
-                    let _ = (
-                        keep_from_height,
-                        keep_commitments,
-                        keep_filtered_blocks,
-                        min_blocks,
-                    );
                     return Err(anyhow!(
                         "Aggressive pruning requires utxo-commitments feature"
                     ));
                 }
             }
-            PruningMode::Custom {
-                keep_headers,
-                keep_bodies_from_height,
-                keep_commitments,
-                keep_filters,
-                keep_filtered_blocks,
-                keep_witnesses,
-                keep_tx_index,
-            } => self.prune_custom(
-                prune_to_height,
-                current_height,
-                *keep_headers,
-                *keep_bodies_from_height,
-                *keep_commitments,
-                *keep_filters,
-                *keep_filtered_blocks,
-                *keep_witnesses,
-                *keep_tx_index,
-            )?,
         };
 
         // Update statistics
@@ -419,43 +337,20 @@ impl PruningManager {
         Ok(())
     }
 
-    fn drop_tx_index_for_block(&self, hash: &blvm_protocol::Hash) -> Result<()> {
-        let Some(index) = &self.tx_index else {
-            return Ok(());
-        };
-        let Some(block) = self.blockstore.get_block(hash)? else {
-            return Ok(());
-        };
-        for tx in &block.transactions {
-            let txid = blvm_protocol::block::calculate_tx_id(tx);
-            index.remove_transaction(&txid)?;
-        }
-        Ok(())
-    }
-
     fn prune_normal(
         &self,
         prune_to_height: u64,
         current_height: u64,
-        keep_from_height: u64,
-        min_recent_blocks: u64,
+        keep_blocks: u64,
     ) -> Result<PruningStats> {
         let mut stats = PruningStats::default();
 
-        // Calculate actual keep height (max of keep_from_height and min_recent_blocks)
-        let effective_keep_height =
-            keep_from_height.max(current_height.saturating_sub(min_recent_blocks));
-
-        // Ensure we don't prune below effective keep height
+        let effective_keep_height = current_height.saturating_sub(keep_blocks);
         let actual_prune_height = prune_to_height.min(effective_keep_height);
 
         debug!(
-            "Normal pruning: prune_to={}, keep_from={}, min_recent={}, effective_keep={}, actual_prune={}",
-            prune_to_height,
-            keep_from_height,
-            min_recent_blocks,
-            effective_keep_height,
-            actual_prune_height
+            "Normal pruning: prune_to={}, keep_blocks={}, effective_keep={}, actual_prune={}",
+            prune_to_height, keep_blocks, effective_keep_height, actual_prune_height
         );
 
         // Prune blocks up to actual_prune_height
@@ -478,44 +373,30 @@ impl PruningManager {
         &self,
         prune_to_height: u64,
         current_height: u64,
-        keep_from_height: u64,
-        keep_commitments: bool,
-        keep_filtered_blocks: bool,
-        min_blocks: u64,
+        keep_blocks: u64,
     ) -> Result<PruningStats> {
         let mut stats = PruningStats::default();
 
-        // Calculate effective keep height
-        let effective_keep_height = keep_from_height.max(current_height.saturating_sub(min_blocks));
-
+        let effective_keep_height = current_height.saturating_sub(keep_blocks);
         let actual_prune_height = prune_to_height.min(effective_keep_height);
 
         debug!(
-            "Aggressive pruning: prune_to={}, keep_from={}, min_blocks={}, effective_keep={}, actual_prune={}",
-            prune_to_height,
-            keep_from_height,
-            min_blocks,
-            effective_keep_height,
-            actual_prune_height
+            "Aggressive pruning: prune_to={}, keep_blocks={}, effective_keep={}, actual_prune={}",
+            prune_to_height, keep_blocks, effective_keep_height, actual_prune_height
         );
 
-        // Generate UTXO commitments before pruning if enabled
-        if keep_commitments {
-            if let (Some(commitment_store), Some(utxostore)) =
-                (self.commitment_store.as_ref(), self.utxostore.as_ref())
-            {
-                info!("Generating UTXO commitments for blocks to be pruned...");
-                self.generate_commitments_before_prune(
-                    actual_prune_height,
-                    current_height,
-                    commitment_store,
-                    utxostore,
-                )?;
-            } else {
-                warn!(
-                    "UTXO commitments requested but commitment store or UTXO store not available"
-                );
-            }
+        if let (Some(commitment_store), Some(utxostore)) =
+            (self.commitment_store.as_ref(), self.utxostore.as_ref())
+        {
+            info!("Generating UTXO commitments for blocks to be pruned...");
+            self.generate_commitments_before_prune(
+                actual_prune_height,
+                current_height,
+                commitment_store,
+                utxostore,
+            )?;
+        } else {
+            warn!("UTXO commitments requested but commitment store or UTXO store not available");
         }
 
         // Prune blocks up to actual_prune_height
@@ -524,10 +405,7 @@ impl PruningManager {
                 // Remove block body (keep header)
                 self.remove_body_if_undo_is_durable(&hash, &mut stats)?;
 
-                // Remove witnesses if not keeping filtered blocks
-                if !keep_filtered_blocks {
-                    self.blockstore.remove_witness(&hash)?;
-                }
+                self.blockstore.remove_witness(&hash)?;
 
                 // Handle BIP158 filters if configured
                 if let Some(ref filter_service) = self.filter_service {
@@ -545,99 +423,6 @@ impl PruningManager {
 
         stats.blocks_kept = current_height.saturating_sub(actual_prune_height);
         stats.headers_kept = current_height;
-
-        Ok(stats)
-    }
-
-    /// Custom pruning: Fine-grained control
-    fn prune_custom(
-        &self,
-        prune_to_height: u64,
-        current_height: u64,
-        keep_headers: bool,
-        keep_bodies_from_height: u64,
-        keep_commitments: bool,
-        keep_filters: bool,
-        keep_filtered_blocks: bool,
-        keep_witnesses: bool,
-        keep_tx_index: bool,
-    ) -> Result<PruningStats> {
-        let mut stats = PruningStats::default();
-
-        // Headers must always be kept (for PoW verification)
-        if !keep_headers {
-            warn!("Custom pruning with keep_headers=false is not recommended (required for PoW)");
-        }
-
-        let actual_prune_height = prune_to_height.min(keep_bodies_from_height);
-
-        debug!(
-            "Custom pruning: prune_to={}, keep_bodies_from={}, actual_prune={}",
-            prune_to_height, keep_bodies_from_height, actual_prune_height
-        );
-
-        // Prune blocks up to actual_prune_height
-        for height in 0..actual_prune_height {
-            if let Some(hash) = self.blockstore.get_hash_by_height(height)? {
-                // Remove block body if not keeping from this height
-                if !keep_tx_index {
-                    self.drop_tx_index_for_block(&hash)?;
-                }
-                if height < keep_bodies_from_height {
-                    self.remove_body_if_undo_is_durable(&hash, &mut stats)?;
-                }
-
-                // Remove witnesses if not keeping
-                if !keep_witnesses {
-                    self.blockstore.remove_witness(&hash)?;
-                }
-
-                // Handle commitments if enabled
-                if keep_commitments {
-                    #[cfg(feature = "utxo-commitments")]
-                    {
-                        if let (Some(commitment_store), Some(utxostore)) =
-                            (self.commitment_store.as_ref(), self.utxostore.as_ref())
-                        {
-                            // Generate commitment if not exists
-                            if !commitment_store.has_commitment(&hash)? {
-                                self.generate_commitment_for_block(
-                                    &hash,
-                                    height,
-                                    commitment_store,
-                                    utxostore,
-                                )?;
-                            }
-                        }
-                    }
-                }
-                // Handle BIP158 filters if enabled
-                if keep_filters {
-                    if let Some(ref filter_service) = self.filter_service {
-                        // Remove filter from cache (saves memory) but keep filter header
-                        // Filter headers are always kept for chain verification
-                        if filter_service.has_filter(&hash) {
-                            filter_service.remove_filter_for_pruned_block(&hash)?;
-                            debug!(
-                                "Removed BIP158 filter for pruned block at height {} (header kept)",
-                                height
-                            );
-                        }
-                    }
-                }
-
-                // Handle filtered blocks if enabled
-                // Note: Filtered blocks are lightweight versions of blocks used for SPV clients
-                // If keep_filtered_blocks is false, we can remove them to save space
-                if !keep_filtered_blocks {
-                    // Filtered block storage not implemented; FilteredBlock is generated on-demand.
-                    // No-op until we add persistent filtered block cache.
-                }
-            }
-        }
-
-        stats.blocks_kept = current_height.saturating_sub(actual_prune_height);
-        stats.headers_kept = if keep_headers { current_height } else { 0 };
 
         Ok(stats)
     }
@@ -882,17 +667,13 @@ mod prune_undo_tests {
 
     #[test]
     fn default_window_keeps_the_floor() {
-        assert_eq!(incremental_prune_target(1000, 144, 288), 712);
+        assert_eq!(incremental_prune_target(1000, 288), 712);
         let temp_dir = TempDir::new().unwrap();
         let db = Arc::from(create_database(temp_dir.path(), default_backend(), None).unwrap());
         let blockstore = Arc::new(BlockStore::new(Arc::clone(&db)).unwrap());
         let config = PruningConfig {
-            mode: PruningMode::Normal {
-                keep_from_height: 0,
-                min_recent_blocks: 0,
-            },
-            min_blocks_to_keep: 288,
-            prune_window_size: 144,
+            mode: PruningMode::Normal,
+            keep_blocks: 288,
             ..PruningConfig::default()
         };
         let manager = PruningManager::new(config, blockstore);

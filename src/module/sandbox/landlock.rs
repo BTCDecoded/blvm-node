@@ -2,12 +2,20 @@
 //!
 //! The ruleset is built in the parent. After fork the child only runs syscalls:
 //! `PR_SET_NO_NEW_PRIVS`, `landlock_restrict_self`, a seccomp filter, then
-//! `close_range`. Landlock handles TCP bind and connect and adds no port rule,
-//! so those operations are denied. Landlock has no UDP right, so the seccomp
-//! filter allows `socket` only for `AF_UNIX`. `close_range` drops inherited
-//! sockets, including a UDP socket the node already holds. The filesystem is an
-//! allow-list: the module data directory, the module binary, the IPC socket
-//! directory, and the system paths a dynamic loader needs.
+//! `close_range`. `close_range` drops inherited sockets, including a UDP socket
+//! the node already holds. The filesystem is an allow-list: the module data
+//! directory, the module binary, the IPC socket directory, and the system paths
+//! a dynamic loader needs. Path rules use `O_PATH`. `/dev/null`, `/dev/urandom`,
+//! `/dev/zero`, and `/opt/cuda` are optional: errno 77 on those fds is skipped
+//! so a container root can still spawn. Loader directories, the binary, the
+//! data directory, and the socket directory stay mandatory.
+//!
+//! Two generations share that filesystem rule. [`SandboxGeneration::Compat`] is
+//! a manifest with no `ipc_protocol` (every published module binary). Stream
+//! TCP stays available, because those binaries call `socket` and `bind`
+//! themselves. UDP stays denied. [`SandboxGeneration::Strict`] is
+//! `ipc_protocol = 2`: Landlock handles TCP bind and connect and adds no port
+//! rule, and `socket` is allowed only for `AF_UNIX`.
 
 use std::fs::OpenOptions;
 use std::io::{self, ErrorKind};
@@ -68,10 +76,37 @@ const RO_DIRS: &[&str] = &["/usr", "/lib", "/lib64", "/etc"];
 #[cfg(all(target_os = "linux", feature = "libc"))]
 const RO_FILES: &[&str] = &["/dev/urandom", "/dev/zero"];
 
+/// Which network policy the child gets. Selected from the manifest before spawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxGeneration {
+    /// Published binaries. `AF_UNIX` and `AF_INET`/`AF_INET6` stream sockets.
+    Compat,
+    /// `ipc_protocol = 2`. Unix sockets only.
+    Strict,
+}
+
+impl SandboxGeneration {
+    pub fn from_ipc_protocol(protocol: u32) -> io::Result<Self> {
+        match protocol {
+            0 => Ok(Self::Compat),
+            2 => Ok(Self::Strict),
+            other => Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("module ipc_protocol {other} is not a supported generation"),
+            )),
+        }
+    }
+
+    fn allows_inet_stream(self) -> bool {
+        matches!(self, Self::Compat)
+    }
+}
+
 /// Ruleset fd. Dropping it closes the fd. It must stay open until the child
 /// has called `landlock_restrict_self`.
 pub struct ModuleLandlock {
     fd: OwnedFd,
+    allow_inet_stream: bool,
 }
 
 #[cfg(all(target_os = "linux", feature = "libc"))]
@@ -99,10 +134,11 @@ impl ModuleLandlock {
         data_dir: &Path,
         socket_path: &Path,
         modules_dir: &Path,
+        generation: SandboxGeneration,
     ) -> io::Result<Self> {
         #[cfg(not(all(target_os = "linux", feature = "libc")))]
         {
-            let _ = (binary, data_dir, socket_path, modules_dir);
+            let _ = (binary, data_dir, socket_path, modules_dir, generation);
             return Err(io::Error::new(
                 ErrorKind::Unsupported,
                 "refusing to spawn a module without Landlock",
@@ -110,7 +146,7 @@ impl ModuleLandlock {
         }
         #[cfg(all(target_os = "linux", feature = "libc"))]
         {
-            prepare_linux(binary, data_dir, socket_path, modules_dir)
+            prepare_linux(binary, data_dir, socket_path, modules_dir, generation)
         }
     }
 
@@ -123,9 +159,10 @@ impl ModuleLandlock {
         #[cfg(unix)]
         {
             let fd = self.raw_fd();
+            let allow_inet_stream = self.allow_inet_stream;
             // SAFETY: the child runs only `landlock_restrict_self`. No allocation.
             unsafe {
-                command.pre_exec(move || restrict_fd(fd));
+                command.pre_exec(move || restrict_fd(fd, allow_inet_stream));
             }
         }
         #[cfg(not(unix))]
@@ -139,15 +176,16 @@ impl ModuleLandlock {
     pub fn arm_std(&self, command: &mut Command) {
         use std::os::unix::process::CommandExt;
         let fd = self.raw_fd();
+        let allow_inet_stream = self.allow_inet_stream;
         // SAFETY: the child runs only `landlock_restrict_self`. No allocation.
         unsafe {
-            command.pre_exec(move || restrict_fd(fd));
+            command.pre_exec(move || restrict_fd(fd, allow_inet_stream));
         }
     }
 }
 
 /// Enact `fd` on the calling thread. Safe to run after `fork`.
-pub fn restrict_fd(fd: RawFd) -> io::Result<()> {
+pub fn restrict_fd(fd: RawFd, allow_inet_stream: bool) -> io::Result<()> {
     #[cfg(all(target_os = "linux", feature = "libc"))]
     {
         let rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
@@ -158,7 +196,7 @@ pub fn restrict_fd(fd: RawFd) -> io::Result<()> {
         if rc != 0 {
             return Err(io::Error::last_os_error());
         }
-        install_unix_only_sockets()?;
+        install_socket_filter(allow_inet_stream)?;
         // Drop inherited sockets after the Landlock fd has been used.
         let rc = unsafe { libc::close_range(3, u32::MAX, 0) };
         if rc == 0 {
@@ -169,7 +207,7 @@ pub fn restrict_fd(fd: RawFd) -> io::Result<()> {
     }
     #[cfg(not(all(target_os = "linux", feature = "libc")))]
     {
-        let _ = fd;
+        let _ = (fd, allow_inet_stream);
         Err(io::Error::new(
             ErrorKind::Unsupported,
             "Landlock requires Linux",
@@ -183,35 +221,43 @@ fn prepare_linux(
     data_dir: &Path,
     socket_path: &Path,
     modules_dir: &Path,
+    generation: SandboxGeneration,
 ) -> io::Result<ModuleLandlock> {
     let abi = landlock_abi()?;
-    if abi < 4 {
+    if generation == SandboxGeneration::Strict && abi < 4 {
         return Err(io::Error::new(
             ErrorKind::Unsupported,
             format!("Landlock ABI {abi} cannot deny TCP; refusing to spawn"),
         ));
     }
     let fs = fs_mask(abi);
-    let net = NET_BIND_TCP | NET_CONNECT_TCP;
+    let net = if generation.allows_inet_stream() {
+        0
+    } else {
+        NET_BIND_TCP | NET_CONNECT_TCP
+    };
     let scoped = if abi >= 6 {
         SCOPE_ABSTRACT_UNIX_SOCKET | SCOPE_SIGNAL
     } else {
         0
     };
     let fd = create_ruleset(fs, net, scoped)?;
-    let ruleset = ModuleLandlock { fd };
+    let ruleset = ModuleLandlock {
+        fd,
+        allow_inet_stream: generation.allows_inet_stream(),
+    };
 
     let ro = FS_READ_FILE | FS_READ_DIR | FS_EXECUTE;
     for path in RO_DIRS {
         add_if_exists(&ruleset, Path::new(path), ro)?;
     }
     // GPU builds link libcudart from here. The loader has to read it.
-    add_if_exists(&ruleset, Path::new("/opt/cuda"), ro)?;
-    add_if_exists(&ruleset, Path::new("/opt/cuda/lib64"), ro)?;
+    add_optional(&ruleset, Path::new("/opt/cuda"), ro)?;
+    add_optional(&ruleset, Path::new("/opt/cuda/lib64"), ro)?;
     for path in RO_FILES {
-        add_if_exists(&ruleset, Path::new(path), FS_READ_FILE)?;
+        add_optional(&ruleset, Path::new(path), FS_READ_FILE)?;
     }
-    add_if_exists(
+    add_optional(
         &ruleset,
         Path::new("/dev/null"),
         FS_READ_FILE | FS_WRITE_FILE | FS_TRUNCATE,
@@ -251,9 +297,10 @@ fn prepare_linux(
 }
 
 #[cfg(all(target_os = "linux", feature = "libc"))]
-fn install_unix_only_sockets() -> io::Result<()> {
+fn install_socket_filter(allow_inet_stream: bool) -> io::Result<()> {
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
+        let _ = allow_inet_stream;
         return Err(io::Error::new(
             ErrorKind::Unsupported,
             "module socket filter is implemented for x86_64 and aarch64",
@@ -270,9 +317,10 @@ fn install_unix_only_sockets() -> io::Result<()> {
         const RET: u16 = 0x06;
         const ALLOW: u32 = libc::SECCOMP_RET_ALLOW;
         const DENY: u32 = libc::SECCOMP_RET_ERRNO | (libc::EPERM as u32);
-        // arch, nr, then domain. Non-socket syscalls are allowed. socket() is
-        // allowed only for AF_UNIX, which is what the module IPC uses.
-        let filter = [
+        // Non-socket syscalls are allowed. `socket` is allowed for `AF_UNIX`.
+        // Generation 0 also allows `AF_INET` and `AF_INET6` `SOCK_STREAM`.
+        // UDP and raw sockets stay denied: Landlock cannot name a UDP port.
+        let unix_only = [
             libc::sock_filter {
                 code: LD,
                 jt: 0,
@@ -322,9 +370,97 @@ fn install_unix_only_sockets() -> io::Result<()> {
                 k: DENY,
             },
         ];
-        let mut prog = libc::sock_fprog {
-            len: filter.len() as libc::c_ushort,
-            filter: filter.as_ptr() as *mut libc::sock_filter,
+        let inet_stream = [
+            libc::sock_filter {
+                code: LD,
+                jt: 0,
+                jf: 0,
+                k: 4,
+            },
+            libc::sock_filter {
+                code: JEQ,
+                jt: 0,
+                jf: 10,
+                k: AUDIT_ARCH,
+            },
+            libc::sock_filter {
+                code: LD,
+                jt: 0,
+                jf: 0,
+                k: 0,
+            },
+            libc::sock_filter {
+                code: JEQ,
+                jt: 0,
+                jf: 7,
+                k: libc::SYS_socket as u32,
+            },
+            libc::sock_filter {
+                code: LD,
+                jt: 0,
+                jf: 0,
+                k: 16,
+            },
+            libc::sock_filter {
+                code: JEQ,
+                jt: 5,
+                jf: 0,
+                k: libc::AF_UNIX as u32,
+            },
+            libc::sock_filter {
+                code: JEQ,
+                jt: 1,
+                jf: 0,
+                k: libc::AF_INET as u32,
+            },
+            libc::sock_filter {
+                code: JEQ,
+                jt: 0,
+                jf: 4,
+                k: libc::AF_INET6 as u32,
+            },
+            libc::sock_filter {
+                code: LD,
+                jt: 0,
+                jf: 0,
+                k: 24,
+            },
+            // glibc ORs SOCK_CLOEXEC and SOCK_NONBLOCK into the type.
+            libc::sock_filter {
+                code: 0x54,
+                jt: 0,
+                jf: 0,
+                k: 0xf,
+            },
+            libc::sock_filter {
+                code: JEQ,
+                jt: 0,
+                jf: 1,
+                k: libc::SOCK_STREAM as u32,
+            },
+            libc::sock_filter {
+                code: RET,
+                jt: 0,
+                jf: 0,
+                k: ALLOW,
+            },
+            libc::sock_filter {
+                code: RET,
+                jt: 0,
+                jf: 0,
+                k: DENY,
+            },
+        ];
+        let mut prog = if allow_inet_stream {
+            libc::sock_fprog {
+                len: inet_stream.len() as libc::c_ushort,
+                filter: inet_stream.as_ptr() as *mut libc::sock_filter,
+            }
+        } else {
+            libc::sock_fprog {
+                len: unix_only.len() as libc::c_ushort,
+                filter: unix_only.as_ptr() as *mut libc::sock_filter,
+            }
         };
         let rc = unsafe {
             libc::syscall(
@@ -416,9 +552,40 @@ fn add_if_exists(ruleset: &ModuleLandlock, path: &Path, access: u64) -> io::Resu
     Ok(())
 }
 
+/// A device or optional tree the module can run without. Errno 77 means the
+/// open fd is not a path Landlock will name (internal mount, private inode).
+#[cfg(all(target_os = "linux", feature = "libc"))]
+fn add_optional(ruleset: &ModuleLandlock, path: &Path, access: u64) -> io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    match add_rule(ruleset, path, access) {
+        Ok(()) => Ok(()),
+        Err(err) if err.raw_os_error() == Some(libc::EBADFD) => Ok(()),
+        Err(err) => Err(io::Error::new(
+            err.kind(),
+            format!("landlock rule for {}: {err}", path.display()),
+        )),
+    }
+}
+
 #[cfg(all(target_os = "linux", feature = "libc"))]
 fn add_path(ruleset: &ModuleLandlock, path: &Path, access: u64) -> io::Result<()> {
-    let file = OpenOptions::new().read(true).open(path)?;
+    add_rule(ruleset, path, access).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("landlock rule for {}: {err}", path.display()),
+        )
+    })
+}
+
+#[cfg(all(target_os = "linux", feature = "libc"))]
+fn add_rule(ruleset: &ModuleLandlock, path: &Path, access: u64) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+        .open(path)?;
     let attr = PathBeneathAttr {
         allowed_access: access,
         parent_fd: file.as_raw_fd(),
@@ -433,16 +600,10 @@ fn add_path(ruleset: &ModuleLandlock, path: &Path, access: u64) -> io::Result<()
         )
     };
     if rc != 0 {
-        return Err(io::Error::new(
-            io::Error::last_os_error().kind(),
-            format!(
-                "landlock rule for {}: {}",
-                path.display(),
-                io::Error::last_os_error()
-            ),
-        ));
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(all(target_os = "linux", feature = "libc"))]
@@ -495,6 +656,7 @@ mod tests {
             &data,
             &socket_dir.join("node.sock"),
             &root,
+            SandboxGeneration::Strict,
         )
         .expect("landlock ruleset");
 
@@ -586,6 +748,74 @@ mod tests {
             assert!(out.status.success(), "AF_UNIX connect failed: {err}");
         }
         drop(listener);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn compat_generation_allows_tcp_stream_and_denies_udp() {
+        let name = format!("blvm-ll-compat-{}", std::process::id());
+        let root = PathBuf::from("/tmp").join(name);
+        let _ = std::fs::remove_dir_all(&root);
+        let data = root.join("data");
+        let socket_dir = root.join("sock");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&socket_dir).unwrap();
+        let ruleset = ModuleLandlock::prepare(
+            Path::new("/bin/true"),
+            &data,
+            &socket_dir.join("node.sock"),
+            &root,
+            SandboxGeneration::Compat,
+        )
+        .expect("compat ruleset");
+        let python = Path::new("/usr/bin/python3");
+        if python.exists() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let mut tcp = Command::new(python);
+            tcp.args([
+                "-c",
+                "import socket,sys\n\
+                 bound=socket.socket()\n\
+                 bound.bind(('127.0.0.1', 0))\n\
+                 bound.listen(1)\n\
+                 socket.create_connection((sys.argv[1], int(sys.argv[2])), 2)\n\
+                 sys.exit(0)\n",
+                "127.0.0.1",
+                &port.to_string(),
+            ]);
+            ruleset.arm_std(&mut tcp);
+            let out = tcp.output().expect("spawn python tcp");
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                out.status.success(),
+                "generation 0 TCP connect failed: {err}"
+            );
+
+            let mut udp = Command::new(python);
+            udp.args([
+                "-c",
+                "import socket,sys\n\
+                 try:\n\
+                 \ts=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n\
+                 \ts.sendto(b'x', ('127.0.0.1', 9))\n\
+                 except PermissionError:\n\
+                 \tsys.exit(13)\n\
+                 except OSError as e:\n\
+                 \tsys.stderr.write(f'oserror {e.errno}\\n')\n\
+                 \tsys.exit(2)\n\
+                 sys.exit(0)\n",
+            ]);
+            ruleset.arm_std(&mut udp);
+            let out = udp.output().expect("spawn python udp");
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                out.status.code(),
+                Some(13),
+                "generation 0 UDP should stay denied, stderr: {err}"
+            );
+            drop(listener);
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

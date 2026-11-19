@@ -93,20 +93,18 @@ fn resync_next_to_send_with_validation_tip(
         // G5: preserve the validation gap block (and height `need`) in `received` so
         // `try_stream_validation_gap` can deliver it — silent remove caused multi-minute stalls.
         if h == need || (h == need.saturating_sub(1) && received.contains_key(&h)) {
-            if in_flight_heights.contains(&h) {
-                if let Some(&hash) = block_hash_by_height.get(&h) {
+            if in_flight_heights.contains(&h)
+                && let Some(&hash) = block_hash_by_height.get(&h) {
                     network.cancel_block_request(peer_addr, hash);
                 }
-            }
             *next_to_send += 1;
             continue;
         }
         let _ = received_take(received, h);
-        if in_flight_heights.contains(&h) {
-            if let Some(&hash) = block_hash_by_height.get(&h) {
+        if in_flight_heights.contains(&h)
+            && let Some(&hash) = block_hash_by_height.get(&h) {
                 network.cancel_block_request(peer_addr, hash);
             }
-        }
         *next_to_send += 1;
     }
     *last_gap_at = std::time::Instant::now();

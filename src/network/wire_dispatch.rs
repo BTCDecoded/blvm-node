@@ -229,18 +229,18 @@ impl NetworkManager {
         // P-3: Reject duplicate Version (peer already completed version exchange).
         {
             let peer_states = self.peer_states().read().await;
-            if let Some(state) = peer_states.get(&peer_addr) {
-                if state.version > 0 {
-                    warn!("Peer {} sent Version twice — disconnecting", peer_addr);
-                    drop(peer_states);
-                    return self
-                        .disconnect_for_protocol_violation(
-                            peer_addr,
-                            "duplicate version message",
-                            false,
-                        )
-                        .await;
-                }
+            if let Some(state) = peer_states.get(&peer_addr)
+                && state.version > 0
+            {
+                warn!("Peer {} sent Version twice — disconnecting", peer_addr);
+                drop(peer_states);
+                return self
+                    .disconnect_for_protocol_violation(
+                        peer_addr,
+                        "duplicate version message",
+                        false,
+                    )
+                    .await;
             }
         }
 
@@ -269,22 +269,22 @@ impl NetworkManager {
                 peer.outbound_role() == Some(crate::network::peer::OutboundRole::BlockRelayOnly)
             });
 
-        if let Some(transport_addr) = transport_addr {
-            if let Some(peer) = pm.get_peer_mut(&transport_addr) {
-                peer.set_version(version_msg.version as u32);
-                peer.set_services(version_msg.services);
-                peer.set_user_agent(version_msg.user_agent.clone());
-                peer.set_start_height(version_msg.start_height);
-                peer.set_version_time(version_msg.timestamp);
-                debug!(
-                    "Updated peer {} with version={}, services={}, user_agent={}, start_height={}",
-                    peer_addr,
-                    version_msg.version,
-                    version_msg.services,
-                    version_msg.user_agent,
-                    version_msg.start_height
-                );
-            }
+        if let Some(transport_addr) = transport_addr
+            && let Some(peer) = pm.get_peer_mut(&transport_addr)
+        {
+            peer.set_version(version_msg.version as u32);
+            peer.set_services(version_msg.services);
+            peer.set_user_agent(version_msg.user_agent.clone());
+            peer.set_start_height(version_msg.start_height);
+            peer.set_version_time(version_msg.timestamp);
+            debug!(
+                "Updated peer {} with version={}, services={}, user_agent={}, start_height={}",
+                peer_addr,
+                version_msg.version,
+                version_msg.services,
+                version_msg.user_agent,
+                version_msg.start_height
+            );
         }
         drop(pm);
 
@@ -453,18 +453,14 @@ impl NetworkManager {
             }
             CompactDecision::KeepCurrent => StagedCompact::Fetch(expired),
             CompactDecision::Hold(mut assembly) if assembly.missing.is_empty() => {
-                if same_hash {
-                    if let Some(previous) = pending.get(&block_hash) {
-                        assembly.started = previous.started;
-                    }
+                if same_hash && let Some(previous) = pending.get(&block_hash) {
+                    assembly.started = previous.started;
                 }
                 StagedCompact::Complete { assembly, expired }
             }
             CompactDecision::Hold(mut assembly) => {
-                if same_hash {
-                    if let Some(previous) = pending.get(&block_hash) {
-                        assembly.started = previous.started;
-                    }
+                if same_hash && let Some(previous) = pending.get(&block_hash) {
+                    assembly.started = previous.started;
                 }
                 let indices = assembly
                     .missing
@@ -718,16 +714,16 @@ impl NetworkManager {
                         .map(|(addr, _)| addr.clone())
                 });
 
-                if let Some(addr) = transport_addr {
-                    if let Some(peer) = pm.get_peer_mut(&addr) {
-                        if !peer.record_pong_received(pong_msg.nonce) {
-                            debug!("Received pong with non-matching nonce from {}", peer_addr);
-                        } else {
-                            debug!(
-                                "Received valid pong from {} (nonce={})",
-                                peer_addr, pong_msg.nonce
-                            );
-                        }
+                if let Some(addr) = transport_addr
+                    && let Some(peer) = pm.get_peer_mut(&addr)
+                {
+                    if !peer.record_pong_received(pong_msg.nonce) {
+                        debug!("Received pong with non-matching nonce from {}", peer_addr);
+                    } else {
+                        debug!(
+                            "Received valid pong from {} (nonce={})",
+                            peer_addr, pong_msg.nonce
+                        );
                     }
                 }
             }
@@ -855,13 +851,12 @@ impl NetworkManager {
                                 let notfound = NotFoundMessage { inventory: refused };
                                 if let Ok(wire_msg) = ProtocolParser::serialize_message(
                                     &ProtocolMessage::NotFound(notfound),
-                                ) {
-                                    if let Err(e) = self.send_to_peer(peer_addr, wire_msg).await {
-                                        warn!(
-                                            "Failed to send NotFound message to {}: {}",
-                                            peer_addr, e
-                                        );
-                                    }
+                                ) && let Err(e) = self.send_to_peer(peer_addr, wire_msg).await
+                                {
+                                    warn!(
+                                        "Failed to send NotFound message to {}: {}",
+                                        peer_addr, e
+                                    );
                                 }
                             }
                             if serve.is_empty() {
@@ -1396,13 +1391,12 @@ impl NetworkManager {
             }
             ProtocolMessage::SendPackages(version) => {
                 let mut states = self.peer_states().write().await;
-                if let Some(state) = states.get_mut(&peer_addr) {
-                    if state.version > 0
-                        && !state.handshake_complete
-                        && state.package_remote.is_none()
-                    {
-                        state.package_remote = Some(*version);
-                    }
+                if let Some(state) = states.get_mut(&peer_addr)
+                    && state.version > 0
+                    && !state.handshake_complete
+                    && state.package_remote.is_none()
+                {
+                    state.package_remote = Some(*version);
                 }
                 return Ok(());
             }
@@ -1413,10 +1407,12 @@ impl NetworkManager {
             }
             ProtocolMessage::WtxidRelay => {
                 let mut states = self.peer_states().write().await;
-                if let Some(state) = states.get_mut(&peer_addr) {
-                    if state.version > 0 && !state.handshake_complete && !state.wtxid_relay {
-                        state.wtxid_relay = true;
-                    }
+                if let Some(state) = states.get_mut(&peer_addr)
+                    && state.version > 0
+                    && !state.handshake_complete
+                    && !state.wtxid_relay
+                {
+                    state.wtxid_relay = true;
                 }
                 return Ok(());
             }

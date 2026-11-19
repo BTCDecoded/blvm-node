@@ -254,6 +254,14 @@ pub struct MempoolPolicyConfig {
     #[serde(default = "default_require_standard")]
     pub require_standard: bool,
 
+    /// Whole `OP_RETURN` output script, opcode included, accepted while
+    /// `require_standard` is on. Default 100,000, the standard transaction
+    /// weight (400,000) divided by four. Each output is checked on its own.
+    /// `max_op_return_outputs` and `reject_multiple_op_return` limit how many
+    /// `OP_RETURN` outputs a transaction has.
+    #[serde(default = "default_max_op_return_script_bytes")]
+    pub max_op_return_script_bytes: usize,
+
     /// Reject transactions classified as spam before they enter the mempool (opt-in).
     /// When `spam_filter` is set, it overrides default spam filter parameters.
     #[serde(default = "default_reject_spam_in_mempool")]
@@ -262,13 +270,6 @@ pub struct MempoolPolicyConfig {
     /// Optional spam filter tuning when `reject_spam_in_mempool` is true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spam_filter: Option<SpamFilterConfigSerializable>,
-
-    /// Maximum length of a standard `OP_RETURN` output script, in bytes,
-    /// including the leading `OP_RETURN`. Default 100,000
-    /// (`MAX_STANDARD_TX_WEIGHT / 4`). This is the node's current limit, not
-    /// the primitives library default of 80.
-    #[serde(default = "default_max_op_return_size")]
-    pub max_op_return_size: usize,
 
     /// Maximum number of `OP_RETURN` outputs in a standard transaction.
     /// Default `u32::MAX` (no cap), matching the node's current admission
@@ -341,6 +342,20 @@ fn default_mempool_persistence_path() -> String {
     "data/mempool.dat".to_string()
 }
 
+/// A relative persistence path is stored under the node data directory.
+/// An absolute path is used as written.
+pub fn resolve_mempool_persistence_path(
+    data_dir: &std::path::Path,
+    configured: &str,
+) -> std::path::PathBuf {
+    let path = std::path::Path::new(configured);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        data_dir.join(path)
+    }
+}
+
 fn default_tx_rate_limit_burst() -> u32 {
     10
 }
@@ -361,12 +376,12 @@ fn default_require_standard() -> bool {
     true
 }
 
-fn default_reject_spam_in_mempool() -> bool {
-    false
+fn default_max_op_return_script_bytes() -> usize {
+    100_000
 }
 
-fn default_max_op_return_size() -> usize {
-    (400_000 / 4) as usize
+fn default_reject_spam_in_mempool() -> bool {
+    false
 }
 
 fn default_max_op_return_outputs() -> u32 {
@@ -427,9 +442,9 @@ impl Default for MempoolPolicyConfig {
             tx_byte_rate_limit: 100_000,
             tx_byte_rate_burst: 1_000_000,
             require_standard: true,
+            max_op_return_script_bytes: 100_000,
             reject_spam_in_mempool: false,
             spam_filter: None,
-            max_op_return_size: (400_000 / 4) as usize,
             max_op_return_outputs: u32::MAX,
             reject_multiple_op_return: false,
             max_standard_script_size: 1_650,
@@ -439,8 +454,32 @@ impl Default for MempoolPolicyConfig {
 
 #[cfg(test)]
 mod overlay_tests {
-    use super::{MempoolPolicyConfig, RbfConfig, overlay_mempool_onto_consensus};
+    use super::{
+        MempoolPolicyConfig, RbfConfig, overlay_mempool_onto_consensus,
+        resolve_mempool_persistence_path,
+    };
     use blvm_protocol::consensus_config::MempoolConfig;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn omitted_op_return_limit_is_the_standard_budget() {
+        let parsed: MempoolPolicyConfig = toml::from_str("max_mempool_mb = 50\n").unwrap();
+        assert_eq!(parsed.max_op_return_script_bytes, 100_000);
+        assert!(parsed.require_standard);
+        let explicit: MempoolPolicyConfig =
+            toml::from_str("max_op_return_script_bytes = 83\n").unwrap();
+        assert_eq!(explicit.max_op_return_script_bytes, 83);
+        assert_eq!(explicit.max_mempool_mb, 300);
+    }
+
+    #[test]
+    fn relative_mempool_path_joins_the_data_dir() {
+        let path = resolve_mempool_persistence_path(Path::new("/var/lib/blvm"), "mempool.dat");
+        assert_eq!(path, PathBuf::from("/var/lib/blvm/mempool.dat"));
+        let absolute =
+            resolve_mempool_persistence_path(Path::new("/var/lib/blvm"), "/tmp/mempool.dat");
+        assert_eq!(absolute, PathBuf::from("/tmp/mempool.dat"));
+    }
 
     #[test]
     fn file_mempool_replaces_env_size() {
@@ -489,7 +528,7 @@ mod overlay_tests {
     #[test]
     fn empty_mempool_table_uses_node_standardness_defaults() {
         let policy: MempoolPolicyConfig = toml::from_str("").unwrap();
-        assert_eq!(policy.max_op_return_size, 100_000);
+        assert_eq!(policy.max_op_return_script_bytes, 100_000);
         assert_eq!(policy.max_op_return_outputs, u32::MAX);
         assert!(!policy.reject_multiple_op_return);
         assert_eq!(policy.max_standard_script_size, 1_650);

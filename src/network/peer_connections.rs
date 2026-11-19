@@ -3,7 +3,7 @@
 //! Extracted from network_manager.rs to reduce file size.
 
 use crate::network::NetworkMessage;
-use crate::network::network_manager::NetworkManager;
+use crate::network::network_manager::{NetworkManager, ReconnectBan, reconnect_ban_decision};
 use crate::network::peer;
 use crate::network::transport::{Transport, TransportAddr, TransportType};
 use crate::utils::current_timestamp;
@@ -695,10 +695,10 @@ impl NetworkManager {
                 false
             }
         };
-        if should_discover_dns {
-            if let Err(e) = self.discover_peers_from_dns(network, port, config).await {
-                warn!("DNS seed discovery failed: {}", e);
-            }
+        if should_discover_dns
+            && let Err(e) = self.discover_peers_from_dns(network, port, config).await
+        {
+            warn!("DNS seed discovery failed: {}", e);
         }
 
         if !config.persistent_peers.is_empty() {
@@ -709,10 +709,10 @@ impl NetworkManager {
         }
 
         #[cfg(feature = "iroh")]
-        if self.transport_preference().allows_iroh() {
-            if let Err(e) = self.discover_iroh_peers().await {
-                warn!("Iroh peer discovery failed: {}", e);
-            }
+        if self.transport_preference().allows_iroh()
+            && let Err(e) = self.discover_iroh_peers().await
+        {
+            warn!("Iroh peer discovery failed: {}", e);
         }
 
         let timing_config_default = crate::config::NetworkTimingConfig::default();
@@ -732,6 +732,14 @@ impl NetworkManager {
 
     /// Connect to a peer at the given address
     pub async fn connect_to_peer(&self, addr: SocketAddr) -> Result<()> {
+        let ban_decision = {
+            let ban_list = self.ban_list().read().await;
+            let unban = ban_list.get(&SocketAddr::new(addr.ip(), 0)).copied();
+            reconnect_ban_decision(unban, current_timestamp())
+        };
+        if ban_decision != ReconnectBan::Dial {
+            return Err(anyhow::anyhow!("peer {addr} is banned"));
+        }
         if dial_is_cooled(addr) {
             return Err(anyhow::anyhow!("dial cooled"));
         }
@@ -837,6 +845,15 @@ impl NetworkManager {
                 );
                 return;
             }
+            let ban_decision = {
+                let ban_list = nm.ban_list().read().await;
+                let unban = ban_list.get(&SocketAddr::new(addr.ip(), 0)).copied();
+                reconnect_ban_decision(unban, current_timestamp())
+            };
+            if ban_decision != ReconnectBan::Dial {
+                debug!("skipping reconnect to {addr} — banned");
+                return;
+            }
             if dial_is_cooled(addr) {
                 // The periodic task retries this entry after the cooldown. Dropping it
                 // here loses the peer for the rest of the session.
@@ -846,10 +863,10 @@ impl NetworkManager {
             }
             {
                 let pm = nm.peer_manager_mutex().lock().await;
-                if let Some(p) = pm.get_peer(&TransportAddr::Tcp(addr)) {
-                    if p.is_connected() {
-                        return;
-                    }
+                if let Some(p) = pm.get_peer(&TransportAddr::Tcp(addr))
+                    && p.is_connected()
+                {
+                    return;
                 }
             }
             {
@@ -893,12 +910,11 @@ impl NetworkManager {
         }
 
         #[cfg(feature = "iroh")]
-        if self.transport_preference().allows_iroh() {
-            if let Ok(guard) = self.iroh_transport().lock() {
-                if guard.is_some() {
-                    transports.push(TransportType::Iroh);
-                }
-            }
+        if self.transport_preference().allows_iroh()
+            && let Ok(guard) = self.iroh_transport().lock()
+            && guard.is_some()
+        {
+            transports.push(TransportType::Iroh);
         }
 
         // Only fall back to TCP if the transport preference actually allows it.

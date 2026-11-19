@@ -668,10 +668,10 @@ impl BlockStore {
                 &[0],
                 &[height],
                 &[block_hash],
-                &[data_to_store.clone()],
+                std::slice::from_ref(&data_to_store),
                 &[Arc::new(header_data.clone())],
-                &[witness_blob.clone()],
-                &[metadata_data.clone()],
+                std::slice::from_ref(&witness_blob),
+                std::slice::from_ref(&metadata_data),
                 &[(height, header_data.clone())],
             )? {
                 return Ok(());
@@ -852,13 +852,13 @@ impl BlockStore {
                 return Ok(Some(witnesses));
             }
             // W5 wire body embeds witnesses — no separate tree row.
-            if let Some(body) = self.blocks.get(&k)? {
-                if let Some(payload) = decode_wire_body_blob(&body) {
-                    let (_, witnesses) =
-                        blvm_protocol::serialization::deserialize_block_with_witnesses(payload)
-                            .map_err(|e| anyhow::anyhow!("wire witness deserialize: {e}"))?;
-                    return Ok(Some(witnesses));
-                }
+            if let Some(body) = self.blocks.get(&k)?
+                && let Some(payload) = decode_wire_body_blob(&body)
+            {
+                let (_, witnesses) =
+                    blvm_protocol::serialization::deserialize_block_with_witnesses(payload)
+                        .map_err(|e| anyhow::anyhow!("wire witness deserialize: {e}"))?;
+                return Ok(Some(witnesses));
             }
         }
         if let Some(data) = self.witnesses.get(block_hash.as_slice())? {
@@ -1482,11 +1482,11 @@ impl BlockStore {
 
         let mut fork_h = None;
         for hash in locator {
-            if let Some(h) = self.get_height_by_hash(hash)? {
-                if self.get_hash_by_height(h)? == Some(*hash) {
-                    fork_h = Some(h);
-                    break;
-                }
+            if let Some(h) = self.get_height_by_hash(hash)?
+                && self.get_hash_by_height(h)? == Some(*hash)
+            {
+                fork_h = Some(h);
+                break;
             }
         }
 
@@ -1523,10 +1523,10 @@ impl BlockStore {
             let Some(hdr) = self.get_header(&hash)? else {
                 break;
             };
-            if let Some(prev) = expect {
-                if hdr.prev_block_hash != prev {
-                    break;
-                }
+            if let Some(prev) = expect
+                && hdr.prev_block_hash != prev
+            {
+                break;
             }
             out.push(hdr);
             expect = Some(hash);
@@ -1560,10 +1560,10 @@ impl BlockStore {
         let mut blocks = Vec::new();
 
         for height in start..=end {
-            if let Some(hash) = self.get_hash_by_height(height)? {
-                if let Some(block) = self.get_block(&hash)? {
-                    blocks.push(block);
-                }
+            if let Some(hash) = self.get_hash_by_height(height)?
+                && let Some(block) = self.get_block(&hash)?
+            {
+                blocks.push(block);
             }
         }
 

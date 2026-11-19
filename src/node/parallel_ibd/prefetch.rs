@@ -203,31 +203,30 @@ impl OrderedReadyBridge {
             }
         }
         // Fast path: in-order completion with no backlog — skip BTreeMap insert.
-        if g.pending.is_empty() {
-            if let Some(n) = g.next_expected {
-                if h == n {
-                    if let Some(feeder) = self.feeder_attached() {
-                        // W56b: durable feeder insert before cursor advance.
-                        let est = g.estimates.remove(&h).unwrap_or(0);
-                        Self::insert_ready_into_feeder(&feeder, item, est);
-                        g.next_expected = Some(n + 1);
-                        sync_bridge_pending_count(&g);
-                        return;
-                    }
-                    match self.out.try_send(item) {
-                        Ok(()) => {
-                            g.next_expected = Some(n + 1);
-                            sync_bridge_pending_count(&g);
-                            return;
-                        }
-                        Err(crossbeam_channel::TrySendError::Full(item))
-                        | Err(crossbeam_channel::TrySendError::Disconnected(item)) => {
-                            // Park in pending; a later try_flush / repair will deliver.
-                            g.pending.insert(h, item);
-                            sync_bridge_pending_count(&g);
-                            return;
-                        }
-                    }
+        if g.pending.is_empty()
+            && let Some(n) = g.next_expected
+            && h == n
+        {
+            if let Some(feeder) = self.feeder_attached() {
+                // W56b: durable feeder insert before cursor advance.
+                let est = g.estimates.remove(&h).unwrap_or(0);
+                Self::insert_ready_into_feeder(&feeder, item, est);
+                g.next_expected = Some(n + 1);
+                sync_bridge_pending_count(&g);
+                return;
+            }
+            match self.out.try_send(item) {
+                Ok(()) => {
+                    g.next_expected = Some(n + 1);
+                    sync_bridge_pending_count(&g);
+                    return;
+                }
+                Err(crossbeam_channel::TrySendError::Full(item))
+                | Err(crossbeam_channel::TrySendError::Disconnected(item)) => {
+                    // Park in pending; a later try_flush / repair will deliver.
+                    g.pending.insert(h, item);
+                    sync_bridge_pending_count(&g);
+                    return;
                 }
             }
         }
@@ -859,7 +858,7 @@ impl OrderedReadyBridge {
             let total = super::memory::BRIDGE_EVICT_BLOCKS
                 .fetch_add(far_evicted as u64, Ordering::Relaxed)
                 + far_evicted as u64;
-            if total == far_evicted as u64 || total % 64 == 0 || wan_tip_crawl {
+            if total == far_evicted as u64 || total.is_multiple_of(64) || wan_tip_crawl {
                 tracing::warn!(
                     "[IBD_BRIDGE_EVICT] evicted {} bridge pending block(s) (next_needed={}, pending={}, ceiling={}, gap_missing={}, next_expected_missing={}, min_pending={}, tight_keep={}, wan_tip_crawl={}, total_evicted={})",
                     far_evicted,
@@ -1114,7 +1113,7 @@ pub(crate) fn run_prefetch_worker(
         bridge.worker_complete(h, item, vh);
         local_blocks += 1;
         // Log aggregate stats every 5000 blocks processed by this worker.
-        if local_blocks % 5_000 == 0 {
+        if local_blocks.is_multiple_of(5_000) {
             let total_blocks = PREFETCH_TOTAL_BLOCKS.load(Ordering::Relaxed);
             let total_reads = PREFETCH_TOTAL_DISK_READS.load(Ordering::Relaxed);
             let total_ms = PREFETCH_TOTAL_DISK_MS.load(Ordering::Relaxed);

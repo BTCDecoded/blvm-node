@@ -2242,13 +2242,12 @@ impl NodeAPI for NodeApiImpl {
         let module_name = crate::module::module_name_from_id(module_id);
 
         // Get module state
-        if let Ok(reported) = self.reported_health.lock() {
-            if let Some(health) = reported
+        if let Ok(reported) = self.reported_health.lock()
+            && let Some(health) = reported
                 .get(module_id)
                 .or_else(|| reported.get(module_name))
-            {
-                return Ok(Some(health.clone()));
-            }
+        {
+            return Ok(Some(health.clone()));
         }
 
         let state = manager.get_module_state(module_name).await;
@@ -2635,14 +2634,13 @@ fn hash_rate_from_tip(storage: &crate::storage::Storage) -> f64 {
     let difficulty = blvm_protocol::pow::difficulty_from_bits(header.bits).unwrap_or(1.0);
     let height = storage.chain().get_height().ok().flatten().unwrap_or(0);
     let mut interval = 600u64;
-    if height >= 1 {
-        if let Ok(Some(prev_hash)) = storage.blocks().get_hash_by_height(height - 1) {
-            if let Ok(Some(prev)) = storage.blocks().get_header(&prev_hash) {
-                let dt = header.timestamp.saturating_sub(prev.timestamp);
-                if dt > 0 {
-                    interval = dt;
-                }
-            }
+    if height >= 1
+        && let Ok(Some(prev_hash)) = storage.blocks().get_hash_by_height(height - 1)
+        && let Ok(Some(prev)) = storage.blocks().get_header(&prev_hash)
+    {
+        let dt = header.timestamp.saturating_sub(prev.timestamp);
+        if dt > 0 {
+            interval = dt;
         }
     }
     difficulty * 4_294_967_296.0 / interval as f64

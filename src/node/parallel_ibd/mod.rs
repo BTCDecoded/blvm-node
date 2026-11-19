@@ -103,6 +103,12 @@ pub static IBD_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// True while `ParallelIBD::sync_parallel` is running (startup IBD or run-loop catch-up).
 pub static PARALLEL_IBD_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Set when a session returns before the checkpoint export thread has finished.
+pub(crate) static CHECKPOINT_EXPORT_STOP: AtomicBool = AtomicBool::new(false);
+
+/// Set when the only download peer hits the chunk-failure cap.
+pub(crate) static IBD_DOWNLOAD_FATAL: AtomicBool = AtomicBool::new(false);
+
 /// Monotonic session id; coordinator tasks exit when this no longer matches their id.
 pub(crate) static PARALLEL_IBD_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -869,11 +875,11 @@ pub(crate) fn tip_hedge_observe_and_should_assign(
 
 pub(crate) fn tip_hedge_mark_issued(h: u64, peer_id: &str) {
     let mut g = tip_hedge_live().lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(live) = g.as_mut() {
-        if live.h == h {
-            live.issued = live.issued.saturating_add(1);
-            live.hedge_peers.push(peer_id.to_string());
-        }
+    if let Some(live) = g.as_mut()
+        && live.h == h
+    {
+        live.issued = live.issued.saturating_add(1);
+        live.hedge_peers.push(peer_id.to_string());
     }
 }
 
@@ -1420,6 +1426,46 @@ pub(crate) fn wan_gap_admit_window() -> u64 {
     }
 }
 
+pub(crate) fn missing_peer_semaphore(
+    peers: &[String],
+    has_semaphore: impl Fn(&str) -> bool,
+) -> Option<&str> {
+    peers
+        .iter()
+        .find(|peer| !has_semaphore(peer))
+        .map(String::as_str)
+}
+
+pub(crate) fn clamped_worker_count(requested: Option<usize>, cap: usize) -> Option<usize> {
+    let cap = cap.max(1);
+    requested.map(|n| n.clamp(1, cap))
+}
+
+pub(crate) fn clamped_pipeline_depth(
+    requested: Option<usize>,
+    workers: usize,
+    default_depth: usize,
+) -> usize {
+    let workers = workers.clamp(1, 64);
+    requested
+        .map(|n| n.clamp(1, 64))
+        .unwrap_or_else(|| default_depth.clamp(workers, 64))
+        .max(workers)
+}
+
+/// Keep admission inside the reorder cap. The reorder stays a slack above
+/// anything admission can fill, and neither passes the RAM cap.
+pub(crate) fn bound_bulk_windows(base: usize, admit: usize, ram_cap: usize) -> (usize, usize) {
+    let ram_cap = ram_cap.max(1);
+    let slack = 512.min(ram_cap / 4);
+    let admit = admit.min(ram_cap.saturating_sub(slack));
+    let reorder = base
+        .max(admit.saturating_add(slack))
+        .min(ram_cap)
+        .max(admit);
+    (admit, reorder)
+}
+
 /// Mid-chain catch-up past body tip: admit window must track the multi-peer ahead pipe.
 /// Default **1024** (was 256). Live: max_ahead 400–528 with admit=256 → 20k+ GAP_ADMIT_DROP
 /// of ahead bodies while tip starved (~few BPS despite busy_peers>1).
@@ -1940,7 +1986,7 @@ pub(crate) fn insert_reorder_gap_aware(
     if throttle && h > next_needed.saturating_add(window) && !lookahead_height_reserved(h) {
         body_dup::note_discard(body_dup::DiscardReason::AdmitDrop, Some(h), 0);
         let n = memory::GAP_ADMIT_DROP_BLOCKS.fetch_add(1, Ordering::Relaxed) + 1;
-        if n == 1 || n % 64 == 0 {
+        if n == 1 || n.is_multiple_of(64) {
             warn!(
                 "[IBD_GAP_ADMIT_DROP] dropped h={} (next_needed={}, reorder={}, limit={}, window={}, bridge_pending={}, bridge_max={}, gap_missing={}, total_drops={})",
                 h,
@@ -2029,7 +2075,7 @@ pub(crate) fn evict_reorder_gap_pressure(
     if evicted > 0 {
         let total = memory::REORDER_EVICT_BLOCKS.fetch_add(evicted as u64, Ordering::Relaxed)
             + evicted as u64;
-        if total == evicted as u64 || total % 64 == 0 {
+        if total == evicted as u64 || total.is_multiple_of(64) {
             warn!(
                 "[IBD_REORDER_EVICT] evicted {} block(s) (next_needed={}, reorder={}, limit={}, window={}, bridge_pending={}, bridge_max={}, gap_missing={}, total_evicted={})",
                 evicted,
@@ -2076,23 +2122,21 @@ fn prepare_coordinator_tip_handoff(
     }
     let mut peeled = 0usize;
     // Peel aggressively when feeder is already deep — ahead pending is what stranded the tip.
-    if peel_bridge {
-        if let Some(bridge) = ready_bridge {
-            peeled = bridge.evict_far_ahead_pending_ex(
-                next_needed,
-                admit_window.min(64),
-                true,
-                bridge_pending_max,
-                wan_tip_crawl,
+    if peel_bridge && let Some(bridge) = ready_bridge {
+        peeled = bridge.evict_far_ahead_pending_ex(
+            next_needed,
+            admit_window.min(64),
+            true,
+            bridge_pending_max,
+            wan_tip_crawl,
+        );
+        for h in bridge.take_evicted_heights() {
+            dispatched.remove(&h);
+        }
+        if peeled > 0 {
+            warn!(
+                "[IBD_TIP_FASTPATH] peeled {peeled} far-ahead bridge pending before tip {next_needed} handoff (feeder={feeder_len})"
             );
-            for h in bridge.take_evicted_heights() {
-                dispatched.remove(&h);
-            }
-            if peeled > 0 {
-                warn!(
-                    "[IBD_TIP_FASTPATH] peeled {peeled} far-ahead bridge pending before tip {next_needed} handoff (feeder={feeder_len})"
-                );
-            }
         }
     }
     let was_dispatched = dispatched.remove(&next_needed);
@@ -2473,6 +2517,24 @@ pub(crate) fn aligned_checkpoint_height(
     last_exported.saturating_add(steps.saturating_mul(interval))
 }
 
+/// GC fence to store before validation appends a block above `last_exported`.
+///
+/// The fence starts at `i32::MAX`. A merge drops an Add together with its Delete
+/// when `Delete.height <= fence`, so `MAX` discards every spend. The export scan
+/// used to be the first `set_gc_fence`, and LAG_EXEMPT starts that scan after
+/// validation has already passed the checkpoint (live 2026-11-18: label 200000,
+/// engine height 200562). Coins spent in that gap were already gone, and the
+/// snapshot was still labeled 200000.
+///
+/// Spends at or below the returned height may be discarded. Spends above it stay
+/// until that snapshot is stored.
+pub(crate) fn gc_fence_before_validation(last_exported: i32, interval: i32) -> i32 {
+    if interval <= 0 {
+        return last_exported.max(0);
+    }
+    last_exported.saturating_add(interval)
+}
+
 /// F-C2: whether the already-persisted skip path should advance durable `chain_info` tip.
 ///
 /// Historically every 1000 heights. Near `effective_end` there may be no `% 1000` boundary
@@ -2483,7 +2545,7 @@ pub(crate) fn should_advance_tip_on_skip_path(next_height: u64, effective_end_he
     if next_height == 0 {
         return false;
     }
-    if next_height % 1_000 == 0 {
+    if next_height.is_multiple_of(1_000) {
         return true;
     }
     next_height.saturating_add(1_024) > effective_end_height
@@ -2638,9 +2700,11 @@ pub struct ParallelIBDConfig {
     pub headers_timeout_secs: u64,
     /// Headers max failures before peer switch (default: 10)
     pub headers_max_failures: u32,
-    /// Dedicated headless IBD — larger RSS envelope (`[ibd] dedicated` or BLVM_IBD_EXCLUSIVE).
+    /// Resolved `[ibd] workload`. `BLVM_IBD_EXCLUSIVE=1` still forces Dedicated inside MemoryGuard.
+    pub memory_request: crate::config::IbdMemoryRequest,
+    /// True when this session asked for the larger envelope, including `BLVM_IBD_EXCLUSIVE`.
     pub dedicated: bool,
-    /// Age-tiered UTXO engine (resolved from env + `[ibd].utxo_engine` in `from_config`).
+    /// Age-tiered UTXO engine. Always on; the legacy store is not selectable.
     pub utxo_engine: bool,
 }
 
@@ -2827,13 +2891,11 @@ impl ParallelIBDConfig {
             .and_then(|s| s.parse().ok())
             .or_else(|| ibd_config.map(|c| c.headers_max_failures))
             .unwrap_or(10);
-        let dedicated = std::env::var("BLVM_IBD_EXCLUSIVE")
+        let memory_request = crate::config::resolve_ibd_memory_request(ibd_config);
+        let exclusive = std::env::var("BLVM_IBD_EXCLUSIVE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or_else(|_| {
-                std::env::var("BLVM_DEDICATED_NODE")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or_else(|_| ibd_config.map(|c| c.dedicated).unwrap_or(false))
-            });
+            .unwrap_or(false);
+        let dedicated = exclusive || memory_request == crate::config::IbdMemoryRequest::Dedicated;
         Self {
             network: blvm_protocol::types::Network::Mainnet,
             num_workers: std::thread::available_parallelism()
@@ -2858,6 +2920,7 @@ impl ParallelIBDConfig {
             max_blocks_in_transit_per_peer: max_blocks_in_transit,
             headers_timeout_secs: headers_timeout,
             headers_max_failures,
+            memory_request,
             dedicated,
             utxo_engine: crate::config::ibd::ibd_engine_enabled(ibd_config),
         }
@@ -3089,16 +3152,16 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
             // Exit early if this worker's own peer has been permanently evicted.
             // Staying alive just causes the worker to grab a chunk, hit the
             // wait_for_peer_connected eviction check, requeue, loop forever.
-            if let Some(net) = network_clone.as_ref() {
-                if let Ok(peer_sa) = peer_id.parse::<std::net::SocketAddr>() {
-                    let evicted = net.ibd_evicted_ips.read().unwrap();
-                    if evicted.contains(&peer_sa.ip()) {
-                        tracing::info!(
-                            "[IBD] Worker {} exiting: peer is permanently evicted (NODE_NETWORK_LIMITED)",
-                            peer_id
-                        );
-                        break None;
-                    }
+            if let Some(net) = network_clone.as_ref()
+                && let Ok(peer_sa) = peer_id.parse::<std::net::SocketAddr>()
+            {
+                let evicted = net.ibd_evicted_ips.read().unwrap();
+                if evicted.contains(&peer_sa.ip()) {
+                    tracing::info!(
+                        "[IBD] Worker {} exiting: peer is permanently evicted (NODE_NETWORK_LIMITED)",
+                        peer_id
+                    );
+                    break None;
                 }
             }
             let got = assigner_clone.get_work(
@@ -3108,12 +3171,12 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
             // R-336: window path queues front-stalling holders for eviction; any
             // worker drains it (the assigner has no network handle).
             for evict in assigner_clone.window_take_evictions() {
-                if let Some(net) = network_clone.as_ref() {
-                    if let Ok(sa) = evict.parse::<std::net::SocketAddr>() {
-                        download::download_forget_peer(&evict);
-                        let netc = net.clone();
-                        tokio::task::spawn_blocking(move || netc.evict_ibd_peer(sa));
-                    }
+                if let Some(net) = network_clone.as_ref()
+                    && let Ok(sa) = evict.parse::<std::net::SocketAddr>()
+                {
+                    download::download_forget_peer(&evict);
+                    let netc = net.clone();
+                    tokio::task::spawn_blocking(move || netc.evict_ibd_peer(sa));
                 }
             }
             if let Some((chunk_start, chunk_end)) = got {
@@ -3710,14 +3773,17 @@ async fn run_ibd_download_worker(ctx: IbdWorkerCtx) -> anyhow::Result<()> {
                     continue;
                 }
 
-                if num_peers_clone == 1 && consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                    warn!(
-                        "Peer {} at {} consecutive failures (single-peer mode) — waiting for reconnect",
-                        peer_id, consecutive_failures
-                    );
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                    consecutive_failures = 0;
-                    continue;
+                if num_peers_clone == 1
+                    && crate::node::reliability_decisions::single_peer_chunk_failure_stops(
+                        num_peers_clone,
+                        consecutive_failures,
+                        MAX_CONSECUTIVE_FAILURES,
+                    )
+                {
+                    IBD_DOWNLOAD_FATAL.store(true, Ordering::Release);
+                    return Err(anyhow::anyhow!(
+                        "single peer {peer_id} at {consecutive_failures} consecutive chunk failures"
+                    ));
                 }
 
                 let backoff_secs = (1u64 << (consecutive_failures - 1).min(3)).min(8);
@@ -4120,44 +4186,43 @@ where
             flight_tip_leftover,
             stalled_ms,
             next_needed,
-        ) {
-            if let Some((block, witnesses)) = reorder_buffer.remove(&next_needed) {
-                prepare_coord_dispatch_bufs(
-                    coord_engine_mode,
-                    &block,
-                    coord_tx_ids_buf,
-                    coord_keys_buf,
-                );
-                let keys_owned = std::mem::take(coord_keys_buf);
-                let tx_ids_owned = std::mem::take(coord_tx_ids_buf);
-                let ready: ReadyItem = (
-                    next_needed,
-                    block,
-                    witnesses,
-                    keys_owned,
-                    prefetch::engine_empty_prefetch_arc(),
-                    tx_ids_owned,
-                    prefetch::engine_empty_spec_adds(),
-                );
-                if let Some(bridge) = ready_bridge_for_coord {
-                    bridge.force_emit_tip_to_feeder(ready, feeder_state_for_coord);
-                    static LEFTOVER_FEEDER_LOG_MS: std::sync::atomic::AtomicU64 =
-                        std::sync::atomic::AtomicU64::new(0);
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-                    let prev = LEFTOVER_FEEDER_LOG_MS.load(Ordering::Relaxed);
-                    if now_ms.saturating_sub(prev) >= 5000 {
-                        LEFTOVER_FEEDER_LOG_MS.store(now_ms, Ordering::Relaxed);
-                        warn!(
-                            "[IBD_LEFTOVER_FEEDER] next={} val_h={} store_has={} flight_tip={}",
-                            next_needed, val_h, store_has_leftover, flight_tip_leftover
-                        );
-                    }
-                } else {
-                    reorder_buffer.insert(next_needed, (ready.1, ready.2));
+        ) && let Some((block, witnesses)) = reorder_buffer.remove(&next_needed)
+        {
+            prepare_coord_dispatch_bufs(
+                coord_engine_mode,
+                &block,
+                coord_tx_ids_buf,
+                coord_keys_buf,
+            );
+            let keys_owned = std::mem::take(coord_keys_buf);
+            let tx_ids_owned = std::mem::take(coord_tx_ids_buf);
+            let ready: ReadyItem = (
+                next_needed,
+                block,
+                witnesses,
+                keys_owned,
+                prefetch::engine_empty_prefetch_arc(),
+                tx_ids_owned,
+                prefetch::engine_empty_spec_adds(),
+            );
+            if let Some(bridge) = ready_bridge_for_coord {
+                bridge.force_emit_tip_to_feeder(ready, feeder_state_for_coord);
+                static LEFTOVER_FEEDER_LOG_MS: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let prev = LEFTOVER_FEEDER_LOG_MS.load(Ordering::Relaxed);
+                if now_ms.saturating_sub(prev) >= 5000 {
+                    LEFTOVER_FEEDER_LOG_MS.store(now_ms, Ordering::Relaxed);
+                    warn!(
+                        "[IBD_LEFTOVER_FEEDER] next={} val_h={} store_has={} flight_tip={}",
+                        next_needed, val_h, store_has_leftover, flight_tip_leftover
+                    );
                 }
+            } else {
+                reorder_buffer.insert(next_needed, (ready.1, ready.2));
             }
         }
 
@@ -4653,6 +4718,66 @@ struct IbdSessionTail<'a> {
     validation_height: Arc<AtomicU64>,
 }
 
+async fn join_download_handles_after_grace(handles: Vec<(i32, tokio::task::JoinHandle<()>)>) {
+    let n_dl = handles.len();
+    info!(
+        "[IBD_DOWNLOAD_JOIN] joining {} download worker(s) before Phase 3",
+        n_dl
+    );
+    let join_grace = std::time::Duration::from_secs(
+        std::env::var("BLVM_IBD_DOWNLOAD_JOIN_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(45),
+    );
+    let join_deadline = std::time::Instant::now() + join_grace;
+    let mut pending = handles;
+    let mut joined = 0usize;
+    let mut aborted = 0usize;
+    while !pending.is_empty() {
+        let mut i = 0;
+        while i < pending.len() {
+            if pending[i].1.is_finished() {
+                let (chunk_start, handle) = pending.swap_remove(i);
+                match handle.await {
+                    Ok(()) => joined += 1,
+                    Err(e) => {
+                        debug!("Download task for chunk {} ended: {}", chunk_start, e);
+                        joined += 1;
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
+        if pending.is_empty() {
+            break;
+        }
+        if std::time::Instant::now() >= join_deadline {
+            warn!(
+                "[IBD_DOWNLOAD_JOIN] {} worker(s) still in-flight after {:?} — aborting so Phase 3 can proceed",
+                pending.len(),
+                join_grace
+            );
+            for (chunk_start, handle) in pending.drain(..) {
+                handle.abort();
+                let _ = handle.await;
+                aborted += 1;
+                debug!(
+                    "Download task for chunk {} aborted after join grace",
+                    chunk_start
+                );
+            }
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    info!(
+        "[IBD_DOWNLOAD_JOIN] done (joined={}, aborted={})",
+        joined, aborted
+    );
+}
+
 async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     let IbdSessionTail {
         actual_synced_height,
@@ -4685,6 +4810,26 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
         utxo_set,
         validation_height,
     } = ctx;
+    // This read is after the coordinator, download workers, and prefetch threads
+    // exist, and before the feeder starts. A failed read must stop those workers
+    // before it returns. It must not start the feeder or take the UTXO set.
+    let engine_stored_export_height =
+        match crate::node::reliability_decisions::stored_export_height_or_zero(
+            storage.chain().get_engine_export_height(),
+        ) {
+            Ok(height) => height,
+            Err(e) => {
+                assigner.request_shutdown();
+                coord_handle.abort();
+                drop(prefetch_input_tx_v2);
+                drop(gap_fill_tx_v2);
+                for handle in prefetch_join_handles.drain(..) {
+                    let _ = handle.join();
+                }
+                join_download_handles_after_grace(download_handles).await;
+                return Err(e);
+            }
+        };
     // Block feeder: drains ready_rx into shared buffer so validation can run while buffer fills.
     // Feeder runs on std::thread (crossbeam recv is blocking). Buffer fills while validation works.
     // feeder_state was created earlier (before coordinator spawn) so the coordinator could reference it.
@@ -4692,7 +4837,7 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     if utxo_engine.is_some() && sparse_local_body_max > start_height {
         feeder_buffer_limit = feeder_buffer_limit.max(400);
     }
-    let feeder_buffer_bytes_limit = mem_guard.feeder_buffer_bytes_limit;
+    let feeder_buffer_bytes_limit = mem_guard.feeder_bytes_limit_for_height(start_height);
     // Lets the teardown path unblock the feeder (which otherwise parks on backpressure / a
     // blocking recv kept open by the detached coordinator's sender clones) so the real
     // validation error surfaces instead of `feeder_handle.join()` hanging forever.
@@ -4825,12 +4970,6 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     // SpendSession::resolve. Both arcs point to the same UtxoDatabase.
     let utxo_engine_for_export = utxo_engine.clone();
 
-    let engine_stored_export_height = storage
-        .chain()
-        .get_engine_export_height()
-        .ok()
-        .flatten()
-        .unwrap_or(0);
     let engine_stored_export_utxo_count = storage
         .chain()
         .get_engine_export_utxo_count()
@@ -4886,7 +5025,8 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     // Adaptive interval: UTXO count + export duration set the ceiling; live validation BPS
     // can shrink the interval so slow replay does not leave huge dirty-restart windows.
     // Target ~checkpoint_target_secs wall clock between exports. Override via BLVM_IBD_CHECKPOINT_INTERVAL.
-    let periodic_checkpoint_handle: Option<std::thread::JoinHandle<()>> = if let Some(
+    CHECKPOINT_EXPORT_STOP.store(false, Ordering::Release);
+    let mut periodic_checkpoint_handle: Option<std::thread::JoinHandle<()>> = if let Some(
         ref engine_arc,
     ) =
         utxo_engine_for_export
@@ -5010,12 +5150,15 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
                             crate::storage::ibd_engine::set_next_checkpoint_target(
                                 last_exported.saturating_add(schedule_iv.max(0)),
                             );
-                            if checkpoint_export_thread_should_exit(
-                                vh_now,
-                                cl,
-                                end_h_now,
-                                last_exported,
-                                schedule_iv,
+                            if crate::node::reliability_decisions::checkpoint_thread_should_stop(
+                                CHECKPOINT_EXPORT_STOP.load(Ordering::Acquire),
+                                checkpoint_export_thread_should_exit(
+                                    vh_now,
+                                    cl,
+                                    end_h_now,
+                                    last_exported,
+                                    schedule_iv,
+                                ),
                             ) {
                                 info!(
                                     "[IBD_CKPT_EXIT] validation_h={} cl={} end_h={} last_exported={} interval={} — joining",
@@ -5256,7 +5399,7 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
                                                     timings.wall_ms / 1000,
                                                     &muhash_bytes,
                                                 ) {
-                                                Ok(()) => {
+                                                Ok(true) => {
                                                     info!(
                                                         "IBD engine: checkpoint persisted at height {} \
                                                          (slot {}, {} UTXOs)",
@@ -5270,6 +5413,13 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
                                                     // set_gc_fence(ckpt+next_interval) let compact
                                                     // GC above the committed snapshot and poisoned
                                                     // the next lagged piggyback.
+                                                }
+                                                Ok(false) => {
+                                                    warn!(
+                                                        "IBD engine: checkpoint persist refused at height {} \
+                                                         — leaving last_exported={}",
+                                                        ckpt, last_exported
+                                                    );
                                                 }
                                                 Err(e) => {
                                                     warn!(
@@ -5292,9 +5442,21 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
                                         "IBD engine: checkpoint export failed at height {ckpt}: \
                                          {e:#}"
                                     );
-                                    // On failure the fence stays at ckpt so the retry scan is
-                                    // protected. The retry will re-advance the fence when it
-                                    // starts the next export attempt.
+                                    let (streak, action) =
+                                        crate::node::reliability_decisions::checkpoint_export_error(
+                                            refuse_streak,
+                                        );
+                                    refuse_streak = streak;
+                                    if action
+                                        == crate::node::reliability_decisions::ExportRetry::Stop
+                                    {
+                                        crate::storage::ibd_engine::set_gc_fence(last_exported);
+                                        warn!(
+                                            "[IBD_CKPT_EXPORT_FAIL] {refuse_streak} consecutive \
+                                             export failures — stopping export path"
+                                        );
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -5304,6 +5466,41 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     } else {
         None
     };
+
+    // The fence is still `i32::MAX` until an export scan stores a height.
+    // Validation appends spends before that scan when the export thread lags.
+    // Those spends are discarded, and the snapshot labeled at the checkpoint
+    // is then missing the coins the next block spends.
+    if utxo_engine.is_some()
+        && crate::storage::ibd_engine::memory_run::gc_fence_snapshot() == i32::MAX
+    {
+        let durability = crate::config::ibd::ibd_engine_durability_config(None);
+        let interval = adaptive_checkpoint_interval(
+            engine_stored_export_utxo_count,
+            0.0,
+            0.0,
+            &durability,
+        );
+        let utxo_iv = utxo_scaled_checkpoint_interval(
+            engine_stored_export_utxo_count,
+            0.0,
+            &durability,
+        );
+        let schedule_iv = checkpoint_schedule_interval(
+            interval,
+            utxo_iv,
+            engine_stored_export_utxo_count,
+        );
+        let fence = gc_fence_before_validation(engine_stored_export_height as i32, schedule_iv);
+        if fence > 0 {
+            crate::storage::ibd_engine::set_next_checkpoint_target(fence);
+            crate::storage::ibd_engine::set_gc_fence(fence);
+            info!(
+                "[IBD_GC_FENCE] set to {fence} before validation \
+                 (last_exported={engine_stored_export_height} interval={schedule_iv})"
+            );
+        }
+    }
 
     let params = validation_loop::ValidationParams {
         feeder_state: feeder_state_valid,
@@ -5371,7 +5568,10 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
                     .await;
                     last_height = current;
                 }
-                if current >= end {
+                if crate::node::reliability_decisions::progress_task_should_stop(
+                    PARALLEL_IBD_SESSION_ACTIVE.load(Ordering::Acquire),
+                    current >= end,
+                ) {
                     break;
                 }
             }
@@ -5382,6 +5582,7 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
 
     // Wait for validation thread (block_in_place keeps tokio worker free)
     let mut ibd_pipeline_shutdown = || {
+        assigner.request_shutdown();
         coord_handle.abort();
         drop(prefetch_input_tx_v2);
         drop(gap_fill_tx_v2);
@@ -5409,10 +5610,26 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
             ibd_pipeline_shutdown();
+            if let Some(h) = progress_handle.as_ref() {
+                h.abort();
+            }
+            CHECKPOINT_EXPORT_STOP.store(true, Ordering::Release);
+            if let Some(h) = periodic_checkpoint_handle.take() {
+                let _ = h.join();
+            }
+            join_download_handles_after_grace(download_handles).await;
             return Err(e);
         }
         Err(panic) => {
             ibd_pipeline_shutdown();
+            if let Some(h) = progress_handle.as_ref() {
+                h.abort();
+            }
+            CHECKPOINT_EXPORT_STOP.store(true, Ordering::Release);
+            if let Some(h) = periodic_checkpoint_handle.take() {
+                let _ = h.join();
+            }
+            join_download_handles_after_grace(download_handles).await;
             return Err(anyhow::anyhow!("Validation thread panicked: {panic:?}"));
         }
     }
@@ -5420,6 +5637,14 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     let effective_end_final = effective_end_live.load(Ordering::Relaxed);
     if validated_through < effective_end_final {
         ibd_pipeline_shutdown();
+        if let Some(h) = progress_handle.as_ref() {
+            h.abort();
+        }
+        CHECKPOINT_EXPORT_STOP.store(true, Ordering::Release);
+        if let Some(h) = periodic_checkpoint_handle.take() {
+            let _ = h.join();
+        }
+        join_download_handles_after_grace(download_handles).await;
         return Err(anyhow::anyhow!(
             "Parallel IBD ended early: validated through height {validated_through} but need {effective_end_final}"
         ));
@@ -5435,13 +5660,34 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
         let _ = h.join();
     }
     *utxo_set = match Arc::try_unwrap(utxo_mutex) {
-        Ok(mutex) => mutex
-            .into_inner()
-            .map_err(|e| anyhow::anyhow!("IBD UTXO mutex poisoned: {e:?}"))?,
-        Err(arc) => arc
-            .lock()
-            .map_err(|e| anyhow::anyhow!("IBD UTXO mutex poisoned: {e:?}"))?
-            .clone(),
+        Ok(mutex) => {
+            let failed = match mutex.into_inner() {
+                Ok(set) => Ok(set),
+                Err(e) => Err(format!("{e:?}")),
+            };
+            match failed {
+                Ok(set) => set,
+                Err(msg) => {
+                    assigner.request_shutdown();
+                    join_download_handles_after_grace(download_handles).await;
+                    return Err(anyhow::anyhow!("IBD UTXO mutex poisoned: {msg}"));
+                }
+            }
+        }
+        Err(arc) => {
+            let failed = match arc.lock() {
+                Ok(guard) => Ok(guard.clone()),
+                Err(e) => Err(format!("{e:?}")),
+            };
+            match failed {
+                Ok(set) => set,
+                Err(msg) => {
+                    assigner.request_shutdown();
+                    join_download_handles_after_grace(download_handles).await;
+                    return Err(anyhow::anyhow!("IBD UTXO mutex poisoned: {msg}"));
+                }
+            }
+        }
     };
 
     // F-C2: catch durable chain_info tip up to validated height before Phase 3.
@@ -5461,6 +5707,9 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     // F-C3: refuse Phase 3 / Ok if durable tip still lags IBD end (export poison risk).
     let durable_tip = storage.chain().get_height().ok().flatten().unwrap_or(0);
     if durable_tip < effective_end_final {
+        assigner.request_shutdown();
+        CHECKPOINT_EXPORT_STOP.store(true, Ordering::Release);
+        join_download_handles_after_grace(download_handles).await;
         return Err(anyhow::anyhow!(
             "Parallel IBD durable tip lag: chain_tip={durable_tip} validated={validated_through} need={effective_end_final} \
                  (refuse Phase 3 / export_h advance past block tip)"
@@ -5475,63 +5724,7 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     // stall after tip sync with no Phase 3 log). Abort any still-hung tasks after grace.
     clear_live_assigner();
     assigner.request_shutdown();
-    let n_dl = download_handles.len();
-    info!(
-        "[IBD_DOWNLOAD_JOIN] joining {} download worker(s) before Phase 3",
-        n_dl
-    );
-    let join_grace = std::time::Duration::from_secs(
-        std::env::var("BLVM_IBD_DOWNLOAD_JOIN_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(45),
-    );
-    let join_deadline = std::time::Instant::now() + join_grace;
-    let mut pending = download_handles;
-    let mut joined = 0usize;
-    let mut aborted = 0usize;
-    while !pending.is_empty() {
-        let mut i = 0;
-        while i < pending.len() {
-            if pending[i].1.is_finished() {
-                let (chunk_start, handle) = pending.swap_remove(i);
-                match handle.await {
-                    Ok(()) => joined += 1,
-                    Err(e) => {
-                        debug!("Download task for chunk {} ended: {}", chunk_start, e);
-                        joined += 1;
-                    }
-                }
-            } else {
-                i += 1;
-            }
-        }
-        if pending.is_empty() {
-            break;
-        }
-        if std::time::Instant::now() >= join_deadline {
-            warn!(
-                "[IBD_DOWNLOAD_JOIN] {} worker(s) still in-flight after {:?} — aborting so Phase 3 can proceed",
-                pending.len(),
-                join_grace
-            );
-            for (chunk_start, handle) in pending.drain(..) {
-                handle.abort();
-                let _ = handle.await;
-                aborted += 1;
-                debug!(
-                    "Download task for chunk {} aborted after join grace",
-                    chunk_start
-                );
-            }
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    info!(
-        "[IBD_DOWNLOAD_JOIN] done (joined={}, aborted={})",
-        joined, aborted
-    );
+    join_download_handles_after_grace(download_handles).await;
     // Reclaim jemalloc retained from validation workers before tip export (coexist with
     // other large processes — blvm must adapt, not assume the host is empty).
     let _ = memory::maybe_purge_jemalloc_retained("phase3_pre_export");
@@ -5543,12 +5736,9 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     if let Some(ref db) = utxo_engine_for_export {
         let tip_i32 = effective_end_final as i32;
         let tip_u = effective_end_final;
-        let export_h = storage
-            .chain()
-            .get_engine_export_height()
-            .ok()
-            .flatten()
-            .unwrap_or(0);
+        let export_h = crate::node::reliability_decisions::stored_export_height_or_zero(
+            storage.chain().get_engine_export_height(),
+        )?;
         let active_slot = storage.chain().get_engine_ckpt_slot().unwrap_or(0);
         let active_name = crate::storage::ibd_engine::ckpt_tree_for_slot(active_slot);
         let slot_h = storage
@@ -5611,7 +5801,7 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
                 crate::storage::ibd_engine::sync_tree_after_persist(tree.as_ref())
                     .context("Phase 3 catch-up sync")?;
                 let bytes = muhash.serialize_running_state();
-                storage
+                let stored_checkpoint = storage
                     .chain()
                     .persist_engine_checkpoint_complete(
                         tip_u,
@@ -5621,6 +5811,9 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
                         &bytes,
                     )
                     .context("persist Phase 3 catch-up checkpoint")?;
+                if !stored_checkpoint {
+                    anyhow::bail!("Phase 3 catch-up refused checkpoint at height {tip_u}");
+                }
                 storage
                     .chain()
                     .set_ibd_utxo_canonical_tree(write_name)
@@ -5655,8 +5848,11 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
                     .context("Phase 3 watermark export sync")?;
                 storage
                     .chain()
-                    .set_ibd_utxo_canonical_tree(crate::storage::ibd_engine::IBD_UTXOS_TREE)
-                    .context("set canonical IBD UTXO tree to ibd_utxos")?;
+                    .persist_canonical_tree_and_export_height(
+                        crate::storage::ibd_engine::IBD_UTXOS_TREE,
+                        effective_end_final,
+                    )
+                    .context("record canonical tree and export height together")?;
                 let bytes = muhash.serialize_running_state();
                 storage
                     .chain()
@@ -5711,6 +5907,18 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
             .await;
     }
     Ok(())
+}
+
+/// `BLVM_IBD_BRIDGE_PENDING_MAX` when it is at least 32, capped by the reorder
+/// limit. Unset, or a value below 32, uses that limit clamped to 128..=512 (F56).
+pub(crate) fn clamped_bridge_pending_max(raw: Option<&str>, coord_buffer_limit: usize) -> usize {
+    match raw
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 32)
+    {
+        Some(n) => n.min(coord_buffer_limit),
+        None => coord_buffer_limit.clamp(128, 512),
+    }
 }
 
 async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
@@ -5787,6 +5995,7 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                 already_dispatched,
                 &mut local_gap_miss_logged,
                 tip_in_pipeline,
+                coord_buffer_limit,
             )
         });
         let injected = match inject {
@@ -6042,10 +6251,16 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                     .max(effective_end_live_for_coord.load(Ordering::Relaxed)),
                 next_needed,
             );
-            let admit_win = admit_window_for_height(
+            let raw_early = admit_window_for_height(
                 next_needed,
                 effective_gap_admit_window(wan_tip_crawl_early, bulk_early),
             );
+            let admit_win = if (raw_early as usize) > coord_buffer_limit {
+                bound_bulk_windows(coord_buffer_limit, raw_early as usize, coord_buffer_limit).0
+                    as u64
+            } else {
+                raw_early
+            };
             let early_drain_t0 = std::time::Instant::now();
             // W6/N14: release-side tip latch before channel drain / bulk admit.
             if let Some((h, block, witnesses)) = tip_release::take_tip_release() {
@@ -6238,10 +6453,10 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                             ready.insert(p.clone());
                             continue;
                         }
-                        if let Ok(addr) = p.parse::<std::net::SocketAddr>() {
-                            if net.peer_ibd_ready(addr).await {
-                                ready.insert(p.clone());
-                            }
+                        if let Ok(addr) = p.parse::<std::net::SocketAddr>()
+                            && net.peer_ibd_ready(addr).await
+                        {
+                            ready.insert(p.clone());
                         }
                     }
                     // Active local-disk workers are always ready (no handshake).
@@ -6259,12 +6474,11 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                             Some((p, scorer.tip_owner_score(&addr)))
                         })
                         .collect();
-                    if let Some(pref) = assigner.preferred_tip_owner() {
-                        if let Ok(addr) = pref.parse::<std::net::SocketAddr>() {
-                            if !scored.iter().any(|(p, _)| p == &pref) {
-                                scored.push((pref, scorer.tip_owner_score(&addr)));
-                            }
-                        }
+                    if let Some(pref) = assigner.preferred_tip_owner()
+                        && let Ok(addr) = pref.parse::<std::net::SocketAddr>()
+                        && !scored.iter().any(|(p, _)| p == &pref)
+                    {
+                        scored.push((pref, scorer.tip_owner_score(&addr)));
                     }
                     if !scored.is_empty() {
                         scored.sort_by(|a, b| {
@@ -6303,15 +6517,15 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                         "[IBD_READY_REFRESH_TIMEOUT] 250ms — skipped to keep tip channel draining (W67)"
                     );
                 }
-                if !synthetic_wan::bulk_local_disk_stream() {
-                    if let Some(n) = network_for_coord.as_ref() {
-                        tip_probe::coord_tick(
-                            Arc::clone(n),
-                            Arc::clone(&blockstore_for_coord),
-                            Arc::clone(&assigner_for_coord),
-                            validation_height_for_coord.load(Ordering::Relaxed),
-                        );
-                    }
+                if !synthetic_wan::bulk_local_disk_stream()
+                    && let Some(n) = network_for_coord.as_ref()
+                {
+                    tip_probe::coord_tick(
+                        Arc::clone(n),
+                        Arc::clone(&blockstore_for_coord),
+                        Arc::clone(&assigner_for_coord),
+                        validation_height_for_coord.load(Ordering::Relaxed),
+                    );
                 }
                 // Flush-path tip: copy only if something live published.
                 // GAP_PERSIST must not publish (R-196 leftover genesis).
@@ -6423,10 +6637,15 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                 .max(effective_end_live_for_coord.load(Ordering::Relaxed)),
             next_for_admit,
         );
-        let admit_window = admit_window_for_height(
+        let raw_admit = admit_window_for_height(
             next_for_admit,
             effective_gap_admit_window(wan_tip_crawl_now, bulk_catchup_now),
         );
+        let admit_window = if (raw_admit as usize) > coord_buffer_limit {
+            bound_bulk_windows(coord_buffer_limit, raw_admit as usize, coord_buffer_limit).0 as u64
+        } else {
+            raw_admit
+        };
         let coord_stall_effective_secs = if assigner_for_coord.is_bootstrap_complete() {
             coord_stall_log_secs
         } else {
@@ -6719,32 +6938,32 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                 };
                 let current = max_ahead_live.load(Ordering::Relaxed);
                 // L1/W11 proactive: even without bridge-full, hold ahead cap.
-                if let Some((kind, lc)) = ahead_cap {
-                    if current > lc {
-                        max_ahead_live.store(lc, Ordering::Relaxed);
-                        let log_now = ahead_clamp_logged_at
-                            .map(|t| t.elapsed() > Duration::from_secs(30))
-                            .unwrap_or(true);
-                        if log_now {
-                            if kind == "local" {
-                                info!(
-                                    "[IBD_LOCAL_AHEAD] next_needed={} ≤ body_tip={} — max_ahead {} → {} (BLVM_IBD_LOCAL_AHEAD)",
-                                    next_needed, live_body_tip_for_coord, current, lc
-                                );
-                            } else {
-                                info!(
-                                    "[IBD_WAN_AHEAD] next_needed={} body_tip={} feeder={} gap_missing={} — max_ahead {} → {} ({})",
-                                    next_needed,
-                                    live_body_tip_for_coord,
-                                    feeder_len,
-                                    gap_missing_coord,
-                                    current,
-                                    lc,
-                                    kind
-                                );
-                            }
-                            ahead_clamp_logged_at = Some(std::time::Instant::now());
+                if let Some((kind, lc)) = ahead_cap
+                    && current > lc
+                {
+                    max_ahead_live.store(lc, Ordering::Relaxed);
+                    let log_now = ahead_clamp_logged_at
+                        .map(|t| t.elapsed() > Duration::from_secs(30))
+                        .unwrap_or(true);
+                    if log_now {
+                        if kind == "local" {
+                            info!(
+                                "[IBD_LOCAL_AHEAD] next_needed={} ≤ body_tip={} — max_ahead {} → {} (BLVM_IBD_LOCAL_AHEAD)",
+                                next_needed, live_body_tip_for_coord, current, lc
+                            );
+                        } else {
+                            info!(
+                                "[IBD_WAN_AHEAD] next_needed={} body_tip={} feeder={} gap_missing={} — max_ahead {} → {} ({})",
+                                next_needed,
+                                live_body_tip_for_coord,
+                                feeder_len,
+                                gap_missing_coord,
+                                current,
+                                lc,
+                                kind
+                            );
                         }
+                        ahead_clamp_logged_at = Some(std::time::Instant::now());
                     }
                 }
                 let current = max_ahead_live.load(Ordering::Relaxed);
@@ -7346,15 +7565,15 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                 {
                     continue;
                 }
-                if let Some(ref bridge) = ready_bridge_for_coord {
-                    if !bridge.may_accept_height(h, bridge_pending_max) {
-                        // Do NOT break: ascending order hits refused ahead heights
-                        // before next_expected when the gap sits later in reorder.
-                        // may_accept always allows next_expected — skip and keep looking
-                        // (live: inject 9111 then stall forever with bridge_pending=512).
-                        bridge_capped = true;
-                        continue;
-                    }
+                if let Some(ref bridge) = ready_bridge_for_coord
+                    && !bridge.may_accept_height(h, bridge_pending_max)
+                {
+                    // Do NOT break: ascending order hits refused ahead heights
+                    // before next_expected when the gap sits later in reorder.
+                    // may_accept always allows next_expected — skip and keep looking
+                    // (live: inject 9111 then stall forever with bridge_pending=512).
+                    bridge_capped = true;
+                    continue;
                 }
                 let Some((block, witnesses)) = reorder_buffer.remove(&h) else {
                     continue;
@@ -7446,41 +7665,39 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                 }
                 // If the gap is now in reorder (inject or prior), dispatch it this
                 // iteration — do not sleep past a ready next_expected.
-                if !dispatched.contains(&next_needed) {
-                    if let Some(ref bridge) = ready_bridge_for_coord {
-                        if bridge.may_accept_height(next_needed, bridge_pending_max) {
-                            if let Some((block, witnesses)) = reorder_buffer.remove(&next_needed) {
-                                dispatched.insert(next_needed);
-                                if next_needed >= next_prefetch_height {
-                                    next_prefetch_height = next_needed + 1;
-                                }
-                                prepare_coord_dispatch_bufs(
-                                    coord_engine_mode,
-                                    &block,
-                                    &mut coord_tx_ids_buf,
-                                    &mut coord_keys_buf,
-                                );
-                                let store = &ibd_store_v2_for_coord;
-                                let keys_owned = std::mem::take(&mut coord_keys_buf);
-                                let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
-                                if let Some((h, block, witnesses)) = dispatch_to_prefetch((
-                                    Arc::clone(store),
-                                    keys_owned,
-                                    tx_ids_owned,
-                                    next_needed,
-                                    block,
-                                    witnesses,
-                                    coord_engine_mode,
-                                )) {
-                                    dispatched.remove(&h);
-                                    reorder_buffer.insert(h, (block, witnesses));
-                                } else {
-                                    coord_buffer_full_since = None;
-                                }
-                                continue;
-                            }
-                        }
+                if !dispatched.contains(&next_needed)
+                    && let Some(ref bridge) = ready_bridge_for_coord
+                    && bridge.may_accept_height(next_needed, bridge_pending_max)
+                    && let Some((block, witnesses)) = reorder_buffer.remove(&next_needed)
+                {
+                    dispatched.insert(next_needed);
+                    if next_needed >= next_prefetch_height {
+                        next_prefetch_height = next_needed + 1;
                     }
+                    prepare_coord_dispatch_bufs(
+                        coord_engine_mode,
+                        &block,
+                        &mut coord_tx_ids_buf,
+                        &mut coord_keys_buf,
+                    );
+                    let store = &ibd_store_v2_for_coord;
+                    let keys_owned = std::mem::take(&mut coord_keys_buf);
+                    let tx_ids_owned = std::mem::take(&mut coord_tx_ids_buf);
+                    if let Some((h, block, witnesses)) = dispatch_to_prefetch((
+                        Arc::clone(store),
+                        keys_owned,
+                        tx_ids_owned,
+                        next_needed,
+                        block,
+                        witnesses,
+                        coord_engine_mode,
+                    )) {
+                        dispatched.remove(&h);
+                        reorder_buffer.insert(h, (block, witnesses));
+                    } else {
+                        coord_buffer_full_since = None;
+                    }
+                    continue;
                 }
                 tokio::time::sleep(IBD_YIELD_SLEEP).await;
                 continue;
@@ -7491,12 +7708,12 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
             continue;
         }
         #[cfg(target_os = "linux")]
-        if let Some(pipeline_quarter) = emergency_pipeline_quarter {
-            if !emergency_may_bulk_recv(&reorder_buffer, pipeline_quarter) {
-                // Buffer quarter full — skip bulk recv_many but keep dispatching above.
-                tokio::time::sleep(IBD_YIELD_SLEEP).await;
-                continue;
-            }
+        if let Some(pipeline_quarter) = emergency_pipeline_quarter
+            && !emergency_may_bulk_recv(&reorder_buffer, pipeline_quarter)
+        {
+            // Buffer quarter full — skip bulk recv_many but keep dispatching above.
+            tokio::time::sleep(IBD_YIELD_SLEEP).await;
+            continue;
         }
         // When the validation gap is missing from reorder, do not park on the full
         // coordinator stall timeout (15–30s). That made LOCAL_GAP inject run once per
@@ -7917,7 +8134,7 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                 // Every 10 stalls: emit a deeper diagnostic to verify validation_height
                 // and prefetch channel health (helps distinguish true validation stall
                 // from coordinator-reads-stale-height phantom stall).
-                if coord_stall_count % 10 == 0 {
+                if coord_stall_count.is_multiple_of(10) {
                     let vh_raw =
                         validation_height_for_coord.load(std::sync::atomic::Ordering::SeqCst);
                     warn!(
@@ -8037,7 +8254,7 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                 if total_received == 1 {
                     info!("Coordinator: first block received, height {}", h);
                 }
-                if total_received <= 3 || total_received % 500 == 0 {
+                if total_received <= 3 || total_received.is_multiple_of(500) {
                     debug!(
                         "[IBD] Coordinator: block {} (total_received={}) [sequential]",
                         h, total_received
@@ -8149,7 +8366,7 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                         );
                     }
                 }
-                if total_received <= 3 || total_received % 500 == 0 {
+                if total_received <= 3 || total_received.is_multiple_of(500) {
                     debug!(
                         "[IBD] Coordinator: block {} (total_received={}, reorder_len={})",
                         height,
@@ -8254,13 +8471,13 @@ async fn run_ibd_coordinator(ctx: IbdCoordinatorCtx) {
                 {
                     continue;
                 }
-                if let Some(ref bridge) = ready_bridge_for_coord {
-                    if !bridge.may_accept_height(h, bridge_pending_max) {
-                        // Skip refused ahead heights; keep scanning for next_expected
-                        // (always allowed). Breaking here wedged gap fills behind
-                        // lower refused keys while bridge_pending was at cap.
-                        continue;
-                    }
+                if let Some(ref bridge) = ready_bridge_for_coord
+                    && !bridge.may_accept_height(h, bridge_pending_max)
+                {
+                    // Skip refused ahead heights; keep scanning for next_expected
+                    // (always allowed). Breaking here wedged gap fills behind
+                    // lower refused keys while bridge_pending was at cap.
+                    continue;
                 }
                 let Some((block, witnesses)) = reorder_buffer.remove(&h) else {
                     continue;
@@ -8415,41 +8632,40 @@ impl ParallelIBD {
         // → `Connected to 64`) and never replaced during IBD; evicted / gone / never-ready
         // peers thinned `ready` every run. Re-run `connect_peers_from_database` while the
         // session is live and the connected count is under target. Pinned peers: skip.
-        if let Some(ref net) = network {
-            if let (Some(target), false) =
+        if let Some(ref net) = network
+            && let (Some(target), false) =
                 (ibd_roster_target(), skip_ibd_archive_dns_seed_for(peer_ids))
-            {
-                let net_clone = Arc::clone(net);
-                let session_id = PARALLEL_IBD_SESSION_ID.load(Ordering::Acquire) + 1;
-                tokio::spawn(async move {
-                    let every = std::time::Duration::from_secs(ibd_roster_topup_secs());
-                    let mut wait = std::time::Duration::from_secs(10).min(every);
-                    loop {
-                        tokio::time::sleep(wait).await;
-                        wait = every;
-                        if !PARALLEL_IBD_SESSION_ACTIVE.load(Ordering::Acquire)
-                            || IBD_SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
-                            || PARALLEL_IBD_SESSION_ID.load(Ordering::Acquire) != session_id
-                        {
-                            break;
-                        }
-                        let have = net_clone.peer_count();
-                        if have >= target {
-                            continue;
-                        }
-                        match net_clone.connect_peers_from_database(target).await {
-                            Ok(n) => info!(
-                                "[IBD_ROSTER_TOPUP] peers={} target={} connected={}",
-                                have, target, n
-                            ),
-                            Err(e) => warn!(
-                                "[IBD_ROSTER_TOPUP] peers={} target={} failed: {}",
-                                have, target, e
-                            ),
-                        }
+        {
+            let net_clone = Arc::clone(net);
+            let session_id = PARALLEL_IBD_SESSION_ID.load(Ordering::Acquire) + 1;
+            tokio::spawn(async move {
+                let every = std::time::Duration::from_secs(ibd_roster_topup_secs());
+                let mut wait = std::time::Duration::from_secs(10).min(every);
+                loop {
+                    tokio::time::sleep(wait).await;
+                    wait = every;
+                    if !PARALLEL_IBD_SESSION_ACTIVE.load(Ordering::Acquire)
+                        || IBD_SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
+                        || PARALLEL_IBD_SESSION_ID.load(Ordering::Acquire) != session_id
+                    {
+                        break;
                     }
-                });
-            }
+                    let have = net_clone.peer_count();
+                    if have >= target {
+                        continue;
+                    }
+                    match net_clone.connect_peers_from_database(target).await {
+                        Ok(n) => info!(
+                            "[IBD_ROSTER_TOPUP] peers={} target={} connected={}",
+                            have, target, n
+                        ),
+                        Err(e) => warn!(
+                            "[IBD_ROSTER_TOPUP] peers={} target={} failed: {}",
+                            have, target, e
+                        ),
+                    }
+                }
+            });
         }
         let _ibd_session_guard = ParallelIbdSessionGuard {
             network: network.clone(),
@@ -8554,7 +8770,7 @@ impl ParallelIBD {
         }
         let ibd_tuning = IbdTuningContext {
             storage_backend: storage.database_backend(),
-            ibd_dedicated: self.config.dedicated,
+            memory_request: self.config.memory_request,
             db_file_size_mb,
         };
         let mut mem_guard = MemoryGuard::new_for_ibd(ibd_tuning);
@@ -8712,26 +8928,25 @@ impl ParallelIBD {
                 "WAN multi-peer IBD: {} peers, 1 worker/peer, work-stealing, peer blacklisting (set BLVM_IBD_WAN_SINGLE_PEER=1 to force single-peer)",
                 filtered_peers.len()
             );
-        } else if filtered_peers.len() == 1 {
-            if let Ok(addr) = filtered_peers[0].parse::<SocketAddr>() {
-                if !is_lan_peer(&addr) {
-                    info!(
-                        "WAN-only IBD: single fastest peer {} for download (mode={})",
-                        filtered_peers[0], ibd_mode
-                    );
-                }
-            }
+        } else if filtered_peers.len() == 1
+            && let Ok(addr) = filtered_peers[0].parse::<SocketAddr>()
+            && !is_lan_peer(&addr)
+        {
+            info!(
+                "WAN-only IBD: single fastest peer {} for download (mode={})",
+                filtered_peers[0], ibd_mode
+            );
         }
 
         // mode=sequential: single-peer mode. Core-like earliest-first, no chunk-boundary stalls.
-        if ibd_mode.eq_ignore_ascii_case("sequential") {
-            if let Some(best) = filtered_peers.first().cloned() {
-                filtered_peers = vec![best.clone()];
-                info!(
-                    "BLVM_IBD_MODE=sequential: single-peer mode ({}), Core-like block fetch",
-                    best
-                );
-            }
+        if ibd_mode.eq_ignore_ascii_case("sequential")
+            && let Some(best) = filtered_peers.first().cloned()
+        {
+            filtered_peers = vec![best.clone()];
+            info!(
+                "BLVM_IBD_MODE=sequential: single-peer mode ({}), Core-like block fetch",
+                best
+            );
         }
 
         // Split the height range into chunks and assign peers (weighted by speed).
@@ -9053,198 +9268,14 @@ impl ParallelIBD {
         );
         #[cfg(target_os = "linux")]
         memory::refresh_stale_emergency_pressure(coord_rss_budget_mb);
-        let engine_will_run = self.config.utxo_engine;
-        let ibd_path_reason = match std::env::var("BLVM_IBD_ENGINE") {
-            Ok(v)
-                if v.trim() == "0"
-                    || v.eq_ignore_ascii_case("false")
-                    || v.eq_ignore_ascii_case("no") =>
-            {
-                "BLVM_IBD_ENGINE=0"
-            }
-            Ok(v)
-                if v.trim() == "1"
-                    || v.eq_ignore_ascii_case("true")
-                    || v.eq_ignore_ascii_case("yes") =>
-            {
-                "BLVM_IBD_ENGINE=1"
-            }
-            Ok(_) => "BLVM_IBD_ENGINE set (unrecognized value — using config default)",
-            Err(_) if !engine_will_run => "[ibd].utxo_engine=false",
-            Err(_) => "default (engine on)",
-        };
-        info!(
-            "IBD UTXO path: {} ({})",
-            if engine_will_run { "engine" } else { "legacy" },
-            ibd_path_reason
-        );
-        if !engine_will_run {
-            warn!(
-                "IBD legacy UTXO path is deprecated; prefer engine (default). \
-                 Set BLVM_IBD_ENGINE unset or remove utxo_engine=false to migrate."
-            );
-        }
-        // IBD v2 (IbdUtxoStore) is the only path. Storage is guaranteed Some (checked at start).
-        let ibd_memory_only: bool =
-            (self.config.memory_only && start_height <= 1) || engine_will_run;
-        // Keeps the standalone LMDB environment alive for the duration of IBD (dropped after
-        // `ibd_store_v2` is no longer used). The `Heed3Tree`'s Arc<Env> would keep the env
-        // alive on its own, but holding the Box<dyn Database> here makes the lifetime explicit
-        // and ensures a clean shutdown flush sequence.
-        let _ibd_utxo_standalone_db: Option<Box<dyn crate::storage::database::Database>>;
+        info!("IBD UTXO path: engine");
+        let ibd_memory_only = true;
         let ibd_store_v2: Arc<IbdUtxoStore> = {
-            // Open the IBD UTXO tree from a SEPARATE, fresh LMDB environment when possible.
-            //
-            // The main storage LMDB holds 400+ GB of block data. After `ibd_utxos.clear()` is
-            // called during autorepair, millions of freed pages are scattered throughout this
-            // file. LMDB reuses freed pages for new allocations, which requires reading each
-            // old page from a random file offset (page fault, ~89% cache-miss rate on a large
-            // file). At h=385k this causes 40+ seconds per 200k-op write transaction.
-            //
-            // A separate fresh LMDB at `<data_dir>/ibd_utxo_store/` allocates pages
-            // sequentially from the end of a small file. With no free-list bloat, the same
-            // 200k-op batch completes in ~1 second — a 40x improvement.
-            //
-            // SELECTION RULE (preserves backward compatibility):
-            //   1. If standalone LMDB exists AND is non-empty → use standalone (resumed session
-            //      that already wrote to the standalone store).
-            //   2. If standalone is empty/absent AND main storage's `ibd_utxos` is non-empty →
-            //      use main storage (legacy partial IBD or previous session without standalone).
-            //   3. If both are empty (fresh start or post-repair) → use standalone (future writes
-            //      go to the small, unfragmented file).
-            //   4. If standalone creation fails → fall back to main storage.
-            let tree: std::sync::Arc<dyn crate::storage::database::Tree> = {
-                let maybe_data_dir = storage.data_dir();
-                if engine_will_run {
-                    _ibd_utxo_standalone_db = None;
-                    info!(
-                        "IBD engine mode: skipping standalone {}/ LMDB (no 128GiB mmap reservation)",
-                        IBD_UTXO_STORE_SUBDIR
-                    );
-                    storage
-                        .open_tree("ibd_utxos")
-                        .context("Failed to open IBD UTXO tree (engine legacy shell)")?
-                } else if let Some(ref root) = maybe_data_dir {
-                    let utxo_store_dir = root.join(IBD_UTXO_STORE_SUBDIR);
-                    match crate::storage::database::create_ibd_utxo_standalone_db(&utxo_store_dir) {
-                        Ok(standalone_db) => {
-                            let standalone_tree = standalone_db.open_tree("ibd_utxos");
-                            let standalone_non_empty = match &standalone_tree {
-                                Ok(tree) => {
-                                    let empty =
-                                        tree.is_empty().context("standalone ibd_utxos is_empty")?;
-                                    !empty
-                                }
-                                Err(_) => false,
-                            };
-
-                            // Case 0: standalone has data from a prior session BUT we are
-                            // replaying from genesis (start_height == 0 ← watermark was not
-                            // durably written on the previous exit, so ibd_resume_heights reset
-                            // synced_tip to 0). Reusing that stale data causes UTXO_TOTAL_MISS:
-                            // old DEL tombstones shadow UTXOs that the fresh replay needs to
-                            // look up, and UTXOs added before the prior session's last
-                            // checkpoint exist in LMDB but with the wrong generation context.
-                            // Fix: drop the env, wipe the directory, and open a clean instance.
-                            if standalone_non_empty && start_height == 0 {
-                                warn!(
-                                    "[IBD_UTXO_STORE] standalone LMDB is non-empty but \
-                                     start_height=0 (watermark not durably written on prior exit). \
-                                     Wiping stale standalone data to prevent UTXO_TOTAL_MISS \
-                                     during local replay."
-                                );
-                                drop(standalone_tree);
-                                drop(standalone_db);
-                                reopen_after_stale_wipe(
-                                    || std::fs::remove_dir_all(&utxo_store_dir),
-                                    || Ok(()),
-                                )?;
-                                match crate::storage::database::create_ibd_utxo_standalone_db(
-                                    &utxo_store_dir,
-                                ) {
-                                    Ok(fresh_db) => {
-                                        info!(
-                                            "IBD UTXO store: using SEPARATE LMDB at {:?} \
-                                             (fresh after stale-wipe — avoids free-list bloat)",
-                                            utxo_store_dir
-                                        );
-                                        let fresh_tree = fresh_db
-                                            .open_tree("ibd_utxos")
-                                            .context("open ibd_utxos after stale-wipe")?;
-                                        _ibd_utxo_standalone_db = Some(fresh_db);
-                                        std::sync::Arc::from(fresh_tree)
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            "create_ibd_utxo_standalone_db failed after \
-                                             stale-wipe ({e}); falling back to main storage"
-                                        );
-                                        _ibd_utxo_standalone_db = None;
-                                        storage.open_tree("ibd_utxos").context(
-                                            "Failed to open IBD UTXO tree (stale-wipe fallback)",
-                                        )?
-                                    }
-                                }
-                            } else if standalone_non_empty {
-                                // Case 1: standalone already has data from a prior session.
-                                info!(
-                                    "IBD UTXO store: resuming SEPARATE LMDB at {:?} \
-                                     (contains existing UTXO data from prior session)",
-                                    utxo_store_dir
-                                );
-                                _ibd_utxo_standalone_db = Some(standalone_db);
-                                std::sync::Arc::from(standalone_tree.unwrap())
-                            } else {
-                                // Case 2 or 3: standalone is empty.
-                                // Check if main storage has UTXO data (legacy partial IBD).
-                                let main_tree =
-                                    storage.open_tree("ibd_utxos").context("open ibd_utxos")?;
-                                let main_non_empty =
-                                    main_utxo_tree_non_empty(main_tree.is_empty())?;
-                                if main_non_empty {
-                                    // Case 2: legacy data in main storage — keep using it.
-                                    // Migrating mid-IBD would require copying millions of entries.
-                                    info!(
-                                        "IBD UTXO store: using MAIN storage ibd_utxos \
-                                         (contains existing UTXO data; standalone store is empty). \
-                                         Next fresh IBD will use the standalone store."
-                                    );
-                                    _ibd_utxo_standalone_db = None;
-                                    main_tree
-                                } else {
-                                    // Case 3: both empty → fresh start → use standalone.
-                                    info!(
-                                        "IBD UTXO store: using SEPARATE LMDB at {:?} \
-                                         (fresh IBD start — avoids free-list bloat in main \
-                                         400GB block store LMDB)",
-                                        utxo_store_dir
-                                    );
-                                    _ibd_utxo_standalone_db = Some(standalone_db);
-                                    std::sync::Arc::from(standalone_tree.unwrap())
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!(
-                                "create_ibd_utxo_standalone_db failed ({e}); \
-                                 falling back to main storage ibd_utxos"
-                            );
-                            _ibd_utxo_standalone_db = None;
-                            storage
-                                .open_tree("ibd_utxos")
-                                .context("Failed to open IBD UTXO tree (fallback)")?
-                        }
-                    }
-                } else {
-                    // In-memory or non-file-backed backend — use the main storage.
-                    _ibd_utxo_standalone_db = None;
-                    storage
-                        .open_tree("ibd_utxos")
-                        .context("Failed to open IBD UTXO tree")?
-                }
-            };
+            let tree = storage
+                .open_tree("ibd_utxos")
+                .context("Failed to open IBD UTXO tree")?;
             info!(
-                "IBD v2: IbdUtxoStore (DashMap, zero lock, max_cache={} entries)",
+                "IBD v2: IbdUtxoStore shell (inactive; engine holds the UTXO set), max_cache={} entries",
                 effective_max_entries
             );
             let eviction: crate::storage::ibd_utxo_store::EvictionStrategy = self
@@ -9258,7 +9289,7 @@ impl ParallelIBD {
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| start_height.saturating_sub(1));
-            let store = Arc::new(IbdUtxoStore::new_with_options(
+            Arc::new(IbdUtxoStore::new_with_options(
                 tree,
                 utxo_flush_threshold,
                 ibd_memory_only,
@@ -9266,31 +9297,18 @@ impl ParallelIBD {
                 eviction,
                 utxo_disk_baseline,
                 storage.utxo_value_codec(),
-            ));
-            if start_height <= 1 && !engine_will_run {
-                store.bootstrap_genesis(&protocol.get_network_params().genesis_block);
-            }
-            if ibd_memory_only && !engine_will_run {
-                info!("IBD_MEMORY_ONLY=1: prefetch uses cache only (no disk reads during IBD)");
-            } else if engine_will_run {
-                info!("IBD engine mode: IbdUtxoStore shell inactive (cache-only placeholder)");
-            }
-            store
+            ))
         };
-
-        // Age-tiered UTXO engine (Phase 2). Opened here (before coordinator) so `coord_engine_mode`
-        // reflects the actual runtime path — including resume-after-SIGKILL when we re-seed from
-        // the durable `ibd_utxos` checkpoint.
-        let utxo_engine: Option<Arc<crate::storage::ibd_engine::UtxoDatabase>> = if !engine_will_run
-        {
-            None
-        } else {
+        let utxo_engine: Option<Arc<crate::storage::ibd_engine::UtxoDatabase>> = {
             let engine_path = crate::config::ibd::ibd_engine_path(storage.data_dir().as_deref());
             if let Some(parent) = engine_path.parent() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("create IBD engine directory {}", parent.display()))?;
+                crate::storage::ibd_engine::sweep_dead_export_scratch(parent);
             }
-            let stored_export = storage.chain().get_engine_export_height().ok().flatten();
+            let stored_export = crate::node::reliability_decisions::stored_export_height(
+                storage.chain().get_engine_export_height(),
+            )?;
             let export_override = crate::config::ibd::export_height_override_from_env();
             let (resolved_export, ignored_override) =
                 crate::config::ibd::resolve_engine_export_height(stored_export, export_override);
@@ -9362,7 +9380,7 @@ impl ParallelIBD {
                     let _ = std::fs::remove_dir_all(&segs_path_pre);
                     let _ = std::fs::remove_file(&epoch_path);
                 }
-                let _ = std::fs::write(&dirty_path, b"1" as &[u8]);
+                crate::node::reliability_decisions::mark_engine_dirty(&dirty_path)?;
                 let _ = std::fs::write(&epoch_path, format!("{start_height}\n"));
             }
 
@@ -9385,7 +9403,7 @@ impl ParallelIBD {
                 )
                 .with_context(|| {
                     format!(
-                        "open IBD engine at {} for dirty re-seed (set BLVM_IBD_ENGINE=0 for legacy path)",
+                        "open IBD engine at {} for dirty re-seed",
                         engine_path.display()
                     )
                 })?
@@ -9394,28 +9412,32 @@ impl ParallelIBD {
                     &engine_path,
                     mem_guard.engine_avail_mb(),
                 )
-                .with_context(|| {
-                    format!(
-                        "open IBD engine at {} (set BLVM_IBD_ENGINE=0 for legacy path)",
-                        engine_path.display()
-                    )
-                })?
+                .with_context(|| format!("open IBD engine at {}", engine_path.display()))?
             };
 
             if resume_seed {
-                let ckpt_slot = storage.chain().get_engine_ckpt_slot().unwrap_or(0);
+                let ckpt_slot = crate::node::reliability_decisions::resume_seed_slot(
+                    storage.chain().get_engine_ckpt_slot(),
+                )?;
                 let ckpt_tree_name = crate::storage::ibd_engine::ckpt_tree_for_slot(ckpt_slot);
-                let expected_count = storage
-                    .chain()
-                    .get_engine_export_utxo_count()
-                    .ok()
-                    .flatten();
-                let last_accepted = storage
-                    .chain()
-                    .get_engine_prev_accepted_utxo_count()
-                    .ok()
-                    .flatten()
-                    .unwrap_or(0);
+                let stored_export_count = crate::node::reliability_decisions::resume_seed_count(
+                    storage.chain().get_engine_export_utxo_count(),
+                )?;
+                // A tip connect used to move the export height and rewrite the tree
+                // without the coin count. The slot height still names the export.
+                let expected_count = match stored_export_count {
+                    Some(count) => Some(
+                        crate::node::reorg_executor::export_count_including_unrecorded_connects(
+                            storage.as_ref(),
+                            checkpoint_height as u64,
+                            count,
+                        )?,
+                    ),
+                    None => None,
+                };
+                let last_accepted = crate::node::reliability_decisions::resume_seed_accepted(
+                    storage.chain().get_engine_prev_accepted_utxo_count(),
+                )?;
 
                 let cl = db.contiguous_length();
                 // Ages live in RAM — never skip re-seed when cl > export_h (segments alone are
@@ -9482,6 +9504,15 @@ impl ParallelIBD {
                     .with_context(|| {
                         format!("seed engine from {seed_name} at checkpoint h={checkpoint_height}")
                     })?;
+                    if stored_export_count != Some(n as u64) {
+                        storage.chain().force_set_engine_export_utxo_count_through(
+                            n as u64,
+                            checkpoint_height as u64,
+                        )?;
+                        storage
+                            .chain()
+                            .set_engine_ckpt_slot_height(ckpt_slot, checkpoint_height as u64)?;
+                    }
                     let validation_tip_at_open =
                         storage.chain().get_engine_validation_tip().ok().flatten();
                     let chain_tip_at_open = storage.chain().get_height().ok().flatten();
@@ -9561,6 +9592,15 @@ impl ParallelIBD {
                     .with_context(|| {
                         format!("seed engine from {seed_name} at checkpoint h={checkpoint_height}")
                     })?;
+                    if stored_export_count != Some(n as u64) {
+                        storage.chain().force_set_engine_export_utxo_count_through(
+                            n as u64,
+                            checkpoint_height as u64,
+                        )?;
+                        storage
+                            .chain()
+                            .set_engine_ckpt_slot_height(ckpt_slot, checkpoint_height as u64)?;
+                    }
                     let validation_tip_at_open =
                         storage.chain().get_engine_validation_tip().ok().flatten();
                     let chain_tip_at_open = storage.chain().get_height().ok().flatten();
@@ -9625,6 +9665,14 @@ impl ParallelIBD {
                 None => guard_limit,
             }
         };
+        if let Some(peer_id) =
+            missing_peer_semaphore(&filtered_peers, |id| self.peer_semaphores.contains_key(id))
+        {
+            return Err(anyhow::anyhow!(
+                "Peer {peer_id} not found in peer_semaphores"
+            ));
+        }
+
         let prefetch_workers: usize = if engine_direct_feed {
             0
         } else {
@@ -9694,6 +9742,7 @@ impl ParallelIBD {
         );
 
         let mut download_handles = Vec::new();
+        IBD_DOWNLOAD_FATAL.store(false, Ordering::Release);
         let num_peers = filtered_peers.len();
         let ibd_protocol_version = protocol.get_protocol_version();
         let confirmed_body_height_at_start = probe_confirmed_body_height(&blockstore)
@@ -9708,30 +9757,30 @@ impl ParallelIBD {
             confirmed_body_height_at_start
         };
         if confirmed_body_height_at_start == 0 {
-            if let Ok(Some(header_max)) = blockstore.highest_stored_height() {
-                if header_max > 0 {
-                    let sparse_max = logged_sparse_body_height(sparse_local_body_max, &blockstore);
-                    if sparse_max > 0 {
-                        info!(
-                            "IBD: sparse block bodies on disk up to height {} (header_max={}) \
+            if let Ok(Some(header_max)) = blockstore.highest_stored_height()
+                && header_max > 0
+            {
+                let sparse_max = logged_sparse_body_height(sparse_local_body_max, &blockstore);
+                if sparse_max > 0 {
+                    info!(
+                        "IBD: sparse block bodies on disk up to height {} (header_max={}) \
                              — per-height write skip active; contiguous replay from genesis unavailable",
-                            sparse_max, header_max
-                        );
-                    } else {
-                        info!(
-                            "IBD: height_index has {header_max} entries but no block bodies found \
+                        sparse_max, header_max
+                    );
+                } else {
+                    info!(
+                        "IBD: height_index has {header_max} entries but no block bodies found \
                              — starting fresh (no local replay)"
-                        );
-                    }
+                    );
                 }
             }
-        } else if let Ok(Some(header_max)) = blockstore.highest_stored_height() {
-            if confirmed_body_height_at_start < header_max {
-                info!(
-                    "IBD: block bodies confirmed up to height {} (header_max={})",
-                    confirmed_body_height_at_start, header_max
-                );
-            }
+        } else if let Ok(Some(header_max)) = blockstore.highest_stored_height()
+            && confirmed_body_height_at_start < header_max
+        {
+            info!(
+                "IBD: block bodies confirmed up to height {} (header_max={})",
+                confirmed_body_height_at_start, header_max
+            );
         }
 
         for peer_id in &filtered_peers {
@@ -9966,7 +10015,10 @@ impl ParallelIBD {
             // R-342 200–250k 40.2 BPS at 20 ms poll (R-341 418.7). The limit must sit above
             // anything admission allows; the admit window is the memory governor.
             if wan_multi_peer {
-                limit = limit.max(wan_bulk_admit_window() as usize + 512);
+                let ram_cap_blocks = (total_ram_mb / 40).clamp(64, 2000) as usize;
+                let (_admit, raised) =
+                    bound_bulk_windows(limit, wan_bulk_admit_window() as usize, ram_cap_blocks);
+                limit = raised;
             }
             limit
         };
@@ -9974,11 +10026,10 @@ impl ParallelIBD {
         // engine-mode dispatch dumps every ahead height into the bridge and pending grows to
         // 3–4k (~6–8 GB) while validation waits on a single gap. Default: ≤512 or reorder cap.
         // Override: BLVM_IBD_BRIDGE_PENDING_MAX (≥32).
-        let bridge_pending_max: usize = std::env::var("BLVM_IBD_BRIDGE_PENDING_MAX")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .filter(|&n| n >= 32)
-            .unwrap_or_else(|| coord_buffer_limit.clamp(128, 512));
+        let bridge_pending_max: usize = clamped_bridge_pending_max(
+            std::env::var("BLVM_IBD_BRIDGE_PENDING_MAX").ok().as_deref(),
+            coord_buffer_limit,
+        );
         if wan_multi_peer {
             info!(
                 "Coordinator: WAN multi-peer reorder buffer={} blocks",
@@ -10304,6 +10355,9 @@ impl ParallelIBD {
         let pin_height = blvm_consensus::block::get_assume_valid_height();
         let hash_at_pin = blockstore.get_hash_by_height(pin_height).ok().flatten();
         let assume_valid_pin_connected = crate::config::assume_valid_pin_connected(hash_at_pin);
+        // Consensus 0.1.84 takes the two-week burial as an argument. No best
+        // header is recorded here, so the signature skip stays closed.
+        let assume_valid_buried = false;
         let (result, new_utxo_set, tx_ids, utxo_delta, undo_log) =
             blvm_consensus::block::connect_block_ibd_with_undo(
                 block,
@@ -10318,6 +10372,7 @@ impl ParallelIBD {
                 best_header_chainwork,
                 ibd_utxo_lookup,
                 assume_valid_pin_connected,
+                assume_valid_buried,
             )?;
 
         *utxo_set = new_utxo_set;
@@ -10420,6 +10475,33 @@ impl ParallelIBD {
             dir.display(),
             height
         );
+        Self::retain_recent_height_dumps(std::path::Path::new(base), 8);
+    }
+
+    fn retain_recent_height_dumps(base: &std::path::Path, keep: usize) {
+        let Ok(entries) = std::fs::read_dir(base) else {
+            return;
+        };
+        let mut heights = Vec::new();
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let Some(rest) = name.strip_prefix("height_") else {
+                continue;
+            };
+            let Ok(height) = rest.parse::<u64>() else {
+                continue;
+            };
+            if entry.path().is_dir() {
+                heights.push((height, entry.path()));
+            }
+        }
+        heights.sort_by_key(|(height, _)| *height);
+        let drop_n = heights.len().saturating_sub(keep);
+        for (_, path) in heights.into_iter().take(drop_n) {
+            let _ = std::fs::remove_dir_all(path);
+        }
     }
 
     /// Dump successful block + witnesses + pre-state UTXO at IBD milestones for snapshot tests.
@@ -11032,13 +11114,13 @@ impl ParallelIBD {
         // or `get_height()` / restarts see `chain_info` missing despite full block index.
         // pending is sorted by height; last entry is the tip.
         if let Some(storage) = _storage {
-            if let Some(tip_hash) = tip_hash_for_update {
-                if let Some((block, _, tip_height, _)) = pending.last() {
-                    storage.ensure_parent_chainwork(&block.header, *tip_height)?;
-                    storage
-                        .chain()
-                        .update_tip(&tip_hash, &block.header, *tip_height)?;
-                }
+            if let Some(tip_hash) = tip_hash_for_update
+                && let Some((block, _, tip_height, _)) = pending.last()
+            {
+                storage.ensure_parent_chainwork(&block.header, *tip_height)?;
+                storage
+                    .chain()
+                    .update_tip(&tip_hash, &block.header, *tip_height)?;
             }
             // Force durable commit under MDB_NOSYNC so chain_tip / height index survive
             // SIGTERM before the next watermark export can race ahead of block bodies.

@@ -172,64 +172,6 @@ fn nosync_switch_returns() {
 }
 
 #[test]
-fn custom_prune_drops_the_tx_index_when_asked() {
-    let (_dir, db) = temp_db();
-    let blockstore = Arc::new(BlockStore::new(Arc::clone(&db)).unwrap());
-    let index = Arc::new(TxIndex::new(Arc::clone(&db)).unwrap());
-    let block = sample_block(1);
-    store_body(&blockstore, &block, 0);
-    let tx = &block.transactions[0];
-    let txid = blvm_protocol::block::calculate_tx_id(tx);
-    let hash = header_hash(&block.header);
-    index.index_transaction(tx, &hash, 0, 0).unwrap();
-    let config = PruningConfig {
-        mode: PruningMode::Custom {
-            keep_headers: true,
-            keep_bodies_from_height: 1,
-            keep_commitments: false,
-            keep_filters: false,
-            keep_filtered_blocks: false,
-            keep_witnesses: true,
-            keep_tx_index: false,
-        },
-        ..PruningConfig::default()
-    };
-    let manager = PruningManager::new(config, Arc::clone(&blockstore)).with_tx_index(index.clone());
-    manager.prune_to_height(2, 300, false).unwrap();
-    assert!(index.get_metadata(&txid).unwrap().is_none());
-    assert!(blockstore.get_block(&hash).unwrap().is_none());
-
-    let (_kept_dir, kept_db) = temp_db();
-    let kept_store = Arc::new(BlockStore::new(Arc::clone(&kept_db)).unwrap());
-    let kept_index = Arc::new(TxIndex::new(Arc::clone(&kept_db)).unwrap());
-    let kept_block = sample_block(2);
-    store_body(&kept_store, &kept_block, 0);
-    let kept_tx = &kept_block.transactions[0];
-    let kept_txid = blvm_protocol::block::calculate_tx_id(kept_tx);
-    let kept_hash = header_hash(&kept_block.header);
-    kept_index
-        .index_transaction(kept_tx, &kept_hash, 0, 0)
-        .unwrap();
-    let kept_config = PruningConfig {
-        mode: PruningMode::Custom {
-            keep_headers: true,
-            keep_bodies_from_height: 1,
-            keep_commitments: false,
-            keep_filters: false,
-            keep_filtered_blocks: false,
-            keep_witnesses: true,
-            keep_tx_index: true,
-        },
-        ..PruningConfig::default()
-    };
-    let kept_manager =
-        PruningManager::new(kept_config, Arc::clone(&kept_store)).with_tx_index(kept_index.clone());
-    kept_manager.prune_to_height(2, 300, false).unwrap();
-    assert!(kept_index.get_metadata(&kept_txid).unwrap().is_some());
-    assert!(kept_store.get_block(&kept_hash).unwrap().is_none());
-}
-
-#[test]
 fn normal_prune_stops_at_the_keep_window() {
     let (_dir, db) = temp_db();
     let blockstore = Arc::new(BlockStore::new(db).unwrap());
@@ -238,14 +180,12 @@ fn normal_prune_stops_at_the_keep_window() {
     store_body(&blockstore, &early, 0);
     store_body(&blockstore, &kept, 8);
     let config = PruningConfig {
-        mode: PruningMode::Normal {
-            keep_from_height: 8,
-            min_recent_blocks: 1000,
-        },
+        mode: PruningMode::Normal,
+        keep_blocks: 292,
         ..PruningConfig::default()
     };
     let manager = PruningManager::new(config, Arc::clone(&blockstore));
-    manager.prune_to_height(10, 300, false).unwrap();
+    manager.prune_to_height(8, 300, false).unwrap();
     assert!(
         blockstore
             .get_block(&header_hash(&early.header))
@@ -265,12 +205,8 @@ fn aggressive_prune_runs() {
     let (_dir, db) = temp_db();
     let blockstore = Arc::new(BlockStore::new(db).unwrap());
     let config = PruningConfig {
-        mode: PruningMode::Aggressive {
-            keep_from_height: 0,
-            keep_commitments: false,
-            keep_filtered_blocks: false,
-            min_blocks: 0,
-        },
+        mode: PruningMode::Aggressive,
+        keep_blocks: 1,
         ..PruningConfig::default()
     };
     let manager = PruningManager::new(config, blockstore);

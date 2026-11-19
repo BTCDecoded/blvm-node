@@ -1153,6 +1153,19 @@ fn aligned_checkpoint_height_steps_from_last_exported() {
     assert_eq!(aligned_checkpoint_height(880_959, 880_000, 960), 880_000);
 }
 
+#[test]
+fn gc_fence_before_validation_is_the_next_checkpoint_not_max() {
+    // 2026-11-18 signet: first export labeled 200000 after the engine had
+    // already validated 200562. The fence was still i32::MAX, so those spends
+    // were discarded before the snapshot.
+    assert_eq!(gc_fence_before_validation(0, 200_000), 200_000);
+    assert_ne!(gc_fence_before_validation(0, 200_000), i32::MAX);
+    // Resume from that export must protect the following interval, not the
+    // one already on disk.
+    assert_eq!(gc_fence_before_validation(200_000, 200_000), 400_000);
+    assert_eq!(gc_fence_before_validation(200_000, 0), 200_000);
+}
+
 #[serial_test::serial(ibd)]
 #[test]
 fn dest_x_vs_persist_180k_export_alignment() {
@@ -3671,4 +3684,88 @@ fn block_whose_prev_is_not_the_active_parent_is_rejected() {
         utxo.is_empty(),
         "a block that does not extend the parent must not change the utxo set"
     );
+}
+
+#[test]
+fn ibd_worker_and_pipeline_env_overrides_stay_inside_the_cap() {
+    assert_eq!(clamped_worker_count(Some(10_000), 8), Some(8));
+    assert_eq!(clamped_worker_count(None, 8), None);
+    assert_eq!(clamped_pipeline_depth(Some(100_000), 8, 16), 64);
+    assert_eq!(clamped_pipeline_depth(None, 8, 16), 16);
+    assert_eq!(clamped_pipeline_depth(Some(4), 8, 16), 8);
+}
+
+#[test]
+fn bulk_admit_stays_under_the_ram_reorder_cap() {
+    let (admit, reorder) = bound_bulk_windows(100, 2048, 2000);
+    assert!(admit < reorder, "reorder must stay above admission");
+    assert!(reorder <= 2000);
+    assert!(admit + 512 >= reorder || admit + (2000 / 4) >= reorder);
+    let (small_admit, small_reorder) = bound_bulk_windows(400, 2048, 64);
+    assert!(small_reorder <= 64);
+    assert!(small_admit <= small_reorder);
+}
+
+#[test]
+fn failure_dumps_keep_the_newest_eight_heights() {
+    let dir = tempfile::tempdir().unwrap();
+    for height in 1..=10 {
+        std::fs::create_dir(dir.path().join(format!("height_{height}"))).unwrap();
+    }
+    ParallelIBD::retain_recent_height_dumps(dir.path(), 8);
+    let mut left = Vec::new();
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        left.push(entry.unwrap().file_name().to_string_lossy().into_owned());
+    }
+    left.sort();
+    let mut expect: Vec<_> = (3..=10).map(|height| format!("height_{height}")).collect();
+    expect.sort();
+    assert_eq!(left, expect);
+}
+
+#[test]
+fn a_dead_export_scratch_dir_is_removed_and_a_live_one_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let dead = dir.path().join("blvm-export-e4-10-4294967294");
+    let live = dir
+        .path()
+        .join(format!("blvm-export-e4-10-{}", std::process::id()));
+    std::fs::create_dir(&dead).unwrap();
+    std::fs::create_dir(&live).unwrap();
+    std::fs::write(dead.join("run"), b"x").unwrap();
+    let dead_spill = dir.path().join("blvm-export-e3c-10-4294967294.bin");
+    let dead_run = dir
+        .path()
+        .join("blvm-export-e3c-off-10-00001-4294967294.bin");
+    let live_spill = dir
+        .path()
+        .join(format!("blvm-export-e3c-10-{}.bin", std::process::id()));
+    std::fs::write(&dead_spill, b"s").unwrap();
+    std::fs::write(&dead_run, b"r").unwrap();
+    std::fs::write(&live_spill, b"l").unwrap();
+    crate::storage::ibd_engine::sweep_dead_export_scratch(dir.path());
+    assert!(!dead.exists());
+    assert!(live.exists());
+    assert!(!dead_spill.exists());
+    assert!(!dead_run.exists());
+    assert!(live_spill.exists());
+}
+
+#[test]
+fn a_missing_peer_semaphore_is_reported_before_prefetch() {
+    use super::missing_peer_semaphore;
+    let peers = vec!["a".to_string(), "b".to_string()];
+    assert_eq!(missing_peer_semaphore(&peers, |id| id == "a"), Some("b"));
+    assert_eq!(missing_peer_semaphore(&peers, |_| true), None);
+}
+
+#[test]
+fn bridge_pending_max_cannot_exceed_the_reorder_limit() {
+    use super::clamped_bridge_pending_max;
+    assert_eq!(clamped_bridge_pending_max(Some("1000000"), 256), 256);
+    assert_eq!(clamped_bridge_pending_max(Some("32"), 256), 32);
+    assert_eq!(clamped_bridge_pending_max(Some("16"), 256), 256);
+    assert_eq!(clamped_bridge_pending_max(None, 64), 128);
+    assert_eq!(clamped_bridge_pending_max(None, 2000), 512);
+    assert_eq!(clamped_bridge_pending_max(None, 200), 200);
 }

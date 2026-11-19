@@ -530,6 +530,7 @@ impl ModuleManager {
                     dependencies: HashMap::new(),
                     optional_dependencies: HashMap::new(),
                     entry_point: name.to_string(),
+                    ipc_protocol: 0,
                 },
                 process: None,
                 state: ModuleState::Stopped,
@@ -623,20 +624,19 @@ impl ModuleManager {
         base: HashMap<String, String>,
     ) -> HashMap<String, String> {
         let mut merged = base;
-        if let Ok(guard) = self.module_config_overrides.read() {
-            if let Some(overrides) = guard.get(module_name) {
-                for (k, v) in overrides {
-                    merged.insert(k.clone(), v.clone());
-                }
+        if let Ok(guard) = self.module_config_overrides.read()
+            && let Some(overrides) = guard.get(module_name)
+        {
+            for (k, v) in overrides {
+                merged.insert(k.clone(), v.clone());
             }
         }
         // Inherit node's effective module DB backend when module doesn't specify one
-        if !merged.contains_key("database_backend") {
-            if let Ok(guard) = self.default_database_backend.read() {
-                if let Some(ref backend) = *guard {
-                    merged.insert("database_backend".to_string(), backend.clone());
-                }
-            }
+        if !merged.contains_key("database_backend")
+            && let Ok(guard) = self.default_database_backend.read()
+            && let Some(ref backend) = *guard
+        {
+            merged.insert("database_backend".to_string(), backend.clone());
         }
         merged
     }
@@ -833,10 +833,10 @@ impl ModuleManager {
                             None
                         }
                     };
-                    if let Some(module_id) = crashed_module_id.as_deref() {
-                        if let Some(metrics) = &metrics_manager {
-                            metrics.clear_module_metrics(module_id).await;
-                        }
+                    if let Some(module_id) = crashed_module_id.as_deref()
+                        && let Some(metrics) = &metrics_manager
+                    {
+                        metrics.clear_module_metrics(module_id).await;
                     }
 
                     // Clean up: loaded_modules, CLI spec, API hub (same as explicit unload)
@@ -1206,10 +1206,16 @@ impl ModuleManager {
             }
         }
 
-        // Native path: spawn subprocess
+        // Native path: spawn subprocess. The handshake id has to be one this
+        // node minted; the accept loop rejects every other id. The handle is
+        // unix-only; Windows has no module IPC server to register it with.
+        #[cfg(unix)]
+        if let Some(handle) = &self.ipc_handle {
+            handle.issue_module_id_with_protocol(&module_id, metadata.ipc_protocol);
+        }
         let process = self
             .spawner
-            .spawn(module_name, binary_path, context)
+            .spawn(module_name, binary_path, context, metadata.ipc_protocol)
             .await?;
         let process_id = process.id();
         let shared_process = Arc::new(tokio::sync::Mutex::new(process));
@@ -1585,14 +1591,14 @@ impl ModuleManager {
 
                 // Validate that the new version still satisfies the dependent's requirements
                 let version_req = discovered.manifest.dependencies.get(module_name);
-                if let Some(req) = version_req {
-                    if !Self::check_version_constraint(&metadata.version, req) {
-                        error!(
-                            "Cannot reload dependent module '{}': new version '{}' of '{}' does not satisfy requirement '{}'",
-                            dependent_name, metadata.version, module_name, req
-                        );
-                        continue; // Skip this dependent
-                    }
+                if let Some(req) = version_req
+                    && !Self::check_version_constraint(&metadata.version, req)
+                {
+                    error!(
+                        "Cannot reload dependent module '{}': new version '{}' of '{}' does not satisfy requirement '{}'",
+                        dependent_name, metadata.version, module_name, req
+                    );
+                    continue; // Skip this dependent
                 }
 
                 // Check if binary path exists
@@ -2608,6 +2614,7 @@ mod tests {
             dependencies: HashMap::new(),
             optional_dependencies: HashMap::new(),
             entry_point: "fake".to_string(),
+            ipc_protocol: 0,
         };
 
         let err = manager
@@ -2717,6 +2724,7 @@ entry_point = "{name}"
                         dependencies: HashMap::new(),
                         optional_dependencies: HashMap::new(),
                         entry_point: "fees".into(),
+                        ipc_protocol: 0,
                     },
                     process: None,
                     state: ModuleState::Stopped,

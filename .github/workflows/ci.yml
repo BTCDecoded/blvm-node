@@ -30,6 +30,8 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
   CARGO_INCREMENTAL: '0'
+  # Full debuginfo makes the test target larger than the free space on this host.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   # The runner image has a distro rustc on PATH and no rustup. The installer
   # refuses that unless this is set, which fails the job before compile.
   RUSTUP_INIT_SKIP_PATH_CHECK: 'yes'
@@ -457,6 +459,9 @@ jobs:
 
       - name: Save Cargo cache
         if: always()
+        # The debug target is larger than the free space left for a second copy.
+        # A failed save must not fail the test job.
+        continue-on-error: true
         uses: BTCDecoded/rust-ci/runner-cargo-cache@main
         with:
           operation: save
@@ -598,10 +603,9 @@ jobs:
           pkg-config --exists openssl 2>/dev/null || command -v openssl >/dev/null 2>&1 || { echo "❌ openssl not found; install it on the runner."; exit 1; }
           echo "✅ Z3 + clang + jq + openssl present."
 
-          # 0.1.48 check-drift exits on notation the Orange Paper does not spell the
-          # same way. 0.1.45 is the verifier that passed the consensus 0.1.73 release.
-          # The installed binary resolves the spec from BLVM_SPEC_DIR, not from --spec-path.
-          cargo install --force blvm-spec-lock --version 0.1.45 --locked --features z3
+          # Consensus installs the current spec-lock. 0.1.45 no longer parses the
+          # Orange Paper latex (F_SighashBase static FAIL), so verify never starts.
+          cargo install --force blvm-spec-lock --version '>=0.1, <1' --locked --features z3
 
           UA='BTCDecoded/blvm-node verify job (https://github.com/BTCDecoded/blvm-node)'
           CONS_VER=$(curl -fsSL --retry 3 --retry-delay 2 -A "$UA" \
@@ -967,8 +971,8 @@ jobs:
           fi
           rustc +nightly --version
 
-          # cargo-fuzz 0.13+ MSRV is rustc 1.91; project stable is 1.88. Install the
-          # subcommand with nightly (libFuzzer builds already use +nightly).
+          # cargo-fuzz 0.13+ MSRV is rustc 1.91, which is also the project stable.
+          # libFuzzer builds already use +nightly, so install the subcommand there too.
           if ! command -v cargo-fuzz >/dev/null 2>&1; then
             cargo +nightly install cargo-fuzz --locked
           fi
@@ -1469,7 +1473,7 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
       
-      # Commit the [package] version bump back to main (same commit message as blvm-consensus).
+      # Record the [package] version bump as a pull request. Do not push it onto main.
       # Only after a successful publish, and only the [package] version line: the release
       # Cargo.toml on disk also has crates.io dependency pins and a stripped [patch.crates-io],
       # which must not land on main. The working tree is left untouched (publish already ran).
@@ -1498,14 +1502,42 @@ jobs:
             echo "No version change to commit in Cargo.toml"
             exit 0
           fi
-          git commit -m "Bump version to ${VERSION} for release [skip ci]" || true
+          git commit -m "Bump version to ${VERSION} for release [skip ci]"
 
           if [ -n "${REPO_ACCESS_TOKEN}" ]; then
             git config --local --unset-all 'http.https://github.com/.extraheader' 2>/dev/null || true
             git remote set-url origin "https://x-access-token:${REPO_ACCESS_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-            git -c credential.helper= push origin HEAD:${{ github.ref }} || true
+            RELEASE_BRANCH="release/v${VERSION}"
+            BASE="${{ github.ref_name }}"
+            if git -c credential.helper= push origin "HEAD:${RELEASE_BRANCH}"; then
+              OWNER="${GITHUB_REPOSITORY%%/*}"
+              EXISTING=$(curl -sS -o /tmp/release-prs.json -w "%{http_code}" \
+                -H "Authorization: Bearer ${REPO_ACCESS_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls?head=${OWNER}:${RELEASE_BRANCH}&base=${BASE}&state=open" || echo "000")
+              if [ "${EXISTING}" = "200" ] && grep -q '"number"' /tmp/release-prs.json; then
+                echo "Pull request already open for ${RELEASE_BRANCH}"
+              else
+                PAYLOAD=$(printf '{"title":"Bump version to %s for release [skip ci]","head":"%s","base":"%s","body":"This pull request records the release version on main. It does not change consensus behavior. The title contains [skip ci] so merging it does not cut another release. The tag push is unchanged."}' "${VERSION}" "${RELEASE_BRANCH}" "${BASE}")
+                CODE=$(curl -sS -o /tmp/release-pr.json -w "%{http_code}" \
+                  -X POST \
+                  -H "Authorization: Bearer ${REPO_ACCESS_TOKEN}" \
+                  -H "Accept: application/vnd.github+json" \
+                  "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls" \
+                  -d "${PAYLOAD}" || echo "000")
+                if [ "${CODE}" = "201" ]; then
+                  echo "Opened pull request for ${RELEASE_BRANCH}"
+                else
+                  echo "::error::Version bump is on ${RELEASE_BRANCH} but the pull request was not opened (HTTP ${CODE})"
+                  exit 1
+                fi
+              fi
+            else
+              echo "::error::Could not push ${RELEASE_BRANCH}. main was not updated."
+              exit 1
+            fi
           else
-            echo "⚠️  REPO_ACCESS_TOKEN not set, skipping push"
+            echo "⚠️  REPO_ACCESS_TOKEN not set, skipping pull request"
           fi
       
       - name: Verify published crate is available

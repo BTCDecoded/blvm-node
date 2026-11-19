@@ -1,3 +1,5 @@
+use anyhow::Context;
+
 /// Heights where a duplicate coinbase must update the index before the next block is dispatched.
 pub(crate) fn duplicate_coinbase_serial_height(height: u64) -> bool {
     height == 91842 || height == 91880
@@ -254,15 +256,14 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             .flatten()
             .unwrap_or(0);
         let near_tip = mtp_tip_window_fallback_ok(start_height, tip_h);
-        if recent_headers_buf.is_empty() && near_tip {
-            if let Ok(stored) = blockstore.get_recent_headers(11) {
+        if recent_headers_buf.is_empty() && near_tip
+            && let Ok(stored) = blockstore.get_recent_headers(11) {
                 for header in stored {
                     blvm_protocol::types::ARC_BLOCKHEADER_CREATED
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     recent_headers_buf.push_back(Arc::new(header));
                 }
             }
-        }
         if !recent_headers_buf.is_empty() {
             info!(
                 "Seeded {} recent header(s) from blockstore for BIP113 MTP (before height {})",
@@ -315,18 +316,16 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
     // Incremental prune: keep a sliding body window. Archive dests (pruning
     // disabled, or the flag off) stay at window 0 and pass horizon 0 below.
-    let (incremental_prune_window, incremental_prune_min_height) = storage_clone
+    let incremental_prune_window = storage_clone
         .pruning()
         .map(|pm| {
-            let window = super::local_block::incremental_ibd_prune_window(
+            super::local_block::incremental_ibd_prune_window(
                 pm.config.incremental_prune_during_ibd,
                 pm.is_enabled(),
-                pm.config.prune_window_size,
-                pm.config.min_blocks_to_keep,
-            );
-            (window, pm.config.min_blocks_for_incremental_prune)
+                pm.config.keep_window().unwrap_or(0),
+            )
         })
-        .unwrap_or((0, 0));
+        .unwrap_or(0);
     let startup_horizon = super::local_block::ibd_prune_horizon(
         super::live_header_tip(),
         effective_end_height(),
@@ -335,7 +334,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     super::local_block::publish_ibd_prune_horizon(startup_horizon);
     if incremental_prune_window > 0 {
         info!(
-            "[IBD_PRUNE] incremental window={incremental_prune_window} min_height={incremental_prune_min_height} horizon={startup_horizon} — skip body flush and GAP_PERSIST below horizon"
+            "[IBD_PRUNE] incremental window={incremental_prune_window} horizon={startup_horizon} — skip body flush and GAP_PERSIST below horizon"
         );
     }
 
@@ -526,71 +525,11 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         max_pending_ops_nominal
     );
 
-    // ── Background durability thread ────────────────────────────────────────────────────────
-    // Retire threads offload synchronous LMDB durability flushes (2–20 s each) here,
-    // eliminating staged_count stalls that idled validation workers for ~40% of SegWit-era
-    // IBD (h=500k–956k: 39 IBD_WATCHDOG freeze events observed in one run).
-    // Packages arrive in FIFO order; the single reader preserves monotonic watermark + crash safety.
-    // Disabled in engine mode (engine bypasses IbdUtxoStore flush path entirely).
-    let (durability_tx_opt, _durability_thread_handle) = if !skip_storage && utxo_engine.is_none() {
-        // Bounded channel with backpressure. Sizing rules:
-        //
-        // 1. Cap must be > (BPS × checkpoint_duration / checkpoint_interval) to absorb
-        //    one checkpoint batch without filling: at h=300k, 250 BPS × 13s / 200 = 16 req.
-        //    Cap=512 gives 32× headroom for the worst case (fast BPS + slow checkpoint).
-        //
-        // 2. When the channel IS full (LMDB can't keep up with validation rate), retire
-        //    briefly blocks, causing staged_count to grow. max_ahead must absorb the block:
-        //    staged_growth ≤ BPS × block_duration ≤ 250 × (512 / drain_rate) ≈ 4000 blocks.
-        //    BLVM_IBD_MAX_AHEAD must be set ≥ 4096 (see start-ibd-mainnet.sh).
-        //
-        // 3. Unbounded channel was tried and rejected: with no backpressure, the retire thread
-        //    enqueued 83M inflight ops before the durability thread could process them, causing
-        //    an inflight-cap stall and internal process recovery from an earlier watermark.
-        // Channel cap: 64 requests × ~50-75 MB per package ≈ 3-5 GB max in-flight.
-        //
-        // The original cap=512 assumed checkpoint_duration ≈ 4s (25 BPS). When the durability
-        // thread stalls for minutes (LMDB write amplification at large tree sizes), the channel
-        // fills completely: 512 × 75 MB = 38 GB — enough to OOM a 64 GB host. Reduced to 32:
-        // each package now carries both ADDs and DELs combined (~500k ops × ~144 B = ~72 MB),
-        // so 32 × 72 MB ≈ 2.3 GB peak channel RSS. The prior 64-slot cap with ADD-only packages
-        // (~15 MB each) also totalled ~960 MB; with ADDs+DELs per package, 32 slots reproduce
-        // that budget while completely eliminating the separate del_backlog flush cycle.
-        //
-        // If a checkpoint takes longer, retirement blocks on channel-full and staged_count grows.
-        // The coordinator's staged_dispatch_cap prevents unbounded validated-but-unretired
-        // blocks from accumulating in the feeder.
-        // 4 slots default (env override): at SegWit heights each retire package can be large;
-        // smaller buffer = correct back-pressure when durability is slow.
-        let chan_cap = ibd_durability_channel_cap(start_height);
-        info!("[IBD_DURABILITY] durability channel cap={chan_cap} (start_height={start_height})");
-        let (tx, rx) = std::sync::mpsc::sync_channel::<DurabilityRequest>(chan_cap);
-        let dur_store = Arc::clone(&ibd_store_v2_for_validation);
-        let dur_storage_wm = Arc::clone(&storage_for_retire);
-        let dur_flush_handles = Arc::clone(&utxo_flush_handles);
-        let dur_muhash = Arc::clone(&ibd_muhash_accumulator);
-        let dur_err = Arc::clone(&retire_err);
-        let dur_inflight = Arc::clone(&durability_in_flight);
-        let defer_checkpoint = ibd_defer_checkpoint;
-        let handle = std::thread::Builder::new()
-            .name("ibd-durability".to_string())
-            .spawn(move || {
-                run_ibd_durability_loop(
-                    dur_store,
-                    dur_storage_wm,
-                    dur_flush_handles,
-                    dur_muhash,
-                    dur_err,
-                    dur_inflight,
-                    defer_checkpoint,
-                    rx,
-                );
-            })
-            .expect("spawn IBD durability thread");
-        (Some(tx), Some(handle))
-    } else {
-        (None, None)
-    };
+    // The legacy LMDB durability thread is gone. Engine checkpoints are separate.
+    let (durability_tx_opt, _durability_thread_handle): (
+        Option<std::sync::mpsc::SyncSender<DurabilityRequest>>,
+        Option<std::thread::JoinHandle<()>>,
+    ) = (None, None);
 
     // Background retire dispatcher: 1..N retire threads, sharded by `height % N`.
     // Each shard runs the same retire loop body as before; only the cursor wiring
@@ -719,6 +658,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 let durability_tx = durability_tx_outer.clone();
                 let replay_transition_done = Arc::clone(&replay_transition_done_outer);
                 let replay_hydration_done = Arc::clone(&replay_hydration_done_outer);
+                let utxo_engine = utxo_engine.clone();
                 std::thread::Builder::new()
                     .name(format!("ibd-retire-{i}"))
                     .spawn(move || {
@@ -745,6 +685,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             max_pending_ops_nominal,
                             mpo_last,
                             engine_mode_for_retire,
+                            utxo_engine,
                             durability_tx,
                             local_replay_no_lmdb_max,
                             replay_transition_done,
@@ -766,28 +707,41 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // `BLVM_IBD_MAX_PARALLEL` overrides. Otherwise default scales with **RAM**:
     // low-memory hosts stay at half-cores (capped) to limit RSS. 32+ GiB hosts
     // cap at 8: cpus-1 up to 24 built ~3–4 GB of per-thread allocator cache.
-    let n_validate_workers: usize = std::env::var("BLVM_IBD_MAX_PARALLEL")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| {
-            let cpus = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4);
-            let total_gb = MemoryGuard::total_gb_rounded(system_total_ram_mb);
-            if total_gb >= 32 {
-                cpus.saturating_sub(1).clamp(4, 8)
-            } else if total_gb >= 24 {
-                (cpus * 3 / 4).clamp(2, 16)
-            } else if total_gb >= 16 {
-                // At h=450k+ the bottleneck shifts to CPU-bound ECDSA verification, not memory.
-                // The adaptive cache cap handles RSS automatically. Use cpus-2 to leave headroom
-                // for coordinator, retire, and prefetch threads while maximising validation
-                // parallelism. On 12-core/16GB this raises workers 8 → 10 (+25% BPS ceiling).
-                cpus.saturating_sub(2).clamp(4, 16)
-            } else {
-                (cpus / 2).clamp(1, 6)
-            }
-        });
+    let worker_cap = {
+        let total_gb = MemoryGuard::total_gb_rounded(system_total_ram_mb);
+        if total_gb >= 32 {
+            8
+        } else if total_gb >= 16 {
+            16
+        } else {
+            6
+        }
+    };
+    let n_validate_workers: usize = crate::node::parallel_ibd::clamped_worker_count(
+        std::env::var("BLVM_IBD_MAX_PARALLEL")
+            .ok()
+            .and_then(|s| s.parse().ok()),
+        worker_cap,
+    )
+    .unwrap_or_else(|| {
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let total_gb = MemoryGuard::total_gb_rounded(system_total_ram_mb);
+        if total_gb >= 32 {
+            cpus.saturating_sub(1).clamp(4, 8)
+        } else if total_gb >= 24 {
+            (cpus * 3 / 4).clamp(2, 16)
+        } else if total_gb >= 16 {
+            // At h=450k+ the bottleneck shifts to CPU-bound ECDSA verification, not memory.
+            // The adaptive cache cap handles RSS automatically. Use cpus-2 to leave headroom
+            // for coordinator, retire, and prefetch threads while maximising validation
+            // parallelism. On 12-core/16GB this raises workers 8 → 10 (+25% BPS ceiling).
+            cpus.saturating_sub(2).clamp(4, 16)
+        } else {
+            (cpus / 2).clamp(1, 6)
+        }
+    });
 
     // Pipeline depth (max in-flight blocks) is **decoupled** from worker count. With
     // pipeline_depth == n_workers, a single slow block (cache-miss → 80ms view-build) at the
@@ -815,12 +769,14 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     //
     // Engine mode default 16 (not 32): each in-flight height pins age-0; with 1-height
     // frozen runs, depth 32 made mergeable_prefix 0–1 and stalled the compacter.
-    let engine_default_depth = if utxo_engine.is_some() { 16 } else { 32 };
-    let n_pipeline_depth: usize = std::env::var("BLVM_IBD_PIPELINE_DEPTH")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| engine_default_depth.clamp(n_validate_workers, 64))
-        .max(n_validate_workers);
+    let engine_default_depth = 16;
+    let n_pipeline_depth: usize = crate::node::parallel_ibd::clamped_pipeline_depth(
+        std::env::var("BLVM_IBD_PIPELINE_DEPTH")
+            .ok()
+            .and_then(|s| s.parse().ok()),
+        n_validate_workers,
+        engine_default_depth,
+    );
 
     info!(
         "IBD: n_validate_workers={} pipeline_depth={} engine_mode={}",
@@ -835,8 +791,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     let (valres_tx, valres_rx) = crossbeam_channel::unbounded::<ValidateResult>();
     // R-359: per-block MuHash subs arrive here after the result; folded in height order by
     // `muhash_folder` so the running accumulator is always "exactly blocks ≤ folded_through".
-    let (muhash_tx, muhash_rx) =
-        crossbeam_channel::unbounded::<super::muhash_fold::MuHashSub>();
+    let (muhash_tx, muhash_rx) = crossbeam_channel::unbounded::<super::muhash_fold::MuHashSub>();
     let mut muhash_folder = super::muhash_fold::InOrderMuHashFolder::new(start_height);
     let muhash_fold_active =
         utxo_engine.is_some() && crate::config::ibd::ibd_engine_muhash_enabled();
@@ -861,11 +816,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     warn!("IBD engine prep join error: {:?}", e);
                 }
             }
-            if let Some(h) = self.handle.take() {
-                if let Err(e) = h.join() {
+            if let Some(h) = self.handle.take()
+                && let Err(e) = h.join() {
                     warn!("IBD engine append join error: {:?}", e);
                 }
-            }
         }
     }
     impl Drop for EngineAppendPipeline {
@@ -905,53 +859,53 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         break 'recv;
                     }
                     while let Some(job) = queue.pop_ready() {
-                    let t_append = Instant::now();
-                    match SpendSession::append(
-                        Arc::clone(&job.db),
-                        job.block_arc.as_ref(),
-                        job.tx_ids.as_slice(),
-                        job.height as i32,
-                    ) {
-                        Ok(partial) => {
-                            let engine_append_ms = t_append.elapsed().as_millis() as u64;
-                            if vjob_tx
-                                .send(ValidateJob::Engine(EngineValidateJob {
+                        let t_append = Instant::now();
+                        match SpendSession::append(
+                            Arc::clone(&job.db),
+                            job.block_arc.as_ref(),
+                            job.tx_ids.as_slice(),
+                            job.height as i32,
+                        ) {
+                            Ok(partial) => {
+                                let engine_append_ms = t_append.elapsed().as_millis() as u64;
+                                if vjob_tx
+                                    .send(ValidateJob::Engine(EngineValidateJob {
+                                        height: job.height,
+                                        block_arc: job.block_arc,
+                                        witnesses_storage: job.witnesses_storage,
+                                        bip30_index: job.bip30_index,
+                                        recent_headers: job.recent_headers,
+                                        tx_ids: job.tx_ids,
+                                        best_header_chainwork: job.best_header_chainwork,
+                                        cached_network_time: job.cached_network_time,
+                                        partial_session: partial,
+                                        engine_append_ms,
+                                        ibd_block_outputs: job.ibd_block_outputs,
+                                    }))
+                                    .is_err()
+                                {
+                                    break 'recv;
+                                }
+                            }
+                            Err(e) => {
+                                let _ = vres_tx.send(ValidateResult {
                                     height: job.height,
-                                    block_arc: job.block_arc,
-                                    witnesses_storage: job.witnesses_storage,
-                                    bip30_index: job.bip30_index,
-                                    recent_headers: job.recent_headers,
-                                    tx_ids: job.tx_ids,
-                                    best_header_chainwork: job.best_header_chainwork,
-                                    cached_network_time: job.cached_network_time,
-                                    partial_session: partial,
-                                    engine_append_ms,
-                                    ibd_block_outputs: job.ibd_block_outputs,
-                                }))
-                                .is_err()
-                            {
+                                    result: Err(e.context(format!(
+                                        "IBD engine SpendSession::append failed at height {}",
+                                        job.height
+                                    ))),
+                                    undo_log: blvm_consensus::reorganization::BlockUndoLog::new(),
+                                    bip30_post: job.bip30_index,
+                                    elapsed: Duration::ZERO,
+                                    view_build_ms: 0,
+                                    engine_append_ms: t_append.elapsed().as_millis() as u64,
+                                    engine_complete_ms: 0,
+                                });
+                                // Stop accepting further appends; orchestrator will see the error
+                                // via in-order collect and tear down.
                                 break 'recv;
                             }
                         }
-                        Err(e) => {
-                            let _ = vres_tx.send(ValidateResult {
-                                height: job.height,
-                                result: Err(e.context(format!(
-                                    "IBD engine SpendSession::append failed at height {}",
-                                    job.height
-                                ))),
-                                undo_log: blvm_consensus::reorganization::BlockUndoLog::new(),
-                                bip30_post: job.bip30_index,
-                                elapsed: Duration::ZERO,
-                                view_build_ms: 0,
-                                engine_append_ms: t_append.elapsed().as_millis() as u64,
-                                engine_complete_ms: 0,
-                            });
-                            // Stop accepting further appends; orchestrator will see the error
-                            // via in-order collect and tear down.
-                            break 'recv;
-                        }
-                    }
                     } // while queue.pop_ready()
                 }
                 if queue.pending_len() > 0 {
@@ -1025,14 +979,18 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     };
     // R-361: last-reference deallocation of validated blocks moves to `ibd-drop`.
     let mut deferred_dropper = if deferred_drop_enabled() {
-        info!("IBD: deferred block drop enabled (ibd-drop thread; opt out BLVM_IBD_DEFERRED_DROP=0)");
+        info!(
+            "IBD: deferred block drop enabled (ibd-drop thread; opt out BLVM_IBD_DEFERRED_DROP=0)"
+        );
         DeferredDropper::spawn()
     } else {
         DeferredDropper::disabled()
     };
     // R-362: the `[IBD_TIP_SKIP]` force_sync moves to `ibd-tip-sync`.
     let mut tip_syncer = if tip_sync_inline() {
-        info!("IBD: tip sync inline (BLVM_IBD_TIP_SYNC=inline; force_sync on the orchestrator, R-361 behaviour)");
+        info!(
+            "IBD: tip sync inline (BLVM_IBD_TIP_SYNC=inline; force_sync on the orchestrator, R-361 behaviour)"
+        );
         TipSyncer::inline()
     } else {
         info!("IBD: tip sync thread enabled (ibd-tip-sync; force_sync off the orchestrator)");
@@ -1052,9 +1010,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         _validate_workers.push(
             std::thread::Builder::new()
                 .name(format!("ibd-validate-{i}"))
-                .spawn(move || {
-                    run_validation_worker_shared(rx, tx, mh, pi, bs, pr, st, lr, mpo)
-                })
+                .spawn(move || run_validation_worker_shared(rx, tx, mh, pi, bs, pr, st, lr, mpo))
                 .expect("spawn IBD validate worker"),
         );
     }
@@ -1134,7 +1090,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     // pages to the OS via MADV_DONTNEED. The background thread does this
                     // automatically after dirty_decay_ms, but an explicit purge here ensures
                     // freed pages are returned promptly during the watchdog window.
-                    #[cfg(all(feature = "jemalloc", not(target_os = "windows")))]
+                    #[cfg(all(feature = "jemalloc", not(test), not(target_os = "windows")))]
                     {
                         use std::os::raw::c_void;
                         unsafe extern "C" {
@@ -1181,7 +1137,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         }
                     }
                     // Every 60s: emit heartbeat + full memory attribution report
-                    if watchdog_poll_count % 6 == 0 {
+                    if watchdog_poll_count.is_multiple_of(6) {
                         info!(
                             "[IBD_WATCHDOG_HEARTBEAT] alive: h={} last_h={} elapsed_since_change={}s poll={}",
                             h, last_height, last_change.elapsed().as_secs(), watchdog_poll_count,
@@ -1376,7 +1332,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         // in jemalloc arenas (includes dirty freed pages not yet MADV_DONTNEED'd).
                         // If allocated << resident, jemalloc is holding freed pages (purge needed).
                         // If allocated ≈ resident ≈ UNEXPLAINED_ANON, the app has untracked live allocs.
-                        #[cfg(all(feature = "jemalloc", not(target_os = "windows")))]
+                        #[cfg(all(feature = "jemalloc", not(test), not(target_os = "windows")))]
                         let (jemalloc_allocated_mb, jemalloc_active_mb, jemalloc_resident_mb, jemalloc_retained_mb) = {
                             use std::os::raw::c_void;
                             unsafe extern "C" {
@@ -1411,7 +1367,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                 )
                             }
                         };
-                        #[cfg(not(all(feature = "jemalloc", not(target_os = "windows"))))]
+                        #[cfg(not(all(feature = "jemalloc", not(test), not(target_os = "windows"))))]
                         let (jemalloc_allocated_mb, jemalloc_active_mb, jemalloc_resident_mb, jemalloc_retained_mb) = (0u64, 0u64, 0u64, 0u64);
 
                         // Dump jemalloc per-size-class stats to identify where allocations are.
@@ -1420,7 +1376,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         // (those containing "reg_size" in the bin breakdown) and logs the
                         // top-10 by bytes allocated.  This lets us identify what object sizes
                         // are consuming the unexplained anonymous memory.
-                        #[cfg(all(feature = "jemalloc", not(target_os = "windows")))]
+                        #[cfg(all(feature = "jemalloc", not(test), not(target_os = "windows")))]
                         {
                             use std::os::raw::{c_char, c_void};
                             use std::sync::Mutex;
@@ -1462,8 +1418,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
                                 // Write the full stats to a temp file only when explicitly requested.
                                 if std::env::var_os("BLVM_IBD_JEMALLOC_DUMP").is_some() {
-                                    let stats_path = format!("/tmp/jemalloc_h{h}.txt");
-                                    let _ = std::fs::write(&stats_path, &*buf);
+                                    let stats_path = "/tmp/jemalloc_ibd.txt";
+                                    let _ = std::fs::write(stats_path, &*buf);
                                 }
 
                                 let text = String::from_utf8_lossy(&buf);
@@ -1498,16 +1454,14 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                     }
                                     if in_merged && in_section {
                                         let parts: Vec<&str> = line.split_whitespace().collect();
-                                        if parts.len() >= 3 && parts[0].bytes().all(|b| b.is_ascii_digit()) {
-                                            if let (Ok(sz), Ok(alloc)) = (
+                                        if parts.len() >= 3 && parts[0].bytes().all(|b| b.is_ascii_digit())
+                                            && let (Ok(sz), Ok(alloc)) = (
                                                 parts[0].parse::<u64>(), parts[2].parse::<u64>(),
-                                            ) {
-                                                if sz > 0 && alloc > 0 {
+                                            )
+                                                && sz > 0 && alloc > 0 {
                                                     let curregs = alloc / sz;
                                                     bin_rows.push(BinRow { sz, alloc, curregs });
                                                 }
-                                            }
-                                        }
                                     }
                                 }
 
@@ -1571,14 +1525,14 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                 );
 
                                 // Dump jemalloc heap profile only when BLVM_IBD_JEMALLOC_DUMP is set
-                                // (requires MALLOC_CONF=prof:true). Produces /tmp/blvm_heap_{h}.jep.
+                                // (requires MALLOC_CONF=prof:true). One file, overwritten (F63).
                                 static PROF_DUMP_COUNT: std::sync::atomic::AtomicU64
                                     = std::sync::atomic::AtomicU64::new(0);
                                 let dump_idx = PROF_DUMP_COUNT.fetch_add(1, Ordering::Relaxed);
                                 if std::env::var_os("BLVM_IBD_JEMALLOC_DUMP").is_none() {
                                     let _ = dump_idx;
                                 } else {
-                                let prof_path = format!("/tmp/blvm_heap_{h}.jep\0");
+                                let prof_path = format!("{}\0", jemalloc_heap_profile_path());
                                 unsafe {
                                     unsafe extern "C" {
                                         fn _rjem_mallctl(
@@ -1665,7 +1619,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             engine_index_mb, engine_compacter_mb, engine_tail_mb, engine_total_mb, table_file_mb,
                             engine_index_mb, engine_compacter_mb, engine_tail_mb, feeder_mb + staged_mb, accounted_mb,
                         );
-                        #[cfg(all(feature = "jemalloc", not(target_os = "windows")))]
+                        #[cfg(all(feature = "jemalloc", not(test), not(target_os = "windows")))]
                         {
                             memory::maybe_purge_jemalloc_retained("mem_report");
                         }
@@ -1957,7 +1911,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         // Using total rather than just in-RAM catches swap pressure early.
         if !shutdown_now && rss_gate_hard_limit_mb > 0 {
             rss_gate_check_block = rss_gate_check_block.wrapping_add(1);
-            if rss_gate_check_block % 16 == 0 {
+            if rss_gate_check_block.is_multiple_of(16) {
                 let (anon_mb, swap_mb) = memory::read_proc_anon_and_swap_mb();
                 let total_anon_mb = anon_mb + swap_mb;
                 if total_anon_mb >= rss_gate_hard_limit_mb {
@@ -1982,8 +1936,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             );
                             break;
                         }
-                        if paused_ms % 5_000 == 0 {
-                            #[cfg(all(feature = "jemalloc", not(target_os = "windows")))]
+                        if paused_ms.is_multiple_of(5_000) {
+                            #[cfg(all(feature = "jemalloc", not(test), not(target_os = "windows")))]
                             {
                                 use std::os::raw::c_void;
                                 unsafe extern "C" {
@@ -2026,10 +1980,10 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         // too many runs. Age-2 alone was insufficient: with eviction_age=4, a2→a3 merges are
         // cheap while a3→disk takes 20–30s; a3 piled to 58 runs / 12GB with a2 still healthy.
         // Skip while shutting down — we only drain in-flight, not grow the pipeline.
-        if !shutdown_now {
-            if let Some(db) = utxo_engine.as_deref() {
+        if !shutdown_now
+            && let Some(db) = utxo_engine.as_deref() {
                 compacter_gate_check_block = compacter_gate_check_block.wrapping_add(1);
-                if compacter_gate_check_block % COMPACTER_GATE_INTERVAL == 0 {
+                if compacter_gate_check_block.is_multiple_of(COMPACTER_GATE_INTERVAL) {
                     let a2_runs = db.age_run_count(2);
                     let spill_age = db.eviction_age_live().saturating_sub(1);
                     let spill_runs = if spill_age >= 3 {
@@ -2098,7 +2052,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                 );
                                 break;
                             }
-                            if paused_ms % 5_000 == 0 {
+                            if paused_ms.is_multiple_of(5_000) {
                                 warn!(
                                     "[COMPACTER_GATE] still waiting h={} a2_runs={} spill_age={} \
                                  spill_runs={} spill_merging={} disk_compact={} disk_segs={} \
@@ -2121,14 +2075,13 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     }
                 }
             }
-        }
 
         // === SPILL IO GATE (HP-M5) ===
         // Pause dispatch while a DiskIndex spill file write is in flight so tip complete
         // (query/pread) does not share the disk with ~10–13s mega writes.
-        if !shutdown_now && spill_io_gate {
-            if let Some(db) = utxo_engine.as_deref() {
-                if db.spill_io_busy() {
+        if !shutdown_now && spill_io_gate
+            && let Some(db) = utxo_engine.as_deref()
+                && db.spill_io_busy() {
                     warn!(
                         "[SPILL_IO_GATE] h={} — pausing dispatch (DiskIndex spill write busy)",
                         next_validation_height
@@ -2142,7 +2095,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         }
                         std::thread::sleep(std::time::Duration::from_millis(50));
                         paused_ms += 50;
-                        if paused_ms % 5_000 == 0 {
+                        if paused_ms.is_multiple_of(5_000) {
                             warn!(
                                 "[SPILL_IO_GATE] still waiting h={} paused={}ms",
                                 next_validation_height, paused_ms
@@ -2156,8 +2109,6 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         );
                     }
                 }
-            }
-        }
 
         // === DISPATCH PHASE: fill pipeline up to pipeline_depth_live ===
         // The two historical duplicate-coinbase blocks are 91842 and 91880. Force depth=1
@@ -2291,13 +2242,14 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     drop(guard);
                     // One height from the body store. Do not hold the feeder lock across heed3.
                     // store_absent → miss → WaitFeeder as before. Not inject-2048.
-                    if utxo_engine.is_some() && super::local_block::store_apply_enabled() {
-                        if let Ok(Some((arc_b, w))) = super::local_block::leftover_stall_try_load(
+                    if utxo_engine.is_some() && super::local_block::store_apply_enabled()
+                        && let Ok(Some((arc_b, w))) = super::local_block::leftover_stall_try_load(
                             blockstore.as_ref(),
                             next_validation_height,
                             protocol.get_protocol_version(),
                         ) {
-                            let est = super::types::estimate_block_bytes(arc_b.as_ref(), w.as_ref());
+                            let est =
+                                super::types::estimate_block_bytes(arc_b.as_ref(), w.as_ref());
                             super::local_block::note_store_apply(next_validation_height);
                             super::tip_stage::mark_taken_from_feeder(next_validation_height);
                             break Some((
@@ -2311,7 +2263,6 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                 est,
                             ));
                         }
-                    }
                     let mut guard = feeder_state.0.lock();
                     if let Some((arc_b, w, input_keys, u, tx_ids, spec_adds, est_bytes)) =
                         guard.0.remove(next_validation_height)
@@ -2404,13 +2355,24 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             // requeue recover owners — do NOT tear down IBD.
                             // Genesis has `local_replay_max_height=0`; the old `> 0 &&` gate
                             // aborted true WAN crawls after ~1080s (live: h=262716).
-                            if next_validation_height > local_replay_max_height {
+                            // A fatal single-peer download does not reset, including past the replay tip.
+                            let past_replay = next_validation_height > local_replay_max_height;
+                            let download_fatal = crate::node::parallel_ibd::IBD_DOWNLOAD_FATAL
+                                .load(std::sync::atomic::Ordering::Acquire);
+                            if crate::node::reliability_decisions::stall_resets(
+                                download_fatal,
+                                past_replay,
+                            ) {
                                 warn!(
                                     "[IBD_STALL] WAN tip gap: {} feeder stalls at h={} — \
                                      resetting counter (tip-SLA/force requeue; no IBD abort)",
                                     feeder_stall_count, next_validation_height
                                 );
                                 feeder_stall_count = 0;
+                            } else if download_fatal {
+                                return Err(anyhow::anyhow!(
+                                    "IBD download stopped after {feeder_stall_count} feeder stalls at h={next_validation_height}: single peer exceeded chunk failures"
+                                ));
                             } else {
                                 let stall_secs =
                                     feeder_wait_timeout.as_secs() * u64::from(MAX_FEEDER_STALLS);
@@ -2482,16 +2444,17 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 let next_h = next_validation_height;
                 let from_feeder = {
                     let mut guard = feeder_state.0.lock();
-                    guard.0.remove(next_h).map(
-                        |(arc_b, w, ik, u, tx_ids, spec_adds, est_bytes)| {
+                    guard
+                        .0
+                        .remove(next_h)
+                        .map(|(arc_b, w, ik, u, tx_ids, spec_adds, est_bytes)| {
                             super::tip_stage::mark_taken_from_feeder(next_h);
                             guard.2 = guard.2.saturating_sub(est_bytes);
                             feeder_state.1.notify_one();
                             super::IBD_FEEDER_BUFFER_BLOCKS
                                 .store(guard.0.len(), std::sync::atomic::Ordering::Relaxed);
                             (next_h, arc_b, w, ik, u, tx_ids, spec_adds, est_bytes)
-                        },
-                    )
+                        })
                 };
                 from_feeder.or_else(|| {
                     if utxo_engine.is_some() && super::local_block::store_apply_enabled() {
@@ -2621,17 +2584,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             // In engine mode the worker uses `partial_session` (query+fetch via the age-tiered
             // index) rather than the legacy prefetch/cache key path, so `keys_v2_buf` is dead
             // work — skip the input-key extraction entirely.
-            if utxo_engine.is_none() {
-                if input_keys_from_feeder.is_empty() {
-                    block_input_keys_into_filtered_with_tx_ids(
-                        block_arc_d.as_ref(),
-                        tx_ids_precomputed_d.as_slice(),
-                        &mut keys_v2_buf,
-                    );
-                } else {
-                    std::mem::swap(&mut keys_v2_buf, &mut input_keys_from_feeder);
-                }
-            }
+            let _ = input_keys_from_feeder;
             if h <= 200 {
                 debug!(
                     "[IBD_V2] height={} keys_needed={} store_len={}",
@@ -2644,14 +2597,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             // Spec snapshot: shallow Arc clones of in-flight blocks' speculative additions.
             // Dead in engine mode — workers use `partial_session` (age-tiered query+fetch)
             // and never consult `spec_adds_snapshot`.  Skip the Arc-clone loop entirely.
-            let spec_adds_snapshot: Vec<(u64, Arc<UtxoSet>)> = if utxo_engine.is_none() {
-                spec_adds_snapshot_buf.clear();
-                spec_adds_snapshot_buf
-                    .extend(spec_adds.iter().map(|(sh, set)| (*sh, Arc::clone(set))));
-                std::mem::replace(&mut spec_adds_snapshot_buf, Vec::with_capacity(64))
-            } else {
-                Vec::new()
-            };
+            let spec_adds_snapshot: Vec<(u64, Arc<UtxoSet>)> = Vec::new();
 
             // Optional debug/profile snapshot (rare, off by default).
             if let Some(ref base) = snapshot_dir_base {
@@ -2696,20 +2642,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
             // Speculative additions: legacy prefetch path only. Engine workers use
             // `partial_session` and never read `spec_adds_snapshot`.
-            if utxo_engine.is_none() {
-                let spec_arc: Arc<UtxoSet> = spec_adds_d;
-                let spec_entry_bytes = (spec_arc.len() as u64).saturating_mul(64);
-                spec_adds_bytes.fetch_add(spec_entry_bytes, Ordering::Relaxed);
-                spec_adds.insert(h, Arc::clone(&spec_arc));
-            } else {
-                drop(spec_adds_d);
-            }
-
-            let keys_for_job: Vec<OutPointKey> = if utxo_engine.is_some() {
-                Vec::new()
-            } else {
-                std::mem::take(&mut keys_v2_buf)
-            };
+            drop(spec_adds_d);
+            let keys_for_job: Vec<OutPointKey> = Vec::new();
 
             // After the known height-in-coinbase block, a new coinbase cannot repeat an
             // earlier one until `BIP34_IMPLIES_BIP30_LIMIT`. An empty index is the skip.
@@ -3099,14 +3033,14 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 );
             }
         }
-        if let Some(ref dur) = engine_durability {
-            if next_height > 0 && next_height % dur.muhash_persist_interval == 0 {
+        if let Some(ref dur) = engine_durability
+            && next_height > 0 && next_height % dur.muhash_persist_interval == 0 {
                 let gap_replay =
                     engine_gap_export_defer_until.is_some_and(|until| next_height < until);
                 if !gap_replay {
                     // R-359 barrier: the persisted running state must be exactly blocks ≤ h.
-                    if muhash_fold_active {
-                        if let Err(e) = muhash_fold_through(
+                    if muhash_fold_active
+                        && let Err(e) = muhash_fold_through(
                             &mut muhash_folder,
                             &muhash_rx,
                             &ibd_muhash_accumulator,
@@ -3120,7 +3054,6 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                 Err(e2) => Err(e2),
                             };
                         }
-                    }
                     let running = ibd_muhash_accumulator.lock().serialize_running_state();
                     if let Err(e) = storage_clone
                         .chain()
@@ -3132,8 +3065,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     }
                 }
                 let persist_tip = !gap_replay || next_height % 10_000 == 0;
-                if persist_tip {
-                    if let Err(e) = storage_clone
+                if persist_tip
+                    && let Err(e) = storage_clone
                         .chain()
                         .persist_engine_validation_tip(next_height)
                     {
@@ -3141,9 +3074,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             "IBD engine: failed to persist validation tip at h={next_height}: {e:#}"
                         );
                     }
-                }
             }
-        }
         let validation_time = vres.elapsed;
         super::ms_breakdown::note_engine(
             vres.engine_append_ms,
@@ -3173,32 +3104,11 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 Ok(utxo_delta_opt) => {
                     // Engine mode: UTXO state lives in `UtxoDatabase`; legacy staged deltas and
                     // incremental commitments are skipped (commitments rebuilt post-IBD).
-                    if utxo_engine.is_none() {
-                        let delta = Arc::new(utxo_delta_opt.unwrap_or_else(empty_utxo_delta));
-                        {
-                            let mut m = staged.lock();
-                            m.insert(next_height, delta);
-                        }
-                        staged_count.fetch_add(1, Ordering::Relaxed);
-                    }
-                    // In engine mode: the retire thread immediately calls `continue` (publish
-                    // + adapt only), so blocks_buf and block are never accessed. Sending
-                    // Arc<Block> in engine mode causes the channel backlog to hold O(blocks)
-                    // heap allocations when dispatch outruns the retire thread — the primary
-                    // root cause of memory growth during local replay (45K blocks/sec).
-                    // In non-engine mode: blocks_buf is needed only for dynamic-eviction.
-                    let retire_blocks_buf = if utxo_engine.is_none()
-                        && ibd_store_v2_for_validation.is_dynamic_eviction()
-                    {
-                        blocks_buf.clone()
-                    } else {
-                        Vec::new()
-                    };
-                    let retire_block = if utxo_engine.is_none() {
-                        Some(Arc::clone(&block_arc))
-                    } else {
-                        None // engine mode retire thread does not use the block
-                    };
+                    let _ = utxo_delta_opt;
+                    // The retire thread only publishes. Sending Arc<Block> would pin every
+                    // in-flight body on the retire channel during local replay.
+                    let retire_blocks_buf = Vec::new();
+                    let retire_block = None;
                     if _retire_dispatcher
                         .send(IbdRetireWork {
                             height: next_height,
@@ -3353,16 +3263,14 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         next_height
                     );
                 }
-                if utxo_engine.is_some() {
-                    if let Some(until) = engine_gap_export_defer_until {
-                        if next_height == until.saturating_add(1) && until >= start_height {
+                if utxo_engine.is_some()
+                    && let Some(until) = engine_gap_export_defer_until
+                        && next_height == until.saturating_add(1) && until >= start_height {
                             info!(
                                 "[IBD_ENGINE_REPLAY] validation passed gap target h={until} \
                                  at h={next_height} — download-led sync / checkpoint export active"
                             );
                         }
-                    }
-                }
                 // DIAGNOSTIC: sample Arc strong_count before pushing to pending_blocks.
                 // Expected: 2 (entry.block_arc + block_arc) when retire thread has already
                 // consumed IbdRetireWork, or 3 if IbdRetireWork is still in-flight.
@@ -3401,9 +3309,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         blockstore
                             .store_undo_log_if_absent(&block_hash, undo)
                             .map_err(|e| {
-                                anyhow::anyhow!(
-                                    "height {next_height} undo was not stored: {e:#}"
-                                )
+                                anyhow::anyhow!("height {next_height} undo was not stored: {e:#}")
                             })?;
                     }
                     // Skip path: body already on disk, so `do_flush_to_storage` (and its
@@ -3506,11 +3412,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
 
                 // Update shared validation height (allows download workers to track progress)
                 validation_height.store(next_height, Ordering::Relaxed);
-                let gc_height = super::local_block::ibd_prune_gc_height(
-                    next_height,
-                    incremental_prune_window,
-                    incremental_prune_min_height,
-                );
+                let gc_height =
+                    super::local_block::ibd_prune_gc_height(next_height, incremental_prune_window);
                 // Far below the keep window there is no body to retain. The lookup
                 // and delete take the LMDB writer on this thread; resume12 spent
                 // the validation clock there while GAP_PERSIST held that writer.
@@ -3521,13 +3424,13 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                         blockstore.as_ref(),
                         gc_height,
                     ) {
-                        Ok(true) if gc_height % 10_000 == 0 => {
+                        Ok(true) if gc_height.is_multiple_of(10_000) => {
                             info!(
                                 "[IBD_PRUNE_GAP_GC] removed body+witness h={gc_height} validated={next_height} window={incremental_prune_window}"
                             );
                         }
                         Ok(_) => {}
-                        Err(e) if gc_height % 10_000 == 0 => {
+                        Err(e) if gc_height.is_multiple_of(10_000) => {
                             warn!("[IBD_PRUNE_GAP_GC] h={gc_height} failed: {e:#}");
                         }
                         Err(_) => {}
@@ -3820,6 +3723,18 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     );
                 }
                 error!("Failed to validate block at height {}: {}", next_height, e);
+                if e.to_string().contains("prev_block_hash does not match")
+                    && let Ok(true) = crate::node::parallel_ibd::headers::discard_nonextending_successor(
+                        blockstore.as_ref(),
+                        next_height.saturating_sub(1),
+                    )
+                {
+                    warn!(
+                        "[IBD_BAD_LOCAL_BODY] height {next_height} does not extend its parent \
+                         header — removed the local body and height index so the next session \
+                         fetches the block that does"
+                    );
+                }
                 let e = if next_height > 0 {
                     match (
                         crate::storage::ibd_autorepair::utxo_miss_prevout(&e),
@@ -3832,8 +3747,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                         &parent, &txid, vout,
                                     ) =>
                                 {
-                                    let failed_hash =
-                                        blockstore.get_block_hash(block_arc.as_ref());
+                                    let failed_hash = blockstore.get_block_hash(block_arc.as_ref());
                                     warn!(
                                         "[IBD_DOUBLE_SPEND] height={} prevout {}:{} already spent in connected parent {} — not a snapshot repair",
                                         next_height,
@@ -3865,15 +3779,13 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 } else {
                     e
                 };
-                if crate::storage::ibd_autorepair::validation_error_suggests_utxo_repair(&e) {
-                    if let Some(dir) = storage_clone.data_dir() {
-                        if let Err(flag_e) =
+                if crate::storage::ibd_autorepair::validation_error_suggests_utxo_repair(&e)
+                    && let Some(dir) = storage_clone.data_dir()
+                        && let Err(flag_e) =
                             crate::storage::ibd_autorepair::set_ibd_utxo_repair_flag(&dir)
                         {
                             warn!("Could not write IBD UTXO repair marker: {flag_e}");
                         }
-                    }
-                }
                 // Re-derive input keys ONLY on error: the dispatcher hot-path no longer
                 // recomputes them per-block. dump_failed_block diagnostics still need the
                 // full key list, so build it here.
@@ -4315,9 +4227,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             IbdBlockFlushOpts::shutdown_sync(),
         )?;
     }
-    if let Err(e) = storage_clone.flush() {
-        warn!("IBD shutdown: storage.flush after block drain failed: {e}");
-    }
+    crate::node::reliability_decisions::shutdown_step(storage_clone.flush())
+        .context("IBD shutdown: storage.flush after block drain failed")?;
 
     // Same order as a periodic checkpoint: spends are durable before the watermark.
     // A crash after the spend flush and before the watermark replays those blocks.
@@ -4343,23 +4254,31 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             if let Some(ref db) = utxo_engine {
                 db.flush_contiguous_length_sidecar();
             }
-            if let Some(data_dir) = storage_clone.data_dir() {
-                let engine_path = crate::config::ibd::ibd_engine_path(Some(data_dir.as_path()));
-                crate::storage::ibd_engine::clear_engine_dirty_flag(&engine_path);
-            }
-            if utxo_engine.is_some() {
-                if let Err(e) = storage_clone
-                    .chain()
-                    .persist_engine_validation_tip(last_validated)
-                {
-                    warn!(
-                        "IBD shutdown: failed to persist engine validation tip at h={last_validated}: {e:#}"
-                    );
+            let steps = if utxo_engine.is_some() {
+                crate::node::reliability_decisions::shutdown_step(
+                    storage_clone
+                        .chain()
+                        .persist_engine_validation_tip(last_validated),
+                )
+                .with_context(|| {
+                    format!(
+                        "IBD shutdown: failed to persist engine validation tip at h={last_validated}"
+                    )
+                })
+                .and_then(|_| {
+                    crate::node::reliability_decisions::shutdown_step(storage_clone.flush()).context(
+                        "IBD shutdown: storage flush after engine resume hint failed",
+                    )
+                })
+            } else {
+                Ok(())
+            };
+            crate::node::reliability_decisions::clear_dirty_after_shutdown(steps, || {
+                if let Some(data_dir) = storage_clone.data_dir() {
+                    let engine_path = crate::config::ibd::ibd_engine_path(Some(data_dir.as_path()));
+                    crate::storage::ibd_engine::clear_engine_dirty_flag(&engine_path);
                 }
-                if let Err(e) = storage_clone.flush() {
-                    warn!("IBD shutdown: storage flush after engine resume hint failed: {e:#}");
-                }
-            }
+            })?;
             info!(
                 "IBD shutdown: graceful stop at height {} (target {}); block store flushed",
                 last_validated,
@@ -4373,20 +4292,29 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             effective_end_height()
         ));
     }
-    if let Err(e) = ibd_store_v2_for_validation.flush_disk() {
-        warn!(
-            "Failed to flush ibd_utxos memtable at final shutdown (height {}): {}",
-            last_validated, e
-        );
-    }
-
     // Do not advance `ibd_utxo_watermark` from chain tip here. During parallel IBD the block index
     // can reach `chain_tip` before UTXO flush workers persist `ibd_utxos` through that height.
     // Watermark must advance only from flush worker paths after `flush_disk` (see
     // `push_utxo_flush_from_retire`). Bumping from tip caused resume at height H with an empty or
     // partial `ibd_utxos` tree → immediate `UTXO not found for input`.
-
-    info!("IBD shutdown: validation loop complete");
+    crate::node::reliability_decisions::clear_dirty_after_shutdown(
+        crate::node::reliability_decisions::shutdown_step(ibd_store_v2_for_validation.flush_disk())
+            .with_context(|| {
+                format!(
+                    "Failed to flush ibd_utxos memtable at final shutdown (height {last_validated})"
+                )
+            }),
+        || {
+            if let Some(ref db) = utxo_engine {
+                db.flush_contiguous_length_sidecar();
+            }
+            if let Some(data_dir) = storage_clone.data_dir() {
+                let engine_path = crate::config::ibd::ibd_engine_path(Some(data_dir.as_path()));
+                crate::storage::ibd_engine::clear_engine_dirty_flag(&engine_path);
+            }
+            info!("IBD shutdown: validation loop complete");
+        },
+    )?;
     Ok(())
 }
 
@@ -4418,11 +4346,10 @@ fn parse_smaps_report(text: &str) -> SmapsReport {
                 }
             }
         } else if in_mi {
-            if line.starts_with("Rss:") {
-                if let Some(v) = line.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok())
-                {
-                    mi_rss_mb += v / 1024;
-                }
+            if line.starts_with("Rss:")
+                && let Some(v) = line.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok())
+            {
+                mi_rss_mb += v / 1024;
             }
             if line.starts_with("VmFlags:") {
                 in_mi = false;
@@ -4461,6 +4388,11 @@ fn parse_smaps_report(text: &str) -> SmapsReport {
     }
 }
 
+/// One heap profile path. A height in the name left a new file on every report (F63).
+fn jemalloc_heap_profile_path() -> &'static str {
+    "/tmp/blvm_heap.jep"
+}
+
 #[cfg(test)]
 mod duplicate_coinbase_depth_tests {
     use super::duplicate_coinbase_serial_height;
@@ -4489,5 +4421,15 @@ Rss:               4096 kB
         assert_eq!(report.mi_virtual_mb, 1);
         assert_eq!(report.mi_rss_mb, 200);
         assert!(report.top_anon.contains("[anon:mimalloc]"));
+    }
+}
+
+#[cfg(test)]
+mod heap_profile_path_tests {
+    #[test]
+    fn the_heap_profile_is_one_file() {
+        let path = super::jemalloc_heap_profile_path();
+        assert_eq!(path, "/tmp/blvm_heap.jep");
+        assert!(!path.contains('{'));
     }
 }

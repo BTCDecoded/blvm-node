@@ -17,6 +17,7 @@ fn create_test_metadata(name: &str) -> ModuleMetadata {
         dependencies: HashMap::new(),
         optional_dependencies: HashMap::new(),
         entry_point: format!("{name}.so"),
+        ipc_protocol: 0,
     }
 }
 

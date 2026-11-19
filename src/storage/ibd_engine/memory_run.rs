@@ -732,11 +732,13 @@ impl MemoryRun {
             if e.is_add() {
                 // Peek at next entry: if it's a Delete at the same height, both cancel.
                 let next = slice.get(i + 1);
-                if let Some(n) = next {
-                    if n.key == *key && n.height == e.height && n.is_delete() {
-                        i += 2; // skip both (same-height create+spend)
-                        continue;
-                    }
+                if let Some(n) = next
+                    && n.key == *key
+                    && n.height == e.height
+                    && n.is_delete()
+                {
+                    i += 2; // skip both (same-height create+spend)
+                    continue;
                 }
                 result = Some(e.id);
                 break;
@@ -764,10 +766,10 @@ impl MemoryRun {
     pub fn batch_lookup(&self, keys: &[[u8; 36]], ids: &mut [OutputId], since: i32, before: i32) {
         debug_assert_eq!(keys.len(), ids.len());
         let lookup_one = |key: &[u8; 36], id: &mut OutputId| {
-            if *id == OutputId::MAX {
-                if let Some(found) = self.lookup_key(key, since, before) {
-                    *id = found; // real id or OUTPUT_ID_DELETED
-                }
+            if *id == OutputId::MAX
+                && let Some(found) = self.lookup_key(key, since, before)
+            {
+                *id = found; // real id or OUTPUT_ID_DELETED
             }
         };
         // Opt out: `BLVM_IBD_QUERY_RAYON=0` — serial lookup.
@@ -893,12 +895,14 @@ impl MemoryRun {
 
             if e.is_delete() {
                 // Case 1 (same-height): Add was already pushed to gc last.
-                if let Some(last) = gc.last() {
-                    if last.key == e.key && last.height == e.height && last.is_add() {
-                        // Same-height Add+Delete: always dead (spent in the same block).
-                        gc.pop();
-                        continue;
-                    }
+                if let Some(last) = gc.last()
+                    && last.key == e.key
+                    && last.height == e.height
+                    && last.is_add()
+                {
+                    // Same-height Add+Delete: always dead (spent in the same block).
+                    gc.pop();
+                    continue;
                 }
                 // Case 2 (cross-height): Add comes later. Stash this Delete.
                 pending_del = Some(e);
@@ -1254,7 +1258,56 @@ mod tests {
 
     #[serial_test::serial(ibd)]
     #[test]
+    fn a_spend_above_the_next_checkpoint_survives_when_the_fence_is_set_first() {
+        // 2026-11-18: export labeled 200000 while the engine was already at
+        // 200562. Fence MAX drops Delete(200100). Fence 200000 keeps the Add
+        // so the snapshot at 200000 still contains the coin block 200001 spends.
+        struct RestoreFence;
+        impl Drop for RestoreFence {
+            fn drop(&mut self) {
+                set_gc_fence(i32::MAX);
+            }
+        }
+        let _restore = RestoreFence;
+        let k = make_key(1);
+        let add = Arc::new(MemoryRun::build(vec![OutputKV::new_add(k, 100_000, 7)]));
+        let delete = Arc::new(MemoryRun::build(vec![OutputKV::new_delete(k, 200_100)]));
+
+        set_gc_fence(i32::MAX);
+        let dropped = MemoryRun::merge(&[Arc::clone(&add), Arc::clone(&delete)]);
+        assert!(
+            dropped.entries.is_empty(),
+            "fence MAX must drop the spend, got {:?}",
+            dropped.entries.len()
+        );
+
+        set_gc_fence(200_000);
+        let kept = MemoryRun::merge(&[add, delete]);
+        assert_eq!(
+            kept.entries.len(),
+            2,
+            "fence at the checkpoint must keep the Add"
+        );
+        assert!(kept.entries.iter().any(|e| e.is_add() && e.height == 100_000));
+        assert!(kept
+            .entries
+            .iter()
+            .any(|e| e.is_delete() && e.height == 200_100));
+    }
+
+    #[serial_test::serial(ibd)]
+    #[test]
     fn test_merge_cross_height_with_recreation() {
+        // Other lib tests store a checkpoint fence and do not always put it
+        // back. A delete above that fence must be kept; the live-UTXO case
+        // below requires the open fence.
+        struct RestoreFence;
+        impl Drop for RestoreFence {
+            fn drop(&mut self) {
+                set_gc_fence(i32::MAX);
+            }
+        }
+        let _restore = RestoreFence;
         let k = make_key(1);
         // UTXO created h=100, spent h=200, recreated h=300 (early Bitcoin P2PKH reuse).
         let run_a = Arc::new(MemoryRun::build(vec![
@@ -1262,6 +1315,15 @@ mod tests {
             OutputKV::new_delete(k, 200),
             OutputKV::new_add(k, 300, 99),
         ]));
+        set_gc_fence(50);
+        let blocked = MemoryRun::merge(&[Arc::clone(&run_a)]);
+        assert_eq!(
+            blocked.entries.len(),
+            3,
+            "delete above the fence stays, got {:?}",
+            blocked.entries
+        );
+        set_gc_fence(i32::MAX);
         let merged = MemoryRun::merge(&[run_a]);
         // Add(h=100) + Delete(h=200) cancel; Add(h=300) survives as the live UTXO.
         assert_eq!(

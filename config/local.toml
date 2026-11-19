@@ -1,0 +1,25 @@
+# local
+#
+# Base document for a full binary that has no config file, and for a file
+# that sets `profile = "local"`. Keys in the user's file replace these.
+# The network, listen address, and RPC address stay unset so the CLI can
+# choose the network and its ports. Consensus rules are not in this file.
+
+profile = "local"
+listen = true
+enable_self_advertisement = false
+
+[modules]
+enabled = false
+enabled_modules = []
+registry_url = ""
+watch_enabled = false
+
+[fees]
+estimator = "native"
+fallback = "native"
+allow_auto_override = []
+
+[mempool]
+persist_mempool = true
+mempool_persistence_path = "mempool.dat"

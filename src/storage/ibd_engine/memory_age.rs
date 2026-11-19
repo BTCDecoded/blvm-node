@@ -353,10 +353,10 @@ impl MemoryAge {
     }
 
     fn maybe_notify_compacter(&self) {
-        if self.runs.read().len() >= self.notify_threshold() {
-            if let Some(ref eq) = self.enqueue {
-                eq();
-            }
+        if self.runs.read().len() >= self.notify_threshold()
+            && let Some(ref eq) = self.enqueue
+        {
+            eq();
         }
     }
 
@@ -541,10 +541,10 @@ impl MemoryAge {
             }
         }
         self.bump_index_epoch();
-        if self.runs.read().len() >= self.notify_threshold() {
-            if let Some(ref eq) = self.enqueue {
-                eq();
-            }
+        if self.runs.read().len() >= self.notify_threshold()
+            && let Some(ref eq) = self.enqueue
+        {
+            eq();
         }
     }
 
@@ -552,16 +552,16 @@ impl MemoryAge {
     pub fn freeze_tip(&self) {
         let mut lock = self.runs.write();
         let old = Arc::clone(&*lock);
-        if let Some(last) = old.last() {
-            if last.is_mutable {
-                let mut new_runs = (*old).clone();
-                let mut frozen = (**last).clone();
-                frozen.freeze();
-                *new_runs.last_mut().unwrap() = Arc::new(frozen);
-                *lock = Arc::new(new_runs);
-                drop(lock);
-                self.bump_index_epoch();
-            }
+        if let Some(last) = old.last()
+            && last.is_mutable
+        {
+            let mut new_runs = (*old).clone();
+            let mut frozen = (**last).clone();
+            frozen.freeze();
+            *new_runs.last_mut().unwrap() = Arc::new(frozen);
+            *lock = Arc::new(new_runs);
+            drop(lock);
+            self.bump_index_epoch();
         }
     }
 

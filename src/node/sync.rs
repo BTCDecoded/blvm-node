@@ -17,7 +17,8 @@ use crate::node::performance::{OperationType, PerformanceProfiler, PerformanceTi
 #[cfg(feature = "production")]
 use crate::node::reorg_executor::{
     commit_utxo_snapshot_delta, note_snapshot_height, read_snapshot_inputs,
-    try_activate_heavier_fork,
+    record_snapshot_coin_delta, recover_if_snapshot_step_failed, recover_snapshot_commit,
+    running_hash_from_read, snapshot_connect_coin_delta, try_activate_heavier_fork,
 };
 use crate::storage::Storage;
 use crate::storage::blockstore::BlockStore;
@@ -279,6 +280,16 @@ fn cloned_fork_choice_entry<T: Clone, W: Clone>(block: &T, witnesses: &[W]) -> O
     None
 }
 
+/// The chainstate write has to succeed before the tip moves.
+pub(crate) fn chainstate_undo_before_tip(batch: Result<()>) -> Result<()> {
+    batch
+}
+
+/// The memory-set write has to succeed before the tip moves.
+pub(crate) fn memory_set_store_before_tip(store: Result<()>) -> Result<()> {
+    store
+}
+
 impl SyncCoordinator {
     /// Create a new sync coordinator
     pub fn new() -> Self {
@@ -405,14 +416,12 @@ impl SyncCoordinator {
                 Ok(true)
             }
             Err(e) => {
-                if let Some(dir) = ibd_data_dir {
-                    if crate::storage::ibd_autorepair::validation_error_suggests_utxo_repair(&e) {
-                        if let Err(flag_e) =
-                            crate::storage::ibd_autorepair::set_ibd_utxo_repair_flag(dir)
-                        {
-                            tracing::warn!("Could not write IBD UTXO repair marker: {}", flag_e);
-                        }
-                    }
+                if let Some(dir) = ibd_data_dir
+                    && crate::storage::ibd_autorepair::validation_error_suggests_utxo_repair(&e)
+                    && let Err(flag_e) =
+                        crate::storage::ibd_autorepair::set_ibd_utxo_repair_flag(dir)
+                {
+                    tracing::warn!("Could not write IBD UTXO repair marker: {}", flag_e);
                 }
                 error!(
                     "Parallel IBD failed: {:#}. Sequential sync is not supported - IBD must succeed in parallel mode.",
@@ -610,17 +619,16 @@ impl SyncCoordinator {
         storage: &Storage,
         undo: &blvm_consensus::reorganization::BlockUndoLog,
     ) -> Result<()> {
+        let mut ops = Vec::new();
         for entry in undo.entries.iter().rev() {
             if entry.previous_utxo.is_some() {
-                storage.utxos().remove_utxo(&entry.outpoint)?;
+                ops.push((&entry.outpoint, None));
             }
             if let Some(created) = &entry.new_utxo {
-                storage
-                    .utxos()
-                    .add_utxo(&entry.outpoint, created.as_ref())?;
+                ops.push((&entry.outpoint, Some(created.as_ref())));
             }
         }
-        Ok(())
+        storage.utxos().commit_outpoint_batch(&ops)
     }
 
     #[cfg(feature = "production")]
@@ -768,12 +776,10 @@ impl SyncCoordinator {
                     // Coins first, then the tip. The journal is in the coin
                     // batch, so a crash here is finished on the next start
                     // instead of validating against coins that are already spent.
-                    let mut muhash = storage
-                        .chain()
-                        .get_ibd_utxo_muhash_running()
-                        .ok()
-                        .flatten()
-                        .map(|bytes| blvm_muhash::MuHash3072::deserialize_running_state(&bytes));
+                    let mut muhash = running_hash_from_read(
+                        storage.chain().get_ibd_utxo_muhash_running(),
+                    )?
+                    .map(|bytes| blvm_muhash::MuHash3072::deserialize_running_state(&bytes));
                     let written = commit_utxo_snapshot_delta(
                         tree.as_ref(),
                         storage.utxo_value_codec(),
@@ -782,44 +788,59 @@ impl SyncCoordinator {
                         Some((connect_height, block_hash)),
                         muhash.as_mut(),
                     )?;
-                    storage
-                        .chain()
-                        .update_tip(&block_hash, &block.header, connect_height)?;
-                    note_snapshot_height(storage, connect_height)?;
-                    if let Some(mh) = muhash.as_ref() {
-                        let bytes = mh.serialize_running_state();
-                        storage
-                            .chain()
-                            .persist_ibd_utxo_muhash_running_only(&bytes)?;
+                    let recovered = recover_if_snapshot_step_failed(
+                        (|| -> Result<()> {
+                            record_snapshot_coin_delta(
+                                storage,
+                                snapshot_connect_coin_delta(&[&undo_log]),
+                                Some(connect_height),
+                            )?;
+                            storage.chain().update_tip(
+                                &block_hash,
+                                &block.header,
+                                connect_height,
+                            )?;
+                            note_snapshot_height(storage, connect_height)?;
+                            if let Some(mh) = muhash.as_ref() {
+                                let bytes = mh.serialize_running_state();
+                                storage
+                                    .chain()
+                                    .persist_ibd_utxo_muhash_running_only(&bytes)?;
+                            }
+                            Ok(())
+                        })(),
+                        || recover_snapshot_commit(storage.as_ref(), blockstore),
+                    )?;
+                    if !recovered {
+                        let _ =
+                            tree.remove(crate::node::reorg_executor::SNAPSHOT_REORG_JOURNAL_KEY);
+                        let _ = tree.remove(crate::node::reorg_executor::SNAPSHOT_MUHASH_KEY);
                     }
-                    let _ = tree.remove(crate::node::reorg_executor::SNAPSHOT_REORG_JOURNAL_KEY);
-                    let _ = tree.remove(crate::node::reorg_executor::SNAPSHOT_MUHASH_KEY);
                     info!("[CONNECT] wrote {written} UTXO rows in snapshot {name}");
                     *utxo_set = UtxoSet::default();
                 } else if from_disk {
-                    let export_height_set = storage
-                        .chain()
-                        .get_engine_export_height()
-                        .ok()
-                        .flatten()
-                        .unwrap_or(0)
-                        > 0;
+                    let export_height_set =
+                        crate::node::reliability_decisions::export_height_is_set(
+                            storage.chain().get_engine_export_height(),
+                        )?;
                     if crate::node::reorg_executor::disk_utxo_source(false, export_height_set)
                         == crate::node::reorg_executor::DiskUtxoSource::MissingSnapshot
                     {
                         anyhow::bail!("connect refused: IBD UTXO snapshot is empty");
                     }
+                    chainstate_undo_before_tip(Self::apply_connect_undo_to_chainstate(
+                        storage, &undo_log,
+                    ))?;
                     storage
                         .chain()
                         .update_tip(&block_hash, &block.header, connect_height)?;
-                    Self::apply_connect_undo_to_chainstate(storage, &undo_log)?;
                     *utxo_set = UtxoSet::default();
                 } else {
+                    memory_set_store_before_tip(storage.utxos().store_utxo_set(&connected_utxo))?;
                     storage
                         .chain()
                         .update_tip(&block_hash, &block.header, connect_height)?;
                     *utxo_set = connected_utxo;
-                    storage.utxos().store_utxo_set(utxo_set)?;
                 }
             } else {
                 let validation_result = validate_block_protocol_only(
@@ -1191,6 +1212,18 @@ pub async fn run_utxo_commitments_initial_sync(
 mod tests {
     use super::*;
     use blvm_protocol::{Block, BlockHeader, Transaction};
+
+    #[test]
+    fn memory_set_connect_does_not_move_the_tip_when_the_store_fails() {
+        assert!(memory_set_store_before_tip(Err(anyhow::anyhow!("store"))).is_err());
+        assert!(memory_set_store_before_tip(Ok(())).is_ok());
+    }
+
+    #[test]
+    fn chainstate_undo_does_not_move_the_tip_when_the_batch_fails() {
+        assert!(chainstate_undo_before_tip(Err(anyhow::anyhow!("batch"))).is_err());
+        assert!(chainstate_undo_before_tip(Ok(())).is_ok());
+    }
 
     #[test]
     fn matching_witness_list_is_not_cloned() {

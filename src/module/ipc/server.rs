@@ -51,8 +51,6 @@ pub trait WasmInvoker: Send + Sync {
 pub struct ModuleIpcServer {
     /// Socket/pipe path where server listens
     socket_path: PathBuf,
-    /// Connection count (for fallback module IDs)
-    connection_count: Arc<std::sync::atomic::AtomicUsize>,
     /// Event manager for publishing events
     event_manager: Option<Arc<crate::module::api::events::EventManager>>,
     /// API hub for request routing
@@ -96,6 +94,9 @@ pub struct ModuleIpcServer {
     wasm_invoker: Option<Arc<dyn WasmInvoker>>,
     /// Timer service notified when a module connects and disconnects.
     timer_service: Option<crate::module::timers::TimerService>,
+    /// Module ids this node minted, and the sandbox generation from the manifest.
+    /// Handshake rejects every other id. Generation 2 rejects a v1 handshake.
+    issued_module_ids: Arc<std::sync::RwLock<HashMap<String, u32>>>,
 }
 
 /// Active connection to a module (generic over stream read half)
@@ -161,6 +162,8 @@ pub struct ModuleIpcHandle {
         Arc<tokio::sync::Mutex<HashMap<u64, oneshot::Sender<InvocationResultMessage>>>>,
     pub(crate) next_invocation_id: Arc<AtomicU64>,
     pub(crate) cli_registry: Arc<tokio::sync::RwLock<HashMap<String, CliSpec>>>,
+    /// Module ids the node minted, with the manifest `ipc_protocol`.
+    pub(crate) issued_module_ids: Arc<std::sync::RwLock<HashMap<String, u32>>>,
 }
 
 impl ModuleIpcHandle {
@@ -173,6 +176,21 @@ impl ModuleIpcHandle {
     pub async fn unregister_cli_spec_by_name(&self, module_name: &str) {
         let mut registry = self.cli_registry.write().await;
         registry.retain(|id, _| id != module_name && !id.starts_with(&format!("{module_name}_")));
+    }
+
+    /// Record an id the node minted. Handshake rejects every other id.
+    ///
+    /// Safe to call while `start` holds the server mutex: the set is its own lock.
+    pub fn issue_module_id(&self, module_id: &str) {
+        self.issue_module_id_with_protocol(module_id, 0);
+    }
+
+    /// Record an id and the manifest generation. `0` keeps stream TCP. `2` requires `HandshakeV2`.
+    pub fn issue_module_id_with_protocol(&self, module_id: &str, ipc_protocol: u32) {
+        self.issued_module_ids
+            .write()
+            .expect("issued module ids")
+            .insert(module_id.to_string(), ipc_protocol);
     }
 
     /// Invoke a subprocess module's registered ModuleAPI method (node → module).
@@ -421,6 +439,7 @@ impl ModuleIpcServer {
             pending_invocations: Arc::clone(&self.pending_invocations),
             next_invocation_id: Arc::clone(&self.next_invocation_id),
             cli_registry: Arc::clone(&self.cli_registry),
+            issued_module_ids: Arc::clone(&self.issued_module_ids),
         }
     }
 
@@ -428,7 +447,6 @@ impl ModuleIpcServer {
     pub fn new<P: AsRef<Path>>(socket_path: P) -> Self {
         Self {
             socket_path: socket_path.as_ref().to_path_buf(),
-            connection_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             event_manager: None,
             api_hub: None,
             rpc_channels: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -440,7 +458,21 @@ impl ModuleIpcServer {
             #[cfg(feature = "wasm-modules")]
             wasm_invoker: None,
             timer_service: None,
+            issued_module_ids: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Record an id this node minted. See [`ModuleIpcHandle::issue_module_id`].
+    pub fn issue_module_id(&self, module_id: &str) {
+        self.issue_module_id_with_protocol(module_id, 0);
+    }
+
+    /// Record an id and the manifest generation. `0` keeps stream TCP. `2` requires `HandshakeV2`.
+    pub fn issue_module_id_with_protocol(&self, module_id: &str, ipc_protocol: u32) {
+        self.issued_module_ids
+            .write()
+            .expect("issued module ids")
+            .insert(module_id.to_string(), ipc_protocol);
     }
 
     /// Notify this service when modules connect and disconnect.
@@ -816,7 +848,6 @@ impl ModuleIpcServer {
 /// Shared per-connection state. Each accepted module runs on its own task.
 #[derive(Clone)]
 struct ConnectionCtx {
-    connection_count: Arc<std::sync::atomic::AtomicUsize>,
     event_manager: Option<Arc<crate::module::api::events::EventManager>>,
     api_hub: Option<Arc<tokio::sync::Mutex<ModuleApiHub>>>,
     rpc_channels: Arc<
@@ -846,12 +877,12 @@ struct ConnectionCtx {
         >,
     >,
     timer_service: Option<crate::module::timers::TimerService>,
+    issued_module_ids: Arc<std::sync::RwLock<HashMap<String, u32>>>,
 }
 
 impl ModuleIpcServer {
     fn connection_ctx(&self) -> ConnectionCtx {
         ConnectionCtx {
-            connection_count: Arc::clone(&self.connection_count),
             event_manager: self.event_manager.clone(),
             api_hub: self.api_hub.clone(),
             rpc_channels: Arc::clone(&self.rpc_channels),
@@ -860,6 +891,7 @@ impl ModuleIpcServer {
             pending_invocations: Arc::clone(&self.pending_invocations),
             rpc_pending: Arc::clone(&self.rpc_pending),
             timer_service: self.timer_service.clone(),
+            issued_module_ids: Arc::clone(&self.issued_module_ids),
         }
     }
 }
@@ -890,6 +922,7 @@ impl ConnectionCtx {
 
                 match message {
                     ModuleMessage::Request(request) => {
+                        // `None` is the v1 handshake every published binary sends.
                         let accepted = match &request.payload {
                             RequestPayload::Handshake {
                                 module_id,
@@ -900,7 +933,7 @@ impl ConnectionCtx {
                                     "Module handshake: id={}, name={}, version={}",
                                     module_id, module_name, version
                                 );
-                                Some((module_id.clone(), module_name.clone()))
+                                Some((module_id.clone(), module_name.clone(), None))
                             }
                             RequestPayload::HandshakeV2 {
                                 module_id,
@@ -908,22 +941,72 @@ impl ConnectionCtx {
                                 version,
                                 ipc_protocol,
                             } => {
-                                if *ipc_protocol
-                                    != crate::module::timers::types::IPC_PROTOCOL_VERSION
-                                {
-                                    return Err(ModuleError::IpcError(format!(
-                                        "unsupported ipc protocol version {ipc_protocol}"
-                                    )));
-                                }
                                 info!(
                                     "Module handshake v2: id={}, name={}, version={}, ipc={}",
                                     module_id, module_name, version, ipc_protocol
                                 );
-                                Some((module_id.clone(), module_name.clone()))
+                                Some((module_id.clone(), module_name.clone(), Some(*ipc_protocol)))
                             }
                             _ => None,
                         };
-                        if let Some((module_id, module_name)) = accepted {
+                        if let Some((module_id, module_name, presented)) = accepted {
+                            let expected = self
+                                .issued_module_ids
+                                .read()
+                                .expect("issued module ids")
+                                .get(&module_id)
+                                .copied();
+                            if expected.is_none() {
+                                let nak = ResponseMessage::error(
+                                    request.correlation_id,
+                                    "module id was not issued by the node".to_string(),
+                                );
+                                let nak_bytes = bincode::serialize(&ModuleMessage::Response(nak))
+                                    .map_err(|e| {
+                                    ModuleError::SerializationError(e.to_string())
+                                })?;
+                                writer
+                                    .send(bytes::Bytes::from(nak_bytes))
+                                    .await
+                                    .map_err(|e| {
+                                        ModuleError::IpcError(format!(
+                                            "Failed to send handshake rejection: {e}"
+                                        ))
+                                    })?;
+                                return Err(ModuleError::IpcError(
+                                    "module id was not issued by the node".to_string(),
+                                ));
+                            }
+                            let expected = expected.expect("issued id");
+                            let generation_ok = match presented {
+                                None => expected == 0,
+                                Some(got) => got == expected,
+                            };
+                            if !generation_ok {
+                                let reason = match presented {
+                                    None => {
+                                        "module ipc_protocol 2 requires HandshakeV2".to_string()
+                                    }
+                                    Some(got) => format!(
+                                        "handshake ipc protocol {got} does not match manifest ipc_protocol {expected}"
+                                    ),
+                                };
+                                let nak =
+                                    ResponseMessage::error(request.correlation_id, reason.clone());
+                                let nak_bytes = bincode::serialize(&ModuleMessage::Response(nak))
+                                    .map_err(|e| {
+                                    ModuleError::SerializationError(e.to_string())
+                                })?;
+                                writer
+                                    .send(bytes::Bytes::from(nak_bytes))
+                                    .await
+                                    .map_err(|e| {
+                                        ModuleError::IpcError(format!(
+                                            "Failed to send handshake rejection: {e}"
+                                        ))
+                                    })?;
+                                return Err(ModuleError::IpcError(reason));
+                            }
                             let ack = ResponseMessage {
                                 correlation_id: request.correlation_id,
                                 success: true,
@@ -944,11 +1027,9 @@ impl ConnectionCtx {
                                 })?;
                             (module_id, module_name)
                         } else {
-                            warn!("Module did not send handshake, using fallback ID");
-                            let timestamp = crate::utils::current_timestamp_nanos();
-                            let count = self.connection_count.fetch_add(1, Ordering::SeqCst);
-                            let module_id = format!("module_{count}_{timestamp}");
-                            (module_id.clone(), module_id)
+                            return Err(ModuleError::IpcError(
+                                "First message must be a handshake request".to_string(),
+                            ));
                         }
                     }
                     _ => {
@@ -1015,13 +1096,13 @@ impl ConnectionCtx {
                 }
 
                 // Clean up: unsubscribe module from events when task exits
-                if let Some(event_mgr) = event_manager_clone {
-                    if let Err(e) = event_mgr.unsubscribe_module(&module_id_event_fwd).await {
-                        warn!(
-                            "Failed to unsubscribe module {} from events: {}",
-                            module_id_event_fwd, e
-                        );
-                    }
+                if let Some(event_mgr) = event_manager_clone
+                    && let Err(e) = event_mgr.unsubscribe_module(&module_id_event_fwd).await
+                {
+                    warn!(
+                        "Failed to unsubscribe module {} from events: {}",
+                        module_id_event_fwd, e
+                    );
                 }
             });
 
@@ -1092,10 +1173,10 @@ impl ConnectionCtx {
                     correlation_id,
                     invocation_type: InvocationType::Rpc { method, params },
                 };
-                if let Ok(bytes) = bincode::serialize(&ModuleMessage::Invocation(invocation)) {
-                    if outgoing_tx_for_rpc.send(bytes::Bytes::from(bytes)).is_err() {
-                        break; // Connection closed
-                    }
+                if let Ok(bytes) = bincode::serialize(&ModuleMessage::Invocation(invocation))
+                    && outgoing_tx_for_rpc.send(bytes::Bytes::from(bytes)).is_err()
+                {
+                    break; // Connection closed
                 }
             }
         });
@@ -1164,13 +1245,13 @@ impl ConnectionCtx {
         }
 
         // Unsubscribe from event manager
-        if let Some(event_mgr) = &self.event_manager {
-            if let Err(e) = event_mgr.unsubscribe_module(&module_id).await {
-                warn!(
-                    "Failed to unsubscribe module {} from events: {}",
-                    module_id, e
-                );
-            }
+        if let Some(event_mgr) = &self.event_manager
+            && let Err(e) = event_mgr.unsubscribe_module(&module_id).await
+        {
+            warn!(
+                "Failed to unsubscribe module {} from events: {}",
+                module_id, e
+            );
         }
 
         Ok(())
@@ -1210,38 +1291,33 @@ impl ConnectionCtx {
                 }
 
                 // Handle SubscribeEvents specially to register with event manager
-                if let RequestPayload::SubscribeModuleEventNames { ref names } = request.payload {
-                    if let Some(event_mgr) = &self.event_manager {
-                        event_mgr
-                            .set_module_event_filter(&connection.module_id, names.clone())
-                            .await;
-                    }
+                if let RequestPayload::SubscribeModuleEventNames { ref names } = request.payload
+                    && let Some(event_mgr) = &self.event_manager
+                {
+                    event_mgr
+                        .set_module_event_filter(&connection.module_id, names.clone())
+                        .await;
                 }
 
-                if let RequestPayload::SubscribeEvents { ref event_types } = request.payload {
-                    if let Some(event_mgr) = &self.event_manager {
-                        if let Some(event_tx) = &connection.event_tx {
-                            // Register module subscriptions
-                            let module_id = connection.module_id.clone();
-                            let event_tx_clone = event_tx.clone();
-                            event_mgr
-                                .subscribe_module(
-                                    module_id.clone(),
-                                    event_types.clone(),
-                                    event_tx_clone,
-                                )
-                                .await?;
-                            connection.subscriptions = event_types.clone();
-                            debug!(
-                                "Module {} subscribed to events: {:?}",
-                                module_id, event_types
-                            );
-                            // Note: subscribe_module() handles:
-                            // 1. Sending already-loaded modules to this newly subscribing module
-                            // 2. Publishing ModuleLoaded for this module (if loaded) AFTER subscription
-                            // This ensures ModuleLoaded only happens after startup is complete
-                        }
-                    }
+                if let RequestPayload::SubscribeEvents { ref event_types } = request.payload
+                    && let Some(event_mgr) = &self.event_manager
+                    && let Some(event_tx) = &connection.event_tx
+                {
+                    // Register module subscriptions
+                    let module_id = connection.module_id.clone();
+                    let event_tx_clone = event_tx.clone();
+                    event_mgr
+                        .subscribe_module(module_id.clone(), event_types.clone(), event_tx_clone)
+                        .await?;
+                    connection.subscriptions = event_types.clone();
+                    debug!(
+                        "Module {} subscribed to events: {:?}",
+                        module_id, event_types
+                    );
+                    // Note: subscribe_module() handles:
+                    // 1. Sending already-loaded modules to this newly subscribing module
+                    // 2. Publishing ModuleLoaded for this module (if loaded) AFTER subscription
+                    // This ensures ModuleLoaded only happens after startup is complete
                 }
 
                 // Use API hub if available, otherwise fall back to direct node_api
@@ -2201,6 +2277,7 @@ mod timer_invoke_tests {
             pending_invocations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             next_invocation_id: Arc::new(AtomicU64::new(1)),
             cli_registry: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            issued_module_ids: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let err = handle

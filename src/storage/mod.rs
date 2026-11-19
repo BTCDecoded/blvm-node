@@ -35,6 +35,7 @@ pub mod ibd_utxo_store;
 #[cfg(test)]
 mod pass_fix_tests;
 pub mod pruning;
+pub(crate) mod reliability_decisions;
 #[cfg(feature = "heed3")]
 pub mod rkyv_codec;
 pub mod serialization_cache;
@@ -62,6 +63,16 @@ use bitcoin_core_storage::BitcoinCoreStorage;
 use bitcoin_detection::BitcoinCoreDetection;
 #[cfg(feature = "rocksdb")]
 use bitcoin_detection::CoreDataNetwork;
+
+/// A slot-read error is not slot 0. A missing slot key is already `Ok(0)`.
+pub(crate) fn resume_ckpt_slot(slot: Result<u8>) -> Result<u8> {
+    slot
+}
+
+/// An empty-check error is not an empty tree. `Ok(true)` means the tree has no rows.
+pub(crate) fn snapshot_has_rows(is_empty: Result<bool>) -> Result<bool> {
+    Ok(!is_empty?)
+}
 
 /// Which named tree holds the durable UTXO snapshot for an engine resume.
 ///
@@ -658,7 +669,6 @@ impl Storage {
                 Arc::clone(&db),
                 Arc::clone(&blockstore),
                 Arc::clone(&utxostore),
-                Arc::clone(&txindex),
                 network,
             );
 
@@ -678,7 +688,6 @@ impl Storage {
         db: Arc<dyn database::Database>,
         blockstore: Arc<blockstore::BlockStore>,
         utxostore: Arc<utxostore::UtxoStore>,
-        txindex: Arc<txindex::TxIndex>,
         network: blvm_protocol::types::Network,
     ) -> Option<Arc<pruning::PruningManager>> {
         pruning_config.map(|config| {
@@ -686,16 +695,7 @@ impl Storage {
             {
                 let needs_commitments = matches!(
                     config.mode,
-                    crate::config::PruningMode::Aggressive {
-                        keep_commitments: true,
-                        ..
-                    }
-                ) || matches!(
-                    config.mode,
-                    crate::config::PruningMode::Custom {
-                        keep_commitments: true,
-                        ..
-                    }
+                    crate::config::PruningMode::Aggressive
                 );
                 if needs_commitments {
                     let commitment_store = match commitment_store::CommitmentStore::new(Arc::clone(&db))
@@ -708,8 +708,7 @@ impl Storage {
                             );
                             return Arc::new(
                                 pruning::PruningManager::new(config, Arc::clone(&blockstore))
-                                    .with_network(network)
-                                    .with_tx_index(Arc::clone(&txindex)),
+                                    .with_network(network),
                             );
                         }
                     };
@@ -720,14 +719,12 @@ impl Storage {
                             commitment_store,
                             Arc::clone(&utxostore),
                         )
-                        .with_network(network)
-                        .with_tx_index(Arc::clone(&txindex)),
+                        .with_network(network),
                     )
                 } else {
                     Arc::new(
                         pruning::PruningManager::new(config, Arc::clone(&blockstore))
-                            .with_network(network)
-                            .with_tx_index(Arc::clone(&txindex)),
+                            .with_network(network),
                     )
                 }
             }
@@ -735,8 +732,7 @@ impl Storage {
             {
                 Arc::new(
                     pruning::PruningManager::new(config, Arc::clone(&blockstore))
-                        .with_network(network)
-                        .with_tx_index(Arc::clone(&txindex)),
+                        .with_network(network),
                 )
             }
         })
@@ -838,7 +834,6 @@ impl Storage {
             Arc::clone(&db),
             Arc::clone(&blockstore),
             Arc::clone(&utxostore),
-            Arc::clone(&txindex),
             network,
         );
 
@@ -974,25 +969,22 @@ impl Storage {
         // A height-index row at tip+1 is not the tip. av4 wrote
         // `000000000045a50e…` over the validated tip because that hash occupied
         // the next height and its prev was a different block.
-        if let Some(info) = self.chain().load_chain_info()? {
-            if info.height > 0 {
-                if let Some(parent_hash) = self.blockstore.get_hash_by_height(info.height - 1)? {
-                    if info.tip_header.prev_block_hash != parent_hash {
-                        if let Some(parent) = self.blockstore.get_block(&parent_hash)? {
-                            let restored = info.height - 1;
-                            let mut repaired = info;
-                            repaired.tip_hash = parent_hash;
-                            repaired.tip_header = parent.header.clone();
-                            repaired.height = restored;
-                            self.chainstate.store_chain_info(&repaired)?;
-                            warn!(
-                                "chain_info tip did not extend the active block at height {restored}; restored that block (prefix {:02x}{:02x}{:02x}{:02x})",
-                                parent_hash[0], parent_hash[1], parent_hash[2], parent_hash[3]
-                            );
-                        }
-                    }
-                }
-            }
+        if let Some(info) = self.chain().load_chain_info()?
+            && info.height > 0
+            && let Some(parent_hash) = self.blockstore.get_hash_by_height(info.height - 1)?
+            && info.tip_header.prev_block_hash != parent_hash
+            && let Some(parent) = self.blockstore.get_block(&parent_hash)?
+        {
+            let restored = info.height - 1;
+            let mut repaired = info;
+            repaired.tip_hash = parent_hash;
+            repaired.tip_header = parent.header.clone();
+            repaired.height = restored;
+            self.chainstate.store_chain_info(&repaired)?;
+            warn!(
+                "chain_info tip did not extend the active block at height {restored}; restored that block (prefix {:02x}{:02x}{:02x}{:02x})",
+                parent_hash[0], parent_hash[1], parent_hash[2], parent_hash[3]
+            );
         }
 
         let Some(max_h) = self.blockstore.highest_stored_height()? else {
@@ -1121,24 +1113,20 @@ impl Storage {
     /// Active ckpt when it has rows. Otherwise the explicitly stored canonical
     /// tree when that tree has rows and is not the empty slot. `None` means
     /// both snapshots are missing: replay from genesis. The default canonical
-    /// name `ibd_utxos` is not used when the key was never written.
+    /// name `ibd_utxos` is not used when the key was never written. A slot
+    /// read, tree open, or empty-check error is returned to the caller.
     pub fn open_engine_resume_snapshot(
         &self,
     ) -> Result<Option<(String, std::sync::Arc<dyn database::Tree>)>> {
-        let slot = self.chain().get_engine_ckpt_slot().unwrap_or(0);
+        let slot = resume_ckpt_slot(self.chain().get_engine_ckpt_slot())?;
         let slot_name = crate::storage::ibd_engine::ckpt_tree_for_slot(slot);
-        let slot_has_rows = self
-            .open_tree(slot_name)
-            .ok()
-            .and_then(|tree| tree.is_empty().ok())
-            == Some(false);
+        let slot_tree = self.open_tree(slot_name)?;
+        let slot_has_rows = snapshot_has_rows(slot_tree.is_empty())?;
         let stored = self.chain().get_stored_ibd_utxo_canonical_tree()?;
         let canonical_has_rows = match stored.as_deref() {
             Some(name) if name != slot_name => {
-                self.open_tree(name)
-                    .ok()
-                    .and_then(|tree| tree.is_empty().ok())
-                    == Some(false)
+                let tree = self.open_tree(name)?;
+                snapshot_has_rows(tree.is_empty())?
             }
             _ => false,
         };
@@ -1298,15 +1286,13 @@ impl Storage {
     /// trees still holding a full UTXO snapshot alongside blocks.
     pub fn prepare_heed3_for_tip_utxo_export(&self) -> Result<()> {
         for name in ["ibd_utxos_ckpt_a", "ibd_utxos_ckpt_b"] {
-            match self.open_tree(name) {
-                Ok(tree) => {
-                    if let Err(e) = tree.clear() {
-                        warn!("prepare tip export: clear {name} failed: {e:#}");
-                    } else {
-                        info!("[HEED3] cleared {name} before tip UTXO export (reclaim freelist)");
-                    }
-                }
-                Err(e) => warn!("prepare tip export: open {name} failed: {e:#}"),
+            let tree = self
+                .open_tree(name)
+                .with_context(|| format!("prepare tip export: open {name}"))?;
+            if reliability_decisions::should_clear_checkpoint(tree.is_empty())? {
+                tree.clear()
+                    .with_context(|| format!("prepare tip export: clear {name}"))?;
+                info!("[HEED3] cleared empty {name} before tip UTXO export (reclaim freelist)");
             }
         }
         // Force freelist visibility before grow/write.
@@ -1404,14 +1390,21 @@ impl Storage {
         const MAX_UTXOS: usize = 1_000_000_000; // 1B UTXOs
         const MAX_TXS: usize = 1_000_000_000; // 1B transactions
 
-        let block_count = self.blockstore.block_count().unwrap_or(0);
-        let utxo_count = self.utxostore.utxo_count().unwrap_or(0);
-        let tx_count = self.txindex.transaction_count().unwrap_or(0);
+        let block_count = self.blockstore.block_count()?;
+        let utxo_count = self.utxostore.utxo_count()?;
+        let tx_count = self.txindex.transaction_count()?;
 
         // Check if we're approaching limits (80% threshold)
-        let blocks_ok = block_count < (MAX_BLOCKS * 8 / 10);
-        let utxos_ok = utxo_count < (MAX_UTXOS * 8 / 10);
-        let txs_ok = tx_count < (MAX_TXS * 8 / 10);
+        let blocks_ok = reliability_decisions::count_within_cap(
+            Ok::<usize, anyhow::Error>(block_count),
+            MAX_BLOCKS,
+        )?;
+        let utxos_ok = reliability_decisions::count_within_cap(
+            Ok::<usize, anyhow::Error>(utxo_count),
+            MAX_UTXOS,
+        )?;
+        let txs_ok =
+            reliability_decisions::count_within_cap(Ok::<usize, anyhow::Error>(tx_count), MAX_TXS)?;
 
         if !blocks_ok {
             warn!(

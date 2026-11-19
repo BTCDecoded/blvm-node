@@ -26,6 +26,9 @@ pub use ibd::*;
 pub mod network;
 pub use network::*;
 
+pub mod hardened;
+pub mod profiles;
+
 use crate::network::transport::TransportPreference;
 use anyhow::{Context, Result};
 use serde::de::{Deserializer, Error, MapAccess, Visitor};
@@ -174,6 +177,9 @@ where
             let mut module_database_backend: Option<String> = None;
             let mut marketplace_fetch_enabled = false;
             let mut allow_unsigned_modules = false;
+            // Applied after `enabled_modules`, so a pin survives an empty list
+            // whatever order the table was written in.
+            let mut pins = Vec::new();
 
             while let Some(key) = map.next_key::<String>()? {
                 if MODULE_CONFIG_KNOWN_KEYS.contains(&key.as_str()) {
@@ -218,12 +224,12 @@ where
                     let value: toml::Value = map.next_value()?;
                     match &value {
                         toml::Value::String(version_constraint) => {
-                            enabled_modules.insert(key, version_constraint.clone());
+                            pins.push((key, version_constraint.clone()));
                         }
                         toml::Value::Table(_) => {
                             let mut flat = flatten_toml_to_string_map(&value);
                             if let Some(version) = flat.remove("version") {
-                                enabled_modules.insert(key.clone(), version);
+                                pins.push((key.clone(), version));
                             }
                             if !flat.is_empty() {
                                 module_configs.entry(key).or_default().extend(flat);
@@ -232,6 +238,9 @@ where
                         _ => {}
                     }
                 }
+            }
+            for (name, version) in pins {
+                enabled_modules.insert(name, version);
             }
 
             let registry_url = registry_url.filter(|s| !s.trim().is_empty());
@@ -294,9 +303,10 @@ pub struct ModuleConfig {
     /// Enabled modules and optional version constraints.
     ///
     /// The baseline is `blvm-miniscript`, `blvm-zmq`, and `blvm-index` at `0.1.*`.
-    /// A `[modules]` table starts from that set. An inline `name = "0.1.*"` adds or replaces
-    /// one pin. A present `enabled_modules` key replaces the whole set; an empty list loads
-    /// only binaries already on disk. `disabled_modules` wins over a pin at load time.
+    /// A `[modules]` table starts from that set. A present `enabled_modules` key replaces
+    /// the whole set; an empty list loads only binaries already on disk. An inline
+    /// `name = "0.1.*"` then adds or replaces one pin, whichever order the keys were
+    /// written. `disabled_modules` wins over a pin at load time.
     ///
     /// When a module also needs spawn overrides (`[modules.blvm-zmq]`), put the pin in that
     /// table as `version = "0.1.*"` (inline `blvm-zmq = "…"` would conflict with the table).
@@ -690,7 +700,7 @@ fn default_max_headers_results() -> usize {
 
 /// A headers reply fills a batch only when the cap is a positive size.
 pub fn headers_batch_is_full(received: usize, max_headers_results: usize) -> bool {
-    max_headers_results > 0 && received % max_headers_results == 0
+    max_headers_results > 0 && received.is_multiple_of(max_headers_results)
 }
 
 /// One header is inside the cap when the cap is zero.
@@ -848,12 +858,23 @@ fn default_modules_option() -> Option<ModuleConfig> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NodeConfig {
+    /// Named deployment profile. Absent keeps the historical defaults.
+    /// A name other than `minimal-hardened` is stored for blvm-ui and does not
+    /// change settings. An unknown name is a load error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+
     /// Network listening address
     pub listen_addr: Option<SocketAddr>,
 
     /// Bind the P2P listeners. An omitted key stays true so existing files keep binding.
     #[serde(default = "default_true")]
     pub listen: bool,
+
+    /// The loaded document is `minimal-hardened`. Not a config key. The
+    /// binary must not seed assume-valid after this parse.
+    #[serde(skip)]
+    pub(crate) assume_valid_seed_rejected: bool,
 
     /// RPC bind address. Absent means the network default chosen by the binary.
     #[serde(default)]
@@ -1033,8 +1054,10 @@ pub struct BrokerNetworkConfig {
 /// uses bitflags for all combinations. Use From trait for conversion.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum TransportPreferenceConfig {
     /// TCP-only mode (Bitcoin P2P compatible, default)
+    #[default]
     TcpOnly,
     /// Quinn-only mode (direct QUIC)
     #[cfg(feature = "quinn")]
@@ -1048,12 +1071,6 @@ pub enum TransportPreferenceConfig {
     /// All transports (TCP + Quinn + Iroh)
     #[cfg(all(feature = "quinn", feature = "iroh"))]
     All,
-}
-
-impl Default for TransportPreferenceConfig {
-    fn default() -> Self {
-        Self::TcpOnly
-    }
 }
 
 impl From<TransportPreferenceConfig> for TransportPreference {
@@ -1075,8 +1092,10 @@ impl From<TransportPreferenceConfig> for TransportPreference {
 impl Default for NodeConfig {
     fn default() -> Self {
         Self {
+            profile: None,
             listen_addr: None,
             listen: true,
+            assume_valid_seed_rejected: false,
             rpc_addr: None,
             block_validation: None,
             assumeutxo_blockhash: None,
@@ -1133,12 +1152,12 @@ fn expand_tilde_path(s: &str) -> String {
         return s.to_string();
     }
     if s == "~" {
-        return dirs::home_dir()
+        return crate::utils::home_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "~".to_string());
     }
     if let (Some(home), Some(rest)) = (
-        dirs::home_dir(),
+        crate::utils::home_dir(),
         s.strip_prefix("~/").or_else(|| s.strip_prefix("~\\")),
     ) {
         let joined = home.join(rest);
@@ -1234,22 +1253,20 @@ impl NodeConfig {
             let path_lossy_for_perm = path.to_string_lossy();
             let is_example_config = path_lossy_for_perm.ends_with(".toml.example")
                 || path_lossy_for_perm.ends_with(".example");
-            if !is_example_config {
-                if let Ok(metadata) = std::fs::metadata(path) {
-                    use std::os::unix::fs::PermissionsExt;
-                    let permissions = metadata.permissions();
-                    let mode = permissions.mode();
-                    // Check if file is readable by others (group or world)
-                    if mode & 0o077 != 0 {
-                        tracing::warn!(
-                            "SECURITY WARNING: Configuration file {:?} is readable by others (mode: {:o}). \
+            if !is_example_config && let Ok(metadata) = std::fs::metadata(path) {
+                use std::os::unix::fs::PermissionsExt;
+                let permissions = metadata.permissions();
+                let mode = permissions.mode();
+                // Check if file is readable by others (group or world)
+                if mode & 0o077 != 0 {
+                    tracing::warn!(
+                        "SECURITY WARNING: Configuration file {:?} is readable by others (mode: {:o}). \
                              Consider setting permissions to 600 for security. \
                              Run: chmod 600 {:?}",
-                            path,
-                            mode,
-                            path
-                        );
-                    }
+                        path,
+                        mode,
+                        path
+                    );
                 }
             }
         }
@@ -1259,13 +1276,49 @@ impl NodeConfig {
         let is_toml = path.extension().and_then(|s| s.to_str()) == Some("toml")
             || path_lossy.ends_with(".toml.example");
 
-        let mut config: NodeConfig = if is_toml {
-            toml::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {e}"))?
+        if is_toml {
+            Self::from_toml_str(&content)
         } else {
-            serde_json::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {e}"))?
-        };
+            Self::from_json_str(&content)
+        }
+    }
+
+    /// Parse a TOML document. `profile` must be a known name when it is set.
+    /// `local` overlays the embedded document and then rejects unknown keys.
+    /// `minimal-hardened` rejects unknown keys and checks the file as written.
+    /// Other profile names are stored and do not change settings. A document
+    /// that omits `profile` ignores unknown keys.
+    pub fn from_toml_str(content: &str) -> anyhow::Result<Self> {
+        let content = profiles::with_overlay_document(content, true)?;
+        let mut config: NodeConfig = toml::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {e}"))?;
+        hardened::apply_profile_gate(&config, &content, true)?;
+        config.assume_valid_seed_rejected =
+            hardened::document_rejects_assume_valid_seed(&content, true)?
+                || config
+                    .profile
+                    .as_deref()
+                    .is_some_and(profiles::skips_assume_valid_seed);
+        config.expand_paths();
+        Ok(config)
+    }
+
+    /// Parse a JSON document. `profile` must be a known name when it is set.
+    /// `local` overlays the embedded document and then rejects unknown keys.
+    /// `minimal-hardened` rejects unknown keys and checks the file as written.
+    /// Other profile names are stored and do not change settings. A document
+    /// that omits `profile` ignores unknown keys.
+    pub fn from_json_str(content: &str) -> anyhow::Result<Self> {
+        let content = profiles::with_overlay_document(content, false)?;
+        let mut config: NodeConfig = serde_json::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {e}"))?;
+        hardened::apply_profile_gate(&config, &content, false)?;
+        config.assume_valid_seed_rejected =
+            hardened::document_rejects_assume_valid_seed(&content, false)?
+                || config
+                    .profile
+                    .as_deref()
+                    .is_some_and(profiles::skips_assume_valid_seed);
         config.expand_paths();
         Ok(config)
     }
@@ -1273,18 +1326,13 @@ impl NodeConfig {
     /// Load configuration from JSON file
     pub fn from_json_file(path: &std::path::Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let mut config: NodeConfig = serde_json::from_str(&content)?;
-        config.expand_paths();
-        Ok(config)
+        Self::from_json_str(&content)
     }
 
     /// Load configuration from TOML file
     pub fn from_toml_file(path: &std::path::Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let mut config: NodeConfig = toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse TOML config: {e}"))?;
-        config.expand_paths();
-        Ok(config)
+        Self::from_toml_str(&content)
     }
 
     /// Save configuration to JSON file
@@ -1317,43 +1365,41 @@ impl NodeConfig {
         use tracing::{debug, info};
 
         // Only auto-detect if governance config exists but is disabled
-        if let Some(ref mut gov_config) = self.governance {
-            if !gov_config.enabled {
-                if let Some(ref commons_url) = gov_config.commons_url {
-                    let client = Client::builder()
-                        .timeout(std::time::Duration::from_secs(5))
-                        .build()?;
+        if let Some(ref mut gov_config) = self.governance
+            && !gov_config.enabled
+            && let Some(ref commons_url) = gov_config.commons_url
+        {
+            let client = Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()?;
 
-                    let health_url = format!("{commons_url}/internal/health");
-                    debug!("Auto-detecting governance server at {}", health_url);
+            let health_url = format!("{commons_url}/internal/health");
+            debug!("Auto-detecting governance server at {}", health_url);
 
-                    let mut request = client.get(&health_url);
-                    if let Some(key) = gov_config.resolved_api_key() {
-                        request =
-                            request.header(reqwest::header::AUTHORIZATION, format!("Bearer {key}"));
-                    }
-                    match request.send().await {
-                        Ok(response) if response.status().is_success() => {
-                            info!(
-                                "Governance server detected and responding at {}, auto-enabling governance",
-                                commons_url
-                            );
-                            gov_config.enabled = true;
-                        }
-                        Ok(response) => {
-                            debug!(
-                                "Governance server at {} responded with status {}, keeping governance disabled",
-                                commons_url,
-                                response.status()
-                            );
-                        }
-                        Err(e) => {
-                            debug!(
-                                "Governance server at {} not reachable: {}, keeping governance disabled",
-                                commons_url, e
-                            );
-                        }
-                    }
+            let mut request = client.get(&health_url);
+            if let Some(key) = gov_config.resolved_api_key() {
+                request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {key}"));
+            }
+            match request.send().await {
+                Ok(response) if response.status().is_success() => {
+                    info!(
+                        "Governance server detected and responding at {}, auto-enabling governance",
+                        commons_url
+                    );
+                    gov_config.enabled = true;
+                }
+                Ok(response) => {
+                    debug!(
+                        "Governance server at {} responded with status {}, keeping governance disabled",
+                        commons_url,
+                        response.status()
+                    );
+                }
+                Err(e) => {
+                    debug!(
+                        "Governance server at {} not reachable: {}, keeping governance disabled",
+                        commons_url, e
+                    );
                 }
             }
         }
@@ -1366,19 +1412,19 @@ impl NodeConfig {
     /// Validate configuration
     pub fn validate(&self) -> anyhow::Result<()> {
         // Validate pruning configuration
-        if let Some(ref storage) = self.storage {
-            if let Some(ref pruning) = storage.pruning {
-                pruning.validate()?;
-            }
+        if let Some(ref storage) = self.storage
+            && let Some(ref pruning) = storage.pruning
+        {
+            pruning.validate()?;
         }
 
-        if let Some(ref mempool) = self.mempool {
-            if mempool.mempool_expiry_hours.checked_mul(3600).is_none() {
-                anyhow::bail!(
-                    "mempool_expiry_hours {} does not fit in seconds",
-                    mempool.mempool_expiry_hours
-                );
-            }
+        if let Some(ref mempool) = self.mempool
+            && mempool.mempool_expiry_hours.checked_mul(3600).is_none()
+        {
+            anyhow::bail!(
+                "mempool_expiry_hours {} does not fit in seconds",
+                mempool.mempool_expiry_hours
+            );
         }
 
         if let Some(ref fees) = self.fees {
@@ -1419,8 +1465,9 @@ impl NodeConfig {
         }
 
         if let Some(ref limits) = self.protocol_limits {
-            if limits.max_headers_results == 0 {
-                anyhow::bail!("max_headers_results must be greater than 0");
+            let cap = default_max_headers_results();
+            if limits.max_headers_results == 0 || limits.max_headers_results > cap {
+                anyhow::bail!("max_headers_results must be between 1 and {cap}");
             }
         }
 
@@ -1477,21 +1524,21 @@ impl NodeConfig {
         }
 
         // Check REST API authentication
-        if let Some(rest_addr) = rest_api_addr {
-            if !is_localhost(&rest_addr) {
-                if let Some(ref rpc_auth) = self.rpc_auth {
-                    if !rpc_auth.required {
-                        warnings.push(format!(
+        if let Some(rest_addr) = rest_api_addr
+            && !is_localhost(&rest_addr)
+        {
+            if let Some(ref rpc_auth) = self.rpc_auth {
+                if !rpc_auth.required {
+                    warnings.push(format!(
                             "SECURITY WARNING: REST API is binding to {rest_addr} (non-localhost) but authentication is not required. \
                             This exposes your node to unauthorized access. Consider setting rpc_auth.required = true"
                         ));
-                    }
-                } else {
-                    warnings.push(format!(
+                }
+            } else {
+                warnings.push(format!(
                         "SECURITY WARNING: REST API is binding to {rest_addr} (non-localhost) without authentication. \
                         This exposes your node to unauthorized access. Consider configuring rpc_auth with required = true"
                     ));
-                }
             }
         }
 

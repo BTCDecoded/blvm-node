@@ -52,6 +52,8 @@ pub struct ModuleRegistry {
     mirrors: Vec<RegistryMirror>,
     local_cache: Arc<RwLock<LocalCache>>,
     cas: Arc<RwLock<ContentAddressableStorage>>,
+    /// Kept so a later trust anchor can use the same verifier. Manifest keys are not that anchor.
+    #[allow(dead_code)]
     signer: ModuleSigner,
     cache_dir: PathBuf,
     /// Optional network manager for P2P fetching
@@ -118,24 +120,24 @@ impl ModuleRegistry {
         // 1. Check local cache first
         {
             let cache = self.local_cache.read().await;
-            if let Some(cached) = cache.get(name) {
-                if cache.is_valid(name) {
-                    debug!("Module {} found in cache", name);
-                    // Try to load from cache
-                    if let Ok(entry) = self.load_from_cache(cached).await {
-                        return Ok(entry);
-                    }
+            if let Some(cached) = cache.get(name)
+                && cache.is_valid(name)
+            {
+                debug!("Module {} found in cache", name);
+                // Try to load from cache
+                if let Ok(entry) = self.load_from_cache(cached).await {
+                    return Ok(entry);
                 }
             }
         }
 
         // 2. Fetch from mirrors (if any configured)
-        if !self.mirrors.is_empty() {
-            if let Ok(entry) = self.fetch_from_mirrors(name).await {
-                // Cache the verified entry
-                self.cache_entry(&entry).await?;
-                return Ok(entry);
-            }
+        if !self.mirrors.is_empty()
+            && let Ok(entry) = self.fetch_from_mirrors(name).await
+        {
+            // Cache the verified entry
+            self.cache_entry(&entry).await?;
+            return Ok(entry);
         }
 
         // 3. Not found
@@ -419,12 +421,12 @@ impl ModuleRegistry {
         };
 
         // Verify binary hash if present
-        if let Some(ref bin_data) = binary {
-            if !self.cas.read().await.verify(bin_data, &cached.binary_hash) {
-                return Err(ModuleError::CryptoError(
-                    "Cached binary hash mismatch".to_string(),
-                ));
-            }
+        if let Some(ref bin_data) = binary
+            && !self.cas.read().await.verify(bin_data, &cached.binary_hash)
+        {
+            return Err(ModuleError::CryptoError(
+                "Cached binary hash mismatch".to_string(),
+            ));
         }
 
         Ok(ModuleEntry {
@@ -450,10 +452,10 @@ impl ModuleRegistry {
         }
 
         // Store binary in CAS if present
-        if let Some(ref binary_data) = entry.binary {
-            if !cas.has(&entry.binary_hash) {
-                cas.store(binary_data)?;
-            }
+        if let Some(ref binary_data) = entry.binary
+            && !cas.has(&entry.binary_hash)
+        {
+            cas.store(binary_data)?;
         }
         drop(cas);
 
@@ -484,28 +486,9 @@ impl ModuleRegistry {
     pub async fn verify_entry(&self, entry: &ModuleEntry) -> Result<(), ModuleError> {
         // 1. Verify manifest signatures if present
         if entry.manifest.has_signatures() {
-            let manifest_data = toml::to_string(&entry.manifest)
-                .map_err(|e| ModuleError::op_err("Failed to serialize manifest", e))?;
-
-            let signatures = entry.manifest.get_signatures();
-            let public_keys = entry.manifest.get_public_keys();
-            let threshold = entry.manifest.get_threshold().ok_or_else(|| {
-                ModuleError::CryptoError("Signature threshold not specified".to_string())
-            })?;
-
-            let valid = self.signer.verify_manifest(
-                manifest_data.as_bytes(),
-                &signatures,
-                &public_keys,
-                threshold,
-            )?;
-
-            if !valid {
-                return Err(ModuleError::CryptoError(format!(
-                    "Manifest signature verification failed for module {}",
-                    entry.name
-                )));
-            }
+            return Err(ModuleError::CryptoError(
+                "module signature keys in the manifest are not a trust anchor".to_string(),
+            ));
         }
 
         // 2. Verify manifest hash
@@ -520,10 +503,10 @@ impl ModuleRegistry {
         }
 
         // 3. Verify binary hash if present
-        if let Some(ref binary_data) = entry.binary {
-            if !cas.verify(binary_data, &entry.binary_hash) {
-                return Err(ModuleError::CryptoError("Binary hash mismatch".to_string()));
-            }
+        if let Some(ref binary_data) = entry.binary
+            && !cas.verify(binary_data, &entry.binary_hash)
+        {
+            return Err(ModuleError::CryptoError("Binary hash mismatch".to_string()));
         }
 
         Ok(())

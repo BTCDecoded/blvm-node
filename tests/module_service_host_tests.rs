@@ -270,7 +270,7 @@ version = "0.1.0"
 entry_point = "idx"
 capabilities = ["host_service"]
 min_node_version = "0.1.*"
-replaces = ["blvm-wallet-index"]
+replaces = ["previous-index"]
 provides_apis = ["blvm.upstream.v1"]
 requires_apis = ["blvm.upstream.v1"]
 
@@ -323,7 +323,7 @@ kind = "http"
 fn replaces_renames_the_old_data_dir_once() {
     let temp = tempfile::tempdir().unwrap();
     let manager = ModuleManager::new(temp.path(), temp.path(), temp.path());
-    let old = temp.path().join("blvm-wallet-index");
+    let old = temp.path().join("previous-index");
     std::fs::create_dir_all(&old).unwrap();
     std::fs::write(old.join("keep"), b"blocks").unwrap();
     let declared = manifest(
@@ -331,7 +331,7 @@ fn replaces_renames_the_old_data_dir_once() {
 name = "blvm-index"
 version = "0.1.0"
 entry_point = "blvm-index"
-replaces = ["blvm-wallet-index"]
+replaces = ["previous-index"]
 "#,
     );
     manager.adopt_replaced_data(&declared).unwrap();

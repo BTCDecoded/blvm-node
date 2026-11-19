@@ -37,10 +37,10 @@ impl<T: Clone> ThreadLocalTimedCache<T> {
     {
         let mut guard = self.inner.borrow_mut();
         let now = Instant::now();
-        if let Some((ref v, ref at)) = *guard {
-            if at.elapsed() < max_age {
-                return v.clone();
-            }
+        if let Some((ref v, ref at)) = *guard
+            && at.elapsed() < max_age
+        {
+            return v.clone();
         }
         let v = compute();
         *guard = Some((v.clone(), now));
@@ -65,10 +65,11 @@ impl<T: Clone, K: Clone + PartialEq> ThreadLocalKeyedCache<T, K> {
     {
         let mut guard = self.inner.borrow_mut();
         let now = Instant::now();
-        if let Some((ref v, ref at, ref k)) = *guard {
-            if k == key && at.elapsed() < max_age {
-                return v.clone();
-            }
+        if let Some((ref v, ref at, ref k)) = *guard
+            && k == key
+            && at.elapsed() < max_age
+        {
+            return v.clone();
         }
         let v = compute();
         *guard = Some((v.clone(), now, key.clone()));

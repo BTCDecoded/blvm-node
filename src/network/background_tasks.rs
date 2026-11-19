@@ -4,7 +4,7 @@
 //! peer eviction, ping, ping timeout, peer reconnection.
 
 use crate::network::NetworkMessage;
-use crate::network::network_manager::NetworkManager;
+use crate::network::network_manager::{NetworkManager, ReconnectBan, reconnect_ban_decision};
 use crate::network::peer::Peer;
 use crate::network::transport::TransportAddr;
 use crate::utils::{BACKGROUND_TASK_BACKOFF_SLEEP, current_timestamp};
@@ -81,6 +81,7 @@ impl NetworkManager {
     pub(crate) fn start_request_cleanup_task(&self) {
         let pending_requests = Arc::clone(self.pending_requests());
         let inventory = Arc::clone(self.inventory());
+        let package_relay = Arc::clone(self.package_relay());
         let timeout_config = Arc::clone(self.request_timeout_config());
 
         tokio::spawn(async move {
@@ -109,6 +110,9 @@ impl NetworkManager {
                 drop(pending);
                 let mut inv = inventory.lock().unwrap_or_else(|e| e.into_inner());
                 inv.cleanup_old_requests(max_age);
+                drop(inv);
+                let mut packages = package_relay.lock().unwrap_or_else(|e| e.into_inner());
+                packages.cleanup_old_packages(max_age);
             }
         });
     }
@@ -508,12 +512,16 @@ impl NetworkManager {
                     }
                     {
                         let ban_list_guard = ban_list.read().await;
-                        if let Some(unban_timestamp) =
-                            ban_list_guard.get(&std::net::SocketAddr::new(addr.ip(), 0))
-                        {
-                            if *unban_timestamp != u64::MAX && now < *unban_timestamp {
+                        let unban = ban_list_guard
+                            .get(&std::net::SocketAddr::new(addr.ip(), 0))
+                            .copied();
+                        match reconnect_ban_decision(unban, now) {
+                            ReconnectBan::Drop => {
+                                queue.remove(addr);
                                 continue;
                             }
+                            ReconnectBan::Wait => continue,
+                            ReconnectBan::Dial => {}
                         }
                     }
 
@@ -532,10 +540,11 @@ impl NetworkManager {
                         queue.remove(addr);
                         continue;
                     }
-                    if *attempts >= 10 && persistent_set.contains(addr) {
-                        if let Some((att, _, _)) = queue.get_mut(addr) {
-                            *att = 0;
-                        }
+                    if *attempts >= 10
+                        && persistent_set.contains(addr)
+                        && let Some((att, _, _)) = queue.get_mut(addr)
+                    {
+                        *att = 0;
                     }
 
                     // At capacity, still try persistent peers (IBD / operator-configured) — same slot

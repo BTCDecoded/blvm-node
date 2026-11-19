@@ -390,110 +390,110 @@ impl RpcAuthManager {
         }
 
         // Try token-based authentication first
-        if let Some(auth_header) = headers.get("authorization") {
-            if let Ok(auth_str) = auth_header.to_str() {
-                // Support "Bearer <token>" format
-                if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                    let tokens = self.valid_tokens.lock().await;
+        if let Some(auth_header) = headers.get("authorization")
+            && let Ok(auth_str) = auth_header.to_str()
+        {
+            // Support "Bearer <token>" format
+            if let Some(token) = auth_str.strip_prefix("Bearer ") {
+                let tokens = self.valid_tokens.lock().await;
 
-                    // Use constant-time comparison to prevent timing attacks
-                    // Iterate through all tokens and compare using constant_time_eq
-                    // This ensures timing is always O(n) regardless of which token matches
-                    let mut matched_user_id = None;
-                    for (stored_token, user_id) in tokens.iter() {
-                        // Constant-time string comparison
-                        if constant_time_eq(stored_token.as_bytes(), token.as_bytes()) {
-                            matched_user_id = Some(user_id.clone());
-                            break;
-                        }
+                // Use constant-time comparison to prevent timing attacks
+                // Iterate through all tokens and compare using constant_time_eq
+                // This ensures timing is always O(n) regardless of which token matches
+                let mut matched_user_id = None;
+                for (stored_token, user_id) in tokens.iter() {
+                    // Constant-time string comparison
+                    if constant_time_eq(stored_token.as_bytes(), token.as_bytes()) {
+                        matched_user_id = Some(user_id.clone());
+                        break;
                     }
+                }
 
-                    if let Some(user_id) = matched_user_id {
-                        debug!("Token authentication successful for {}", client_addr);
-                        SecurityEvent::AuthSuccess {
-                            user_id: format!("{user_id:?}"),
-                            client_addr,
-                            auth_method: "token".to_string(),
-                        }
-                        .log();
-                        return AuthResult {
-                            user_id: Some(user_id),
-                            requires_auth: self.auth_required,
-                            error: None,
-                        };
-                    }
-                    self.auth_failure_tracker.record_failure(client_addr).await;
-                    SecurityEvent::AuthFailure {
+                if let Some(user_id) = matched_user_id {
+                    debug!("Token authentication successful for {}", client_addr);
+                    SecurityEvent::AuthSuccess {
+                        user_id: format!("{user_id:?}"),
                         client_addr,
-                        reason: "Invalid authentication token".to_string(),
+                        auth_method: "token".to_string(),
                     }
                     .log();
                     return AuthResult {
-                        user_id: None,
+                        user_id: Some(user_id),
                         requires_auth: self.auth_required,
-                        error: Some("Invalid authentication token".to_string()),
-                    };
-                } else if let Some(b64) = auth_str.strip_prefix("Basic ") {
-                    if let Some((user, pass)) = decode_http_basic_credentials(b64.trim()) {
-                        let expected_user = self.basic_auth_user.lock().await.clone();
-                        let expected_pass = self.basic_auth_password.lock().await.clone();
-                        if let Some(expected_password) = expected_pass.as_deref() {
-                            let Some(expected_user) =
-                                expected_user.as_deref().filter(|user| !user.is_empty())
-                            else {
-                                return AuthResult {
-                                    user_id: None,
-                                    requires_auth: self.auth_required,
-                                    error: Some("RPC basic auth requires a username".to_string()),
-                                };
-                            };
-                            if constant_time_eq(expected_user.as_bytes(), user.as_bytes())
-                                && verify_password(pass.as_bytes(), expected_password)
-                            {
-                                let token = AuthToken::new(pass.clone());
-                                let user_id = UserId::Token(token);
-                                debug!("HTTP Basic authentication successful for {}", client_addr);
-                                SecurityEvent::AuthSuccess {
-                                    user_id: format!("{user_id:?}"),
-                                    client_addr,
-                                    auth_method: "basic".to_string(),
-                                }
-                                .log();
-                                return AuthResult {
-                                    user_id: Some(user_id),
-                                    requires_auth: self.auth_required,
-                                    error: None,
-                                };
-                            }
-                        }
-                    }
-
-                    if self.auth_required {
-                        self.auth_failure_tracker.record_failure(client_addr).await;
-                        SecurityEvent::AuthFailure {
-                            client_addr,
-                            reason: "Invalid HTTP Basic credentials".to_string(),
-                        }
-                        .log();
-                        return AuthResult {
-                            user_id: None,
-                            requires_auth: self.auth_required,
-                            error: Some("Invalid authentication credentials".to_string()),
-                        };
-                    }
-                } else if self.auth_required {
-                    self.auth_failure_tracker.record_failure(client_addr).await;
-                    SecurityEvent::AuthFailure {
-                        client_addr,
-                        reason: "Invalid authentication token".to_string(),
-                    }
-                    .log();
-                    return AuthResult {
-                        user_id: None,
-                        requires_auth: self.auth_required,
-                        error: Some("Invalid authentication token".to_string()),
+                        error: None,
                     };
                 }
+                self.auth_failure_tracker.record_failure(client_addr).await;
+                SecurityEvent::AuthFailure {
+                    client_addr,
+                    reason: "Invalid authentication token".to_string(),
+                }
+                .log();
+                return AuthResult {
+                    user_id: None,
+                    requires_auth: self.auth_required,
+                    error: Some("Invalid authentication token".to_string()),
+                };
+            } else if let Some(b64) = auth_str.strip_prefix("Basic ") {
+                if let Some((user, pass)) = decode_http_basic_credentials(b64.trim()) {
+                    let expected_user = self.basic_auth_user.lock().await.clone();
+                    let expected_pass = self.basic_auth_password.lock().await.clone();
+                    if let Some(expected_password) = expected_pass.as_deref() {
+                        let Some(expected_user) =
+                            expected_user.as_deref().filter(|user| !user.is_empty())
+                        else {
+                            return AuthResult {
+                                user_id: None,
+                                requires_auth: self.auth_required,
+                                error: Some("RPC basic auth requires a username".to_string()),
+                            };
+                        };
+                        if constant_time_eq(expected_user.as_bytes(), user.as_bytes())
+                            && verify_password(pass.as_bytes(), expected_password)
+                        {
+                            let token = AuthToken::new(pass.clone());
+                            let user_id = UserId::Token(token);
+                            debug!("HTTP Basic authentication successful for {}", client_addr);
+                            SecurityEvent::AuthSuccess {
+                                user_id: format!("{user_id:?}"),
+                                client_addr,
+                                auth_method: "basic".to_string(),
+                            }
+                            .log();
+                            return AuthResult {
+                                user_id: Some(user_id),
+                                requires_auth: self.auth_required,
+                                error: None,
+                            };
+                        }
+                    }
+                }
+
+                if self.auth_required {
+                    self.auth_failure_tracker.record_failure(client_addr).await;
+                    SecurityEvent::AuthFailure {
+                        client_addr,
+                        reason: "Invalid HTTP Basic credentials".to_string(),
+                    }
+                    .log();
+                    return AuthResult {
+                        user_id: None,
+                        requires_auth: self.auth_required,
+                        error: Some("Invalid authentication credentials".to_string()),
+                    };
+                }
+            } else if self.auth_required {
+                self.auth_failure_tracker.record_failure(client_addr).await;
+                SecurityEvent::AuthFailure {
+                    client_addr,
+                    reason: "Invalid authentication token".to_string(),
+                }
+                .log();
+                return AuthResult {
+                    user_id: None,
+                    requires_auth: self.auth_required,
+                    error: Some("Invalid authentication token".to_string()),
+                };
             }
         }
 
@@ -502,35 +502,34 @@ impl RpcAuthManager {
         // interface. A remote peer could forge the header otherwise — this guard ensures only
         // a local TLS-terminating proxy (127.0.0.1 / ::1) can inject the fingerprint.
         let is_loopback = client_addr.ip().is_loopback();
-        if is_loopback {
-            if let Some(cert_header) = headers.get("x-client-cert-fingerprint") {
-                if let Ok(fingerprint) = cert_header.to_str() {
-                    let certs = self.valid_certificates.lock().await;
+        if is_loopback
+            && let Some(cert_header) = headers.get("x-client-cert-fingerprint")
+            && let Ok(fingerprint) = cert_header.to_str()
+        {
+            let certs = self.valid_certificates.lock().await;
 
-                    // Use constant-time comparison for certificate fingerprints
-                    let mut matched_user_id = None;
-                    for (stored_fingerprint, user_id) in certs.iter() {
-                        if constant_time_eq(stored_fingerprint.as_bytes(), fingerprint.as_bytes()) {
-                            matched_user_id = Some(user_id.clone());
-                            break;
-                        }
-                    }
-
-                    if let Some(user_id) = matched_user_id {
-                        debug!("Certificate authentication successful for {}", client_addr);
-                        SecurityEvent::AuthSuccess {
-                            user_id: format!("{user_id:?}"),
-                            client_addr,
-                            auth_method: "certificate".to_string(),
-                        }
-                        .log();
-                        return AuthResult {
-                            user_id: Some(user_id),
-                            requires_auth: self.auth_required,
-                            error: None,
-                        };
-                    }
+            // Use constant-time comparison for certificate fingerprints
+            let mut matched_user_id = None;
+            for (stored_fingerprint, user_id) in certs.iter() {
+                if constant_time_eq(stored_fingerprint.as_bytes(), fingerprint.as_bytes()) {
+                    matched_user_id = Some(user_id.clone());
+                    break;
                 }
+            }
+
+            if let Some(user_id) = matched_user_id {
+                debug!("Certificate authentication successful for {}", client_addr);
+                SecurityEvent::AuthSuccess {
+                    user_id: format!("{user_id:?}"),
+                    client_addr,
+                    auth_method: "certificate".to_string(),
+                }
+                .log();
+                return AuthResult {
+                    user_id: Some(user_id),
+                    requires_auth: self.auth_required,
+                    error: None,
+                };
             }
         } // end is_loopback guard
 

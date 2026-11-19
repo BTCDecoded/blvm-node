@@ -665,4 +665,19 @@ mod tests {
         );
         test_reset_probes();
     }
+
+    #[test]
+    fn verify_probe_body_rejects_a_mismatched_header_hash() {
+        let header = blvm_protocol::BlockHeader {
+            version: 1,
+            prev_block_hash: [0; 32],
+            merkle_root: [2; 32],
+            timestamp: 1_231_006_505,
+            bits: 0x1d00_ffff,
+            nonce: 1,
+        };
+        let block = blvm_protocol::Block::from_parts(header, Box::new([]));
+        let accepted = verify_probe_body(&block, [0xab; 32], [2; 32]);
+        assert!(!accepted, "mismatched header hash was accepted");
+    }
 }

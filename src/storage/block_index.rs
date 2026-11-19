@@ -203,12 +203,12 @@ impl BlockIndex {
 
     /// Clear an invalid index status so the block can be the tip again.
     pub fn clear_invalid_status(&self, hash: &Hash) -> Result<()> {
-        if let Some(mut entry) = self.get(hash)? {
-            if entry.status == BlockIndexStatus::Invalid {
-                entry.status = BlockIndexStatus::Valid;
-                let data = bincode::serialize(&entry)?;
-                self.entries.insert(hash.as_slice(), &data)?;
-            }
+        if let Some(mut entry) = self.get(hash)?
+            && entry.status == BlockIndexStatus::Invalid
+        {
+            entry.status = BlockIndexStatus::Valid;
+            let data = bincode::serialize(&entry)?;
+            self.entries.insert(hash.as_slice(), &data)?;
         }
         Ok(())
     }

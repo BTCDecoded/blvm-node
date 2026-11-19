@@ -271,32 +271,30 @@ impl NetworkManager {
         // Headers stored by the probe are fetched before the raw inv. That covers a
         // same-height sibling as well as a gap of more than one block.
         // Parallel IBD is not started.
-        if let Ok((tip_hash, _)) = storage.chain().get_tip_hash_and_height() {
-            if let Ok(Some(probed)) = self
+        if let Ok((tip_hash, _)) = storage.chain().get_tip_hash_and_height()
+            && let Ok(Some(probed)) = self
                 .refresh_peer_tip_from(peer_addr, local_height, tip_hash)
                 .await
-            {
-                if !probed.missing_bodies.is_empty() {
-                    info!(
-                        "[BLOCK_RELAY] Local {} peer tip ≈ {} — getdata for {} missing block(s)",
-                        local_height,
-                        probed.peer_height,
-                        probed.missing_bodies.len()
-                    );
-                    let missing: Vec<InventoryVector> = probed
-                        .missing_bodies
-                        .iter()
-                        .take(MAX_BLOCK_REQUESTS_PER_INV)
-                        .map(|hash| InventoryVector {
-                            inv_type: MSG_WITNESS_BLOCK,
-                            hash: *hash,
-                        })
-                        .collect();
-                    return self
-                        .send_block_getdata(peer_addr, &peer_key, missing, local_height)
-                        .await;
-                }
-            }
+            && !probed.missing_bodies.is_empty()
+        {
+            info!(
+                "[BLOCK_RELAY] Local {} peer tip ≈ {} — getdata for {} missing block(s)",
+                local_height,
+                probed.peer_height,
+                probed.missing_bodies.len()
+            );
+            let missing: Vec<InventoryVector> = probed
+                .missing_bodies
+                .iter()
+                .take(MAX_BLOCK_REQUESTS_PER_INV)
+                .map(|hash| InventoryVector {
+                    inv_type: MSG_WITNESS_BLOCK,
+                    hash: *hash,
+                })
+                .collect();
+            return self
+                .send_block_getdata(peer_addr, &peer_key, missing, local_height)
+                .await;
         }
 
         self.send_block_getdata(peer_addr, &peer_key, inventory, local_height)
@@ -617,11 +615,11 @@ impl NetworkManager {
                 }
             }
         }
-        if !on_active.is_empty() {
-            if let Err(e) = storage.blocks().store_headers_batch(&on_active) {
-                warn!("probe headers failed to store: {e}");
-                return StoredProbeHeaders::none();
-            }
+        if !on_active.is_empty()
+            && let Err(e) = storage.blocks().store_headers_batch(&on_active)
+        {
+            warn!("probe headers failed to store: {e}");
+            return StoredProbeHeaders::none();
         }
         for (hash, header, height) in &batch {
             if let Err(e) = storage.chain().cache_block_chainwork(hash, header, *height) {
@@ -728,10 +726,10 @@ impl NetworkManager {
                 continue;
             };
             let message = ProtocolMessage::Headers(HeadersMessage { headers });
-            if let Ok(wire) = ProtocolParser::serialize_message(&message) {
-                if self.send_to_peer(peer_addr, wire).await.is_ok() {
-                    self.note_known_header_height(peer_addr, tip_height).await;
-                }
+            if let Ok(wire) = ProtocolParser::serialize_message(&message)
+                && self.send_to_peer(peer_addr, wire).await.is_ok()
+            {
+                self.note_known_header_height(peer_addr, tip_height).await;
             }
         }
     }

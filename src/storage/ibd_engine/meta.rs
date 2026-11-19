@@ -37,3 +37,52 @@ pub fn engine_dirty_flag_path(table_path: &Path) -> PathBuf {
 pub fn clear_engine_dirty_flag(table_path: &Path) {
     let _ = std::fs::remove_file(engine_dirty_flag_path(table_path));
 }
+
+/// Remove export scratch left by a process that is no longer running.
+/// A live export uses this process id and is left in place. E4 directories are
+/// the scratch a finished merge deletes. E3c spill and off-run files are the
+/// scratch a finished sort deletes (F57, F78). The pid is the last `-` field,
+/// after a `.bin` suffix is stripped.
+pub fn sweep_dead_export_scratch(engine_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(engine_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let e4 = name.starts_with("blvm-export-e4-");
+        let e3c = name.starts_with("blvm-export-e3c-");
+        if !e4 && !e3c {
+            continue;
+        }
+        let stem = name.strip_suffix(".bin").unwrap_or(name.as_str());
+        let Some(pid) = stem.rsplit('-').next().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == std::process::id() || export_pid_alive(pid) {
+            continue;
+        }
+        let path = entry.path();
+        if e4 && path.is_dir() {
+            let _ = std::fs::remove_dir_all(path);
+        } else if e3c && path.is_file() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn export_pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        true
+    }
+}

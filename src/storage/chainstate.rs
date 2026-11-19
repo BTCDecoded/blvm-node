@@ -620,6 +620,31 @@ impl ChainState {
         Ok(())
     }
 
+    /// One `chain_info` batch: canonical tree name and export height.
+    /// A height above the block tip writes neither key.
+    pub fn persist_canonical_tree_and_export_height(&self, name: &str, height: u64) -> Result<()> {
+        anyhow::ensure!(
+            crate::storage::ibd_engine::is_ibd_utxo_tree_name(name),
+            "invalid ibd utxo canonical tree name: {name}"
+        );
+        let block_tip = self.get_height()?.unwrap_or(0);
+        if !super::reliability_decisions::canonical_export_writes_both(true, height, block_tip) {
+            tracing::warn!(
+                "refusing canonical tree and export height {height} (block store tip={block_tip})"
+            );
+            return Ok(());
+        }
+        let current = self.get_engine_export_height()?.unwrap_or(0);
+        let mut batch = self.chain_info.batch()?;
+        batch.put(b"ibd_utxo_canonical_tree", name.as_bytes());
+        batch.put(
+            b"ibd_engine_export_height",
+            &height.max(current).to_be_bytes(),
+        );
+        batch.commit()?;
+        Ok(())
+    }
+
     /// Height recorded for a ping-pong slot's last successful export (0 = unknown/empty).
     pub fn get_engine_ckpt_slot_height(&self, slot: u8) -> Result<u64> {
         let key: &[u8] = if slot & 1 == 0 {
@@ -712,10 +737,119 @@ impl ChainState {
         Ok(())
     }
 
+    /// Add a snapshot connect's net coin change to the stored export count.
+    ///
+    /// A tip connect rewrites the checkpoint tree in place. Leaving the count at
+    /// the last full export makes the next seed refuse a tree that already
+    /// contains those coins. No stored count means there is nothing to adjust.
+    /// `through_height` advances only upward, and only in this same batch, so a
+    /// crash cannot leave the count covering a block the height label denies.
+    pub fn add_engine_export_utxo_count(
+        &self,
+        delta: i64,
+        through_height: Option<u64>,
+    ) -> Result<()> {
+        let Some(current) = self.get_engine_export_utxo_count()? else {
+            return Ok(());
+        };
+        if current == 0 {
+            return Ok(());
+        }
+        let next = (current as i64).saturating_add(delta).max(0) as u64;
+        let mut batch = self.chain_info.batch()?;
+        batch.put(b"ibd_engine_export_utxo_count", &next.to_be_bytes());
+        if let Some(height) = through_height {
+            let covered = self.get_engine_export_count_height()?;
+            if height > covered {
+                batch.put(b"ibd_engine_export_count_height", &height.to_be_bytes());
+            }
+        }
+        batch.commit()?;
+        Ok(())
+    }
+
+    /// Height the stored export count is known to include. `0` means an export
+    /// written before this field existed; the slot height is the fallback.
+    pub fn get_engine_export_count_height(&self) -> Result<u64> {
+        Ok(
+            match self.chain_info.get(b"ibd_engine_export_count_height")? {
+                Some(data) if data.len() >= 8 => {
+                    let mut bytes = [0u8; 8];
+                    bytes.copy_from_slice(&data[..8]);
+                    u64::from_be_bytes(bytes)
+                }
+                _ => 0,
+            },
+        )
+    }
+
+    /// Count saved before a reorg disconnect. Startup restores it when the
+    /// connect batch never committed. A second disconnect in the same reorg
+    /// must not overwrite the original count.
+    pub fn remember_export_count_before_reorg(&self) -> Result<()> {
+        if self
+            .chain_info
+            .get(b"ibd_engine_export_count_before_reorg")?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let Some(count) = self.get_engine_export_utxo_count()? else {
+            return Ok(());
+        };
+        self.chain_info.insert(
+            b"ibd_engine_export_count_before_reorg",
+            &count.to_be_bytes(),
+        )?;
+        Ok(())
+    }
+
+    pub fn take_export_count_before_reorg(&self) -> Result<Option<u64>> {
+        let Some(data) = self
+            .chain_info
+            .get(b"ibd_engine_export_count_before_reorg")?
+        else {
+            return Ok(None);
+        };
+        self.chain_info
+            .remove(b"ibd_engine_export_count_before_reorg")?;
+        if data.len() < 8 {
+            return Ok(None);
+        }
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&data[..8]);
+        Ok(Some(u64::from_be_bytes(bytes)))
+    }
+
+    pub fn clear_export_count_before_reorg(&self) -> Result<()> {
+        if self
+            .chain_info
+            .get(b"ibd_engine_export_count_before_reorg")?
+            .is_some()
+        {
+            self.chain_info
+                .remove(b"ibd_engine_export_count_before_reorg")?;
+        }
+        Ok(())
+    }
+
     /// Test/repair helper: set export UTXO count without a full checkpoint persist.
     pub fn force_set_engine_export_utxo_count(&self, count: u64) -> Result<()> {
         self.chain_info
             .insert(b"ibd_engine_export_utxo_count", &count.to_be_bytes())?;
+        Ok(())
+    }
+
+    /// Set the count and the height it covers in one batch.
+    pub fn force_set_engine_export_utxo_count_through(
+        &self,
+        count: u64,
+        height: u64,
+    ) -> Result<()> {
+        let mut batch = self.chain_info.batch()?;
+        batch.put(b"ibd_engine_export_utxo_count", &count.to_be_bytes());
+        batch.put(b"ibd_engine_export_count_height", &height.to_be_bytes());
+        batch.commit()?;
         Ok(())
     }
 
@@ -757,24 +891,25 @@ impl ChainState {
         utxo_count: u64,
         export_wall_secs: u64,
         muhash_running: &[u8; MUHASH_RUNNING_STATE_BYTES],
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let current = self.get_engine_export_height()?.unwrap_or(0);
         let block_tip = self.get_height()?.unwrap_or(0);
-        if height > block_tip {
-            tracing::warn!(
-                "refusing engine checkpoint at height {height} (block store tip={block_tip}) — \
-                 snapshot must not be labeled below the scan height"
-            );
+        if super::reliability_decisions::checkpoint_complete_decision(height, block_tip, current)
+            == super::reliability_decisions::CheckpointComplete::Refuse
+        {
+            if height > block_tip {
+                tracing::warn!(
+                    "refusing engine checkpoint at height {height} (block store tip={block_tip}) — \
+                     snapshot must not be labeled below the scan height"
+                );
+            } else {
+                tracing::warn!(
+                    "engine checkpoint complete ignored at height {height} (durable export is {current})"
+                );
+            }
             // Refresh MuHash only; do not advance export/watermark or flip ckpt slot.
             self.persist_ibd_utxo_muhash_running_only(muhash_running)?;
-            return Ok(());
-        }
-        if height <= current {
-            tracing::warn!(
-                "engine checkpoint complete ignored at height {height} (durable export is {current})"
-            );
-            self.persist_ibd_utxo_muhash_running_only(muhash_running)?;
-            return Ok(());
+            return Ok(false);
         }
         let prev_count = self.get_engine_export_utxo_count()?.unwrap_or(0);
         let current_wm = self.get_utxo_watermark()?.unwrap_or(0);
@@ -798,13 +933,14 @@ impl ChainState {
         batch.put(b"ibd_engine_ckpt_slot", &[slot & 1]);
         batch.put(slot_key, &height.to_be_bytes());
         batch.put(b"ibd_engine_export_utxo_count", &utxo_count.to_be_bytes());
+        batch.put(b"ibd_engine_export_count_height", &height.to_be_bytes());
         batch.put(
             b"ibd_engine_export_wall_secs",
             &export_wall_secs.to_be_bytes(),
         );
         batch.put(b"ibd_engine_export_muhash", muhash_running.as_slice());
         batch.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     /// Reset all engine checkpoint metadata to "no checkpoint" state.
@@ -819,6 +955,8 @@ impl ChainState {
         batch.put(b"ibd_engine_ckpt_slot", &[0u8]);
         batch.put(b"ibd_engine_export_utxo_count", &0u64.to_be_bytes());
         batch.put(b"ibd_engine_prev_accepted_utxo_count", &0u64.to_be_bytes());
+        batch.delete(b"ibd_engine_export_count_height");
+        batch.delete(b"ibd_engine_export_count_before_reorg");
         batch.delete(b"ibd_engine_export_muhash");
         batch.delete(b"ibd_engine_validation_tip");
         batch.commit()?;
@@ -1007,24 +1145,24 @@ impl ChainState {
         // Try to get from tip height first
         if let Some(height) = self.get_height()? {
             let key = height.to_be_bytes();
-            if let Some(data) = self.network_hashrate_cache.get(&key)? {
-                if data.len() >= 8 {
-                    let bytes = [
-                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                    ];
-                    return Ok(Some(f64::from_be_bytes(bytes)));
-                }
+            if let Some(data) = self.network_hashrate_cache.get(&key)?
+                && data.len() >= 8
+            {
+                let bytes = [
+                    data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                ];
+                return Ok(Some(f64::from_be_bytes(bytes)));
             }
             // Fallback: try previous heights (up to 10 blocks back)
             for h in (height.saturating_sub(10)..height).rev() {
                 let key = h.to_be_bytes();
-                if let Some(data) = self.network_hashrate_cache.get(&key)? {
-                    if data.len() >= 8 {
-                        let bytes = [
-                            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
-                        ];
-                        return Ok(Some(f64::from_be_bytes(bytes)));
-                    }
+                if let Some(data) = self.network_hashrate_cache.get(&key)?
+                    && data.len() >= 8
+                {
+                    let bytes = [
+                        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                    ];
+                    return Ok(Some(f64::from_be_bytes(bytes)));
                 }
             }
         }
@@ -1078,10 +1216,10 @@ impl ChainState {
         // Get timestamps from blocks
         let mut timestamps = Vec::new();
         for h in start_height..=height {
-            if let Ok(Some(hash)) = blocks.get_hash_by_height(h) {
-                if let Ok(Some(block)) = blocks.get_block(&hash) {
-                    timestamps.push((h, block.header.timestamp));
-                }
+            if let Ok(Some(hash)) = blocks.get_hash_by_height(h)
+                && let Ok(Some(block)) = blocks.get_block(&hash)
+            {
+                timestamps.push((h, block.header.timestamp));
             }
         }
 
@@ -1102,17 +1240,17 @@ impl ChainState {
         let avg_time_per_block = time_span as f64 / num_intervals as f64;
 
         // Get difficulty from tip block
-        if let Ok(Some(tip_hash)) = blocks.get_hash_by_height(height) {
-            if let Ok(Some(tip_block)) = blocks.get_block(&tip_hash) {
-                let difficulty = Self::calculate_difficulty(tip_block.header.bits);
+        if let Ok(Some(tip_hash)) = blocks.get_hash_by_height(height)
+            && let Ok(Some(tip_block)) = blocks.get_block(&tip_hash)
+        {
+            let difficulty = Self::calculate_difficulty(tip_block.header.bits);
 
-                // Calculate hashrate: difficulty * 2^32 / avg_time_per_block
-                const HASHES_PER_DIFFICULTY: f64 = 4294967296.0; // 2^32
-                let hashrate = (difficulty * HASHES_PER_DIFFICULTY) / avg_time_per_block;
+            // Calculate hashrate: difficulty * 2^32 / avg_time_per_block
+            const HASHES_PER_DIFFICULTY: f64 = 4294967296.0; // 2^32
+            let hashrate = (difficulty * HASHES_PER_DIFFICULTY) / avg_time_per_block;
 
-                // Store in cache
-                self.store_network_hashrate(height, hashrate)?;
-            }
+            // Store in cache
+            self.store_network_hashrate(height, hashrate)?;
         }
 
         Ok(())
@@ -1343,12 +1481,12 @@ impl ChainState {
         let mut tips = Vec::new();
         for result in self.chain_tips.iter() {
             let (key, data) = result?;
-            if key.len() == 32 {
-                if let Ok(tip_info) = bincode::deserialize::<TipInfo>(&data) {
-                    let mut hash = [0u8; 32];
-                    hash.copy_from_slice(&key);
-                    tips.push((hash, tip_info.height, tip_info.branchlen, tip_info.status));
-                }
+            if key.len() == 32
+                && let Ok(tip_info) = bincode::deserialize::<TipInfo>(&data)
+            {
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&key);
+                tips.push((hash, tip_info.height, tip_info.branchlen, tip_info.status));
             }
         }
         Ok(tips)

@@ -105,59 +105,23 @@ fn test_config_with_minimal_values() {
 #[test]
 fn test_config_with_all_pruning_modes() {
     // Test all pruning modes
-    let test_cases = vec![
-        (PruningMode::Disabled, None),
-        (
-            PruningMode::Normal {
-                keep_from_height: 0,
-                min_recent_blocks: 100,
-            },
-            Some(100),
-        ),
-        (
-            PruningMode::Normal {
-                keep_from_height: 0,
-                min_recent_blocks: 1000,
-            },
-            Some(1000),
-        ),
+    let test_cases = [
+        (PruningMode::Disabled, 288u64),
+        (PruningMode::Normal, 100),
+        (PruningMode::Normal, 1000),
     ];
 
-    for (mode, expected_min) in test_cases {
+    for (mode, keep_blocks) in test_cases {
         let pruning_config = PruningConfig {
-            mode: match mode {
-                PruningMode::Disabled => PruningMode::Disabled,
-                PruningMode::Normal {
-                    keep_from_height,
-                    min_recent_blocks,
-                } => PruningMode::Normal {
-                    keep_from_height,
-                    min_recent_blocks,
-                },
-                _ => continue,
-            },
-            prune_on_startup: true,
+            mode,
+            keep_blocks,
             ..Default::default()
         };
 
-        // Should serialize/deserialize
         let json = serde_json::to_string(&pruning_config).unwrap();
         let deserialized: PruningConfig = serde_json::from_str(&json).unwrap();
-
-        // Compare by matching variants since PruningMode doesn't implement PartialEq
-        match (deserialized.mode, expected_min) {
-            (PruningMode::Disabled, None) => {}
-            (
-                PruningMode::Normal {
-                    min_recent_blocks: d_min,
-                    ..
-                },
-                Some(e_min),
-            ) => {
-                assert_eq!(d_min, e_min);
-            }
-            _ => panic!("Modes don't match"),
-        }
+        assert_eq!(deserialized.mode, mode);
+        assert_eq!(deserialized.keep_blocks, keep_blocks);
     }
 }
 
@@ -284,10 +248,8 @@ fn test_config_roundtrip_complex_scenario() {
     // Storage settings
     let mut storage = StorageConfig::default();
     let mut pruning = PruningConfig::default();
-    pruning.mode = PruningMode::Normal {
-        keep_from_height: 0,
-        min_recent_blocks: 5000,
-    };
+    pruning.mode = PruningMode::Normal;
+    pruning.keep_blocks = 5000;
     storage.pruning = Some(pruning);
     if let Some(ref mut indexing) = storage.indexing {
         indexing.enable_address_index = true;
@@ -325,12 +287,8 @@ fn test_config_roundtrip_complex_scenario() {
     );
     if let Some(ref storage) = deserialized.storage {
         if let Some(ref pruning) = storage.pruning {
-            match &pruning.mode {
-                PruningMode::Normal {
-                    min_recent_blocks, ..
-                } => assert_eq!(*min_recent_blocks, 5000),
-                _ => panic!("Expected Normal pruning mode"),
-            }
+            assert_eq!(pruning.mode, PruningMode::Normal);
+            assert_eq!(pruning.keep_blocks, 5000);
         }
         if let Some(ref indexing) = storage.indexing {
             assert!(indexing.enable_address_index);

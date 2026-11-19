@@ -26,6 +26,8 @@ pub struct PackageRelay {
     pending_packages: HashMap<PackageId, PackageState>,
     /// Package validator
     validator: PackageValidator,
+    /// Last package `register_package` inserted. Accept and reject clear it.
+    last_registered: Option<PackageId>,
 }
 
 /// Package ID (combined hash of all transactions)
@@ -211,10 +213,10 @@ impl TransactionPackage {
         // Check each transaction: inputs that reference in-package parents must be earlier
         for (i, tx) in transactions.iter().enumerate() {
             for input in &tx.inputs {
-                if let Some(&parent_pos) = idx.get(&input.prevout.hash) {
-                    if parent_pos >= i {
-                        return Err(PackageError::InvalidOrder);
-                    }
+                if let Some(&parent_pos) = idx.get(&input.prevout.hash)
+                    && parent_pos >= i
+                {
+                    return Err(PackageError::InvalidOrder);
                 }
             }
         }
@@ -251,6 +253,7 @@ impl PackageRelay {
         Self {
             pending_packages: HashMap::new(),
             validator: PackageValidator::default(),
+            last_registered: None,
         }
     }
 
@@ -324,6 +327,7 @@ impl PackageRelay {
         };
 
         self.pending_packages.insert(package_id, state);
+        self.last_registered = Some(package_id);
         debug!(
             "Registered package {} with {} transactions",
             hex::encode(package_id.0),
@@ -338,23 +342,32 @@ impl PackageRelay {
         self.pending_packages.get(package_id).map(|s| &s.package)
     }
 
-    /// Mark package as accepted
+    /// The package inserted by the last successful `register_package`.
+    pub fn last_registered(&self) -> Option<PackageId> {
+        self.last_registered
+    }
+
+    /// Mark package as accepted and drop it from the pending map.
     pub fn mark_accepted(&mut self, package_id: &PackageId) {
-        if let Some(state) = self.pending_packages.get_mut(package_id) {
-            state.status = PackageStatus::Accepted;
+        if self.pending_packages.remove(package_id).is_some() {
             info!("Package {} accepted", hex::encode(package_id.0));
+        }
+        if self.last_registered.as_ref() == Some(package_id) {
+            self.last_registered = None;
         }
     }
 
-    /// Mark package as rejected
+    /// Mark package as rejected and drop it from the pending map.
     pub fn mark_rejected(&mut self, package_id: &PackageId, reason: PackageRejectReason) {
-        if let Some(state) = self.pending_packages.get_mut(package_id) {
-            state.status = PackageStatus::Rejected { reason };
+        if self.pending_packages.remove(package_id).is_some() {
             warn!(
                 "Package {} rejected: {:?}",
                 hex::encode(package_id.0),
                 reason
             );
+        }
+        if self.last_registered.as_ref() == Some(package_id) {
+            self.last_registered = None;
         }
     }
 
@@ -371,6 +384,9 @@ impl PackageRelay {
 
         for id in expired {
             self.pending_packages.remove(&id);
+            if self.last_registered == Some(id) {
+                self.last_registered = None;
+            }
             debug!("Cleaned up expired package {}", hex::encode(id.0));
         }
     }
@@ -624,5 +640,82 @@ mod tests {
         assert!(at_one);
         assert!(at_floor);
         assert!(!under);
+    }
+
+    #[test]
+    fn a_finished_package_leaves_the_map() {
+        let prevout = OutPoint {
+            hash: [9u8; 32],
+            index: 0,
+        };
+        let mut tx = spend(prevout, 1);
+        let vsize = super::package_transaction_weight_wu(&tx, None)
+            .div_ceil(4)
+            .max(1) as i64;
+        let input_value = 50_000i64;
+        tx.outputs[0].value = input_value - vsize;
+        let mut utxo_set = blvm_protocol::UtxoSet::default();
+        utxo_set.insert(
+            prevout,
+            Arc::new(UTXO {
+                value: input_value,
+                script_pubkey: vec![OP_1].into(),
+                height: 1,
+                is_coinbase: false,
+            }),
+        );
+        let package = TransactionPackage::new_with_utxo_set(vec![tx], Some(&utxo_set)).unwrap();
+        let mut relay = PackageRelay::new();
+        let id = relay.register_package(package).unwrap();
+        assert!(relay.get_package(&id).is_some());
+        relay.mark_accepted(&id);
+        assert!(relay.get_package(&id).is_none());
+
+        let tx = spend(prevout, input_value - vsize);
+        let package = TransactionPackage::new_with_utxo_set(vec![tx], Some(&utxo_set)).unwrap();
+        let id = relay.register_package(package).unwrap();
+        relay.mark_rejected(&id, PackageRejectReason::FeeRateTooLow);
+        assert!(relay.get_package(&id).is_none());
+
+        let young_prev = OutPoint {
+            hash: [8u8; 32],
+            index: 0,
+        };
+        let old_prev = OutPoint {
+            hash: [7u8; 32],
+            index: 0,
+        };
+        for prev in [young_prev, old_prev] {
+            utxo_set.insert(
+                prev,
+                Arc::new(UTXO {
+                    value: input_value,
+                    script_pubkey: vec![OP_1].into(),
+                    height: 1,
+                    is_coinbase: false,
+                }),
+            );
+        }
+        let young_tx = spend(young_prev, input_value - vsize);
+        let old_tx = spend(old_prev, input_value - vsize);
+        let young = relay
+            .register_package(
+                TransactionPackage::new_with_utxo_set(vec![young_tx], Some(&utxo_set)).unwrap(),
+            )
+            .unwrap();
+        let old = relay
+            .register_package(
+                TransactionPackage::new_with_utxo_set(vec![old_tx], Some(&utxo_set)).unwrap(),
+            )
+            .unwrap();
+        relay.pending_packages.get_mut(&old).unwrap().received_at = 0;
+        relay.cleanup_old_packages(1);
+        assert!(relay.get_package(&old).is_none());
+        assert!(relay.get_package(&young).is_some());
+        let handler = include_str!("handlers/package_relay.rs");
+        let cleanup = include_str!("background_tasks.rs");
+        assert!(handler.contains("relay.mark_accepted(&id)"));
+        assert!(handler.contains(".package_relay()"));
+        assert!(cleanup.contains("packages.cleanup_old_packages(max_age)"));
     }
 }

@@ -298,19 +298,19 @@ impl<C: Clock> DandelionRelay<C> {
             // Update stem path for current peer
             let _ = state;
             self.update_stem_path(&current_peer, available_peers);
-            if let Some(state2) = self.stem_txs.get_mut(&tx_hash) {
-                if let Some(path) = self.stem_paths.get(&current_peer) {
-                    let next = path.next_peer.clone();
-                    state2.current_peer = next.clone();
-                    state2.next_peer = Some(next.clone());
-                    debug!(
-                        "Advanced Dandelion stem for tx {}: hop {} -> {}",
-                        hex::encode(tx_hash),
-                        state2.hops,
-                        next
-                    );
-                    return Some(next);
-                }
+            if let Some(state2) = self.stem_txs.get_mut(&tx_hash)
+                && let Some(path) = self.stem_paths.get(&current_peer)
+            {
+                let next = path.next_peer.clone();
+                state2.current_peer = next.clone();
+                state2.next_peer = Some(next.clone());
+                debug!(
+                    "Advanced Dandelion stem for tx {}: hop {} -> {}",
+                    hex::encode(tx_hash),
+                    state2.hops,
+                    next
+                );
+                return Some(next);
             }
         }
 

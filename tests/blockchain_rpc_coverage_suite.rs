@@ -478,17 +478,10 @@ fn rpc_with_pruning_chain() -> (TempDir, Arc<Storage>, BlockchainRpc) {
 
     let temp_dir = TempDir::new().unwrap();
     let pruning = Some(PruningConfig {
-        mode: blvm_node::config::PruningMode::Normal {
-            keep_from_height: 0,
-            min_recent_blocks: 50,
-        },
+        mode: blvm_node::config::PruningMode::Normal,
+        keep_blocks: 50,
         auto_prune: true,
-        auto_prune_interval: 100,
-        min_blocks_to_keep: 50,
-        prune_on_startup: false,
-        incremental_prune_during_ibd: false,
-        prune_window_size: 50,
-        min_blocks_for_incremental_prune: 288,
+        ..PruningConfig::default()
     });
     let storage = Arc::new(
         Storage::with_backend_pruning_and_indexing(

@@ -426,10 +426,10 @@ async fn handle_peer_disconnected(nm: &NetworkManager, addr: TransportAddr) {
     pm.remove_peer(&addr);
     drop(pm);
 
-    if let Some(sock) = sock_opt {
-        if !handshake_done {
-            crate::network::peer_connections::note_dial_failure(sock);
-        }
+    if let Some(sock) = sock_opt
+        && !handshake_done
+    {
+        crate::network::peer_connections::note_dial_failure(sock);
     }
 
     // Clean up per-connection state for this peer.

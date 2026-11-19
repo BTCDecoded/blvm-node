@@ -360,19 +360,16 @@ pub fn pruned_midchain_skip_horizon(header_tip: u64, prune_window: u64) -> u64 {
 /// Sliding keep window for incremental prune on the parallel IBD path.
 ///
 /// `0` leaves archive persist unchanged: pruning disabled, or
-/// `incremental_prune_during_ibd` off. Otherwise the window is
-/// `max(prune_window_size, min_blocks_to_keep)`.
+/// `incremental_prune_during_ibd` off. Otherwise the window is `keep_blocks`.
 pub fn incremental_ibd_prune_window(
     incremental_during_ibd: bool,
     pruning_enabled: bool,
-    prune_window_size: u64,
-    min_blocks_to_keep: u64,
+    keep_blocks: u64,
 ) -> u64 {
-    if !incremental_during_ibd || !pruning_enabled {
+    if !incremental_during_ibd || !pruning_enabled || keep_blocks == 0 {
         return 0;
     }
-    let window = prune_window_size.max(min_blocks_to_keep);
-    if window == 0 { 0 } else { window }
+    keep_blocks
 }
 
 /// Header-tip horizon for the validation flush. `0` means do not skip for prune.
@@ -384,8 +381,8 @@ pub fn ibd_prune_horizon(header_tip: u64, end_height: u64, window: u64) -> u64 {
 }
 
 /// Height whose GAP_PERSIST body just left the keep window. `0` means do not delete.
-pub fn ibd_prune_gc_height(validated: u64, window: u64, min_height: u64) -> u64 {
-    if window == 0 || validated < min_height {
+pub fn ibd_prune_gc_height(validated: u64, window: u64) -> u64 {
+    if window == 0 || validated <= window {
         return 0;
     }
     validated.saturating_sub(window)
@@ -499,10 +496,10 @@ pub fn try_repair_missing_witness(
         if block_in_memory.is_none() && blockstore.get_block(&block_hash)?.is_none() {
             return Ok(false);
         }
-    } else if let Some(w) = blockstore.get_witness(&block_hash)? {
-        if has_real_witnesses(&w) {
-            return Ok(false);
-        }
+    } else if let Some(w) = blockstore.get_witness(&block_hash)?
+        && has_real_witnesses(&w)
+    {
+        return Ok(false);
     }
     let header_ts = match block_in_memory {
         Some(b) => b.header.timestamp,
@@ -674,7 +671,9 @@ pub(crate) fn gap_persist_gate(
     // before any blockstore call.
     let horizon = published_prune_horizon();
     if height_below_prune_horizon(height, horizon) {
-        if !GAP_PERSIST_PRUNE_SKIP_LOGGED.swap(true, Ordering::Relaxed) || height % 10_000 == 0 {
+        if !GAP_PERSIST_PRUNE_SKIP_LOGGED.swap(true, Ordering::Relaxed)
+            || height.is_multiple_of(10_000)
+        {
             info!("[IBD_GAP_PERSIST_PRUNE_SKIP] h={height} horizon={horizon} val={val_h}");
         }
         return Ok(GapPersistGate::Skip);
@@ -857,7 +856,7 @@ pub fn note_store_apply(height: u64) {
     let n = STORE_APPLY_N
         .fetch_add(1, Ordering::Relaxed)
         .saturating_add(1);
-    if n <= 3 || n % 256 == 0 {
+    if n <= 3 || n.is_multiple_of(256) {
         info!("[IBD_STORE_APPLY] h={} n={}", height, n);
     }
 }
@@ -1102,6 +1101,7 @@ pub fn coordinator_inject_local_gap(
     already_dispatched: &rustc_hash::FxHashSet<u64>,
     log_miss: &mut rustc_hash::FxHashSet<u64>,
     tip_in_pipeline: bool,
+    reorder_limit: usize,
 ) -> Result<bool> {
     if height != validation_height.saturating_add(1) {
         return Ok(false);
@@ -1119,6 +1119,11 @@ pub fn coordinator_inject_local_gap(
     for i in 0..lookahead {
         let h = height + i;
         let had_in_reorder = reorder_buffer.contains_key(&h);
+        // F72: the reorder cap is the memory bound. A height already in the buffer
+        // can still be stepped over so a chain can pass it. A new height stops.
+        if !had_in_reorder && reorder_buffer.len() >= reorder_limit {
+            break;
+        }
         // Tip only: reload when not confirmed in-pipeline. Lookahead heights keep skip-on-dispatched.
         let reload_if_dispatched = i == 0 && !tip_in_pipeline;
         match coordinator_inject_one(

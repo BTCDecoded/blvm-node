@@ -22,8 +22,10 @@ protocol_version = "BitcoinV1"
 # max_background_flushes = 4
 
 # [storage.pruning]
+# mode = "normal"
+# keep_blocks = 288
+# auto_prune = true
 # incremental_prune_during_ibd = false
-# prune_window_size = 144
 
 # [ibd]
 # chunk_size = 128                    # blocks per request round-trip (default 128; fewer round-trips vs old 16)

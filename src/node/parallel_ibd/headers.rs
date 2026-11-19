@@ -228,6 +228,31 @@ pub(crate) fn stored_height_extends_active_parent(
     Ok(header.prev_block_hash == parent)
 }
 
+/// Drop the block indexed just past `chain_tip` when it does not extend that tip.
+///
+/// A crash can leave a body and a height-index row for a block the parent header
+/// does not link to. Connecting it fails the prev-hash check and ends the session.
+/// The header row for that hash stays, so a later header sync can store the block
+/// that does extend the tip. Returns true when a row was removed.
+pub(crate) fn discard_nonextending_successor(
+    blockstore: &crate::storage::blockstore::BlockStore,
+    chain_tip: u64,
+) -> Result<bool> {
+    let height = match chain_tip.checked_add(1) {
+        Some(height) => height,
+        None => return Ok(false),
+    };
+    let Some(hash) = blockstore.get_hash_by_height(height)? else {
+        return Ok(false);
+    };
+    if stored_height_extends_active_parent(blockstore, height, &hash)? {
+        return Ok(false);
+    }
+    blockstore.remove_block_by_height(height)?;
+    blockstore.clear_height_index(height)?;
+    Ok(true)
+}
+
 /// H08: child links to the parent this walk has already accepted.
 ///
 /// A stored row at `height - 1` is that parent only when its hash is `last_hash`.
@@ -262,10 +287,10 @@ pub(crate) fn header_prev_links(
     last_hash: &[u8; 32],
     prev: &[u8; 32],
 ) -> bool {
-    if let Some(parent_hash) = stored_parent_hash {
-        if parent_hash == last_hash {
-            return prev == parent_hash;
-        }
+    if let Some(parent_hash) = stored_parent_hash
+        && parent_hash == last_hash
+    {
+        return prev == parent_hash;
     }
     prev == last_hash
 }
@@ -623,6 +648,26 @@ pub(crate) async fn download_headers(
             start_height,
             hex::encode(last_hash)
         );
+        if !header_presync.releases_assigner() {
+            let prior = network
+                .storage()
+                .as_ref()
+                .and_then(|storage| storage.chain().get_chainwork(&last_hash).ok().flatten());
+            match prior {
+                Some(work) => {
+                    if header_presync.release_if_prior_work_meets_floor(work) {
+                        info!(
+                            "header pre-sync: stored chainwork at height {} meets the floor",
+                            start_height - 1
+                        );
+                    }
+                }
+                None => warn!(
+                    "header pre-sync: no stored chainwork at height {}; this batch must reach the floor on its own",
+                    start_height - 1
+                ),
+            }
+        }
     }
     // Genesis stores the local header and asks the peer for height 1. An empty
     // reply at that floor is no progress. A resume asks from `start_height`.
@@ -778,22 +823,22 @@ pub(crate) async fn download_headers(
                         // leftover-c1t-recv0: peer rotate never rewound last_hash (5976×).
                         if let Ok(Some(attach_h)) =
                             blockstore.get_height_by_hash(&header.prev_block_hash)
+                            && attach_h > 0
+                            && attach_h + 1 < current_height
                         {
-                            if attach_h > 0 && attach_h + 1 < current_height {
-                                warn!(
-                                    "[IBD_HEADER_REWIND] attach prev height {} → ask {} (was {}) peer={}",
-                                    attach_h,
-                                    attach_h + 1,
-                                    current_height,
-                                    peer_addr
-                                );
-                                last_hash = header.prev_block_hash;
-                                current_height = attach_h + 1;
-                                consecutive_failures = 0;
-                                batch_entries.clear();
-                                pending_work.clear();
-                                break;
-                            }
+                            warn!(
+                                "[IBD_HEADER_REWIND] attach prev height {} → ask {} (was {}) peer={}",
+                                attach_h,
+                                attach_h + 1,
+                                current_height,
+                                peer_addr
+                            );
+                            last_hash = header.prev_block_hash;
+                            current_height = attach_h + 1;
+                            consecutive_failures = 0;
+                            batch_entries.clear();
+                            pending_work.clear();
+                            break;
                         }
                         if header.prev_block_hash == genesis_hash && current_height > 1 {
                             let back = 2048u64.min(current_height.saturating_sub(1));
@@ -950,23 +995,22 @@ pub(crate) async fn download_headers(
                 // Publish HeadersSyncProgress every 5000 headers for module event subscribers
                 if current_height > last_progress_event
                     && (current_height - last_progress_event) >= 5000
+                    && let Some(ref ep) = event_publisher
                 {
-                    if let Some(ref ep) = event_publisher {
-                        let progress_percent = if end_height > start_height {
-                            ((current_height - start_height) as f64
-                                / (end_height - start_height + 1) as f64)
-                                * 100.0
-                        } else {
-                            100.0
-                        };
-                        ep.publish_headers_sync_progress(
-                            current_height.saturating_sub(1),
-                            end_height,
-                            progress_percent,
-                        )
-                        .await;
-                        last_progress_event = current_height;
-                    }
+                    let progress_percent = if end_height > start_height {
+                        ((current_height - start_height) as f64
+                            / (end_height - start_height + 1) as f64)
+                            * 100.0
+                    } else {
+                        100.0
+                    };
+                    ep.publish_headers_sync_progress(
+                        current_height.saturating_sub(1),
+                        end_height,
+                        progress_percent,
+                    )
+                    .await;
+                    last_progress_event = current_height;
                 }
 
                 let max_headers = network.protocol_limits().max_headers_results;
@@ -1020,45 +1064,13 @@ pub(crate) async fn download_headers(
             }
         }
 
-        if consecutive_failures >= headers_max_failures {
-            warn!(
-                "Too many failures ({}), refreshing peers",
-                consecutive_failures
-            );
-            consecutive_failures = 0;
-            peer_addrs = network.get_connected_peer_addresses().await;
-            if peer_addrs.is_empty() {
-                // Actively trigger archive peer discovery before waiting — don't just
-                // sit idle for 5 s then give up. The address DB may be drained of
-                // full-history peers after mass evictions; seed it explicitly.
-                warn!("Header sync: no connected peers — triggering archive peer re-discovery");
-                // Fire both archive and regular DNS seeds in parallel for speed.
-                let default_ban = Default::default();
-                let (arc_res, _) = tokio::join!(network.discover_archive_peers_from_dns(), {
-                    let (net_name, port) =
-                        crate::network::protocol::ProtocolParser::dns_seed_network();
-                    network.discover_peers_from_dns(net_name, port, &default_ban)
-                },);
-                let _ = arc_res;
-                let _ = network.connect_peers_from_database(16).await;
-                // Wait up to 15 s in 2-second slices for a peer to connect.
-                for _ in 0..8 {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    peer_addrs = network.get_connected_peer_addresses().await;
-                    if !peer_addrs.is_empty() {
-                        info!(
-                            "Header sync: {} peer(s) reconnected, resuming",
-                            peer_addrs.len()
-                        );
-                        break;
-                    }
-                }
-                if peer_addrs.is_empty() {
-                    return Err(anyhow::anyhow!(
-                        "No peers available after 70s wait + re-discovery"
-                    ));
-                }
-            }
+        if crate::node::reliability_decisions::header_timeout_stops(
+            consecutive_failures,
+            headers_max_failures,
+        ) {
+            return Err(anyhow::anyhow!(
+                "Too many header failures ({consecutive_failures})"
+            ));
         }
     }
 

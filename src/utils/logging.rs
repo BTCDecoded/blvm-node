@@ -22,7 +22,14 @@
 //! init_module_logging("my_module", None); // Module gets its own filter
 //! ```
 
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+
+/// Live log size that `scripts/ibd/wan-bench-common.sh` rotates at start.
+pub(crate) const LOG_ROTATE_BYTES: u64 = 200 * 1024 * 1024;
 
 /// Initialize logging for the main node
 ///
@@ -98,6 +105,7 @@ fn install_text_subscriber(filter: &str) {
         )
         .with(env_filter)
         .try_init();
+    start_log_rotation();
 }
 
 /// Install the node subscriber once.
@@ -220,6 +228,205 @@ pub fn init_json_logging(filter: Option<&str>) {
         .with(fmt::layer().json().with_target(true))
         .with(env_filter)
         .try_init();
+    start_log_rotation();
+}
+
+/// Why the live log should be closed.
+///
+/// A new UTC day rotates on its own. A file larger than [`LOG_ROTATE_BYTES`]
+/// rotates on the same rule as the IBD bench script, including in the middle
+/// of a day. The returned day is the date stamped on the closed file.
+pub(crate) fn rotation_stamp_day(open_day: i64, now_day: i64, size: u64) -> Option<i64> {
+    if now_day != open_day {
+        return Some(open_day);
+    }
+    if size > LOG_ROTATE_BYTES {
+        return Some(now_day);
+    }
+    None
+}
+
+fn utc_unix_day() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64 / 86_400)
+        .unwrap_or(0)
+}
+
+pub(crate) fn ymd_from_unix_day(mut z: i64) -> (i32, u32, u32) {
+    z += 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m as u32, d)
+}
+
+pub(crate) fn format_unix_day(day: i64) -> String {
+    let (y, m, d) = ymd_from_unix_day(day);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// `YYYY-MM-DD` or `YYYY-MM-DD.N` written by this rotator. Script names
+/// (`.prev`, `.stall-*`, `.pre-oom-restart-*`) do not match.
+fn rotation_date(rest: &str) -> Option<&str> {
+    let (date, tail) = if rest.len() == 10 {
+        (rest, "")
+    } else if rest.len() > 11 && rest.as_bytes().get(10) == Some(&b'.') {
+        (&rest[..10], &rest[11..])
+    } else {
+        return None;
+    };
+    if !tail.is_empty() && !tail.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let b = date.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    if !b[..4]
+        .iter()
+        .chain(b[5..7].iter())
+        .chain(b[8..10].iter())
+        .all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(date)
+}
+
+fn rotation_dest(live: &Path, day: i64) -> PathBuf {
+    let stamp = format_unix_day(day);
+    let stem = live
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("ibd.log");
+    let mut dest = live.with_file_name(format!("{stem}.{stamp}"));
+    for n in 1..1000u32 {
+        if !dest.exists() {
+            return dest;
+        }
+        dest = live.with_file_name(format!("{stem}.{stamp}.{n}"));
+    }
+    dest
+}
+
+/// Drop dated rotations from before yesterday. `.prev` and restart copies stay.
+pub(crate) fn prune_dated_rotations(live: &Path, today: i64) {
+    let Some(dir) = live.parent() else {
+        return;
+    };
+    let Some(name) = live.file_name().and_then(|s| s.to_str()) else {
+        return;
+    };
+    let prefix = format!("{name}.");
+    let keep_from = format_unix_day(today - 1);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let Some(fname) = fname.to_str() else {
+            continue;
+        };
+        let Some(rest) = fname.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some(date) = rotation_date(rest) else {
+            continue;
+        };
+        if date < keep_from.as_str() {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn stderr_log_path() -> Option<PathBuf> {
+    let link = std::fs::read_link("/proc/self/fd/2").ok()?;
+    if !link.is_absolute() {
+        return None;
+    }
+    std::fs::metadata(&link).ok().filter(|m| m.is_file())?;
+    Some(link)
+}
+
+fn start_log_rotation() {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    if STARTED.get().is_some() {
+        return;
+    }
+    let Some(path) = stderr_log_path() else {
+        return;
+    };
+    if STARTED.set(()).is_err() {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("log-rotate".to_string())
+        .spawn(move || {
+            let mut open_day = utc_unix_day();
+            loop {
+                std::thread::sleep(Duration::from_secs(60));
+                let now_day = utc_unix_day();
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                let Some(stamp) = rotation_stamp_day(open_day, now_day, size) else {
+                    continue;
+                };
+                if rotate_live_log(&path, stamp, now_day) {
+                    open_day = now_day;
+                }
+            }
+        })
+        .ok();
+}
+
+fn rotate_live_log(live: &Path, stamp_day: i64, today: i64) -> bool {
+    let _ = std::io::stderr().flush();
+    let _ = std::io::stdout().flush();
+    let dest = rotation_dest(live, stamp_day);
+    if std::fs::rename(live, &dest).is_err() {
+        return false;
+    }
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(live)
+    {
+        Ok(file) => file,
+        Err(_) => {
+            let _ = std::fs::rename(&dest, live);
+            return false;
+        }
+    };
+    if !retarget_stdio(&file) {
+        let _ = std::fs::rename(&dest, live);
+        return false;
+    }
+    prune_dated_rotations(live, today);
+    true
+}
+
+fn retarget_stdio(file: &std::fs::File) -> bool {
+    #[cfg(unix)]
+    {
+        let fd = std::os::fd::AsRawFd::as_raw_fd(file);
+        unsafe { dup2(fd, 1) >= 0 && dup2(fd, 2) >= 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        false
+    }
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn dup2(oldfd: i32, newfd: i32) -> i32;
 }
 
 /// Initialize logging from NodeConfig
@@ -342,5 +549,75 @@ mod tests {
             value.get("level").is_some(),
             "json log missing level: {line}"
         );
+    }
+
+    #[test]
+    fn log_rotation_unix_day_is_utc_date() {
+        assert_eq!(ymd_from_unix_day(0), (1970, 1, 1));
+        assert_eq!(format_unix_day(20_774), "2026-11-17");
+    }
+
+    #[test]
+    fn log_rotation_new_day_or_script_size() {
+        assert_eq!(rotation_stamp_day(10, 10, 0), None);
+        assert_eq!(rotation_stamp_day(10, 10, LOG_ROTATE_BYTES), None);
+        assert_eq!(rotation_stamp_day(10, 10, LOG_ROTATE_BYTES + 1), Some(10));
+        assert_eq!(rotation_stamp_day(10, 11, 0), Some(10));
+    }
+
+    #[test]
+    fn log_rotation_dest_skips_a_taken_name() {
+        let dir = std::env::temp_dir().join(format!(
+            "blvm-log-rot-dest-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).expect("temp dir");
+        let live = dir.join("ibd.log");
+        let taken = dir.join("ibd.log.2026-11-17");
+        std::fs::write(&taken, b"x").expect("taken rotation");
+        let dest = rotation_dest(&live, 20_774);
+        assert_eq!(dest, dir.join("ibd.log.2026-11-17.1"));
+        let _ = std::fs::remove_file(&taken);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn log_rotation_prune_keeps_yesterday_and_script_archives() {
+        let dir = std::env::temp_dir().join(format!(
+            "blvm-log-rot-prune-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).expect("temp dir");
+        let live = dir.join("ibd.log");
+        let today = 20_774_i64;
+        let keep = dir.join(format!("ibd.log.{}", format_unix_day(today - 1)));
+        let drop_day = dir.join(format!("ibd.log.{}", format_unix_day(today - 2)));
+        let drop_n = dir.join(format!("ibd.log.{}.2", format_unix_day(today - 2)));
+        let prev = dir.join("ibd.log.prev");
+        let stall = dir.join("ibd.log.stall-1");
+        let restart = dir.join("ibd.log.pre-oom-restart-20261115T000000Z");
+        for path in [&live, &keep, &drop_day, &drop_n, &prev, &stall, &restart] {
+            std::fs::write(path, b"x").expect("fixture");
+        }
+        prune_dated_rotations(&live, today);
+        assert!(keep.exists());
+        assert!(!drop_day.exists());
+        assert!(!drop_n.exists());
+        assert!(prev.exists());
+        assert!(stall.exists());
+        assert!(restart.exists());
+        assert!(live.exists());
+        for path in [&live, &keep, &prev, &stall, &restart] {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir(&dir);
     }
 }

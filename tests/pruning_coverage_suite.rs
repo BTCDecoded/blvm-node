@@ -11,17 +11,10 @@ use common::setup_mining_chain;
 
 fn normal_pruning_config() -> PruningConfig {
     PruningConfig {
-        mode: PruningMode::Normal {
-            keep_from_height: 0,
-            min_recent_blocks: 50,
-        },
+        mode: PruningMode::Normal,
+        keep_blocks: 50,
         auto_prune: true,
-        auto_prune_interval: 100,
-        min_blocks_to_keep: 50,
-        prune_on_startup: false,
-        incremental_prune_during_ibd: false,
-        prune_window_size: 50,
-        min_blocks_for_incremental_prune: 288,
+        ..PruningConfig::default()
     }
 }
 
@@ -42,9 +35,9 @@ fn test_pruning_manager_should_auto_prune_interval() {
     let storage = Storage::new(temp_dir.path()).unwrap();
     let pm = PruningManager::new(normal_pruning_config(), storage.blocks());
     assert!(!pm.should_auto_prune(50, None));
-    assert!(pm.should_auto_prune(100, None));
-    assert!(!pm.should_auto_prune(150, Some(100)));
-    assert!(pm.should_auto_prune(200, Some(100)));
+    assert!(pm.should_auto_prune(144, None));
+    assert!(!pm.should_auto_prune(200, Some(100)));
+    assert!(pm.should_auto_prune(244, Some(100)));
 }
 
 #[test]
@@ -96,33 +89,6 @@ fn test_storage_with_pruning_config_enables_manager() {
     .unwrap();
     assert!(storage.is_pruning_enabled());
     assert!(storage.pruning().is_some());
-}
-
-#[test]
-fn test_pruning_custom_mode_keeps_metadata() {
-    let (_dir, storage) = chain_storage(80);
-    let config = PruningConfig {
-        mode: PruningMode::Custom {
-            keep_headers: true,
-            keep_bodies_from_height: 10,
-            keep_commitments: false,
-            keep_filters: false,
-            keep_filtered_blocks: false,
-            keep_witnesses: false,
-            keep_tx_index: false,
-        },
-        auto_prune: false,
-        auto_prune_interval: 100,
-        min_blocks_to_keep: 20,
-        prune_on_startup: false,
-        incremental_prune_during_ibd: false,
-        prune_window_size: 50,
-        min_blocks_for_incremental_prune: 288,
-    };
-    let pm = PruningManager::new(config, storage.blocks());
-    let stats = pm.prune_to_height(15, 79, false).unwrap();
-    assert!(stats.blocks_pruned > 0);
-    assert!(stats.blocks_kept > 0);
 }
 
 #[test]

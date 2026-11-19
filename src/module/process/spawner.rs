@@ -79,6 +79,7 @@ impl ModuleProcessSpawner {
         module_name: &str,
         binary_path: &Path,
         context: ModuleContext,
+        ipc_protocol: u32,
     ) -> Result<ModuleProcess, ModuleError> {
         info!("Spawning module process: {}", module_name);
 
@@ -112,6 +113,7 @@ impl ModuleProcessSpawner {
             .stderr(Stdio::piped())
             .env("MODULE_NAME", module_name)
             .env("MODULE_ID", &context.module_id)
+            .env("MODULE_IPC_PROTOCOL", ipc_protocol.to_string())
             .env("SOCKET_PATH", &socket_path)
             .env("DATA_DIR", &module_data_dir);
 
@@ -124,18 +126,25 @@ impl ModuleProcessSpawner {
             command.env(format!("MODULE_CONFIG_{env_key}"), value);
         }
 
-        debug!(
-            "Spawning process: {:?} with args: {:?}",
-            binary_path, command
-        );
+        debug!("{}", spawn_log_line(module_name, binary_path));
 
         #[cfg(target_os = "linux")]
         {
+            let generation =
+                crate::module::sandbox::landlock::SandboxGeneration::from_ipc_protocol(
+                    ipc_protocol,
+                )
+                .map_err(|e| {
+                    ModuleError::InitializationError(format!(
+                        "refusing to spawn module {module_name}: {e}"
+                    ))
+                })?;
             let landlock = crate::module::sandbox::landlock::ModuleLandlock::prepare(
                 binary_path,
                 &module_data_dir,
                 &socket_path,
                 &self.modules_dir,
+                generation,
             )
             .map_err(|e| {
                 ModuleError::InitializationError(format!(
@@ -280,6 +289,12 @@ impl ModuleProcessSpawner {
     }
 }
 
+/// Spawn log text. It names the module and the binary only. The `Command`
+/// debug format includes `MODULE_CONFIG_*` values, so it is not logged.
+fn spawn_log_line(module_name: &str, binary_path: &Path) -> String {
+    format!("Spawning module process {module_name} binary {binary_path:?}")
+}
+
 /// `MODULE_CONFIG_*` keys are ASCII letters, digits, and underscores.
 fn sanitize_module_env_key(key: &str) -> String {
     key.chars()
@@ -347,10 +362,10 @@ impl ModuleProcess {
         let _ = self.process.wait().await;
 
         // Clean up socket file if it exists (Unix; Windows named pipes don't create files)
-        if self.socket_path.exists() {
-            if let Err(e) = std::fs::remove_file(&self.socket_path) {
-                warn!("Failed to remove socket file {:?}: {}", self.socket_path, e);
-            }
+        if self.socket_path.exists()
+            && let Err(e) = std::fs::remove_file(&self.socket_path)
+        {
+            warn!("Failed to remove socket file {:?}: {}", self.socket_path, e);
         }
 
         Ok(())
@@ -364,5 +379,26 @@ impl ModuleProcess {
     /// Take IPC client (for cleanup)
     pub fn take_client(&mut self) -> Option<ModuleIpcClient> {
         self.client.take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spawn_log_line;
+    use std::path::Path;
+    use tokio::process::Command;
+
+    #[test]
+    fn spawn_log_does_not_include_module_config() {
+        let mut command = Command::new("true");
+        command
+            .env_clear()
+            .env("MODULE_CONFIG_API_KEY", "super-secret-value");
+        let line = spawn_log_line("demo", Path::new("demo"));
+        let rendered = format!("{command:?}");
+        assert!(rendered.contains("super-secret-value"));
+        assert!(!line.contains("super-secret-value"));
+        assert!(!line.contains("MODULE_CONFIG"));
+        assert!(line.contains("demo"));
     }
 }
