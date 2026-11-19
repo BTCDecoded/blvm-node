@@ -2517,6 +2517,24 @@ pub(crate) fn aligned_checkpoint_height(
     last_exported.saturating_add(steps.saturating_mul(interval))
 }
 
+/// GC fence to store before validation appends a block above `last_exported`.
+///
+/// The fence starts at `i32::MAX`. A merge drops an Add together with its Delete
+/// when `Delete.height <= fence`, so `MAX` discards every spend. The export scan
+/// used to be the first `set_gc_fence`, and LAG_EXEMPT starts that scan after
+/// validation has already passed the checkpoint (live 2026-11-18: label 200000,
+/// engine height 200562). Coins spent in that gap were already gone, and the
+/// snapshot was still labeled 200000.
+///
+/// Spends at or below the returned height may be discarded. Spends above it stay
+/// until that snapshot is stored.
+pub(crate) fn gc_fence_before_validation(last_exported: i32, interval: i32) -> i32 {
+    if interval <= 0 {
+        return last_exported.max(0);
+    }
+    last_exported.saturating_add(interval)
+}
+
 /// F-C2: whether the already-persisted skip path should advance durable `chain_info` tip.
 ///
 /// Historically every 1000 heights. Near `effective_end` there may be no `% 1000` boundary
@@ -5448,6 +5466,41 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     } else {
         None
     };
+
+    // The fence is still `i32::MAX` until an export scan stores a height.
+    // Validation appends spends before that scan when the export thread lags.
+    // Those spends are discarded, and the snapshot labeled at the checkpoint
+    // is then missing the coins the next block spends.
+    if utxo_engine.is_some()
+        && crate::storage::ibd_engine::memory_run::gc_fence_snapshot() == i32::MAX
+    {
+        let durability = crate::config::ibd::ibd_engine_durability_config(None);
+        let interval = adaptive_checkpoint_interval(
+            engine_stored_export_utxo_count,
+            0.0,
+            0.0,
+            &durability,
+        );
+        let utxo_iv = utxo_scaled_checkpoint_interval(
+            engine_stored_export_utxo_count,
+            0.0,
+            &durability,
+        );
+        let schedule_iv = checkpoint_schedule_interval(
+            interval,
+            utxo_iv,
+            engine_stored_export_utxo_count,
+        );
+        let fence = gc_fence_before_validation(engine_stored_export_height as i32, schedule_iv);
+        if fence > 0 {
+            crate::storage::ibd_engine::set_next_checkpoint_target(fence);
+            crate::storage::ibd_engine::set_gc_fence(fence);
+            info!(
+                "[IBD_GC_FENCE] set to {fence} before validation \
+                 (last_exported={engine_stored_export_height} interval={schedule_iv})"
+            );
+        }
+    }
 
     let params = validation_loop::ValidationParams {
         feeder_state: feeder_state_valid,

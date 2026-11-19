@@ -1258,6 +1258,45 @@ mod tests {
 
     #[serial_test::serial(ibd)]
     #[test]
+    fn a_spend_above_the_next_checkpoint_survives_when_the_fence_is_set_first() {
+        // 2026-11-18: export labeled 200000 while the engine was already at
+        // 200562. Fence MAX drops Delete(200100). Fence 200000 keeps the Add
+        // so the snapshot at 200000 still contains the coin block 200001 spends.
+        struct RestoreFence;
+        impl Drop for RestoreFence {
+            fn drop(&mut self) {
+                set_gc_fence(i32::MAX);
+            }
+        }
+        let _restore = RestoreFence;
+        let k = make_key(1);
+        let add = Arc::new(MemoryRun::build(vec![OutputKV::new_add(k, 100_000, 7)]));
+        let delete = Arc::new(MemoryRun::build(vec![OutputKV::new_delete(k, 200_100)]));
+
+        set_gc_fence(i32::MAX);
+        let dropped = MemoryRun::merge(&[Arc::clone(&add), Arc::clone(&delete)]);
+        assert!(
+            dropped.entries.is_empty(),
+            "fence MAX must drop the spend, got {:?}",
+            dropped.entries.len()
+        );
+
+        set_gc_fence(200_000);
+        let kept = MemoryRun::merge(&[add, delete]);
+        assert_eq!(
+            kept.entries.len(),
+            2,
+            "fence at the checkpoint must keep the Add"
+        );
+        assert!(kept.entries.iter().any(|e| e.is_add() && e.height == 100_000));
+        assert!(kept
+            .entries
+            .iter()
+            .any(|e| e.is_delete() && e.height == 200_100));
+    }
+
+    #[serial_test::serial(ibd)]
+    #[test]
     fn test_merge_cross_height_with_recreation() {
         // Other lib tests store a checkpoint fence and do not always put it
         // back. A delete above that fence must be kept; the live-UTXO case

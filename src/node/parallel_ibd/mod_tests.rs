@@ -1153,6 +1153,19 @@ fn aligned_checkpoint_height_steps_from_last_exported() {
     assert_eq!(aligned_checkpoint_height(880_959, 880_000, 960), 880_000);
 }
 
+#[test]
+fn gc_fence_before_validation_is_the_next_checkpoint_not_max() {
+    // 2026-11-18 signet: first export labeled 200000 after the engine had
+    // already validated 200562. The fence was still i32::MAX, so those spends
+    // were discarded before the snapshot.
+    assert_eq!(gc_fence_before_validation(0, 200_000), 200_000);
+    assert_ne!(gc_fence_before_validation(0, 200_000), i32::MAX);
+    // Resume from that export must protect the following interval, not the
+    // one already on disk.
+    assert_eq!(gc_fence_before_validation(200_000, 200_000), 400_000);
+    assert_eq!(gc_fence_before_validation(200_000, 0), 200_000);
+}
+
 #[serial_test::serial(ibd)]
 #[test]
 fn dest_x_vs_persist_180k_export_alignment() {
