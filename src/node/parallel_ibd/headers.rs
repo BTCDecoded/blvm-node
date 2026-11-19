@@ -228,6 +228,31 @@ pub(crate) fn stored_height_extends_active_parent(
     Ok(header.prev_block_hash == parent)
 }
 
+/// Drop the block indexed just past `chain_tip` when it does not extend that tip.
+///
+/// A crash can leave a body and a height-index row for a block the parent header
+/// does not link to. Connecting it fails the prev-hash check and ends the session.
+/// The header row for that hash stays, so a later header sync can store the block
+/// that does extend the tip. Returns true when a row was removed.
+pub(crate) fn discard_nonextending_successor(
+    blockstore: &crate::storage::blockstore::BlockStore,
+    chain_tip: u64,
+) -> Result<bool> {
+    let height = match chain_tip.checked_add(1) {
+        Some(height) => height,
+        None => return Ok(false),
+    };
+    let Some(hash) = blockstore.get_hash_by_height(height)? else {
+        return Ok(false);
+    };
+    if stored_height_extends_active_parent(blockstore, height, &hash)? {
+        return Ok(false);
+    }
+    blockstore.remove_block_by_height(height)?;
+    blockstore.clear_height_index(height)?;
+    Ok(true)
+}
+
 /// H08: child links to the parent this walk has already accepted.
 ///
 /// A stored row at `height - 1` is that parent only when its hash is `last_hash`.

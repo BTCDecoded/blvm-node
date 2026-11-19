@@ -3710,6 +3710,18 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                     );
                 }
                 error!("Failed to validate block at height {}: {}", next_height, e);
+                if e.to_string().contains("prev_block_hash does not match")
+                    && let Ok(true) = crate::node::parallel_ibd::headers::discard_nonextending_successor(
+                        blockstore.as_ref(),
+                        next_height.saturating_sub(1),
+                    )
+                {
+                    warn!(
+                        "[IBD_BAD_LOCAL_BODY] height {next_height} does not extend its parent \
+                         header — removed the local body and height index so the next session \
+                         fetches the block that does"
+                    );
+                }
                 let e = if next_height > 0 {
                     match (
                         crate::storage::ibd_autorepair::utxo_miss_prevout(&e),

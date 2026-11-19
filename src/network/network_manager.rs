@@ -2037,7 +2037,20 @@ impl NetworkManager {
 
     /// Async variant for use from the node run loop (avoids block_in_place inside async tasks).
     pub async fn get_highest_peer_start_height_async(&self) -> Option<u64> {
-        let pm = self.peer_manager.lock().await;
+        // A task that still holds this lock after a failed IBD must not freeze the
+        // run loop. Five seconds is far longer than a peer-table read. On timeout
+        // the caller continues with the local tip and retries.
+        let Ok(pm) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.peer_manager.lock(),
+        )
+        .await
+        else {
+            warn!(
+                "[CATCH_UP] peer manager lock held for more than 5s — continuing without a peer height"
+            );
+            return None;
+        };
         let mut max_height: Option<u64> = None;
         for (_addr, peer) in pm.peers().iter() {
             let from_version = peer.start_height().max(0) as u64;

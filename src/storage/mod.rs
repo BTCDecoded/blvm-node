@@ -35,6 +35,7 @@ pub mod ibd_utxo_store;
 #[cfg(test)]
 mod pass_fix_tests;
 pub mod pruning;
+pub(crate) mod reliability_decisions;
 #[cfg(feature = "heed3")]
 pub mod rkyv_codec;
 pub mod serialization_cache;

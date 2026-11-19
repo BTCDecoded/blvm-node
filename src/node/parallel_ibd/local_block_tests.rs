@@ -58,6 +58,83 @@ fn leftover_stall_try_load_hits_stored_body() {
 }
 
 #[test]
+fn a_body_that_does_not_extend_its_parent_is_removed() {
+    let blockstore = temp_blockstore();
+    let parent = Block {
+        header: BlockHeader {
+            version: 1,
+            prev_block_hash: [0u8; 32],
+            merkle_root: [1u8; 32],
+            timestamp: 1_600_000_000,
+            bits: 0,
+            nonce: 1,
+        },
+        transactions: vec![Transaction {
+            version: 1,
+            inputs: blvm_protocol::tx_inputs![],
+            outputs: blvm_protocol::tx_outputs![TransactionOutput {
+                value: 50_0000_0000,
+                script_pubkey: vec![0x51],
+            }],
+            lock_time: 0,
+        }]
+        .into(),
+    };
+    let parent_hash = blockstore.get_block_hash(&parent);
+    blockstore.store_height(1, &parent_hash).unwrap();
+    blockstore
+        .store_block_with_witness(&parent, &[], 1)
+        .unwrap();
+    let child = Block {
+        header: BlockHeader {
+            version: 1,
+            prev_block_hash: [9u8; 32],
+            merkle_root: [2u8; 32],
+            timestamp: 1_600_000_001,
+            bits: 0,
+            nonce: 2,
+        },
+        transactions: parent.transactions.clone(),
+    };
+    let child_hash = blockstore.get_block_hash(&child);
+    blockstore.store_height(2, &child_hash).unwrap();
+    blockstore.store_block_with_witness(&child, &[], 2).unwrap();
+
+    assert!(
+        crate::node::parallel_ibd::headers::discard_nonextending_successor(&blockstore, 1).unwrap()
+    );
+    assert!(blockstore.get_hash_by_height(2).unwrap().is_none());
+    assert!(!blockstore.has_block_body(&child_hash).unwrap());
+    assert_eq!(
+        blockstore.get_hash_by_height(1).unwrap().as_ref(),
+        Some(&parent_hash)
+    );
+
+    let linked = Block {
+        header: BlockHeader {
+            prev_block_hash: parent_hash,
+            merkle_root: [3u8; 32],
+            nonce: 3,
+            ..child.header
+        },
+        transactions: parent.transactions.clone(),
+    };
+    let linked_hash = blockstore.get_block_hash(&linked);
+    blockstore.store_height(2, &linked_hash).unwrap();
+    blockstore
+        .store_block_with_witness(&linked, &[], 2)
+        .unwrap();
+    assert!(
+        !crate::node::parallel_ibd::headers::discard_nonextending_successor(&blockstore, 1)
+            .unwrap()
+    );
+    assert_eq!(
+        blockstore.get_hash_by_height(2).unwrap().as_ref(),
+        Some(&linked_hash)
+    );
+}
+
+#[test]
 fn local_gap_fill_allowed_without_contiguous_body_probe() {
     assert!(height_eligible_for_local_gap_fill(338_305, 0));
     assert!(!height_eligible_for_local_gap_fill(0, 0));
