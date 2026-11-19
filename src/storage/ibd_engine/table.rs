@@ -22,7 +22,7 @@ use super::types::{
 use blvm_protocol::types::SharedByteString;
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
@@ -426,6 +426,8 @@ impl UtxoTable {
         {
             let mut file = self.write_file.lock();
             for b in &ordered {
+                // Open leaves the handle at byte 0. Ids are allocated at next_offset.
+                file.seek(SeekFrom::Start(b.begin_offset))?;
                 file.write_all(&b.data)?;
             }
             file.flush()?;
@@ -806,6 +808,44 @@ mod tests {
         assert_eq!(resolved, 6);
         for d in &details {
             assert_eq!(d.header.height, 100);
+        }
+    }
+
+    #[test]
+    fn a_reopened_table_does_not_write_at_byte_zero() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let first_ids = {
+            let table = UtxoTable::open(&path).unwrap();
+            let block = dummy_block(1, 1, 1000);
+            let mut tx_id = [0u8; 32];
+            tx_id[0] = 1;
+            let mut entries = Vec::new();
+            table
+                .append_outputs(&block, &[tx_id], 100, &mut entries)
+                .unwrap();
+            table.commit_before(i32::MAX).unwrap();
+            entries.into_iter().map(|entry| entry.id).collect::<Vec<_>>()
+        };
+
+        let table = UtxoTable::open(&path).unwrap();
+        let block = dummy_block(1, 1, 2000);
+        let mut tx_id = [0u8; 32];
+        tx_id[0] = 2;
+        let mut entries = Vec::new();
+        table
+            .append_outputs(&block, &[tx_id], 200, &mut entries)
+            .unwrap();
+        table.commit_before(i32::MAX).unwrap();
+
+        let mut details = Vec::new();
+        let resolved = table.fetch(&first_ids, &mut details).unwrap();
+        assert_eq!(resolved, first_ids.len());
+        for d in &details {
+            assert_eq!(
+                d.header.height, 100,
+                "reopen wrote the second block at byte 0"
+            );
         }
     }
 }
