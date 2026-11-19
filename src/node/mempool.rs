@@ -287,6 +287,7 @@ const MAX_STANDARD_TX_WEIGHT: u64 = 400_000;
 const MIN_STANDARD_TX_NONWITNESS_SIZE: usize = 65;
 
 /// A standard input's scriptSig is at most this many bytes.
+/// Used as the default for [`MempoolPolicyConfig::max_standard_script_size`].
 const MAX_STANDARD_SCRIPTSIG_SIZE: usize = 1_650;
 
 /// True for a standard output script: P2PKH, P2SH, P2PK, a witness program, or an `OP_RETURN`.
@@ -335,6 +336,21 @@ fn output_script_is_standard(script: &[u8], max_op_return_script_bytes: usize) -
 fn spent_script_is_standard(script: &[u8], max_op_return_script_bytes: usize) -> bool {
     output_script_is_standard(script, max_op_return_script_bytes)
         || bare_multisig_within(script, 16)
+}
+
+fn op_return_output_count(tx: &blvm_protocol::Transaction) -> usize {
+    tx.outputs
+        .iter()
+        .filter(|output| output.script_pubkey.first() == Some(&0x6a))
+        .count()
+}
+
+fn op_return_count_exceeds_policy(
+    tx: &blvm_protocol::Transaction,
+    policy: &MempoolPolicyConfig,
+) -> bool {
+    let count = op_return_output_count(tx);
+    (policy.reject_multiple_op_return && count > 1) || count > policy.max_op_return_outputs as usize
 }
 
 /// Bare `OP_m <keys> OP_n OP_CHECKMULTISIG` with `1 <= m <= n <= 3`.
@@ -2316,7 +2332,7 @@ impl MempoolManager {
     /// the configured limits, and, when standardness is required, the version is
     /// 1 or 2, the weight,
     /// including `witnesses`, is at most 400,000, every scriptSig is push-only
-    /// and at most 1,650 bytes, and every output
+    /// and at most `max_standard_script_size` bytes (default 1,650), and every output
     /// script and spent script is standard, a pay-to-script-hash redeem has at
     /// most 15 signature operations, and the transaction has at most 2,500
     /// legacy signature operations. `Err` is the reject reason.
@@ -2353,11 +2369,14 @@ impl MempoolManager {
         {
             return Err("scriptpubkey");
         }
+        if require_standard && op_return_count_exceeds_policy(tx, &policy) {
+            return Err("multi-op-return");
+        }
         if require_standard
             && tx
                 .inputs
                 .iter()
-                .any(|input| input.script_sig.len() > MAX_STANDARD_SCRIPTSIG_SIZE)
+                .any(|input| input.script_sig.len() > policy.max_standard_script_size)
         {
             return Err("scriptsig-size");
         }
@@ -2411,13 +2430,7 @@ impl MempoolManager {
             return Err("bad-txns-in-belowout");
         }
         let fee = self.calculate_transaction_fee(tx, utxo_set);
-        let rate = self
-            .policy_config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|policy| policy.min_relay_fee_rate)
-            .unwrap_or(100);
+        let rate = policy.min_relay_fee_rate;
         let vsize = self.admit_vsize(tx, witnesses, utxo_set).0;
         let required = (rate as u128).saturating_mul(vsize as u128).div_ceil(1000);
         let tx_hash = blvm_protocol::block::calculate_tx_id(tx);
@@ -2429,12 +2442,6 @@ impl MempoolManager {
         if !waived && (fee as u128) < required {
             return Err("min relay fee not met");
         }
-        let policy = self
-            .policy_config
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-            .unwrap_or_default();
         if fee < policy.min_tx_fee {
             return Err("min relay fee not met");
         }
@@ -3101,6 +3108,16 @@ impl MempoolManager {
             return Ok(false);
         }
         if effective_policy.require_standard
+            && op_return_count_exceeds_policy(&tx, &effective_policy)
+        {
+            warn!(
+                "Transaction {} rejected: {} OP_RETURN outputs",
+                hex::encode(tx_hash),
+                op_return_output_count(&tx)
+            );
+            return Ok(false);
+        }
+        if effective_policy.require_standard
             && tx
                 .inputs
                 .iter()
@@ -3116,7 +3133,7 @@ impl MempoolManager {
             && tx
                 .inputs
                 .iter()
-                .any(|input| input.script_sig.len() > MAX_STANDARD_SCRIPTSIG_SIZE)
+                .any(|input| input.script_sig.len() > effective_policy.max_standard_script_size)
         {
             warn!(
                 "Transaction {} rejected: scriptSig is {} bytes",
