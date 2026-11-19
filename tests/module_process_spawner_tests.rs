@@ -107,6 +107,8 @@ async fn spawn_log_omits_module_config() {
     let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let subscriber = LogCapture(std::sync::Arc::clone(&lines));
     let _guard = tracing::subscriber::set_default(subscriber);
+    // The spawn callsite may already be cached against the no-op subscriber.
+    tracing::callsite::rebuild_interest_cache();
 
     let (temp_dir, _) = create_test_spawner();
     let config = ModuleResourceLimitsConfig {
@@ -132,6 +134,7 @@ async fn spawn_log_omits_module_config() {
     let fake_binary = PathBuf::from("/bin/true");
     let result = spawner.spawn("test-module", &fake_binary, context, 0).await;
     drop(_guard);
+    tracing::callsite::rebuild_interest_cache();
 
     assert!(result.is_err());
     let text = lines.lock().unwrap().join("\n");
