@@ -102,80 +102,38 @@ async fn spawn_rejects_an_unknown_ipc_protocol_before_launch() {
     // We don't need to match on the specific error variant for this test
 }
 
-#[test]
-fn spawn_log_omits_module_config() {
-    use std::io::{self, Write};
-    use std::sync::{Arc, Mutex};
-
-    struct Buf(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for Buf {
-        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-            self.0.lock().expect("log buffer").extend_from_slice(data);
-            Ok(data.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let writer = captured.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_ansi(false)
-        .with_target(false)
-        .with_writer(move || Buf(writer.clone()))
-        .finish();
-
-    let text = tracing::subscriber::with_default(subscriber, || {
-        tracing::callsite::rebuild_interest_cache();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let result = runtime.block_on(async {
-            let (temp_dir, _) = create_test_spawner();
-            let config = ModuleResourceLimitsConfig {
-                default_max_cpu_percent: 50,
-                default_max_memory_bytes: 512 * 1024 * 1024,
-                default_max_file_descriptors: 256,
-                default_max_child_processes: 10,
-                module_startup_wait_millis: 1,
-                module_socket_timeout_seconds: 1,
-                module_socket_check_interval_millis: 10,
-                module_socket_max_attempts: 2,
-            };
-            let spawner = ModuleProcessSpawner::with_config(
-                temp_dir.path().join("modules"),
-                temp_dir.path().join("data"),
-                temp_dir.path().join("sockets"),
-                Some(&config),
-            );
-            let mut context = create_test_context();
-            context
-                .config
-                .insert("api_key".to_string(), "super-secret-value".to_string());
-            let fake_binary = PathBuf::from("/bin/true");
-            spawner.spawn("test-module", &fake_binary, context, 0).await
-        });
-        assert!(result.is_err());
-        let bytes = captured.lock().expect("log buffer").clone();
-        String::from_utf8(bytes).expect("log line is utf-8")
-    });
-    tracing::callsite::rebuild_interest_cache();
-
-    assert!(
-        text.contains("Spawning module process"),
-        "spawn did not emit the spawn log: {text}"
+#[tokio::test(flavor = "current_thread")]
+async fn spawn_error_omits_module_config() {
+    // spawn_log_does_not_include_module_config locks the log line. This locks
+    // the error returned to the caller, the other place a Command debug dump
+    // would leak MODULE_CONFIG values.
+    let (temp_dir, _) = create_test_spawner();
+    let config = ModuleResourceLimitsConfig {
+        default_max_cpu_percent: 50,
+        default_max_memory_bytes: 512 * 1024 * 1024,
+        default_max_file_descriptors: 256,
+        default_max_child_processes: 10,
+        module_startup_wait_millis: 1,
+        module_socket_timeout_seconds: 1,
+        module_socket_check_interval_millis: 10,
+        module_socket_max_attempts: 2,
+    };
+    let spawner = ModuleProcessSpawner::with_config(
+        temp_dir.path().join("modules"),
+        temp_dir.path().join("data"),
+        temp_dir.path().join("sockets"),
+        Some(&config),
     );
-    assert!(text.contains("test-module"), "{text}");
-    assert!(text.contains("/bin/true"), "{text}");
-    assert!(
-        !text.contains("super-secret-value"),
-        "spawn log included module config: {text}"
-    );
+    let mut context = create_test_context();
+    context
+        .config
+        .insert("api_key".to_string(), "super-secret-value".to_string());
+    let err = spawner
+        .spawn("test-module", &PathBuf::from("/bin/true"), context, 0)
+        .await
+        .expect_err("true is not a module");
+    let text = format!("{err}");
+    assert!(!text.contains("super-secret-value"), "{text}");
     assert!(!text.contains("MODULE_CONFIG"), "{text}");
 }
 
