@@ -1426,10 +1426,10 @@ pub(crate) fn wan_gap_admit_window() -> u64 {
     }
 }
 
-pub(crate) fn missing_peer_semaphore<'a>(
-    peers: &'a [String],
+pub(crate) fn missing_peer_semaphore(
+    peers: &[String],
     has_semaphore: impl Fn(&str) -> bool,
-) -> Option<&'a str> {
+) -> Option<&str> {
     peers
         .iter()
         .find(|peer| !has_semaphore(peer))

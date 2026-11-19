@@ -130,17 +130,10 @@ fn export_piggyback_enabled() -> bool {
     }
 }
 
-/// Batched checkpoint writer used by piggyback export and memory overlay.
-
 /// Removes the spill file unless `finish` has taken the path (F57).
+#[derive(Default)]
 struct SpillPath {
     path: Option<PathBuf>,
-}
-
-impl Default for SpillPath {
-    fn default() -> Self {
-        Self { path: None }
-    }
 }
 
 impl SpillPath {

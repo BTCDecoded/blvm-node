@@ -1419,7 +1419,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                                 // Write the full stats to a temp file only when explicitly requested.
                                 if std::env::var_os("BLVM_IBD_JEMALLOC_DUMP").is_some() {
                                     let stats_path = "/tmp/jemalloc_ibd.txt";
-                                    let _ = std::fs::write(&stats_path, &*buf);
+                                    let _ = std::fs::write(stats_path, &*buf);
                                 }
 
                                 let text = String::from_utf8_lossy(&buf);
