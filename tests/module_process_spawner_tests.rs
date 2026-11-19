@@ -102,42 +102,70 @@ async fn spawn_rejects_an_unknown_ipc_protocol_before_launch() {
     // We don't need to match on the specific error variant for this test
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn spawn_log_omits_module_config() {
-    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let subscriber = LogCapture(std::sync::Arc::clone(&lines));
-    let _guard = tracing::subscriber::set_default(subscriber);
-    // The spawn callsite may already be cached against the no-op subscriber.
+#[test]
+fn spawn_log_omits_module_config() {
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Buf {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .with_target(false)
+        .with_writer(move || Buf(writer.clone()))
+        .finish();
+
+    let text = tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let result = runtime.block_on(async {
+            let (temp_dir, _) = create_test_spawner();
+            let config = ModuleResourceLimitsConfig {
+                default_max_cpu_percent: 50,
+                default_max_memory_bytes: 512 * 1024 * 1024,
+                default_max_file_descriptors: 256,
+                default_max_child_processes: 10,
+                module_startup_wait_millis: 1,
+                module_socket_timeout_seconds: 1,
+                module_socket_check_interval_millis: 10,
+                module_socket_max_attempts: 2,
+            };
+            let spawner = ModuleProcessSpawner::with_config(
+                temp_dir.path().join("modules"),
+                temp_dir.path().join("data"),
+                temp_dir.path().join("sockets"),
+                Some(&config),
+            );
+            let mut context = create_test_context();
+            context
+                .config
+                .insert("api_key".to_string(), "super-secret-value".to_string());
+            let fake_binary = PathBuf::from("/bin/true");
+            spawner.spawn("test-module", &fake_binary, context, 0).await
+        });
+        assert!(result.is_err());
+        let bytes = captured.lock().expect("log buffer").clone();
+        String::from_utf8(bytes).expect("log line is utf-8")
+    });
     tracing::callsite::rebuild_interest_cache();
 
-    let (temp_dir, _) = create_test_spawner();
-    let config = ModuleResourceLimitsConfig {
-        default_max_cpu_percent: 50,
-        default_max_memory_bytes: 512 * 1024 * 1024,
-        default_max_file_descriptors: 256,
-        default_max_child_processes: 10,
-        module_startup_wait_millis: 1,
-        module_socket_timeout_seconds: 1,
-        module_socket_check_interval_millis: 10,
-        module_socket_max_attempts: 2,
-    };
-    let spawner = ModuleProcessSpawner::with_config(
-        temp_dir.path().join("modules"),
-        temp_dir.path().join("data"),
-        temp_dir.path().join("sockets"),
-        Some(&config),
-    );
-    let mut context = create_test_context();
-    context
-        .config
-        .insert("api_key".to_string(), "super-secret-value".to_string());
-    let fake_binary = PathBuf::from("/bin/true");
-    let result = spawner.spawn("test-module", &fake_binary, context, 0).await;
-    drop(_guard);
-    tracing::callsite::rebuild_interest_cache();
-
-    assert!(result.is_err());
-    let text = lines.lock().unwrap().join("\n");
     assert!(
         text.contains("Spawning module process"),
         "spawn did not emit the spawn log: {text}"
@@ -149,46 +177,6 @@ async fn spawn_log_omits_module_config() {
         "spawn log included module config: {text}"
     );
     assert!(!text.contains("MODULE_CONFIG"), "{text}");
-}
-
-struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
-
-struct LogVisit(String);
-
-impl tracing::field::Visit for LogVisit {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        use std::fmt::Write;
-        let _ = write!(self.0, "{}={:?} ", field.name(), value);
-    }
-
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        use std::fmt::Write;
-        let _ = write!(self.0, "{}={} ", field.name(), value);
-    }
-}
-
-impl tracing::Subscriber for LogCapture {
-    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-        *metadata.level() <= tracing::Level::DEBUG
-    }
-
-    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-
-    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-
-    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-
-    fn event(&self, event: &tracing::Event<'_>) {
-        let mut visit = LogVisit(String::new());
-        event.record(&mut visit);
-        self.0.lock().unwrap().push(visit.0);
-    }
-
-    fn enter(&self, _span: &tracing::span::Id) {}
-
-    fn exit(&self, _span: &tracing::span::Id) {}
 }
 
 // Note: ModuleProcess has private fields, so we can't construct it directly in tests.
