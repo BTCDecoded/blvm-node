@@ -1288,11 +1288,16 @@ mod tests {
             2,
             "fence at the checkpoint must keep the Add"
         );
-        assert!(kept.entries.iter().any(|e| e.is_add() && e.height == 100_000));
-        assert!(kept
-            .entries
-            .iter()
-            .any(|e| e.is_delete() && e.height == 200_100));
+        assert!(
+            kept.entries
+                .iter()
+                .any(|e| e.is_add() && e.height == 100_000)
+        );
+        assert!(
+            kept.entries
+                .iter()
+                .any(|e| e.is_delete() && e.height == 200_100)
+        );
     }
 
     #[serial_test::serial(ibd)]
