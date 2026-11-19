@@ -128,11 +128,13 @@ async fn spawn_error_omits_module_config() {
     context
         .config
         .insert("api_key".to_string(), "super-secret-value".to_string());
-    let err = spawner
+    let result = spawner
         .spawn("test-module", &PathBuf::from("/bin/true"), context, 0)
-        .await
-        .expect_err("true is not a module");
-    let text = format!("{err}");
+        .await;
+    let text = match result {
+        Err(err) => format!("{err}"),
+        Ok(_) => panic!("true is not a module"),
+    };
     assert!(!text.contains("super-secret-value"), "{text}");
     assert!(!text.contains("MODULE_CONFIG"), "{text}");
 }
