@@ -21,8 +21,6 @@ ibd-bps-*.csv
 *.pdb
 **/*.rmeta
 
-# Root Cargo.lock is gitignored (crate publishes as a library; lockfile is generated locally / on runners — see CONTRIBUTING).
-Cargo.lock
 
 # Coverage reports and profiling
 /coverage/
