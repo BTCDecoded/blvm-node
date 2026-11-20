@@ -101,7 +101,7 @@ pub(crate) fn load_keys_from_disk(
     if codec == crate::storage::utxo_value_codec::ValueCodec::Rkyv
         && let Some(heed3_tree) = disk.as_heed3_tree()
     {
-        let rtxn = heed3_tree.env().read_txn()?;
+        let rtxn = heed3_tree.read_txn()?;
         let slices = heed3_tree.get_many_heed3(&key_refs, &rtxn)?;
         let mut result = FxHashMap::with_capacity_and_hasher(keys.len(), Default::default());
         for (key, opt_bytes) in keys.iter().zip(slices) {

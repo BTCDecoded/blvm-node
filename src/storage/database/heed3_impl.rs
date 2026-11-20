@@ -10,13 +10,153 @@ use blvm_storage_fence::heed3::types::Bytes;
 use blvm_storage_fence::heed3::{
     Database as HeedDatabase, Env, EnvFlags, EnvOpenOptions, FlagSetMode, PutFlags, WithoutTls,
 };
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 type ByteDb = HeedDatabase<Bytes, Bytes>;
 type HeedEnv = Env<WithoutTls>;
+
+static NEXT_MAP_TXN_GATE: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    static HELD_MAP_TXN_GATES: std::cell::RefCell<Vec<u64>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct MapTxnGateInner {
+    blocked: bool,
+    txns: usize,
+}
+
+/// Counts LMDB transactions on one environment so `mdb_env_set_mapsize` can run
+/// only while that count is zero. heed does not check this; a live reader holds
+/// pointers into the mapping that `resize` unmaps.
+struct MapTxnGate {
+    id: u64,
+    inner: Mutex<MapTxnGateInner>,
+    cv: Condvar,
+}
+
+struct MapTxnPermit {
+    gate: Arc<MapTxnGate>,
+    nested: bool,
+}
+
+struct MapResizeUnblock<'a> {
+    gate: &'a MapTxnGate,
+}
+
+impl Drop for MapResizeUnblock<'_> {
+    fn drop(&mut self) {
+        self.gate.inner.lock().blocked = false;
+        self.gate.cv.notify_all();
+    }
+}
+
+impl Drop for MapTxnPermit {
+    fn drop(&mut self) {
+        let id = self.gate.id;
+        HELD_MAP_TXN_GATES.with(|held| {
+            let mut stack = held.borrow_mut();
+            if let Some(pos) = stack.iter().rposition(|held_id| *held_id == id) {
+                stack.remove(pos);
+            }
+        });
+        if self.nested {
+            return;
+        }
+        let mut guard = self.gate.inner.lock();
+        guard.txns = guard.txns.saturating_sub(1);
+        if guard.txns == 0 {
+            self.gate.cv.notify_all();
+        }
+    }
+}
+
+impl MapTxnGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            id: NEXT_MAP_TXN_GATE.fetch_add(1, Ordering::Relaxed),
+            inner: Mutex::new(MapTxnGateInner {
+                blocked: false,
+                txns: 0,
+            }),
+            cv: Condvar::new(),
+        })
+    }
+
+    fn enter(self: &Arc<Self>) -> MapTxnPermit {
+        let nested = HELD_MAP_TXN_GATES.with(|held| held.borrow().contains(&self.id));
+        if nested {
+            HELD_MAP_TXN_GATES.with(|held| held.borrow_mut().push(self.id));
+            return MapTxnPermit {
+                gate: Arc::clone(self),
+                nested: true,
+            };
+        }
+        {
+            let mut guard = self.inner.lock();
+            while guard.blocked {
+                self.cv.wait(&mut guard);
+            }
+            guard.txns += 1;
+        }
+        HELD_MAP_TXN_GATES.with(|held| held.borrow_mut().push(self.id));
+        MapTxnPermit {
+            gate: Arc::clone(self),
+            nested: false,
+        }
+    }
+
+    /// `write_lock` is acquired first so a writer cannot open a transaction between
+    /// the wait and `mdb_env_set_mapsize`. The closure must not open a transaction.
+    fn exclusive<R>(
+        &self,
+        write_lock: &Mutex<()>,
+        f: impl FnOnce() -> Result<R>,
+    ) -> Result<R> {
+        if HELD_MAP_TXN_GATES.with(|held| held.borrow().contains(&self.id)) {
+            anyhow::bail!(
+                "heed3 map resize called while this thread holds an LMDB transaction"
+            );
+        }
+        let _write = write_lock.lock();
+        {
+            let mut guard = self.inner.lock();
+            guard.blocked = true;
+            while guard.txns != 0 {
+                self.cv.wait(&mut guard);
+            }
+        }
+        let _unblock = MapResizeUnblock { gate: self };
+        f()
+    }
+}
+
+/// A read transaction that keeps its gate permit until the LMDB transaction ends.
+/// Field order is drop order: the transaction ends, then the permit is released.
+pub struct Heed3ReadTxn<'a> {
+    txn: blvm_storage_fence::heed3::RoTxn<'a, WithoutTls>,
+    _permit: MapTxnPermit,
+}
+
+impl<'a> std::ops::Deref for Heed3ReadTxn<'a> {
+    type Target = blvm_storage_fence::heed3::RoTxn<'a, WithoutTls>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.txn
+    }
+}
+
+/// Live resize is required when the free map cannot hold another copy of `data.mdb`.
+/// The 128 GiB headroom is reserved at open. Restoring it after the file grows by
+/// one block remaps the whole environment.
+fn live_map_resize_needed(map_mb: u64, file_mb: u64) -> bool {
+    file_mb > 0 && map_mb.saturating_sub(file_mb) < file_mb
+}
 
 /// Release LMDB `data.mdb` mmap pages from the process's RSS after each fdatasync.
 ///
@@ -166,6 +306,7 @@ const HEED3_ITER_BATCH: usize = 4096;
 
 struct Heed3TreeIter {
     env: Arc<HeedEnv>,
+    txn_gate: Arc<MapTxnGate>,
     db: ByteDb,
     resume_after: Option<Vec<u8>>,
     buffer: std::vec::IntoIter<Result<(Vec<u8>, Vec<u8>)>>,
@@ -173,9 +314,10 @@ struct Heed3TreeIter {
 }
 
 impl Heed3TreeIter {
-    fn new(env: Arc<HeedEnv>, db: ByteDb) -> Self {
+    fn new(env: Arc<HeedEnv>, txn_gate: Arc<MapTxnGate>, db: ByteDb) -> Self {
         Self {
             env,
+            txn_gate,
             db,
             resume_after: None,
             buffer: Vec::new().into_iter(),
@@ -187,6 +329,7 @@ impl Heed3TreeIter {
         if self.exhausted {
             return Ok(());
         }
+        let _permit = self.txn_gate.enter();
         let rtxn = self.env.read_txn()?;
         let mut batch = Vec::with_capacity(HEED3_ITER_BATCH);
         let resume_after = self.resume_after.clone();
@@ -242,6 +385,7 @@ pub struct Heed3Database {
     env: Arc<HeedEnv>,
     /// LMDB allows one write txn per environment; serialize writers.
     write_lock: Arc<Mutex<()>>,
+    txn_gate: Arc<MapTxnGate>,
     trees: HashMap<String, ByteDb>,
     data_path: PathBuf,
 }
@@ -397,6 +541,7 @@ impl Heed3Database {
         Ok(Self {
             env,
             write_lock: Arc::new(Mutex::new(())),
+            txn_gate: MapTxnGate::new(),
             trees,
             data_path,
         })
@@ -406,24 +551,32 @@ impl Heed3Database {
         &self.data_path
     }
 
-    /// Grow the LMDB map so `data.mdb` has at least `headroom_mb` MiB of unused map
-    /// capacity. No-op if already sufficient. Must be called with no active LMDB txns
-    /// on this env (Phase 3 runs after validation/download join — safe).
+    /// Grow the LMDB map when a second copy of `data.mdb` does not fit in the free map.
+    ///
+    /// `headroom_mb` is the size added when a grow does run (the open-time cushion,
+    /// default 128 GiB). It is not re-checked on every call: restoring that cushion
+    /// after the file grows by one block remaps the whole environment.
+    ///
+    /// `mdb_env_set_mapsize` unmaps the environment. The resize waits until this
+    /// process has no transaction on it. heed does not check that.
     ///
     /// Live 2026-07-13: Phase 3 piggyback export hit `MDB_MAP_FULL` with map=1 TiB at
     /// 99.998% full; warn-only sink kept compact running for 11h.
+    /// Live 2026-11-19: a 21 MB shortfall of the 128 GiB cushion remapped a 198 GiB
+    /// map while a reader was in it (`SEGV_MAPERR`).
     pub fn ensure_map_headroom_mb(&self, headroom_mb: usize) -> Result<()> {
         let info = self.env.info();
         let map_bytes = info.map_size;
-        let map_mb = map_bytes / (1024 * 1024);
+        let map_mb = (map_bytes / (1024 * 1024)) as u64;
         let mdb_path = self.data_path.join("data.mdb");
         let file_mb = std::fs::metadata(&mdb_path)
             .map(|m| m.len() / (1024 * 1024))
             .unwrap_or(0);
-        let free_in_map = map_mb.saturating_sub(file_mb as usize);
-        if free_in_map >= headroom_mb {
+        let free_in_map = map_mb.saturating_sub(file_mb);
+        if !live_map_resize_needed(map_mb, file_mb) {
             tracing::info!(
-                "[HEED3] map headroom OK: file={} MB map={} MB free_in_map={} MB (need ≥{})",
+                "[HEED3] map resize skipped: file={} MB map={} MB free_in_map={} MB \
+                 (free map holds another copy of the file; requested headroom={} MB)",
                 file_mb,
                 map_mb,
                 free_in_map,
@@ -434,7 +587,7 @@ impl Heed3Database {
         let target_mb = (file_mb as usize)
             .saturating_add(headroom_mb)
             .min(4 * 1024 * 1024);
-        if target_mb <= map_mb {
+        if (target_mb as u64) <= map_mb {
             return Ok(());
         }
         let page = {
@@ -458,14 +611,16 @@ impl Heed3Database {
             file_mb,
             headroom_mb
         );
-        let _guard = self.write_lock.lock();
-        // SAFETY: no other write txn held; callers must not hold RoTxn across this call.
-        unsafe {
-            self.env
-                .resize(target_bytes)
-                .context("heed3 Env::resize failed")?;
-        }
-        Ok(())
+        self.txn_gate.exclusive(&self.write_lock, || {
+            // SAFETY: exclusive waits until this process has no LMDB transaction,
+            // then holds the write lock so no new one starts.
+            unsafe {
+                self.env
+                    .resize(target_bytes)
+                    .context("heed3 Env::resize failed")?;
+            }
+            Ok(())
+        })
     }
 
     fn tree_db(&self, name: &str) -> Result<ByteDb> {
@@ -498,6 +653,7 @@ impl Heed3Database {
         let db_recent = self.tree_db("recent_headers")?;
 
         let _guard = self.write_lock.lock();
+        let _permit = self.txn_gate.enter();
         let mut wtxn = self.env.write_txn()?;
 
         for &i in flush_order {
@@ -743,6 +899,7 @@ impl Database for Heed3Database {
         Ok(Box::new(Heed3Tree {
             env: Arc::clone(&self.env),
             write_lock: Arc::clone(&self.write_lock),
+            txn_gate: Arc::clone(&self.txn_gate),
             db,
             name: name.to_string(),
         }))
@@ -791,6 +948,7 @@ impl Database for Heed3Database {
 pub struct Heed3Tree {
     env: Arc<HeedEnv>,
     write_lock: Arc<Mutex<()>>,
+    txn_gate: Arc<MapTxnGate>,
     db: ByteDb,
     name: String,
 }
@@ -813,12 +971,15 @@ pub fn abort_next_three_put_commit(abort: bool) {
 }
 
 impl Heed3Tree {
-    /// Return the underlying LMDB environment. Callers can open a `RoTxn` and use
-    /// [`Self::get_many_heed3`] to read values as `&[u8]` slices backed directly by
-    /// mmap'd LMDB pages — zero intermediate `Vec<u8>` allocation per value.
-    #[inline]
-    pub fn env(&self) -> &Arc<HeedEnv> {
-        &self.env
+    /// Open a read transaction whose slices stay valid until the returned value drops.
+    /// The permit is held for that whole lifetime so a map resize cannot unmap them.
+    pub fn read_txn(&self) -> Result<Heed3ReadTxn<'_>> {
+        let permit = self.txn_gate.enter();
+        let txn = self.env.read_txn().context("heed3 read_txn failed")?;
+        Ok(Heed3ReadTxn {
+            txn,
+            _permit: permit,
+        })
     }
 
     /// Batch-read `keys` inside an existing read transaction.
@@ -846,6 +1007,7 @@ impl Heed3Tree {
     ///
     /// Returns early with the first error from either LMDB or the closure.
     pub fn scan_heed3(&self, mut f: impl FnMut(&[u8], &[u8]) -> Result<()>) -> Result<()> {
+        let _permit = self.txn_gate.enter();
         let rtxn = self.env.read_txn()?;
         for result in self.db.iter(&rtxn)? {
             let (k, v) = result?;
@@ -858,6 +1020,7 @@ impl Heed3Tree {
 impl Tree for Heed3Tree {
     fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
         let _guard = self.write_lock.lock();
+        let _permit = self.txn_gate.enter();
         let mut wtxn = self.env.write_txn()?;
         self.db.put(&mut wtxn, key, value)?;
         wtxn.commit()?;
@@ -865,6 +1028,7 @@ impl Tree for Heed3Tree {
     }
 
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let _permit = self.txn_gate.enter();
         let rtxn = self.env.read_txn()?;
         match self.db.get(&rtxn, key)? {
             Some(v) => Ok(Some(v.to_vec())),
@@ -873,6 +1037,7 @@ impl Tree for Heed3Tree {
     }
 
     fn get_many(&self, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>> {
+        let _permit = self.txn_gate.enter();
         let rtxn = self.env.read_txn()?;
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
@@ -888,6 +1053,7 @@ impl Tree for Heed3Tree {
 
     fn remove(&self, key: &[u8]) -> Result<()> {
         let _guard = self.write_lock.lock();
+        let _permit = self.txn_gate.enter();
         let mut wtxn = self.env.write_txn()?;
         self.db.delete(&mut wtxn, key)?;
         wtxn.commit()?;
@@ -895,12 +1061,14 @@ impl Tree for Heed3Tree {
     }
 
     fn contains_key(&self, key: &[u8]) -> Result<bool> {
+        let _permit = self.txn_gate.enter();
         let rtxn = self.env.read_txn()?;
         Ok(self.db.get(&rtxn, key)?.is_some())
     }
 
     fn clear(&self) -> Result<()> {
         let _guard = self.write_lock.lock();
+        let _permit = self.txn_gate.enter();
         let mut wtxn = self.env.write_txn()?;
         self.db.clear(&mut wtxn)?;
         wtxn.commit()?;
@@ -908,18 +1076,24 @@ impl Tree for Heed3Tree {
     }
 
     fn len(&self) -> Result<usize> {
+        let _permit = self.txn_gate.enter();
         let rtxn = self.env.read_txn()?;
         Ok(self.db.len(&rtxn)? as usize)
     }
 
     fn iter(&self) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_> {
-        Box::new(Heed3TreeIter::new(Arc::clone(&self.env), self.db))
+        Box::new(Heed3TreeIter::new(
+            Arc::clone(&self.env),
+            Arc::clone(&self.txn_gate),
+            self.db,
+        ))
     }
 
     fn batch(&self) -> Result<Box<dyn BatchWriter + '_>> {
         Ok(Box::new(Heed3BatchWriter {
             env: Arc::clone(&self.env),
             write_lock: Arc::clone(&self.write_lock),
+            txn_gate: Arc::clone(&self.txn_gate),
             db: self.db,
             pending: Vec::new(),
         }))
@@ -977,6 +1151,7 @@ impl Heed3Tree {
         ops: impl IntoIterator<Item = (&'a [u8], Option<&'a [u8]>)>,
     ) -> anyhow::Result<usize> {
         let _guard = self.write_lock.lock();
+        let _permit = self.txn_gate.enter();
         let mut wtxn = self.env.write_txn()?;
         let mut count = 0usize;
         for (key, value_opt) in ops {
@@ -1012,6 +1187,7 @@ impl Heed3Tree {
             anyhow::bail!("header trees are not one heed3 environment");
         }
         let _guard = self.write_lock.lock();
+        let _permit = self.txn_gate.enter();
         let mut wtxn = self.env.write_txn()?;
         for (key, value) in first {
             self.db.put(&mut wtxn, key.as_slice(), value.as_slice())?;
@@ -1046,6 +1222,7 @@ impl Heed3Tree {
             }
         }
         let _guard = ops[0].tree.write_lock.lock();
+        let _permit = ops[0].tree.txn_gate.enter();
         let mut wtxn = env.write_txn()?;
         for op in ops {
             match op.value {
@@ -1073,6 +1250,7 @@ impl Heed3Tree {
             }
         }
         let _guard = trees[0].write_lock.lock();
+        let _permit = trees[0].txn_gate.enter();
         let mut wtxn = env.write_txn()?;
         for tree in trees {
             tree.db.clear(&mut wtxn)?;
@@ -1090,6 +1268,7 @@ impl Heed3Tree {
         ops: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
     ) -> anyhow::Result<usize> {
         let _guard = self.write_lock.lock();
+        let _permit = self.txn_gate.enter();
         let mut wtxn = self.env.write_txn()?;
         let mut count = 0usize;
         for (key, value) in ops {
@@ -1118,6 +1297,7 @@ impl Heed3Tree {
         F: FnMut() -> anyhow::Result<Option<(Vec<u8>, Vec<u8>)>>,
     {
         let _guard = self.write_lock.lock();
+        let _permit = self.txn_gate.enter();
         let mut wtxn = self.env.write_txn()?;
         let mut count = 0usize;
         let mut since_commit = 0usize;
@@ -1161,6 +1341,7 @@ impl Heed3Tree {
 pub struct Heed3ModuleDatabase {
     env: Arc<HeedEnv>,
     write_lock: Arc<Mutex<()>>,
+    txn_gate: Arc<MapTxnGate>,
     trees: Mutex<HashMap<String, ByteDb>>,
     data_path: PathBuf,
 }
@@ -1215,6 +1396,7 @@ impl Heed3ModuleDatabase {
         Ok(Self {
             env: Arc::new(env),
             write_lock: Arc::new(Mutex::new(())),
+            txn_gate: MapTxnGate::new(),
             trees: Mutex::new(HashMap::new()),
             data_path,
         })
@@ -1228,6 +1410,7 @@ impl Heed3ModuleDatabase {
         if let Some(db) = self.trees.lock().get(name) {
             return Ok(*db);
         }
+        let _permit = self.txn_gate.enter();
         let mut wtxn = self.env.write_txn()?;
         let db = self
             .env
@@ -1249,6 +1432,7 @@ impl Database for Heed3ModuleDatabase {
         Ok(Box::new(Heed3Tree {
             env: Arc::clone(&self.env),
             write_lock: Arc::clone(&self.write_lock),
+            txn_gate: Arc::clone(&self.txn_gate),
             db,
             name: name.to_string(),
         }))
@@ -1265,6 +1449,7 @@ impl Database for Heed3ModuleDatabase {
 struct Heed3BatchWriter {
     env: Arc<HeedEnv>,
     write_lock: Arc<Mutex<()>>,
+    txn_gate: Arc<MapTxnGate>,
     db: ByteDb,
     pending: Vec<(Vec<u8>, Option<Vec<u8>>)>,
 }
@@ -1283,6 +1468,7 @@ impl BatchWriter for Heed3BatchWriter {
             return Ok(());
         }
         let _guard = self.write_lock.lock();
+        let _permit = self.txn_gate.enter();
         let mut wtxn = self.env.write_txn()?;
         for (key, value) in self.pending {
             match value {
@@ -1312,7 +1498,7 @@ impl BatchWriter for Heed3BatchWriter {
 mod map_size_tests {
     use super::{
         disk_based_map_size_mb, disk_free_mb_for_path, explicit_map_size_mb,
-        map_size_mb_for_existing_file,
+        live_map_resize_needed, map_size_mb_for_existing_file,
     };
 
     #[test]
@@ -1364,5 +1550,89 @@ mod map_size_tests {
         file.set_len(4 * 1024 * 1024).unwrap();
         assert_eq!(explicit_map_size_mb(1, Some(&dir)), 4);
         let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    #[test]
+    fn live_resize_skips_when_another_copy_of_the_file_fits() {
+        // 2026-11-19 bounds crash: free map 131051 MB, file 71841 MB.
+        assert!(!live_map_resize_needed(202_892, 71_841));
+        assert!(!live_map_resize_needed(123_973, 50_382));
+        assert!(!live_map_resize_needed(181_454, 61_406));
+        assert!(!live_map_resize_needed(192_478, 71_820));
+        assert!(!live_map_resize_needed(128 * 1024, 0));
+    }
+
+    #[test]
+    fn live_resize_runs_when_the_file_fills_the_map() {
+        // 2026-07-13: map 1 TiB, file 99.998% full.
+        let map_mb = 1024 * 1024;
+        assert!(live_map_resize_needed(map_mb, map_mb - 20));
+        assert!(live_map_resize_needed(100, 60));
+    }
+}
+
+#[cfg(test)]
+mod map_txn_gate_tests {
+    use super::MapTxnGate;
+    use parking_lot::Mutex;
+    use std::sync::mpsc;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[test]
+    fn resize_waits_until_the_read_permit_drops() {
+        let gate = MapTxnGate::new();
+        let write = Mutex::new(());
+        let permit = gate.enter();
+        let (started_tx, started_rx) = mpsc::channel();
+        let gate2 = Arc::clone(&gate);
+        let worker = std::thread::spawn(move || {
+            gate2
+                .exclusive(&write, || {
+                    started_tx.send(()).unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        assert!(
+            started_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "resize ran while a read permit was held"
+        );
+        drop(permit);
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn resize_blocks_a_new_reader_until_it_finishes() {
+        let gate = MapTxnGate::new();
+        let write = Mutex::new(());
+        let (inside_tx, inside_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let gate2 = Arc::clone(&gate);
+        let resizer = std::thread::spawn(move || {
+            gate2
+                .exclusive(&write, || {
+                    inside_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        inside_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let gate3 = Arc::clone(&gate);
+        let reader = std::thread::spawn(move || {
+            let _permit = gate3.enter();
+            entered_tx.send(()).unwrap();
+        });
+        assert!(
+            entered_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a reader entered during resize"
+        );
+        release_tx.send(()).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        resizer.join().unwrap();
+        reader.join().unwrap();
     }
 }

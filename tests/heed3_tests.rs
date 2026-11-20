@@ -145,7 +145,7 @@ mod heed3_tests {
         // Downcast to Heed3Tree and open a single read txn for the batch.
         let heed3_tree: &Heed3Tree = tree.as_heed3_tree().expect("expected heed3 backend");
         let key_refs: Vec<&[u8]> = written.iter().map(|(k, _)| k.as_slice()).collect();
-        let rtxn = heed3_tree.env().read_txn().unwrap();
+        let rtxn = heed3_tree.read_txn().unwrap();
         let slices = heed3_tree.get_many_heed3(&key_refs, &rtxn).unwrap();
 
         assert_eq!(slices.len(), N);
