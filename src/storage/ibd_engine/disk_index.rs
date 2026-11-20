@@ -231,13 +231,20 @@ impl Drop for SpillWriteGuard<'_> {
 
 impl DiskIndex {
     pub fn new(seg_dir: &Path) -> anyhow::Result<(Self, i32)> {
-        Self::new_impl(seg_dir, true)
+        Self::new_impl(seg_dir, true, None)
+    }
+
+    /// Load only the segment file names a commit record lists. Other `seg_*.bin`
+    /// files stay on disk and are not queried. `next_idx` still skips them.
+    pub fn new_named(seg_dir: &Path, names: &[String]) -> anyhow::Result<(Self, i32)> {
+        let allow: std::collections::HashSet<&str> = names.iter().map(String::as_str).collect();
+        Self::new_impl(seg_dir, true, Some(allow))
     }
 
     /// Create an empty index (no segment load). Used before checkpoint re-seed to avoid
     /// reading hundreds of millions of on-disk entries that will be wiped immediately.
     pub fn new_empty(seg_dir: &Path) -> anyhow::Result<(Self, i32)> {
-        Self::new_impl(seg_dir, false)
+        Self::new_impl(seg_dir, false, None)
     }
 
     /// Scan segment headers only — max block height durably on disk (no bloom load).
@@ -262,7 +269,7 @@ impl DiskIndex {
         max_height
     }
 
-    fn new_impl(seg_dir: &Path, load_segments: bool) -> anyhow::Result<(Self, i32)> {
+    fn new_impl<'a>(seg_dir: &Path, load_segments: bool, only: Option<std::collections::HashSet<&'a str>>) -> anyhow::Result<(Self, i32)> {
         super::disk_segment::log_compact_dontneed_once();
         std::fs::create_dir_all(seg_dir)?;
         let mut loaded: Vec<Arc<DiskSegment>> = Vec::new();
@@ -289,9 +296,13 @@ impl DiskIndex {
                     else {
                         continue;
                     };
+                    next_idx = next_idx.max(idx + 1);
+                    let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if only.as_ref().is_some_and(|allow| !allow.contains(fname)) {
+                        continue;
+                    }
                     let seg = DiskSegment::open(&path)?;
                     max_height = max_height.max(seg.height_range().1);
-                    next_idx = next_idx.max(idx + 1);
                     loaded.push(Arc::new(seg));
                 }
             }

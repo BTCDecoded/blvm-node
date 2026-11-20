@@ -1883,11 +1883,77 @@ impl Node {
                     .ok()
                     .flatten()
                     .unwrap_or(0);
-                let poisoned_ckpt = durable_watermark > 0
+                let commit_h = if engine_enabled {
+                    if let Some(data_dir) = self.storage.data_dir() {
+                        let engine_path =
+                            crate::config::ibd::ibd_engine_path(Some(data_dir.as_path()));
+                        match crate::storage::ibd_engine::commit::load(&engine_path) {
+                            Ok(crate::storage::ibd_engine::commit::LoadCommit::Absent) => None,
+                            Err(e) => {
+                                return Err(anyhow::anyhow!(
+                                    "engine commit slots are torn; directory left in place: {e:#}"
+                                ));
+                            }
+                            Ok(crate::storage::ibd_engine::commit::LoadCommit::Record(rec)) => {
+                                let height_u = u64::try_from(rec.height).unwrap_or(0);
+                                let indexed = self
+                                    .storage
+                                    .blocks()
+                                    .get_hash_by_height(height_u)
+                                    .ok()
+                                    .flatten();
+                                let body_ok = match indexed {
+                                    Some(hash) if hash == rec.tip_hash => self
+                                        .storage
+                                        .blocks()
+                                        .has_block_body(&hash)
+                                        .unwrap_or(false),
+                                    _ => false,
+                                };
+                                if body_ok {
+                                    Some(rec.height)
+                                } else {
+                                    match crate::storage::ibd_engine::commit::demote_winner(
+                                        &engine_path,
+                                    ) {
+                                        Ok(prev) => {
+                                            warn!(
+                                                "[IBD_RESUME] commit body missing at height {} — \
+                                                 previous slot {prev}",
+                                                rec.height
+                                            );
+                                            Some(prev)
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "[IBD_RESUME] commit body missing at height {} \
+                                                 and no previous slot ({e:#}) — resume stays at \
+                                                 that height, not 0",
+                                                rec.height
+                                            );
+                                            Some(rec.height)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let poisoned_ckpt = commit_h.is_none()
+                    && durable_watermark > 0
                     && durable_watermark == chain_tip
                     && validation_tip > chain_tip.saturating_add(10_000);
 
-                let effective_tip = if poisoned_ckpt {
+                let effective_tip = if let Some(h) = commit_h {
+                    info!(
+                        "[IBD_RESUME] commit file height={h} — sidecar, watermark, and export_h are not the coin tip"
+                    );
+                    u64::try_from(h).unwrap_or(0)
+                } else if poisoned_ckpt {
                     warn!(
                         "[IBD_RESUME] poisoned UTXO checkpoint: watermark/export={wm} equals \
                          chain_tip but engine_validation_tip={vt} is far ahead — checkpoint \

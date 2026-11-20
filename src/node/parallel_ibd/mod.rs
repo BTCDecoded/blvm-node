@@ -5026,11 +5026,13 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     // can shrink the interval so slow replay does not leave huge dirty-restart windows.
     // Target ~checkpoint_target_secs wall clock between exports. Override via BLVM_IBD_CHECKPOINT_INTERVAL.
     CHECKPOINT_EXPORT_STOP.store(false, Ordering::Release);
-    let mut periodic_checkpoint_handle: Option<std::thread::JoinHandle<()>> = if let Some(
-        ref engine_arc,
-    ) =
-        utxo_engine_for_export
+    let mut periodic_checkpoint_handle: Option<std::thread::JoinHandle<()>> = if utxo_engine_for_export
+        .as_ref()
+        .is_some_and(|db| db.commit_mode())
     {
+        info!("IBD engine: commit file is the coin tip — checkpoint export thread not started");
+        None
+    } else if let Some(ref engine_arc) = utxo_engine_for_export {
         let engine_clone = Arc::clone(engine_arc);
         let storage_ckpt = Arc::clone(storage);
         let durability = engine_durability;
@@ -5471,7 +5473,7 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     // Validation appends spends before that scan when the export thread lags.
     // Those spends are discarded, and the snapshot labeled at the checkpoint
     // is then missing the coins the next block spends.
-    if utxo_engine.is_some()
+    if utxo_engine.as_ref().is_some_and(|db| !db.commit_mode())
         && crate::storage::ibd_engine::memory_run::gc_fence_snapshot() == i32::MAX
     {
         let durability = crate::config::ibd::ibd_engine_durability_config(None);
@@ -9291,6 +9293,8 @@ impl ParallelIBD {
         };
         let utxo_engine: Option<Arc<crate::storage::ibd_engine::UtxoDatabase>> = {
             let engine_path = crate::config::ibd::ibd_engine_path(storage.data_dir().as_deref());
+            let commit_present =
+                crate::storage::ibd_engine::winning_height(&engine_path).is_some();
             if let Some(parent) = engine_path.parent() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("create IBD engine directory {}", parent.display()))?;
@@ -9336,7 +9340,9 @@ impl ParallelIBD {
                     .and_then(|s| s.trim().parse().ok());
                 let epoch_matches = stored_epoch == Some(start_height);
                 let segments_recoverable = segs_exist_pre && segment_max_pre >= checkpoint_height;
-                let needs_wipe = if resume_seed {
+                let needs_wipe = if commit_present {
+                    false
+                } else if resume_seed {
                     if !engine_path.exists() || !segs_exist_pre {
                         true
                     } else if !epoch_matches {
@@ -9377,7 +9383,17 @@ impl ParallelIBD {
             // Dirty exit loses in-memory age tiers. Disk segments only hold spilled overflow,
             // so a dirty open wipes and the seed below reloads the heed checkpoint.
             // A clean exit may skip that seed only when contiguous_length equals export_h.
-            let mut db = if resume_seed && was_dirty_at_open {
+            let mut db = if commit_present {
+                info!(
+                    "IBD engine: commit file present — opening {} without a heed reseed",
+                    engine_path.display()
+                );
+                crate::storage::ibd_engine::UtxoDatabase::open(
+                    &engine_path,
+                    mem_guard.engine_avail_mb(),
+                )
+                .with_context(|| format!("open IBD engine at {}", engine_path.display()))?
+            } else if resume_seed && was_dirty_at_open {
                 info!(
                     "IBD engine: dirty shutdown — wipe + re-seed from checkpoint \
                      (export_h={}; prior segment_max={}; sidecar={:?})",
@@ -9404,7 +9420,12 @@ impl ParallelIBD {
                 .with_context(|| format!("open IBD engine at {}", engine_path.display()))?
             };
 
-            if resume_seed {
+            if commit_present {
+                info!(
+                    "IBD engine: commit file is the coin tip at {} — export reseed skipped",
+                    engine_path.display()
+                );
+            } else if resume_seed {
                 let ckpt_slot = crate::node::reliability_decisions::resume_seed_slot(
                     storage.chain().get_engine_ckpt_slot(),
                 )?;

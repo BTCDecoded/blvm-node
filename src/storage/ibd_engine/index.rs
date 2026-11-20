@@ -559,7 +559,7 @@ impl UtxoIndex {
     /// how many index tiers remain in memory vs. are spilled to disk.
     pub fn open(seg_dir: &Path, avail_mb: u64) -> anyhow::Result<Self> {
         let (disk_index, restored_cl) = DiskIndex::new(seg_dir)?;
-        Self::open_with_disk(Arc::new(disk_index), avail_mb, restored_cl, None)
+        Self::open_with_disk(Arc::new(disk_index), avail_mb, restored_cl, None, None)
     }
 
     pub(super) fn open_with_disk(
@@ -567,6 +567,7 @@ impl UtxoIndex {
         avail_mb: u64,
         restored_cl: i32,
         table_path: Option<&Path>,
+        commit_height: Option<i32>,
     ) -> anyhow::Result<Self> {
         let eviction_age = choose_eviction_age(avail_mb);
         let index_epoch = Arc::new(AtomicU64::new(0));
@@ -582,6 +583,10 @@ impl UtxoIndex {
         });
 
         let ages = Arc::new(ages_raw);
+        // A commit file is the fence. Set it before any compacter thread runs.
+        if let Some(h) = commit_height {
+            super::set_gc_fence(h);
+        }
         let compacter = Compacter::start(Arc::clone(&ages), Arc::clone(&disk_index), eviction_age);
         // Mark spill-tier ages for early take-2 (or env override) before any appends.
         {
@@ -597,8 +602,9 @@ impl UtxoIndex {
                 ages[i].set_spill_early_take(if is_spill { take } else { 0 });
             }
         }
-        let mut restored_cl = restored_cl;
-        if let Some(tp) = table_path
+        let mut restored_cl = commit_height.unwrap_or(restored_cl);
+        if commit_height.is_none()
+            && let Some(tp) = table_path
             && let Some(file_cl) = super::meta::read_contiguous_length_sidecar(tp)
         {
             if restored_cl < 0 && file_cl >= 0 {
@@ -1476,7 +1482,7 @@ mod tests {
         }
         let tmp = tempfile::tempdir().expect("tempdir");
         let (disk_index, restored_cl) = DiskIndex::new(tmp.path()).expect("DiskIndex::new");
-        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None)
+        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None, None)
             .expect("open_with_disk");
         assert_eq!(idx.boot_eviction_age, 4);
         idx.memory_pressure_tick(2);
@@ -1506,7 +1512,7 @@ mod tests {
         crate::node::parallel_ibd::tip_stage::test_seed_getdata_body_ewma(40, 32);
         let tmp = tempfile::tempdir().expect("tempdir");
         let (disk_index, restored_cl) = DiskIndex::new(tmp.path()).expect("DiskIndex::new");
-        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None)
+        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None, None)
             .expect("open_with_disk");
         let boot = idx.boot_eviction_age;
         idx.memory_pressure_tick(2); // Critical — Land E holds boot
@@ -1549,7 +1555,7 @@ mod tests {
         }
         let tmp = tempfile::tempdir().expect("tempdir");
         let (disk_index, restored_cl) = DiskIndex::new(tmp.path()).expect("DiskIndex::new");
-        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None)
+        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None, None)
             .expect("open_with_disk");
         let boot = idx.boot_eviction_age;
         assert!(boot >= 4);
@@ -1584,7 +1590,7 @@ mod tests {
         }
         let tmp = tempfile::tempdir().expect("tempdir");
         let (disk_index, restored_cl) = DiskIndex::new(tmp.path()).expect("DiskIndex::new");
-        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None)
+        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None, None)
             .expect("open_with_disk");
         let boot = idx.boot_eviction_age;
         assert!(boot >= 4);
@@ -1618,7 +1624,7 @@ mod tests {
         }
         let tmp = tempfile::tempdir().expect("tempdir");
         let (disk_index, restored_cl) = DiskIndex::new(tmp.path()).expect("DiskIndex::new");
-        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None)
+        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None, None)
             .expect("open_with_disk");
         assert_eq!(idx.boot_eviction_age, 5);
         idx.memory_pressure_tick(2); // Critical — soft → 4, not mutable floor
@@ -1649,7 +1655,7 @@ mod tests {
         }
         let tmp = tempfile::tempdir().expect("tempdir");
         let (disk_index, restored_cl) = DiskIndex::new(tmp.path()).expect("DiskIndex::new");
-        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None)
+        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None, None)
             .expect("open_with_disk");
         let boot = idx.boot_eviction_age;
         assert_eq!(boot, 4);
@@ -1689,7 +1695,7 @@ mod tests {
         }
         let tmp = tempfile::tempdir().expect("tempdir");
         let (disk_index, restored_cl) = DiskIndex::new(tmp.path()).expect("DiskIndex::new");
-        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None)
+        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None, None)
             .expect("open_with_disk");
         idx.memory_pressure_tick(3); // first Emergency — defer clear
         assert!(
@@ -1723,7 +1729,7 @@ mod tests {
         }
         let tmp = tempfile::tempdir().expect("tempdir");
         let (disk_index, restored_cl) = DiskIndex::new(tmp.path()).expect("DiskIndex::new");
-        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None)
+        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None, None)
             .expect("open_with_disk");
         assert_eq!(idx.boot_eviction_age, 5);
         idx.memory_pressure_tick(1); // Elevated — tip_res keeps boot
@@ -1756,7 +1762,7 @@ mod tests {
         }
         let tmp = tempfile::tempdir().expect("tempdir");
         let (disk_index, restored_cl) = DiskIndex::new(tmp.path()).expect("DiskIndex::new");
-        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None)
+        let idx = UtxoIndex::open_with_disk(Arc::new(disk_index), 24 * 1024, restored_cl, None, None)
             .expect("open_with_disk");
         assert_eq!(idx.boot_eviction_age, 4);
         idx.memory_pressure_tick(2);

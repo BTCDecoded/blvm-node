@@ -27,7 +27,8 @@ use super::types::{
 use blvm_protocol::{Block, transaction::is_coinbase};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 thread_local! {
     /// Txids of the block being appended. The dispatch thread reuses this set.
@@ -36,10 +37,21 @@ thread_local! {
         RefCell::new(rustc_hash::FxHashSet::default());
 }
 
+#[derive(Clone)]
+struct CommitPending {
+    height: i32,
+    wal_before: u64,
+    table_before: u64,
+    wal_after: u64,
+}
+
 pub struct UtxoDatabase {
     pub(super) table: Arc<UtxoTable>,
     pub(super) index: UtxoIndex,
     table_path: PathBuf,
+    /// True when this directory's coin tip is a commit file.
+    commit_mode: AtomicBool,
+    pending: Mutex<Vec<CommitPending>>,
 }
 
 impl UtxoDatabase {
@@ -143,8 +155,26 @@ impl UtxoDatabase {
             p.push(".segs");
             std::path::PathBuf::from(p)
         };
+        let loaded = super::commit::load(&table_path)?;
+        let record = match loaded {
+            super::commit::LoadCommit::Record(rec) => Some(rec),
+            super::commit::LoadCommit::Absent => None,
+        };
+        if let Some(rec) = record.as_ref() {
+            super::commit::truncate_logs(&table_path, rec)?;
+        }
+        let commit_mode = record.is_some() || fresh_commit_dir(&table_path, record.is_some());
         let table = UtxoTable::open(&table_path)?;
-        let (disk_index, restored_cl) = if load_segments {
+        if let Some(rec) = record.as_ref() {
+            table.truncate_to(rec.table_len)?;
+        }
+        let (disk_index, restored_cl) = if let Some(rec) = record.as_ref() {
+            if load_segments {
+                DiskIndex::new_named(&seg_dir, &rec.segments)?
+            } else {
+                DiskIndex::new_empty(&seg_dir)?
+            }
+        } else if load_segments {
             DiskIndex::new(&seg_dir)?
         } else {
             DiskIndex::new_empty(&seg_dir)?
@@ -154,11 +184,17 @@ impl UtxoDatabase {
             avail_mb,
             restored_cl,
             Some(&table_path),
+            record.as_ref().map(|r| r.height),
         )?;
+        if let Some(rec) = record.as_ref() {
+            replay_wal(&index, &table_path, rec)?;
+        }
         Ok(Self {
             table,
             index,
             table_path,
+            commit_mode: AtomicBool::new(commit_mode),
+            pending: Mutex::new(Vec::new()),
         })
     }
 
@@ -245,6 +281,17 @@ impl UtxoDatabase {
         super::memory_run::sort_external_keys(&mut external_keys);
         external_keys.dedup();
 
+        if self.commit_mode.load(Ordering::Acquire) {
+            let wal_before = super::commit::wal_len(&self.table_path);
+            let table_before = self.table.append_offset();
+            let wal_after = super::commit::append_wal(&self.table_path, &entries)?;
+            self.pending.lock().expect("commit pending").push(CommitPending {
+                height,
+                wal_before,
+                table_before,
+                wal_after,
+            });
+        }
         let pin = self.index.append(entries, height);
         self.persist_contiguous_length();
         Ok((pin, external_keys, intra_block_keys))
@@ -290,6 +337,67 @@ impl UtxoDatabase {
     /// Block until `contiguous_length >= height`. Watermark export only — NOT on hot path.
     pub fn wait_for_height(&self, height: i32) {
         self.index.wait_for_height(height);
+    }
+
+    /// This directory uses a commit file as the coin tip.
+    pub fn commit_mode(&self) -> bool {
+        self.commit_mode.load(Ordering::Acquire)
+    }
+
+    /// Durability for one accepted block. The caller has already made the
+    /// block body durable (`Database::flush` / heed `force_sync`). A failure
+    /// here leaves the previous slot in place.
+    pub fn seal_commit(
+        &self,
+        height: i32,
+        tip_hash: [u8; 32],
+        undo_payload: &[u8],
+    ) -> anyhow::Result<()> {
+        if !self.commit_mode() {
+            return Ok(());
+        }
+        let pending = self
+            .pending
+            .lock()
+            .expect("commit pending")
+            .iter()
+            .find(|p| p.height == height)
+            .cloned();
+        let Some(pending) = pending else {
+            anyhow::bail!("no commit wal for height {height}");
+        };
+        let table_len = self.table.sync_through(height.saturating_add(1))?;
+        let pre = super::commit::Preimage {
+            table_len: pending.table_before,
+            wal_len: pending.wal_before,
+            undo_len: super::commit::undo_len(&self.table_path),
+        };
+        let undo_end = super::commit::append_undo(&self.table_path, pre, undo_payload)?;
+        super::commit::sync_wal_and_undo(&self.table_path)?;
+        let mut seg_dir = self.table_path.as_os_str().to_owned();
+        seg_dir.push(".segs");
+        let segments = super::commit::segment_names(Path::new(&seg_dir));
+        let prev_start = match super::commit::load(&self.table_path)? {
+            super::commit::LoadCommit::Record(r) => r.wal_start,
+            super::commit::LoadCommit::Absent => 0,
+        };
+        let rec = super::commit::CommitRecord {
+            generation: 0,
+            height,
+            tip_hash,
+            table_len,
+            wal_start: prev_start,
+            wal_len: pending.wal_after,
+            undo_len: undo_end,
+            segments,
+        };
+        let published = super::commit::publish(&self.table_path, rec)?;
+        super::set_gc_fence(published.height);
+        self.pending
+            .lock()
+            .expect("commit pending")
+            .retain(|p| p.height > height);
+        Ok(())
     }
 
     /// Reorg: remove all data at `height >= since` from mutable ages.
@@ -389,6 +497,57 @@ impl UtxoDatabase {
     }
 }
 
+fn fresh_commit_dir(table_path: &Path, already: bool) -> bool {
+    if already {
+        return false;
+    }
+    if std::env::var("BLVM_ENGINE_COMMIT").ok().as_deref() == Some("1") {
+        return true;
+    }
+    // Unit tests open an empty directory per case. Arming those would turn the
+    // commit path on for every engine test. The node binary still arms a
+    // directory that has no table and no segments.
+    #[cfg(test)]
+    {
+        let _ = table_path;
+        return false;
+    }
+    #[cfg(not(test))]
+    {
+        let table_empty = std::fs::metadata(table_path)
+            .map(|m| m.len() == 0)
+            .unwrap_or(true);
+        let mut seg_dir = table_path.as_os_str().to_owned();
+        seg_dir.push(".segs");
+        let no_segs = super::commit::segment_names(Path::new(&seg_dir)).is_empty();
+        table_empty && no_segs
+    }
+}
+
+fn replay_wal(
+    index: &UtxoIndex,
+    dir: &Path,
+    rec: &super::commit::CommitRecord,
+) -> anyhow::Result<()> {
+    let entries = super::commit::read_wal(dir, rec.wal_start, rec.wal_len)?;
+    let mut batch: Vec<OutputKV> = Vec::new();
+    let mut height: Option<i32> = None;
+    for entry in entries {
+        if height != Some(entry.height) {
+            if let Some(h) = height.take() {
+                drop(index.append(std::mem::take(&mut batch), h));
+            }
+            height = Some(entry.height);
+        }
+        batch.push(entry);
+    }
+    if let Some(h) = height {
+        drop(index.append(batch, h));
+    }
+    Ok(())
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,7 +556,8 @@ mod tests {
     };
     use tempfile::NamedTempFile;
 
-    fn make_txid(n: u8) -> [u8; 32] {
+
+fn make_txid(n: u8) -> [u8; 32] {
         let mut id = [0u8; 32];
         id[0] = n;
         id
@@ -463,6 +623,70 @@ mod tests {
             },
             transactions: txs.into_boxed_slice(),
         }
+    }
+
+    #[test]
+    fn test_commit_seal_reopen_serves_the_coin() {
+        let tmp = NamedTempFile::new().unwrap();
+        let db = UtxoDatabase::open(tmp.path(), 0).unwrap();
+        db.commit_mode.store(true, Ordering::Release);
+        let block = make_block(vec![dummy_coinbase_tx(5_000_000_000)]);
+        let tx_ids = vec![make_txid(3)];
+        db.append(&block, &tx_ids, 7).unwrap();
+        db.seal_commit(7, [9u8; 32], b"undo").unwrap();
+        drop(db);
+        let db2 = UtxoDatabase::open(tmp.path(), 0).unwrap();
+        assert!(db2.commit_mode());
+        assert_eq!(db2.contiguous_length(), 7);
+        let mut key: OutputKey = [0u8; 36];
+        key[..32].copy_from_slice(&tx_ids[0]);
+        key[32..36].copy_from_slice(&0u32.to_be_bytes());
+        let mut ids = [OutputId::MAX; 1];
+        db2.query(&[key], &mut ids, i32::MAX);
+        assert_ne!(ids[0], OutputId::MAX);
+        let mut details = Vec::new();
+        assert_eq!(db2.fetch(&ids, &mut details).unwrap(), 1);
+        assert_eq!(details[0].header.amount, 5_000_000_000);
+        crate::storage::ibd_engine::set_gc_fence(i32::MAX);
+    }
+
+    #[test]
+    fn test_unsealed_wal_suffix_is_dropped_on_reopen() {
+        let tmp = NamedTempFile::new().unwrap();
+        let db = UtxoDatabase::open(tmp.path(), 0).unwrap();
+        db.commit_mode.store(true, Ordering::Release);
+        let tx7 = vec![make_txid(7)];
+        db.append(&make_block(vec![dummy_coinbase_tx(1)]), &tx7, 7).unwrap();
+        db.seal_commit(7, [7u8; 32], b"u").unwrap();
+        let tx8 = vec![make_txid(8)];
+        db.append(&make_block(vec![dummy_coinbase_tx(2)]), &tx8, 8).unwrap();
+        drop(db);
+        let db2 = UtxoDatabase::open(tmp.path(), 0).unwrap();
+        assert_eq!(db2.contiguous_length(), 7);
+        let mut key7: OutputKey = [0u8; 36];
+        key7[..32].copy_from_slice(&tx7[0]);
+        let mut key8: OutputKey = [0u8; 36];
+        key8[..32].copy_from_slice(&tx8[0]);
+        let mut ids = [OutputId::MAX; 2];
+        db2.query(&[key7, key8], &mut ids, i32::MAX);
+        assert_ne!(ids[0], OutputId::MAX);
+        assert_eq!(ids[1], OutputId::MAX);
+        crate::storage::ibd_engine::set_gc_fence(i32::MAX);
+    }
+
+    #[test]
+    fn test_sidecar_ahead_of_commit_is_ignored() {
+        let tmp = NamedTempFile::new().unwrap();
+        let db = UtxoDatabase::open(tmp.path(), 0).unwrap();
+        db.commit_mode.store(true, Ordering::Release);
+        let tx = vec![make_txid(4)];
+        db.append(&make_block(vec![dummy_coinbase_tx(3)]), &tx, 7).unwrap();
+        db.seal_commit(7, [4u8; 32], b"u").unwrap();
+        drop(db);
+        meta::write_contiguous_length_sidecar(tmp.path(), 50_000).unwrap();
+        let db2 = UtxoDatabase::open(tmp.path(), 0).unwrap();
+        assert_eq!(db2.contiguous_length(), 7);
+        crate::storage::ibd_engine::set_gc_fence(i32::MAX);
     }
 
     #[test]

@@ -35,6 +35,7 @@
 //! Module built and tested in isolation. No wire-in to IBD pipeline during Phase 1.
 //! Phase 2 adds `SpendSession` and updates `validation_loop.rs`.
 
+pub mod commit;
 pub mod database;
 pub mod disk_index;
 pub mod disk_segment;
@@ -57,6 +58,7 @@ pub use export::{
 };
 pub use import::{bootstrap_ckpt_from_legacy_standalone, seed_from_ibd_utxos};
 pub use index::take_last_query_split_ms;
+pub use commit::winning_height;
 pub use memory_run::{
     advance_gc_fence_between_exports, advance_gc_fence_to, gc_fence_high_water,
     next_checkpoint_target, set_gc_fence, set_next_checkpoint_target,

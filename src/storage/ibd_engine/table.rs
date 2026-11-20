@@ -176,6 +176,29 @@ impl UtxoTable {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Next append offset, including bytes still only in the tail.
+    pub fn append_offset(&self) -> u64 {
+        self.next_offset.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Flush every tail block below `limit`, then `fsync` the file.
+    pub fn sync_through(&self, limit: i32) -> anyhow::Result<u64> {
+        self.flush_before(limit)?;
+        self.write_file.lock().sync_all()?;
+        Ok(self.committed_fence.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    /// Drop bytes past `len`. A commit that does not name them must not serve them.
+    pub fn truncate_to(&self, len: u64) -> anyhow::Result<()> {
+        use std::sync::atomic::Ordering;
+        let mut f = self.write_file.lock();
+        f.set_len(len)?;
+        f.sync_all()?;
+        self.next_offset.store(len, Ordering::Release);
+        self.committed_fence.store(len, Ordering::Release);
+        Ok(())
+    }
+
     /// Append a block's outputs to the tail.
     pub fn append_outputs(
         &self,

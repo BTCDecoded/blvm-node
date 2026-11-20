@@ -3000,7 +3000,8 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         // R-352: the same applies between sparse periodic exports (100k apart): let the
         // fence follow validation whenever no export scan is running, so spends after the
         // last export stay GC-able and the cold journal does not force exports back to 10k.
-        if utxo_engine.is_some() && next_height > 0 && next_height % 10_000 == 0 {
+        let commit_mode = utxo_engine.as_ref().is_some_and(|db| db.commit_mode());
+        if !commit_mode && utxo_engine.is_some() && next_height > 0 && next_height % 10_000 == 0 {
             let gap_replay = engine_gap_export_defer_until.is_some_and(|until| next_height < until);
             if gap_replay {
                 crate::storage::ibd_engine::advance_gc_fence_to(next_height as i32);
@@ -3066,6 +3067,22 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         // R-361: the undo log either rides into `pending_blocks` (flush path) or goes to the
         // `ibd-drop` thread with the block (skip path) — never freed on this thread.
         let mut undo_log_opt = Some(vres.undo_log);
+        if utxo_engine.as_ref().is_some_and(|db| db.commit_mode()) {
+            // Body durability first, then the engine slot. A seal error leaves
+            // the previous commit and does not mark the block invalid.
+            if let Err(e) = storage_clone.flush() {
+                warn!("IBD engine: body flush before commit at h={next_height} failed: {e:#}");
+            } else if let Some(db) = utxo_engine.as_ref() {
+                let tip_hash = blockstore.get_block_hash(entry.block_arc.as_ref());
+                let payload = bincode::serialize(undo_log_opt.as_ref().expect("undo"))
+                    .unwrap_or_default();
+                if let Err(e) = db.seal_commit(next_height as i32, tip_hash, &payload) {
+                    warn!(
+                        "IBD engine: commit seal failed at h={next_height} (previous slot kept): {e:#}"
+                    );
+                }
+            }
+        }
 
         #[cfg(feature = "profile")]
         let ibd_log_this_height =
