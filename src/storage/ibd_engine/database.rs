@@ -285,12 +285,15 @@ impl UtxoDatabase {
             let wal_before = super::commit::wal_len(&self.table_path);
             let table_before = self.table.append_offset();
             let wal_after = super::commit::append_wal(&self.table_path, &entries)?;
-            self.pending.lock().expect("commit pending").push(CommitPending {
-                height,
-                wal_before,
-                table_before,
-                wal_after,
-            });
+            self.pending
+                .lock()
+                .expect("commit pending")
+                .push(CommitPending {
+                    height,
+                    wal_before,
+                    table_before,
+                    wal_after,
+                });
         }
         let pin = self.index.append(entries, height);
         self.persist_contiguous_length();
@@ -547,7 +550,6 @@ fn replay_wal(
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,8 +558,7 @@ mod tests {
     };
     use tempfile::NamedTempFile;
 
-
-fn make_txid(n: u8) -> [u8; 32] {
+    fn make_txid(n: u8) -> [u8; 32] {
         let mut id = [0u8; 32];
         id[0] = n;
         id
@@ -656,10 +657,12 @@ fn make_txid(n: u8) -> [u8; 32] {
         let db = UtxoDatabase::open(tmp.path(), 0).unwrap();
         db.commit_mode.store(true, Ordering::Release);
         let tx7 = vec![make_txid(7)];
-        db.append(&make_block(vec![dummy_coinbase_tx(1)]), &tx7, 7).unwrap();
+        db.append(&make_block(vec![dummy_coinbase_tx(1)]), &tx7, 7)
+            .unwrap();
         db.seal_commit(7, [7u8; 32], b"u").unwrap();
         let tx8 = vec![make_txid(8)];
-        db.append(&make_block(vec![dummy_coinbase_tx(2)]), &tx8, 8).unwrap();
+        db.append(&make_block(vec![dummy_coinbase_tx(2)]), &tx8, 8)
+            .unwrap();
         drop(db);
         let db2 = UtxoDatabase::open(tmp.path(), 0).unwrap();
         assert_eq!(db2.contiguous_length(), 7);
@@ -680,7 +683,8 @@ fn make_txid(n: u8) -> [u8; 32] {
         let db = UtxoDatabase::open(tmp.path(), 0).unwrap();
         db.commit_mode.store(true, Ordering::Release);
         let tx = vec![make_txid(4)];
-        db.append(&make_block(vec![dummy_coinbase_tx(3)]), &tx, 7).unwrap();
+        db.append(&make_block(vec![dummy_coinbase_tx(3)]), &tx, 7)
+            .unwrap();
         db.seal_commit(7, [4u8; 32], b"u").unwrap();
         drop(db);
         meta::write_contiguous_length_sidecar(tmp.path(), 50_000).unwrap();

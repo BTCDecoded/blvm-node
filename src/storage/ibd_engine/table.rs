@@ -185,7 +185,9 @@ impl UtxoTable {
     pub fn sync_through(&self, limit: i32) -> anyhow::Result<u64> {
         self.flush_before(limit)?;
         self.write_file.lock().sync_all()?;
-        Ok(self.committed_fence.load(std::sync::atomic::Ordering::Acquire))
+        Ok(self
+            .committed_fence
+            .load(std::sync::atomic::Ordering::Acquire))
     }
 
     /// Drop bytes past `len`. A commit that does not name them must not serve them.

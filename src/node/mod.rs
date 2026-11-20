@@ -1903,11 +1903,9 @@ impl Node {
                                     .ok()
                                     .flatten();
                                 let body_ok = match indexed {
-                                    Some(hash) if hash == rec.tip_hash => self
-                                        .storage
-                                        .blocks()
-                                        .has_block_body(&hash)
-                                        .unwrap_or(false),
+                                    Some(hash) if hash == rec.tip_hash => {
+                                        self.storage.blocks().has_block_body(&hash).unwrap_or(false)
+                                    }
                                     _ => false,
                                 };
                                 if body_ok {

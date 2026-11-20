@@ -62,7 +62,10 @@ pub fn undo_path(table: &Path) -> PathBuf {
 }
 
 fn parent_dir(table: &Path) -> &Path {
-    table.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."))
+    table
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
 }
 
 pub fn engine_dir(table_path: &Path) -> Option<&Path> {
@@ -162,19 +165,16 @@ pub fn load(dir: &Path) -> anyhow::Result<LoadCommit> {
     let rb = read_slot(&b);
     match (ra, rb) {
         (None, None) if !a.exists() && !b.exists() => Ok(LoadCommit::Absent),
-        (None, None) => anyhow::bail!(
-            "commit slots torn or unknown version in {}",
-            dir.display()
-        ),
+        (None, None) => anyhow::bail!("commit slots torn or unknown version in {}", dir.display()),
         (Some(r), None) => Ok(LoadCommit::Record(r)),
         (None, Some(r)) => Ok(LoadCommit::Record(r)),
-        (Some(left), Some(right)) => Ok(LoadCommit::Record(
-            if right.generation >= left.generation {
+        (Some(left), Some(right)) => {
+            Ok(LoadCommit::Record(if right.generation >= left.generation {
                 right
             } else {
                 left
-            },
-        )),
+            }))
+        }
     }
 }
 
@@ -279,18 +279,22 @@ pub fn append_wal(dir: &Path, entries: &[OutputKV]) -> anyhow::Result<u64> {
 }
 
 pub fn wal_len(dir: &Path) -> u64 {
-    std::fs::metadata(wal_path(dir)).map(|m| m.len()).unwrap_or(0)
+    std::fs::metadata(wal_path(dir))
+        .map(|m| m.len())
+        .unwrap_or(0)
 }
 
 pub fn undo_len(dir: &Path) -> u64 {
-    std::fs::metadata(undo_path(dir)).map(|m| m.len()).unwrap_or(0)
+    std::fs::metadata(undo_path(dir))
+        .map(|m| m.len())
+        .unwrap_or(0)
 }
 
 pub fn read_wal(dir: &Path, start: u64, end: u64) -> anyhow::Result<Vec<OutputKV>> {
     if end == start {
         return Ok(Vec::new());
     }
-    if end < start || (end - start) % RECORD_SIZE as u64 != 0 {
+    if end < start || !(end - start).is_multiple_of(RECORD_SIZE as u64) {
         anyhow::bail!("wal range {start}..{end} is not a multiple of {RECORD_SIZE}");
     }
     let mut f = File::open(wal_path(dir))?;
@@ -339,7 +343,10 @@ pub fn truncate_file(path: &Path, len: u64) -> std::io::Result<()> {
 
 pub fn sync_wal_and_undo(dir: &Path) -> std::io::Result<()> {
     if wal_path(dir).exists() {
-        OpenOptions::new().write(true).open(wal_path(dir))?.sync_all()?;
+        OpenOptions::new()
+            .write(true)
+            .open(wal_path(dir))?
+            .sync_all()?;
     }
     if undo_path(dir).exists() {
         OpenOptions::new()
@@ -419,7 +426,10 @@ mod tests {
     #[test]
     fn absent_when_no_files() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(matches!(load(&table(dir.path())).unwrap(), LoadCommit::Absent));
+        assert!(matches!(
+            load(&table(dir.path())).unwrap(),
+            LoadCommit::Absent
+        ));
     }
 
     #[test]

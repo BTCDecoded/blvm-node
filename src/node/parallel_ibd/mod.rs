@@ -5026,23 +5026,24 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
     // can shrink the interval so slow replay does not leave huge dirty-restart windows.
     // Target ~checkpoint_target_secs wall clock between exports. Override via BLVM_IBD_CHECKPOINT_INTERVAL.
     CHECKPOINT_EXPORT_STOP.store(false, Ordering::Release);
-    let mut periodic_checkpoint_handle: Option<std::thread::JoinHandle<()>> = if utxo_engine_for_export
-        .as_ref()
-        .is_some_and(|db| db.commit_mode())
-    {
-        info!("IBD engine: commit file is the coin tip — checkpoint export thread not started");
-        None
-    } else if let Some(ref engine_arc) = utxo_engine_for_export {
-        let engine_clone = Arc::clone(engine_arc);
-        let storage_ckpt = Arc::clone(storage);
-        let durability = engine_durability;
-        let effective_end_live_ckpt = Arc::clone(&effective_end_live);
-        let stored_export_h = engine_stored_export_height as i32;
-        let stored_export_utxo_count = engine_stored_export_utxo_count;
-        let gap_export_defer_until = engine_gap_export_defer_until;
-        let resume_gap_replay = engine_resume_gap_replay;
-        let validation_height_export = Arc::clone(&validation_height);
-        let handle = std::thread::Builder::new()
+    let mut periodic_checkpoint_handle: Option<std::thread::JoinHandle<()>> =
+        if utxo_engine_for_export
+            .as_ref()
+            .is_some_and(|db| db.commit_mode())
+        {
+            info!("IBD engine: commit file is the coin tip — checkpoint export thread not started");
+            None
+        } else if let Some(ref engine_arc) = utxo_engine_for_export {
+            let engine_clone = Arc::clone(engine_arc);
+            let storage_ckpt = Arc::clone(storage);
+            let durability = engine_durability;
+            let effective_end_live_ckpt = Arc::clone(&effective_end_live);
+            let stored_export_h = engine_stored_export_height as i32;
+            let stored_export_utxo_count = engine_stored_export_utxo_count;
+            let gap_export_defer_until = engine_gap_export_defer_until;
+            let resume_gap_replay = engine_resume_gap_replay;
+            let validation_height_export = Arc::clone(&validation_height);
+            let handle = std::thread::Builder::new()
                     .name("ibd-checkpoint-export".to_string())
                     .spawn(move || {
                         // Lower this thread's I/O scheduling class to "best-effort, priority 7"
@@ -5464,10 +5465,10 @@ async fn finish_parallel_ibd_session(ctx: IbdSessionTail<'_>) -> Result<()> {
                         }
                     })
                     .expect("spawn ibd-checkpoint-export");
-        Some(handle)
-    } else {
-        None
-    };
+            Some(handle)
+        } else {
+            None
+        };
 
     // The fence is still `i32::MAX` until an export scan stores a height.
     // Validation appends spends before that scan when the export thread lags.
@@ -9293,8 +9294,7 @@ impl ParallelIBD {
         };
         let utxo_engine: Option<Arc<crate::storage::ibd_engine::UtxoDatabase>> = {
             let engine_path = crate::config::ibd::ibd_engine_path(storage.data_dir().as_deref());
-            let commit_present =
-                crate::storage::ibd_engine::winning_height(&engine_path).is_some();
+            let commit_present = crate::storage::ibd_engine::winning_height(&engine_path).is_some();
             if let Some(parent) = engine_path.parent() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("create IBD engine directory {}", parent.display()))?;

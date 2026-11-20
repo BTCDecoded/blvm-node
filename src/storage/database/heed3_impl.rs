@@ -13,8 +13,8 @@ use blvm_storage_fence::heed3::{
 use parking_lot::{Condvar, Mutex};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 type ByteDb = HeedDatabase<Bytes, Bytes>;
 type HeedEnv = Env<WithoutTls>;
@@ -113,15 +113,9 @@ impl MapTxnGate {
 
     /// `write_lock` is acquired first so a writer cannot open a transaction between
     /// the wait and `mdb_env_set_mapsize`. The closure must not open a transaction.
-    fn exclusive<R>(
-        &self,
-        write_lock: &Mutex<()>,
-        f: impl FnOnce() -> Result<R>,
-    ) -> Result<R> {
+    fn exclusive<R>(&self, write_lock: &Mutex<()>, f: impl FnOnce() -> Result<R>) -> Result<R> {
         if HELD_MAP_TXN_GATES.with(|held| held.borrow().contains(&self.id)) {
-            anyhow::bail!(
-                "heed3 map resize called while this thread holds an LMDB transaction"
-            );
+            anyhow::bail!("heed3 map resize called while this thread holds an LMDB transaction");
         }
         let _write = write_lock.lock();
         {
@@ -1575,8 +1569,8 @@ mod map_size_tests {
 mod map_txn_gate_tests {
     use super::MapTxnGate;
     use parking_lot::Mutex;
-    use std::sync::mpsc;
     use std::sync::Arc;
+    use std::sync::mpsc;
     use std::time::Duration;
 
     #[test]

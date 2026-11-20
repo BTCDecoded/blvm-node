@@ -269,7 +269,11 @@ impl DiskIndex {
         max_height
     }
 
-    fn new_impl<'a>(seg_dir: &Path, load_segments: bool, only: Option<std::collections::HashSet<&'a str>>) -> anyhow::Result<(Self, i32)> {
+    fn new_impl(
+        seg_dir: &Path,
+        load_segments: bool,
+        only: Option<std::collections::HashSet<&str>>,
+    ) -> anyhow::Result<(Self, i32)> {
         super::disk_segment::log_compact_dontneed_once();
         std::fs::create_dir_all(seg_dir)?;
         let mut loaded: Vec<Arc<DiskSegment>> = Vec::new();
