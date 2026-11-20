@@ -14,12 +14,8 @@
 //!   [`RetireDispatcher::global_last_retired`] is the **min** across all shards (the
 //!   highest height that has been retired by *every* shard, the contiguously-retired
 //!   floor). Logic that needs a contiguous floor reads `global_last_retired`.
-//! - Flush packages are still spawned per-shard via the existing
-//!   `push_utxo_flush_from_retire`. Workers populate the pending log independently of
-//!   retire, so `take_flush_batch_through(local_h)` is safe to call concurrently from
-//!   multiple shards: the only shared mutable state in the flush path is the `mh_acc`
-//!   mutex (already serialized) and the `utxo_flush_handles` queue (already
-//!   mutex-guarded).
+//! - Each shard publishes its height. It does not flush UTXOs. The engine checkpoint
+//!   export is that write.
 //!
 //! **Defaults.** [`configured_retire_shards`] returns `1` unless
 //! `BLVM_IBD_RETIRE_SHARDS=N` is set with `N>=2`, which is byte-for-byte the original
@@ -28,16 +24,10 @@
 //! during the apply call. Practical sweet-spot is `2..=4` on most hosts.
 //!
 //! **Correctness invariants.**
-//! 1. Workers push pending ops for height `h` *before* the dispatcher sends
-//!    `IbdRetireWork{height=h}`. Therefore any shard calling
-//!    `take_flush_batch_through(local_h)` only sees ops that workers already finished
-//!    pushing — `local_h` may exceed `global_last_retired` without losing data.
-//! 2. The chain UTXO watermark advances based on the per-flush-package
-//!    `max_block_height`, not on `global_last_retired`. This means a fast shard's flush
-//!    can advance the watermark past a slower shard's cursor; that is *correct* because
-//!    the worker-side production is what the watermark actually depends on.
-//! 3. `staged.remove(&h)` runs on the shard that owns `h` (per the modulo). No two
-//!    shards ever touch the same staged entry.
+//! 1. `global_last_retired` is the minimum of the shard cursors. A reader that needs a
+//!    contiguous retired floor uses that minimum.
+//! 2. The chain UTXO watermark moves when an engine checkpoint export finishes, not when
+//!    a shard publishes a height.
 //!
 //! **Shutdown.** Dropping the dispatcher drops all senders, which causes each shard's
 //! `mpsc::recv_timeout` to return `Disconnected` on the next tick and the thread to

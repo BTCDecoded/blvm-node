@@ -2740,9 +2740,7 @@ impl IbdUtxoStore {
         );
 
         // Release in_flight_insertions now that disk has the data. Height-based protection
-        // is released by the caller (`push_utxo_flush_from_retire`) via `release_protected_heights`
-        // after this function returns — not here — so all cache entries at the flushed heights
-        // remain protected until the caller explicitly clears them.
+        // stays until the caller runs `release_protected_heights`.
         // For DELETE ops we also clear any stale INSERT that was eagerly registered: the UTXO
         // no longer exists on disk so the in_flight reference (if any) is invalid.
         if self.max_entries_effective() != usize::MAX {

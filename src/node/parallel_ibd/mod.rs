@@ -9374,10 +9374,9 @@ impl ParallelIBD {
                 let _ = std::fs::write(&epoch_path, format!("{start_height}\n"));
             }
 
-            // Dirty exit loses in-memory age tiers. Disk segments / segment_max only hold
-            // spilled overflow — not a complete UTXO set — so always wipe + re-seed from the
-            // durable checkpoint (export_h). Clean exits clear .dirty after flush and may
-            // skip reseed when contiguous_length >= export_h.
+            // Dirty exit loses in-memory age tiers. Disk segments only hold spilled overflow,
+            // so a dirty open wipes and the seed below reloads the heed checkpoint.
+            // A clean exit may skip that seed only when contiguous_length equals export_h.
             let mut db = if resume_seed && was_dirty_at_open {
                 info!(
                     "IBD engine: dirty shutdown — wipe + re-seed from checkpoint \
@@ -9437,95 +9436,6 @@ impl ParallelIBD {
                     info!(
                         "IBD engine: skip re-seed — clean shutdown, on-disk contiguous_length={cl} == export_h={checkpoint_height}"
                     );
-                } else if was_dirty_at_open || cl > checkpoint_height {
-                    if cl > checkpoint_height {
-                        info!(
-                            "IBD engine: contiguous_length={cl} > export_h={checkpoint_height} — \
-                             re-seeding from checkpoint (ages are RAM-only across restarts)"
-                        );
-                    }
-                    // Wipe stale segments then seed (same as clean cl-mismatch path below).
-                    info!(
-                        "IBD engine: wiping engine data before re-seed (contiguous_length={cl}, was_dirty={was_dirty_at_open})"
-                    );
-                    let _ = std::fs::remove_file(&engine_path);
-                    crate::storage::ibd_engine::remove_contiguous_length_sidecar(&engine_path);
-                    let mut segs_os = engine_path.as_os_str().to_owned();
-                    segs_os.push(".segs");
-                    let _ = std::fs::remove_dir_all(std::path::PathBuf::from(segs_os));
-                    drop(db);
-                    db = crate::storage::ibd_engine::UtxoDatabase::open_skip_segments(
-                        &engine_path,
-                        mem_guard.engine_avail_mb(),
-                    )
-                    .with_context(|| {
-                        format!(
-                            "re-open IBD engine at {} after wipe for re-seed",
-                            engine_path.display()
-                        )
-                    })?;
-                    let Some((seed_name, ckpt_tree)) =
-                        storage.open_engine_resume_snapshot().with_context(|| {
-                            format!("open engine resume snapshot (slot {ckpt_tree_name})")
-                        })?
-                    else {
-                        return Err(anyhow::anyhow!(
-                            "IBD engine: resume at height {start_height} requires non-empty \
-                             checkpoint in {ckpt_tree_name} or a stored canonical UTXO snapshot \
-                             (last export missing or incomplete — replay from last good export or genesis)"
-                        ));
-                    };
-                    // Slot export count describes the ping-pong ckpt. Phase 3's
-                    // canonical `ibd_utxos` rewrite does not update that count.
-                    let count_for_seed = if seed_name == ckpt_tree_name {
-                        expected_count
-                    } else {
-                        None
-                    };
-
-                    let n = crate::storage::ibd_engine::seed_from_ibd_utxos(
-                        &db,
-                        ckpt_tree.as_ref(),
-                        checkpoint_height,
-                        count_for_seed,
-                        last_accepted,
-                        storage.utxo_value_codec(),
-                    )
-                    .with_context(|| {
-                        format!("seed engine from {seed_name} at checkpoint h={checkpoint_height}")
-                    })?;
-                    if stored_export_count != Some(n as u64) {
-                        storage.chain().force_set_engine_export_utxo_count_through(
-                            n as u64,
-                            checkpoint_height as u64,
-                        )?;
-                        storage
-                            .chain()
-                            .set_engine_ckpt_slot_height(ckpt_slot, checkpoint_height as u64)?;
-                    }
-                    let validation_tip_at_open =
-                        storage.chain().get_engine_validation_tip().ok().flatten();
-                    let chain_tip_at_open = storage.chain().get_height().ok().flatten();
-                    info!(
-                        "IBD engine: resume from height {start_height} — re-seeded {n} UTXOs \
-                         from {seed_name} (slot {ckpt_slot})"
-                    );
-                    info!(
-                        "[IBD_ENGINE_REPLAY] seed complete: export_h={checkpoint_height} start_h={start_height} \
-                         utxos={n} validation_tip={validation_tip_at_open:?} chain_tip={chain_tip_at_open:?}"
-                    );
-                    crate::storage::ibd_utxo_muhash::backfill_engine_export_muhash_if_missing(
-                        storage.as_ref(),
-                    )
-                    .with_context(|| {
-                        format!(
-                            "backfill export MuHash snapshot for checkpoint h={checkpoint_height}"
-                        )
-                    })?;
-                    crate::storage::ibd_utxo_muhash::reset_engine_resume_muhash_baseline(
-                        storage.chain(),
-                        checkpoint_height as u64,
-                    )?;
                 } else {
                     if cl > 0 && cl < checkpoint_height {
                         warn!(
@@ -9533,6 +9443,13 @@ impl ParallelIBD {
                              — re-seeding from {ckpt_tree_name}"
                         );
                     }
+                    if cl > checkpoint_height {
+                        info!(
+                            "IBD engine: contiguous_length={cl} > export_h={checkpoint_height} — \
+                             re-seeding from checkpoint (ages are RAM-only across restarts)"
+                        );
+                    }
+                    // Wipe stale segments, then seed from the heed checkpoint.
                     info!(
                         "IBD engine: wiping engine data before re-seed (contiguous_length={cl}, was_dirty={was_dirty_at_open})"
                     );

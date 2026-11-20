@@ -1,5 +1,4 @@
 //! Validation-loop unit tests: pipeline depth, pressure, engine-append gates.
-//! Retire/flush batch cases live in `validation_loop_retire_flush_tests.rs`.
 
 use super::*;
 

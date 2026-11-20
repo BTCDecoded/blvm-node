@@ -1,9 +1,8 @@
 //! IBD validation loop — runs on a dedicated `std::thread`.
 //!
-//! Each block: **connect** (build a `UtxoSet` view from the store, run `validate_block_only` and
-//! BIP30 on that view), then **retire** the returned delta on [`IbdUtxoStore`] (apply, protect /
-//! evict, flush decision). The connect path does not write canonical in-memory UTXO state; retire
-//! does. Reads from the feeder buffer, validates, and flushes to storage in batches.
+//! Each block: **connect** (build a `UtxoSet` view from the engine spend session, run
+//! `validate_block_only` and BIP30 on that view). The age-tiered engine holds the UTXO set.
+//! Retire publishes the height. Checkpoint export writes the heed snapshot.
 
 use super::feeder::FeederState;
 use super::latch_env;
@@ -55,15 +54,6 @@ include!("validation_loop_parts/binder.rs");
 include!("validation_loop_parts/scoreboard.rs");
 include!("validation_loop_parts/apply.rs");
 
-fn retire_flush_batch_tests_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 #[cfg(test)]
 #[path = "validation_loop_tests.rs"]
 mod tests;
-
-#[cfg(all(test, feature = "production"))]
-#[path = "validation_loop_retire_flush_tests.rs"]
-mod retire_flush_batch_tests;

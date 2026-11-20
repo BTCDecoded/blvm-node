@@ -15,14 +15,6 @@ pub struct MissingStagedDelta {
     pub height: u64,
 }
 
-/// No-op overlay (when `connect_block_ibd` returns no delta; retire still advances the watermark).
-pub fn empty_utxo_delta() -> UtxoDelta {
-    UtxoDelta {
-        additions: Default::default(),
-        deletions: Default::default(),
-    }
-}
-
 /// Apply one overlay delta to an in-memory `UtxoSet` (consensus outpoint space).
 /// Same UTXO semantics as [`crate::storage::ibd_utxo_store::IbdUtxoStore::apply_utxo_delta`]
 /// on the outpoint key space, but for the `UtxoSet` type used in `connect_block_ibd`.

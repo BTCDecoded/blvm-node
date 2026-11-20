@@ -388,8 +388,7 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // The normal success path drains utxo_flush_handles explicitly; the guard is then a no-op.
     let _utxo_flush_guard = UtxoFlushGuard(Arc::clone(&utxo_flush_handles));
     // Per-IBD-run counter shared across retire shards (kept at 1 by default; increments only
-    // on each `push_utxo_flush_from_retire` call). Drives the durability batching schedule
-    // documented on `push_utxo_flush_from_retire`.
+    // Engine checkpoints own durability. This counter stays for the shutdown join.
     let retire_flush_counter: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let (max_block_flushes_in_flight, max_utxo_flushes_under_pressure) = {
         let g = mem_mtx.lock();
@@ -441,16 +440,9 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
     // `BIP34_IMPLIES_BIP30_LIMIT`, which is when this flag is no longer enough.
     let mut bip34_hash_matches = false;
     let mut bip30_index_dropped = false;
-    // Arc<UtxoDelta> so under-lock snapshots in the dispatcher fold are pointer-bumps only,
-    // not deep clones of the delta vectors. Retire takes the Arc out (refcount drops to 1 after
-    // the dispatcher's transient fold clones go out of scope) and operates on the inner value.
+    // Kept for the retire signature. The engine holds the UTXO set, so this map stays empty.
     let staged: Arc<Mutex<BTreeMap<u64, Arc<UtxoDelta>>>> = Arc::new(Mutex::new(BTreeMap::new()));
-    // Lock-free counter that mirrors staged.len(). The dispatcher increments it on each
-    // staged.insert; retire threads decrement it after staged.remove. Reading this without
-    // holding the staged mutex lets the dispatch loop add a cheap backpressure cap that
-    // prevents staged from growing unboundedly when retire stalls during a UTXO durability
-    // flush (flush_disk can take 1–3 s at h>300k; validation at 500 BPS would otherwise
-    // accumulate 500–1500 Arc<UtxoDelta> entries × ~800 KB each ≈ 400–1200 MB).
+    // Lock-free stand-in for staged.len(). The engine path does not fill it.
     let staged_count: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let retire_err: Arc<Mutex<Option<anyhow::Error>>> = Arc::new(Mutex::new(None));
     // Sharded retire (default `BLVM_IBD_RETIRE_SHARDS=1` → original single-threaded behavior).
@@ -525,12 +517,6 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         max_pending_ops_nominal
     );
 
-    // The legacy LMDB durability thread is gone. Engine checkpoints are separate.
-    let (durability_tx_opt, _durability_thread_handle): (
-        Option<std::sync::mpsc::SyncSender<DurabilityRequest>>,
-        Option<std::thread::JoinHandle<()>>,
-    ) = (None, None);
-
     // Background retire dispatcher: 1..N retire threads, sharded by `height % N`.
     // Each shard runs the same retire loop body as before; only the cursor wiring
     // differs (`local_last_retired` per shard, `publisher` recomputes the global min).
@@ -555,7 +541,6 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         let mpo_last_outer = Arc::clone(&max_pending_ops_last_adapt_ms);
         let utxo_engine_outer = utxo_engine.clone();
         let engine_mode_for_retire = utxo_engine.is_some();
-        let durability_tx_outer = durability_tx_opt.clone();
         let replay_transition_done_outer = Arc::clone(&local_replay_transition_done);
         let replay_hydration_done_outer_wc = Arc::clone(&local_replay_hydration_done);
         super::retire_dispatcher::RetireDispatcher::spawn(
@@ -578,7 +563,6 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 let mpo = Arc::clone(&mpo_outer);
                 let mpo_last = Arc::clone(&mpo_last_outer);
                 let utxo_engine = utxo_engine_outer.clone();
-                let durability_tx = durability_tx_outer.clone();
                 let replay_transition_done = Arc::clone(&replay_transition_done_outer);
                 let replay_hydration_done = Arc::clone(&replay_hydration_done_outer_wc);
                 std::thread::Builder::new()
@@ -611,7 +595,6 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             mpo_last,
                             engine_mode_for_retire,
                             utxo_engine,
-                            durability_tx,
                             local_replay_no_lmdb_max,
                             replay_transition_done,
                             replay_hydration_done,
@@ -636,7 +619,6 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
         let mpo_outer = Arc::clone(&max_pending_ops);
         let mpo_last_outer = Arc::clone(&max_pending_ops_last_adapt_ms);
         let engine_mode_for_retire = utxo_engine.is_some();
-        let durability_tx_outer = durability_tx_opt.clone();
         let replay_transition_done_outer = Arc::clone(&local_replay_transition_done);
         let replay_hydration_done_outer = Arc::clone(&local_replay_hydration_done);
         super::retire_dispatcher::RetireDispatcher::spawn(
@@ -655,7 +637,6 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                 let retire_err = Arc::clone(&retire_err_outer);
                 let mpo = Arc::clone(&mpo_outer);
                 let mpo_last = Arc::clone(&mpo_last_outer);
-                let durability_tx = durability_tx_outer.clone();
                 let replay_transition_done = Arc::clone(&replay_transition_done_outer);
                 let replay_hydration_done = Arc::clone(&replay_hydration_done_outer);
                 let utxo_engine = utxo_engine.clone();
@@ -686,7 +667,6 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
                             mpo_last,
                             engine_mode_for_retire,
                             utxo_engine,
-                            durability_tx,
                             local_replay_no_lmdb_max,
                             replay_transition_done,
                             replay_hydration_done,
@@ -4292,11 +4272,9 @@ pub fn run_validation_loop(params: ValidationParams) -> Result<()> {
             effective_end_height()
         ));
     }
-    // Do not advance `ibd_utxo_watermark` from chain tip here. During parallel IBD the block index
-    // can reach `chain_tip` before UTXO flush workers persist `ibd_utxos` through that height.
-    // Watermark must advance only from flush worker paths after `flush_disk` (see
-    // `push_utxo_flush_from_retire`). Bumping from tip caused resume at height H with an empty or
-    // partial `ibd_utxos` tree → immediate `UTXO not found for input`.
+    // Do not advance `ibd_utxo_watermark` from chain tip here. The engine export is the
+    // durable UTXO height. Bumping from tip caused resume at height H with an empty or
+    // partial snapshot → immediate `UTXO not found for input`.
     crate::node::reliability_decisions::clear_dirty_after_shutdown(
         crate::node::reliability_decisions::shutdown_step(ibd_store_v2_for_validation.flush_disk())
             .with_context(|| {
