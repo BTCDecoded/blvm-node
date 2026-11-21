@@ -626,6 +626,7 @@ mod tests {
         }
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_commit_seal_reopen_serves_the_coin() {
         let tmp = NamedTempFile::new().unwrap();
@@ -651,6 +652,7 @@ mod tests {
         crate::storage::ibd_engine::set_gc_fence(i32::MAX);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_unsealed_wal_suffix_is_dropped_on_reopen() {
         let tmp = NamedTempFile::new().unwrap();
@@ -677,6 +679,7 @@ mod tests {
         crate::storage::ibd_engine::set_gc_fence(i32::MAX);
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_sidecar_ahead_of_commit_is_ignored() {
         let tmp = NamedTempFile::new().unwrap();
@@ -718,6 +721,7 @@ mod tests {
         assert!(details[0].header.is_coinbase());
     }
 
+    #[serial_test::serial(ibd)]
     #[test]
     fn test_contiguous_length_sidecar_roundtrip() {
         let tmp = NamedTempFile::new().unwrap();
