@@ -1512,8 +1512,21 @@ jobs:
           BLOB=$(git hash-object -w "${RUNNER_TEMP}/Cargo.toml.bump")
           git update-index --cacheinfo "100644,${BLOB},Cargo.toml"
 
+          # Cargo.lock is committed, so bump its root blvm-node entry too, or it drifts every release.
+          CRATE_NAME=$(git show HEAD:Cargo.toml | grep -A 5 '^\[package\]' | grep '^name = ' | head -1 | sed -E 's/^name = "([^"]+)".*/\1/')
+          if git cat-file -e HEAD:Cargo.lock 2>/dev/null; then
+            git show HEAD:Cargo.lock | awk -v name="$CRATE_NAME" -v ver="$VERSION" '
+              /^\[\[package\]\]/ { in_root = 0 }
+              $0 == "name = \"" name "\"" { in_root = 1 }
+              in_root && /^version = / { print "version = \"" ver "\""; in_root = 0; next }
+              { print }
+            ' > "${RUNNER_TEMP}/Cargo.lock.bump"
+            LOCK_BLOB=$(git hash-object -w "${RUNNER_TEMP}/Cargo.lock.bump")
+            git update-index --cacheinfo "100644,${LOCK_BLOB},Cargo.lock"
+          fi
+
           if git diff --cached --quiet; then
-            echo "No version change to commit in Cargo.toml"
+            echo "No version change to commit in Cargo.toml or Cargo.lock"
             exit 0
           fi
           git commit -m "Bump version to ${VERSION} for release [skip ci]"
