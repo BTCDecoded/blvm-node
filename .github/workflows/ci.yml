@@ -266,6 +266,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64, builds]
     env:
       RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
+      # Test and Clippy can land on the same host at once; unbounded rustc jobs got SIGKILLed (OOM).
+      # Override with repo variable BLVM_CARGO_BUILD_JOBS.
+      CARGO_BUILD_JOBS: ${{ vars.BLVM_CARGO_BUILD_JOBS || '4' }}
       BLVM_SECP256K1_NO_GPU: "1"
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
@@ -484,6 +487,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64, builds]
     env:
       RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
+      # Test and Clippy can land on the same host at once; unbounded rustc jobs got SIGKILLed (OOM).
+      # Override with repo variable BLVM_CARGO_BUILD_JOBS.
+      CARGO_BUILD_JOBS: ${{ vars.BLVM_CARGO_BUILD_JOBS || '4' }}
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
        (!contains(github.event.head_commit.message, '[skip ci]') &&
@@ -868,6 +874,8 @@ jobs:
     runs-on: [self-hosted, Linux, X64, builds]
     env:
       RUSTFLAGS: ${{ needs.setup.outputs.rustflags }}
+      # Same OOM cap as Test and Clippy (Fuzz builds the lib on the same hosts).
+      CARGO_BUILD_JOBS: ${{ vars.BLVM_CARGO_BUILD_JOBS || '4' }}
     timeout-minutes: 30
     if: |
       (github.event_name != 'push' || github.event.head_commit == null || 
