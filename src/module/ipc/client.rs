@@ -52,32 +52,10 @@ impl ModuleIpcClient {
         request: RequestMessage,
     ) -> Result<ResponseMessage, ModuleError> {
         let correlation_id = request.correlation_id;
-
-        // Serialize request
-        let bytes = bincode::serialize(&ModuleMessage::Request(request))
-            .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
-
-        // Send request
-        self.writer
-            .send(bytes::Bytes::from(bytes))
-            .await
-            .map_err(|e| ModuleError::IpcError(format!("Failed to send request: {e}")))?;
-
-        debug!("Sent request with correlation_id={}", correlation_id);
-
-        // Wait for response
-        let response_bytes = self
-            .reader
-            .next()
-            .await
-            .ok_or_else(|| {
-                ModuleError::IpcError("Connection closed while waiting for response".to_string())
-            })?
-            .map_err(|e| ModuleError::IpcError(format!("Failed to read response: {e}")))?;
-
-        // Deserialize response
-        let message: ModuleMessage = bincode::deserialize(&response_bytes)
-            .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
+        self.send_request(request).await?;
+        let message = self.receive_message().await?.ok_or_else(|| {
+            ModuleError::IpcError("Connection closed while waiting for response".to_string())
+        })?;
 
         match message {
             ModuleMessage::Response(resp) => {
@@ -94,6 +72,21 @@ impl ModuleIpcClient {
                 "Received unexpected message type".to_string(),
             )),
         }
+    }
+
+    pub(crate) async fn send_request(
+        &mut self,
+        request: RequestMessage,
+    ) -> Result<(), ModuleError> {
+        let correlation_id = request.correlation_id;
+        let bytes = bincode::serialize(&ModuleMessage::Request(request))
+            .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
+        self.writer
+            .send(bytes::Bytes::from(bytes))
+            .await
+            .map_err(|e| ModuleError::IpcError(format!("Failed to send request: {e}")))?;
+        debug!("Sent request with correlation_id={}", correlation_id);
+        Ok(())
     }
 
     /// Send a log message to the node

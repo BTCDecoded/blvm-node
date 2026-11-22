@@ -62,16 +62,7 @@ impl ModuleIpcClient {
         request: RequestMessage,
     ) -> Result<ResponseMessage, ModuleError> {
         let correlation_id = request.correlation_id;
-
-        let bytes = bincode::serialize(&ModuleMessage::Request(request))
-            .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
-
-        self.writer
-            .send(bytes::Bytes::from(bytes))
-            .await
-            .map_err(|e| ModuleError::IpcError(format!("Failed to send request: {e}")))?;
-
-        debug!("Sent request with correlation_id={}", correlation_id);
+        self.send_request(request).await?;
 
         let response_bytes = self
             .reader
@@ -100,6 +91,21 @@ impl ModuleIpcClient {
                 "Received unexpected message type".to_string(),
             )),
         }
+    }
+
+    pub(crate) async fn send_request(
+        &mut self,
+        request: RequestMessage,
+    ) -> Result<(), ModuleError> {
+        let correlation_id = request.correlation_id;
+        let bytes = bincode::serialize(&ModuleMessage::Request(request))
+            .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
+        self.writer
+            .send(bytes::Bytes::from(bytes))
+            .await
+            .map_err(|e| ModuleError::IpcError(format!("Failed to send request: {e}")))?;
+        debug!("Sent request with correlation_id={}", correlation_id);
+        Ok(())
     }
 
     /// Send a log message to the node

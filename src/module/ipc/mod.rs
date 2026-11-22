@@ -20,6 +20,7 @@ pub mod client;
 pub mod client_windows;
 pub mod protocol;
 pub mod server;
+pub(crate) mod session;
 
 #[cfg(unix)]
 pub use client::ModuleIpcClient;
