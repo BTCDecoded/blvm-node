@@ -128,8 +128,11 @@ impl ModuleProcessSpawner {
 
         debug!("{}", spawn_log_line(module_name, binary_path));
 
+        // The Landlock ruleset is an OwnedFd. arm_tokio captures only the raw
+        // descriptor, so the guard must stay open through spawn. Dropping it
+        // first leaves the child with errno 77 (EBADFD) in pre_exec.
         #[cfg(target_os = "linux")]
-        {
+        let _landlock = {
             let generation =
                 crate::module::sandbox::landlock::SandboxGeneration::from_ipc_protocol(
                     ipc_protocol,
@@ -152,7 +155,8 @@ impl ModuleProcessSpawner {
                 ))
             })?;
             landlock.arm_tokio(&mut command);
-        }
+            landlock
+        };
 
         let mut child = command.spawn().map_err(|e| {
             ModuleError::InitializationError(format!("Failed to spawn module process: {e}"))

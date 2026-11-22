@@ -818,4 +818,41 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn spawn_sees_ebadfd_when_the_ruleset_is_dropped_before_exec() {
+        // Regression for the ModuleProcessSpawner lifetime bug: arm_* captures
+        // only the raw fd. Closing the OwnedFd before spawn leaves pre_exec with
+        // errno 77 (EBADFD). The spawner must keep the guard alive through spawn.
+        let name = format!("blvm-ll-drop-{}", std::process::id());
+        let root = PathBuf::from("/tmp").join(name);
+        let _ = std::fs::remove_dir_all(&root);
+        let data = root.join("data");
+        let socket_dir = root.join("sock");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&socket_dir).unwrap();
+
+        let ruleset = ModuleLandlock::prepare(
+            Path::new("/bin/true"),
+            &data,
+            &socket_dir.join("node.sock"),
+            &root,
+            SandboxGeneration::Compat,
+        )
+        .expect("landlock ruleset");
+
+        let mut child = Command::new("/bin/true");
+        ruleset.arm_std(&mut child);
+        drop(ruleset);
+
+        let err = child.spawn().expect_err("spawn must fail after the ruleset closes");
+        let code = err.raw_os_error();
+        // EBADF (9) or EBADFD (77): the raw ruleset fd is no longer usable.
+        // GridPool's beta.5 smoke saw 77; this host returns 9.
+        assert!(
+            code == Some(libc::EBADF) || code == Some(libc::EBADFD),
+            "expected EBADF/EBADFD from a closed Landlock fd, got {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
