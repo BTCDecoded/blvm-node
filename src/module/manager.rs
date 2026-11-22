@@ -21,7 +21,7 @@ use crate::module::process::{
     spawner::{ModuleProcess, ModuleProcessSpawner},
 };
 use crate::module::registry::{ModuleDependencies, ModuleDiscovery};
-use crate::module::security::permissions::PermissionSet;
+use crate::module::security::permissions::{Permission, PermissionSet};
 use crate::module::traits::{ModuleContext, ModuleError, ModuleMetadata, ModuleState};
 #[cfg(feature = "wasm-modules")]
 use crate::module::wasm::{WasmModuleInstance, WasmModuleLoader};
@@ -798,7 +798,7 @@ impl ModuleManager {
         let service_host = self.service_host.clone();
         let fee_estimator = self.fee_estimator.clone();
         #[cfg(unix)]
-        let ipc_server = self.ipc_server.clone();
+        let ipc_handle = self.ipc_handle.clone();
         if let Some(mut crash_rx) = self.crash_rx.take() {
             tokio::spawn(async move {
                 while let Some((module_name, error)) = crash_rx.recv().await {
@@ -845,9 +845,9 @@ impl ModuleManager {
                         service.detach_module(&module_name, None).await;
                     }
                     #[cfg(unix)]
-                    if let Some(ref ipc) = ipc_server {
-                        let ipc = ipc.lock().await;
+                    if let Some(ref ipc) = ipc_handle {
                         if let Some(module_id) = crashed_module_id.as_deref() {
+                            ipc.revoke_module_id(module_id);
                             ipc.unregister_cli_spec(module_id).await;
                         }
                         ipc.unregister_cli_spec_by_name(&module_name).await;
@@ -868,6 +868,9 @@ impl ModuleManager {
                             );
                         }
                         h.unregister_module(&module_name).await;
+                        if let Some(module_id) = crashed_module_id.as_deref() {
+                            h.unregister_module(module_id).await;
+                        }
                     }
 
                     // Publish ModuleStateChanged and ModuleHealthChanged (Running -> Error)
@@ -945,7 +948,7 @@ impl ModuleManager {
                             dependents.len(),
                             module_name
                         );
-                        let removed: Vec<String> = {
+                        let removed: Vec<_> = {
                             let mut modules = modules.lock().await;
                             dependents
                                 .into_iter()
@@ -961,28 +964,27 @@ impl ModuleManager {
                                         "Dependent module '{}' unloaded due to crashed dependency",
                                         dependent
                                     );
-                                        Some(dependent)
+                                        Some((dependent, managed.module_id))
                                     } else {
                                         None
                                     }
                                 })
                                 .collect()
                         };
-                        for dependent in removed {
+                        for (dependent, module_id) in removed {
                             event_manager.remove_loaded_module(&dependent).await;
                             if let Some(service) = &timer_service {
                                 service.detach_module(&dependent, None).await;
                             }
                             #[cfg(unix)]
-                            if let Some(ref ipc) = ipc_server {
-                                ipc.lock()
-                                    .await
-                                    .unregister_cli_spec_by_name(&dependent)
-                                    .await;
+                            if let Some(ref ipc) = ipc_handle {
+                                ipc.revoke_module_id(&module_id);
+                                ipc.unregister_cli_spec_by_name(&dependent).await;
                             }
                             if let Some(ref hub) = api_hub {
                                 let mut h = hub.lock().await;
                                 h.unregister_module(&dependent).await;
+                                h.unregister_module(&module_id).await;
                             }
                         }
                     }
@@ -1209,20 +1211,39 @@ impl ModuleManager {
         // Native path: spawn subprocess. The handshake id has to be one this
         // node minted; the accept loop rejects every other id. The handle is
         // unix-only; Windows has no module IPC server to register it with.
+        let chain_tip_heartbeat = self.bind_native_grants(&module_id, &metadata).await;
         #[cfg(unix)]
         if let Some(handle) = &self.ipc_handle {
             handle.issue_module_id_with_protocol(&module_id, metadata.ipc_protocol);
         }
-        let process = self
+        let started = self
             .spawner
             .spawn(module_name, binary_path, context, metadata.ipc_protocol)
-            .await?;
+            .await;
+        let mut process = match started {
+            Ok(process) => process,
+            Err(error) => {
+                #[cfg(unix)]
+                if let Some(handle) = &self.ipc_handle {
+                    handle.revoke_module_id(&module_id);
+                }
+                if let Some(ref api_hub) = self.api_hub {
+                    api_hub.lock().await.unregister_module(&module_id).await;
+                }
+                return Err(error);
+            }
+        };
+        process.set_chain_tip_heartbeat(chain_tip_heartbeat);
         let process_id = process.id();
         let shared_process = Arc::new(tokio::sync::Mutex::new(process));
         let monitor = ModuleProcessMonitor::new(self.crash_tx.clone());
         let module_name_clone = module_name.to_string();
         let shared_process_for_monitor = Arc::clone(&shared_process);
         let resource_sandbox = self.spawner.process_sandbox();
+        let monitor_module_id = module_id.clone();
+        let monitor_hub = self.api_hub.clone();
+        #[cfg(unix)]
+        let monitor_ipc = self.ipc_handle.clone();
         let monitor_handle = tokio::spawn(async move {
             if let Err(e) = monitor
                 .monitor_module_shared(
@@ -1234,13 +1255,14 @@ impl ModuleManager {
             {
                 error!("Module {} monitor error: {}", module_name_clone, e);
             }
+            #[cfg(unix)]
+            if let Some(handle) = monitor_ipc {
+                handle.revoke_module_id(&monitor_module_id);
+            }
+            if let Some(hub) = monitor_hub {
+                hub.lock().await.unregister_module(&monitor_module_id).await;
+            }
         });
-
-        if let Some(ref api_hub) = self.api_hub {
-            let permissions = Self::parse_permissions_from_metadata(&metadata);
-            let mut hub_guard = api_hub.lock().await;
-            hub_guard.register_module_permissions(module_name.to_string(), permissions);
-        }
 
         let module_version = metadata.version.clone();
         let managed = ManagedModule {
@@ -1314,6 +1336,13 @@ impl ModuleManager {
                 ModuleState::Stopped | ModuleState::Error(_) => "unhealthy",
             };
             drop(modules);
+            #[cfg(unix)]
+            if let Some(ref ipc) = self.ipc_handle {
+                ipc.revoke_module_id(&metrics_id);
+            }
+            if let Some(ref hub) = self.api_hub {
+                hub.lock().await.unregister_module(&metrics_id).await;
+            }
             self.service_host.forget(module_name).await;
             if let Some(estimator) = &self.fee_estimator {
                 estimator.drop_module_estimates(&metrics_id);
@@ -1380,8 +1409,7 @@ impl ModuleManager {
 
             // Unregister CLI spec (WASM modules register on load; native remove on disconnect, but we clean up here too)
             #[cfg(unix)]
-            if let Some(ref ipc) = self.ipc_server {
-                let ipc = ipc.lock().await;
+            if let Some(ref ipc) = self.ipc_handle {
                 ipc.unregister_cli_spec(&metrics_id).await;
                 ipc.unregister_cli_spec_by_name(module_name).await;
             }
@@ -2406,6 +2434,22 @@ impl ModuleManager {
         &self.event_manager
     }
 
+    /// Bind manifest permissions to the native instance's issued identity.
+    async fn bind_native_grants(&self, module_id: &str, metadata: &ModuleMetadata) -> bool {
+        // An absent list retains the legacy default policy.
+        if metadata.capabilities.is_empty() {
+            return true;
+        }
+        let permissions = Self::parse_permissions_from_metadata(metadata);
+        let chain_tip_heartbeat = permissions.has(&Permission::ReadChainState);
+        if let Some(ref hub) = self.api_hub {
+            hub.lock()
+                .await
+                .register_module_permissions(module_id.to_owned(), permissions);
+        }
+        chain_tip_heartbeat
+    }
+
     /// Parse permissions from module metadata
     fn parse_permissions_from_metadata(metadata: &ModuleMetadata) -> PermissionSet {
         use crate::module::security::permissions::PermissionSet;
@@ -2687,6 +2731,87 @@ entry_point = "{name}"
         let filtered =
             manager.filter_discovered_for_auto_load(vec![fake_discovered("alpha", "0.1.0")]);
         assert!(filtered.is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_mempool_grant_is_bound_to_one_instance_and_removed_on_unload() {
+        use crate::module::api::node_api::NodeApiImpl;
+        use crate::module::ipc::protocol::{
+            MessageType, RequestMessage, RequestPayload, ResponsePayload,
+        };
+        use crate::node::mempool::MempoolManager;
+        use crate::storage::Storage;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut manager = ModuleManager::new(temp.path(), temp.path(), temp.path());
+        let node = NodeApiImpl::with_dependencies(
+            Arc::new(Storage::new(temp.path()).unwrap()),
+            None,
+            None,
+            Some(Arc::new(MempoolManager::new())),
+            None,
+        );
+        let hub = Arc::new(Mutex::new(ModuleApiHub::new(Arc::new(node))));
+        manager.api_hub = Some(Arc::clone(&hub));
+        let metadata = ModuleMetadata {
+            name: "publisher".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            author: String::new(),
+            capabilities: vec!["read_mempool".into()],
+            rpc_overrides: Vec::new(),
+            dependencies: HashMap::new(),
+            optional_dependencies: HashMap::new(),
+            entry_point: "publisher".into(),
+            ipc_protocol: 0,
+        };
+        let instance = "publisher_0123456789abcdef0123456789abcdef";
+        assert!(!manager.bind_native_grants(instance, &metadata).await);
+        let read = || RequestMessage {
+            correlation_id: 1,
+            request_type: MessageType::GetMempoolTransaction,
+            payload: RequestPayload::GetMempoolTransaction { tx_hash: [0; 32] },
+        };
+        let response = hub
+            .lock()
+            .await
+            .handle_request(instance, read())
+            .await
+            .unwrap();
+        assert!(matches!(
+            response.payload,
+            Some(ResponsePayload::MempoolTransaction(None))
+        ));
+        let other = "publisher_fedcba9876543210fedcba9876543210";
+        let denied = hub
+            .lock()
+            .await
+            .handle_request(other, read())
+            .await
+            .unwrap_err();
+        assert!(denied.to_string().contains("ReadMempool"));
+
+        manager.modules.lock().await.insert(
+            metadata.name.clone(),
+            ManagedModule {
+                metadata,
+                process: None,
+                state: ModuleState::Stopped,
+                monitor_handle: None,
+                process_id: None,
+                module_id: instance.into(),
+                #[cfg(feature = "wasm-modules")]
+                wasm_instance: None,
+            },
+        );
+        manager.unload_module("publisher").await.unwrap();
+        let denied = hub
+            .lock()
+            .await
+            .handle_request(instance, read())
+            .await
+            .unwrap_err();
+        assert!(denied.to_string().contains("ReadMempool"));
     }
 
     #[tokio::test]

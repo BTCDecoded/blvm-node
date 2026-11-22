@@ -167,6 +167,17 @@ pub struct ModuleIpcHandle {
 }
 
 impl ModuleIpcHandle {
+    pub(crate) fn revoke_module_id(&self, module_id: &str) {
+        self.issued_module_ids
+            .write()
+            .expect("issued module ids")
+            .remove(module_id);
+    }
+
+    pub(crate) async fn unregister_cli_spec(&self, module_id: &str) {
+        self.cli_registry.write().await.remove(module_id);
+    }
+
     /// Register a CLI spec without locking the IPC server (the accept loop holds that mutex).
     pub async fn register_cli_spec(&self, module_id: String, spec: CliSpec) {
         self.cli_registry.write().await.insert(module_id, spec);
@@ -1264,6 +1275,16 @@ impl ConnectionCtx {
         connection: &mut ModuleConnection<R>,
         node_api: Arc<A>,
     ) -> Result<(), ModuleError> {
+        if !self
+            .issued_module_ids
+            .read()
+            .expect("issued module ids")
+            .contains_key(&connection.module_id)
+        {
+            return Err(ModuleError::PermissionDenied(
+                "Module IPC identity was revoked".into(),
+            ));
+        }
         let message: ModuleMessage = bincode::deserialize(bytes)
             .map_err(|e| ModuleError::SerializationError(e.to_string()))?;
 
@@ -1290,36 +1311,6 @@ impl ConnectionCtx {
                     return Ok(());
                 }
 
-                // Handle SubscribeEvents specially to register with event manager
-                if let RequestPayload::SubscribeModuleEventNames { ref names } = request.payload
-                    && let Some(event_mgr) = &self.event_manager
-                {
-                    event_mgr
-                        .set_module_event_filter(&connection.module_id, names.clone())
-                        .await;
-                }
-
-                if let RequestPayload::SubscribeEvents { ref event_types } = request.payload
-                    && let Some(event_mgr) = &self.event_manager
-                    && let Some(event_tx) = &connection.event_tx
-                {
-                    // Register module subscriptions
-                    let module_id = connection.module_id.clone();
-                    let event_tx_clone = event_tx.clone();
-                    event_mgr
-                        .subscribe_module(module_id.clone(), event_types.clone(), event_tx_clone)
-                        .await?;
-                    connection.subscriptions = event_types.clone();
-                    debug!(
-                        "Module {} subscribed to events: {:?}",
-                        module_id, event_types
-                    );
-                    // Note: subscribe_module() handles:
-                    // 1. Sending already-loaded modules to this newly subscribing module
-                    // 2. Publishing ModuleLoaded for this module (if loaded) AFTER subscription
-                    // This ensures ModuleLoaded only happens after startup is complete
-                }
-
                 // Use API hub if available, otherwise fall back to direct node_api
                 let response = if let Some(hub) = &self.api_hub {
                     let mut hub_guard = hub.lock().await;
@@ -1330,6 +1321,41 @@ impl ConnectionCtx {
                     self.process_request(&request, node_api, &connection.module_id)
                         .await?
                 };
+                if response.success {
+                    // Handle SubscribeEvents specially to register with event manager
+                    if let RequestPayload::SubscribeModuleEventNames { ref names } = request.payload
+                        && let Some(event_mgr) = &self.event_manager
+                    {
+                        event_mgr
+                            .set_module_event_filter(&connection.module_id, names.clone())
+                            .await;
+                    }
+
+                    if let RequestPayload::SubscribeEvents { ref event_types } = request.payload
+                        && let Some(event_mgr) = &self.event_manager
+                        && let Some(event_tx) = &connection.event_tx
+                    {
+                        // Register module subscriptions
+                        let module_id = connection.module_id.clone();
+                        let event_tx_clone = event_tx.clone();
+                        event_mgr
+                            .subscribe_module(
+                                module_id.clone(),
+                                event_types.clone(),
+                                event_tx_clone,
+                            )
+                            .await?;
+                        connection.subscriptions = event_types.clone();
+                        debug!(
+                            "Module {} subscribed to events: {:?}",
+                            module_id, event_types
+                        );
+                        // Note: subscribe_module() handles:
+                        // 1. Sending already-loaded modules to this newly subscribing module
+                        // 2. Publishing ModuleLoaded for this module (if loaded) AFTER subscription
+                        // This ensures ModuleLoaded only happens after startup is complete
+                    }
+                }
                 let response_message = ModuleMessage::Response(response);
 
                 let response_bytes = bincode::serialize(&response_message)

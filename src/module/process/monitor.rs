@@ -87,7 +87,7 @@ impl ModuleProcessMonitor {
             }
 
             // Check heartbeat via IPC
-            if let Some(client) = process.client_mut() {
+            if let Some(client) = process.heartbeat_client_mut() {
                 use crate::module::ipc::protocol::MessageType;
                 use crate::module::ipc::protocol::RequestMessage;
                 use crate::module::ipc::protocol::RequestPayload;
@@ -173,7 +173,7 @@ impl ModuleProcessMonitor {
             // Check heartbeat via IPC
             {
                 let mut process_guard = shared_process.lock().await;
-                if let Some(client) = process_guard.client_mut() {
+                if let Some(client) = process_guard.heartbeat_client_mut() {
                     use crate::module::ipc::protocol::MessageType;
                     use crate::module::ipc::protocol::RequestMessage;
                     use crate::module::ipc::protocol::RequestPayload;
@@ -259,7 +259,7 @@ impl ModuleProcessMonitor {
     pub fn check_health(process: &mut ModuleProcess) -> ModuleHealth {
         if !process.is_running() {
             ModuleHealth::Crashed("Process exited".to_string())
-        } else if let Some(client) = process.client_mut() {
+        } else if let Some(client) = process.heartbeat_client_mut() {
             use crate::module::ipc::protocol::{MessageType, RequestMessage, RequestPayload};
             use tokio::time::timeout;
 

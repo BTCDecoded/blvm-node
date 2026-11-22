@@ -197,9 +197,15 @@ Module Binary
 
 Modules request capabilities:
 - `read_blockchain` - Read-only blockchain access
+- `read_mempool` - Read-only access to unconfirmed transactions and mempool statistics
 - `subscribe_events` - Subscribe to node events
 - `governance_vote` - Cast governance votes (if authorized)
 - `send_transactions` - Submit transactions to mempool (future)
+
+Native modules with a nonempty capability list receive exactly the listed
+permissions for their running IPC instance. An absent or empty list uses the
+legacy read-only defaults, which do not include `read_mempool`. Module
+supervision does not add a chain-state grant.
 
 ## Module Manifest
 

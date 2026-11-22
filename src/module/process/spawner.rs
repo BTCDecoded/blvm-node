@@ -248,6 +248,7 @@ impl ModuleProcessSpawner {
             process: child,
             socket_path,
             client,
+            chain_tip_heartbeat: true,
         })
     }
 
@@ -332,9 +333,22 @@ pub struct ModuleProcess {
     pub socket_path: PathBuf,
     /// IPC client connection (optional, may be dropped for cleanup)
     client: Option<ModuleIpcClient>,
+    chain_tip_heartbeat: bool,
 }
 
 impl ModuleProcess {
+    pub(crate) fn set_chain_tip_heartbeat(&mut self, enabled: bool) {
+        self.chain_tip_heartbeat = enabled;
+    }
+
+    pub(crate) fn heartbeat_client_mut(&mut self) -> Option<&mut ModuleIpcClient> {
+        if self.chain_tip_heartbeat {
+            self.client_mut()
+        } else {
+            None
+        }
+    }
+
     /// Get the process ID
     pub fn id(&self) -> Option<u32> {
         self.process.id()
