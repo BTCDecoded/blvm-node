@@ -6,8 +6,9 @@
 use crate::module::ipc::ModuleIpcClient;
 use crate::module::ipc::protocol::ModuleMessage;
 use crate::module::ipc::protocol::{
-    EventPayload, MessageType, RequestMessage, RequestPayload, ResponsePayload,
+    EventPayload, MessageType, RequestMessage, RequestPayload, ResponseMessage, ResponsePayload,
 };
+use crate::module::ipc::session::SessionRequest;
 use crate::module::traits::{
     BlockServeDenylistSnapshot, ChainInfo, EventType, LightningInfo, MempoolSize, ModuleError,
     NetworkStats, NodeAPI, PaymentState, PeerInfo, SyncStatus, TxServeDenylistSnapshot,
@@ -15,17 +16,18 @@ use crate::module::traits::{
 use crate::{Block, BlockHeader, Hash, OutPoint, Transaction, UTXO};
 use async_trait::async_trait;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc, oneshot};
+
+enum Transport {
+    Direct(Arc<Mutex<ModuleIpcClient>>),
+    Session(mpsc::Sender<SessionRequest>),
+}
 
 /// NodeAPI implementation that uses IPC to communicate with the node
 pub struct NodeApiIpc {
-    /// IPC client (wrapped in Arc<Mutex> for thread safety)
-    ipc_client: Arc<Mutex<ModuleIpcClient>>,
+    transport: Transport,
     /// Module ID for logging and identification
     module_id: String,
-    /// Correlation ID counter
-    correlation_id: Arc<tokio::sync::Mutex<u64>>,
     /// Event broadcast sender (for creating multiple receivers)
     event_broadcast: Option<Arc<tokio::sync::broadcast::Sender<ModuleMessage>>>,
 }
@@ -34,9 +36,16 @@ impl NodeApiIpc {
     /// Create a new NodeAPI IPC wrapper
     pub fn new(ipc_client: Arc<Mutex<ModuleIpcClient>>, module_id: String) -> Self {
         Self {
-            ipc_client,
+            transport: Transport::Direct(ipc_client),
             module_id,
-            correlation_id: Arc::new(tokio::sync::Mutex::new(0)),
+            event_broadcast: None,
+        }
+    }
+
+    pub(crate) fn with_session(requests: mpsc::Sender<SessionRequest>, module_id: String) -> Self {
+        Self {
+            transport: Transport::Session(requests),
+            module_id,
             event_broadcast: None,
         }
     }
@@ -49,11 +58,24 @@ impl NodeApiIpc {
         self.event_broadcast = Some(broadcast);
     }
 
-    /// Get next correlation ID
-    async fn next_correlation_id(&self) -> u64 {
-        let mut id = self.correlation_id.lock().await;
-        *id += 1;
-        *id
+    async fn request_message(
+        &self,
+        mut request: RequestMessage,
+    ) -> Result<ResponseMessage, ModuleError> {
+        match &self.transport {
+            Transport::Direct(client) => {
+                let mut client = client.lock().await;
+                request.correlation_id = client.next_correlation_id();
+                client.request(request).await
+            }
+            Transport::Session(requests) => {
+                let (tx, rx) = oneshot::channel();
+                let closed = |_| ModuleError::IpcError("Module IPC session closed".into());
+                requests.send((request, tx)).await.map_err(closed)?;
+                rx.await
+                    .map_err(|_| ModuleError::IpcError("Module IPC session closed".into()))
+            }
+        }
     }
 
     /// Helper to send a request and parse the response
@@ -61,16 +83,13 @@ impl NodeApiIpc {
     where
         F: FnOnce(ResponsePayload) -> Result<T, ModuleError>,
     {
-        let mut client = self.ipc_client.lock().await;
-        let correlation_id = client.next_correlation_id();
-
         let request = RequestMessage {
-            correlation_id,
+            correlation_id: 0,
             request_type: Self::payload_to_message_type(&payload),
             payload,
         };
 
-        let response = client.request(request).await?;
+        let response = self.request_message(request).await?;
 
         if !response.success {
             return Err(ModuleError::OperationError(
@@ -287,15 +306,13 @@ impl NodeAPI for NodeApiIpc {
         event_types: Vec<EventType>,
     ) -> Result<mpsc::Receiver<ModuleMessage>, ModuleError> {
         // Send SubscribeEvents IPC request
-        let correlation_id = self.next_correlation_id().await;
         let request = RequestMessage {
-            correlation_id,
+            correlation_id: 0,
             request_type: MessageType::SubscribeEvents,
             payload: RequestPayload::SubscribeEvents { event_types },
         };
 
-        let mut client = self.ipc_client.lock().await;
-        let response = client.request(request).await?;
+        let response = self.request_message(request).await?;
 
         if !response.success {
             return Err(ModuleError::IpcError(
@@ -636,9 +653,8 @@ impl NodeAPI for NodeApiIpc {
         method: String,
         description: String,
     ) -> Result<(), ModuleError> {
-        let correlation_id = self.next_correlation_id().await;
         let request = RequestMessage {
-            correlation_id,
+            correlation_id: 0,
             request_type: MessageType::RegisterRpcEndpoint,
             payload: RequestPayload::RegisterRpcEndpoint {
                 method,
@@ -646,7 +662,7 @@ impl NodeAPI for NodeApiIpc {
             },
         };
 
-        let response = self.ipc_client.lock().await.request(request).await?;
+        let response = self.request_message(request).await?;
         if response.success {
             Ok(())
         } else {
@@ -657,16 +673,15 @@ impl NodeAPI for NodeApiIpc {
     }
 
     async fn unregister_rpc_endpoint(&self, method: &str) -> Result<(), ModuleError> {
-        let correlation_id = self.next_correlation_id().await;
         let request = RequestMessage {
-            correlation_id,
+            correlation_id: 0,
             request_type: MessageType::UnregisterRpcEndpoint,
             payload: RequestPayload::UnregisterRpcEndpoint {
                 method: method.to_string(),
             },
         };
 
-        let response = self.ipc_client.lock().await.request(request).await?;
+        let response = self.request_message(request).await?;
         if response.success {
             Ok(())
         } else {
@@ -681,9 +696,8 @@ impl NodeAPI for NodeApiIpc {
         method: String,
         description: String,
     ) -> Result<(), ModuleError> {
-        let correlation_id = self.next_correlation_id().await;
         let request = RequestMessage {
-            correlation_id,
+            correlation_id: 0,
             request_type: MessageType::RegisterCoreRpcOverride,
             payload: RequestPayload::RegisterCoreRpcOverride {
                 method,
@@ -691,7 +705,7 @@ impl NodeAPI for NodeApiIpc {
             },
         };
 
-        let response = self.ipc_client.lock().await.request(request).await?;
+        let response = self.request_message(request).await?;
         if response.success {
             Ok(())
         } else {
@@ -702,16 +716,15 @@ impl NodeAPI for NodeApiIpc {
     }
 
     async fn unregister_core_rpc_override(&self, method: &str) -> Result<(), ModuleError> {
-        let correlation_id = self.next_correlation_id().await;
         let request = RequestMessage {
-            correlation_id,
+            correlation_id: 0,
             request_type: MessageType::UnregisterCoreRpcOverride,
             payload: RequestPayload::UnregisterCoreRpcOverride {
                 method: method.to_string(),
             },
         };
 
-        let response = self.ipc_client.lock().await.request(request).await?;
+        let response = self.request_message(request).await?;
         if response.success {
             Ok(())
         } else {
@@ -755,14 +768,13 @@ impl NodeAPI for NodeApiIpc {
         &self,
         metric: crate::module::metrics::manager::Metric,
     ) -> Result<(), ModuleError> {
-        let correlation_id = self.next_correlation_id().await;
         let request = RequestMessage {
-            correlation_id,
+            correlation_id: 0,
             request_type: MessageType::ReportMetric,
             payload: RequestPayload::ReportMetric { metric },
         };
 
-        let response = self.ipc_client.lock().await.request(request).await?;
+        let response = self.request_message(request).await?;
         if response.success {
             Ok(())
         } else {
@@ -778,16 +790,15 @@ impl NodeAPI for NodeApiIpc {
         &self,
         module_id: &str,
     ) -> Result<Vec<crate::module::metrics::manager::Metric>, ModuleError> {
-        let correlation_id = self.next_correlation_id().await;
         let request = RequestMessage {
-            correlation_id,
+            correlation_id: 0,
             request_type: MessageType::GetModuleMetrics,
             payload: RequestPayload::GetModuleMetrics {
                 module_id: module_id.to_string(),
             },
         };
 
-        let response = self.ipc_client.lock().await.request(request).await?;
+        let response = self.request_message(request).await?;
         match response.payload {
             Some(ResponsePayload::ModuleMetrics(metrics)) => Ok(metrics),
             _ => {

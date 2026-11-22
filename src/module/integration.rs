@@ -9,6 +9,7 @@ use crate::module::ipc::protocol::{
     CliSpec, InvocationMessage, InvocationResultMessage, MessageType, ModuleMessage,
     RequestMessage, RequestPayload, ResponsePayload,
 };
+use crate::module::ipc::session::{SessionRequest, drive_session};
 use crate::module::traits::{EventType, ModuleError, NodeAPI};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -114,51 +115,16 @@ impl ModuleIntegration {
         // Use broadcast channel for events (allows multiple receivers)
         let (broadcast_tx, broadcast_rx) = tokio::sync::broadcast::channel(1000);
         let broadcast_tx_arc = Arc::new(broadcast_tx);
-        let ipc_client_arc = Arc::new(tokio::sync::Mutex::new(ipc_client));
+        let (request_tx, request_rx) = mpsc::channel::<SessionRequest>(32);
 
         // Channel for invocations: spawn sends (Invocation, oneshot_tx), module receives and responds
         let (invocation_tx, invocation_rx) = mpsc::channel(32);
 
-        // Spawn message receiver: forwards Events to broadcast, dispatches Invocations to module
-        let ipc_for_receive = Arc::clone(&ipc_client_arc);
-        let broadcast_tx_for_events = Arc::clone(&broadcast_tx_arc);
+        let events = Arc::clone(&broadcast_tx_arc);
         tokio::spawn(async move {
-            loop {
-                match ipc_for_receive.lock().await.receive_message().await {
-                    Ok(Some(ModuleMessage::Event(e))) => {
-                        let _ = broadcast_tx_for_events.send(ModuleMessage::Event(e));
-                    }
-                    Ok(Some(ModuleMessage::Invocation(invocation))) => {
-                        let (result_tx, result_rx) = oneshot::channel();
-                        if invocation_tx.send((invocation, result_tx)).await.is_err() {
-                            warn!("Invocation channel closed, dropping invocation");
-                            continue;
-                        }
-                        match result_rx.await {
-                            Ok(result) => {
-                                if let Err(e) = ipc_for_receive
-                                    .lock()
-                                    .await
-                                    .send_invocation_result(result)
-                                    .await
-                                {
-                                    error!("Failed to send invocation result: {}", e);
-                                }
-                            }
-                            Err(_) => {
-                                warn!("Invocation result channel dropped");
-                            }
-                        }
-                    }
-                    Ok(Some(_)) => {
-                        // Response, Log, InvocationResult - unexpected here, ignore
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        error!("Error receiving message: {}", e);
-                        break;
-                    }
-                }
+            if let Err(error) = drive_session(ipc_client, request_rx, &events, invocation_tx).await
+            {
+                tracing::warn!("Module IPC session ended: {error}");
             }
         });
 
@@ -166,7 +132,7 @@ impl ModuleIntegration {
         let event_receiver = broadcast_rx;
 
         // Create NodeAPI over IPC
-        let mut node_api_impl = NodeApiIpc::new(ipc_client_arc, module_id.clone());
+        let mut node_api_impl = NodeApiIpc::with_session(request_tx, module_id.clone());
         node_api_impl.set_event_broadcast(Arc::clone(&broadcast_tx_arc));
         let node_api = Arc::new(node_api_impl);
 
