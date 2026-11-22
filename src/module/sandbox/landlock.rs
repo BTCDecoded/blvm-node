@@ -845,7 +845,9 @@ mod tests {
         ruleset.arm_std(&mut child);
         drop(ruleset);
 
-        let err = child.spawn().expect_err("spawn must fail after the ruleset closes");
+        let err = child
+            .spawn()
+            .expect_err("spawn must fail after the ruleset closes");
         let code = err.raw_os_error();
         // EBADF (9) or EBADFD (77): the raw ruleset fd is no longer usable.
         // GridPool's beta.5 smoke saw 77; this host returns 9.
