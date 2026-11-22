@@ -90,7 +90,8 @@ mod tests {
     #[tokio::test]
     async fn routes_event_before_response_and_keeps_idle_session_writable() {
         tokio::time::timeout(Duration::from_secs(5), async {
-            let directory = tempfile::tempdir().unwrap();
+            // AF_UNIX paths must be shorter than SUN_LEN; CI points TMPDIR at a long path.
+            let directory = tempfile::TempDir::new_in("/tmp").unwrap();
             let path = directory.path().join("module.sock");
             let listener = UnixListener::bind(&path).unwrap();
             let client = ModuleIpcClient::connect(&path).await.unwrap();
