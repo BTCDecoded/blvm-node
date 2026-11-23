@@ -1,7 +1,7 @@
 # ZMQ Notifications
 
 
-> **2025 update:** ZeroMQ is no longer built into `blvm-node`. Use the **`blvm-zmq`** module. Configure endpoints in the module `config.toml` (same keys as former `[zmq]`). Repository: <https://github.com/BTCDecoded/blvm-zmq>.
+> **2025 update:** ZeroMQ is no longer built into `blvm-node`. Use the **`blvm-zmq`** module. Set `endpoint` in the module config. A topic key overrides that topic. Repository: <https://github.com/BTCDecoded/blvm-zmq>.
 
 BLLVM node supports ZeroMQ (ZMQ) notifications for real-time blockchain event notifications, compatible with standard Bitcoin node notification interfaces.
 
@@ -26,11 +26,7 @@ Publishes the 32-byte block hash when a new block is connected to the chain.
 - Topic: `"hashblock"` (string)
 - Data: Block hash (32 bytes)
 
-**Example:**
-```toml
-[zmq]
-hashblock = "tcp://127.0.0.1:28332"
-```
+Subscribers filter on `hashblock`. It uses `endpoint` unless this topic sets its own address.
 
 ### 2. `hashtx` - Transaction Hash Notifications
 
@@ -40,11 +36,7 @@ Publishes the 32-byte transaction hash when a transaction enters or leaves the m
 - Topic: `"hashtx"` (string)
 - Data: Transaction hash (32 bytes)
 
-**Example:**
-```toml
-[zmq]
-hashtx = "tcp://127.0.0.1:28333"
-```
+Subscribers filter on `hashtx`. It uses `endpoint` unless this topic sets its own address.
 
 ### 3. `rawblock` - Raw Block Data Notifications
 
@@ -54,11 +46,7 @@ Publishes the complete serialized block data when a new block is connected.
 - Topic: `"rawblock"` (string)
 - Data: Serialized block (variable length)
 
-**Example:**
-```toml
-[zmq]
-rawblock = "tcp://127.0.0.1:28334"
-```
+Subscribers filter on `rawblock`. It uses `endpoint` unless this topic sets its own address.
 
 ### 4. `rawtx` - Raw Transaction Data Notifications
 
@@ -68,11 +56,7 @@ Publishes the complete serialized transaction data when a transaction enters or 
 - Topic: `"rawtx"` (string)
 - Data: Serialized transaction (variable length)
 
-**Example:**
-```toml
-[zmq]
-rawtx = "tcp://127.0.0.1:28335"
-```
+Subscribers filter on `rawtx`. It uses `endpoint` unless this topic sets its own address.
 
 #### Wire format for `rawblock` and `rawtx` payloads
 
@@ -89,35 +73,19 @@ Publishes sequence notifications for mempool events with sequence numbers.
 - Data: 33 bytes (1 byte type + 32 bytes transaction hash)
   - Type: `0x01` = mempool entry, `0x02` = mempool removal
 
-**Example:**
-```toml
-[zmq]
-sequence = "tcp://127.0.0.1:28336"
-```
+Subscribers filter on `sequence`. It uses `endpoint` unless this topic sets its own address.
 
 ## Configuration
 
 ZMQ notifications are configured in the node configuration file (TOML format):
 
 ```toml
-[zmq]
-# Block hash notifications
-hashblock = "tcp://127.0.0.1:28332"
-
-# Transaction hash notifications
-hashtx = "tcp://127.0.0.1:28333"
-
-# Raw block data notifications
-rawblock = "tcp://127.0.0.1:28334"
-
-# Raw transaction data notifications
-rawtx = "tcp://127.0.0.1:28335"
-
-# Sequence notifications
-sequence = "tcp://127.0.0.1:28336"
+[modules.blvm-zmq]
+endpoint = "tcp://127.0.0.1:28332"
+# hashblock = "tcp://127.0.0.1:28333"
 ```
 
-All notification types are optional. Only configure the endpoints you need.
+`endpoint` binds one PUB socket. `hashblock`, `hashtx`, `rawblock`, `rawtx`, and `sequence` are the subscribe topics on that socket. A topic key binds that topic on its own socket. Omit `endpoint` and every topic key to leave the module unbound.
 
 ### Endpoint Format
 
@@ -261,7 +229,7 @@ If you see "Address already in use" errors:
 
 ## Compatibility
 
-The `sequence` body is 33 bytes, `0x01` for a mempool entry and `0x02` for a removal. It is not Bitcoin Core's topic, body, and 4-byte count, and it is not the `C`/`D`/`R`/`A` frame. The socket is not authenticated. A Core subscriber does not work unchanged.
+Each message is three frames: the topic, the payload, and a 32-bit little-endian counter for that socket. The `sequence` payload is 33 bytes, `0x01` for a mempool entry and `0x02` for a removal. It is not Bitcoin Core's `C`/`D`/`R`/`A` frame. The socket is not authenticated.
 
 ## Future Enhancements
 

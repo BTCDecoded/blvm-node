@@ -106,18 +106,13 @@ pub fn default_enabled_modules() -> HashMap<String, String> {
     .collect()
 }
 
-/// Loopback ZeroMQ binds for a fresh install. Electrum and Esplora stay closed until `[services]` sets `listen`.
+/// Loopback ZeroMQ bind for a fresh install. `endpoint` covers every topic.
+/// Electrum and Esplora stay closed until `[services]` sets `listen`.
 fn default_module_configs() -> HashMap<String, HashMap<String, String>> {
-    let zmq = [
-        ("hashblock", "tcp://127.0.0.1:28332"),
-        ("hashtx", "tcp://127.0.0.1:28333"),
-        ("rawblock", "tcp://127.0.0.1:28334"),
-        ("rawtx", "tcp://127.0.0.1:28335"),
-        ("sequence", "tcp://127.0.0.1:28336"),
-    ]
-    .into_iter()
-    .map(|(key, value)| (key.to_string(), value.to_string()))
-    .collect();
+    let zmq = [("endpoint", "tcp://127.0.0.1:28332")]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
     let mut configs = HashMap::new();
     configs.insert("blvm-zmq".to_string(), zmq);
     configs

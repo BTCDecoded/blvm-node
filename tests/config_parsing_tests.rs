@@ -184,7 +184,7 @@ transport_preference = "tcponly"
         modules
             .module_configs
             .get("blvm-zmq")
-            .and_then(|c| c.get("hashblock"))
+            .and_then(|c| c.get("endpoint"))
             .map(String::as_str),
         Some("tcp://127.0.0.1:28332")
     );
@@ -226,9 +226,9 @@ blvm-payment = "0.1.*"
         modules
             .module_configs
             .get("blvm-zmq")
-            .and_then(|c| c.get("sequence"))
+            .and_then(|c| c.get("endpoint"))
             .map(String::as_str),
-        Some("tcp://127.0.0.1:28336")
+        Some("tcp://127.0.0.1:28332")
     );
 }
 
@@ -290,7 +290,7 @@ blvm-zmq = "0.3.*"
         modules
             .module_configs
             .get("blvm-zmq")
-            .and_then(|c| c.get("hashblock"))
+            .and_then(|c| c.get("endpoint"))
             .map(String::as_str),
         Some("tcp://127.0.0.1:28332")
     );
@@ -365,9 +365,16 @@ hashblock = "tcp://127.0.0.1:28332"
         modules
             .module_configs
             .get("blvm-zmq")
-            .and_then(|c| c.get("hashtx"))
+            .and_then(|c| c.get("endpoint"))
             .map(String::as_str),
-        Some("tcp://127.0.0.1:28333")
+        Some("tcp://127.0.0.1:28332")
+    );
+    assert!(
+        modules
+            .module_configs
+            .get("blvm-zmq")
+            .and_then(|c| c.get("hashtx"))
+            .is_none()
     );
     assert!(
         !modules
