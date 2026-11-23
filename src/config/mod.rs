@@ -106,16 +106,10 @@ pub fn default_enabled_modules() -> HashMap<String, String> {
     .collect()
 }
 
-/// Loopback ZeroMQ bind for a fresh install. `endpoint` covers every topic.
-/// Electrum and Esplora stay closed until `[services]` sets `listen`.
+/// Operator `[modules.<name>]` keys only. A module's own values come from its
+/// `module.toml` `[config_defaults]` when that module is loaded.
 fn default_module_configs() -> HashMap<String, HashMap<String, String>> {
-    let zmq = [("endpoint", "tcp://127.0.0.1:28332")]
-        .into_iter()
-        .map(|(key, value)| (key.to_string(), value.to_string()))
-        .collect();
-    let mut configs = HashMap::new();
-    configs.insert("blvm-zmq".to_string(), zmq);
-    configs
+    HashMap::new()
 }
 
 fn default_module_registry_url() -> Option<String> {

@@ -202,9 +202,6 @@ fn enforce_minimal_hardened(config: &NodeConfig) -> Result<()> {
     {
         bail!("minimal-hardened profile does not load, fetch, or watch modules");
     }
-    // `module_configs` still carries the crate's default ZeroMQ bind strings.
-    // `with_modules_from_config` returns before reading them when `enabled` is false.
-
     if config
         .services
         .iter()

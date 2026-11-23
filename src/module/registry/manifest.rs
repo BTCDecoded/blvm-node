@@ -117,6 +117,11 @@ pub struct PaymentSection {
 /// # Configuration schema (optional)
 /// [config_schema]
 /// poll_interval = "Polling interval in seconds"
+///
+/// # Values the node copies under operator overrides at load. The node does not
+/// # interpret the keys.
+/// [config_defaults]
+/// poll_interval = "30"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleManifest {
@@ -365,9 +370,51 @@ impl ModuleManifest {
     }
 }
 
+/// `[config_defaults]` from a manifest. Missing or unreadable files yield an empty map.
+/// Only string values are kept. The node does not interpret the keys.
+pub fn config_defaults_from_manifest_toml(text: &str) -> HashMap<String, String> {
+    let Ok(value) = toml::from_str::<toml::Value>(text) else {
+        return HashMap::new();
+    };
+    let Some(table) = value.get("config_defaults").and_then(|v| v.as_table()) else {
+        return HashMap::new();
+    };
+    table
+        .iter()
+        .filter_map(|(key, value)| value.as_str().map(|text| (key.clone(), text.to_string())))
+        .collect()
+}
+
+/// Walk up from the module binary to the `module.toml` beside it.
+pub fn config_defaults_for_binary(binary_path: &Path) -> HashMap<String, String> {
+    let mut dir = binary_path.parent();
+    for _ in 0..5 {
+        let Some(current) = dir else {
+            break;
+        };
+        let manifest = current.join("module.toml");
+        if manifest.is_file() {
+            let text = std::fs::read_to_string(&manifest).unwrap_or_default();
+            return config_defaults_from_manifest_toml(&text);
+        }
+        dir = current.parent();
+    }
+    HashMap::new()
+}
+
+/// Module-declared values first. Operator values, including `""`, replace them.
+pub fn merge_module_declared_config(
+    declared: HashMap<String, String>,
+    operator: HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut merged = declared;
+    merged.extend(operator);
+    merged
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ModuleManifest;
+    use super::*;
 
     #[test]
     fn omitted_ipc_protocol_is_generation_0_and_1_is_rejected() {
@@ -399,6 +446,50 @@ mod tests {
         .unwrap();
         let strict = ModuleManifest::from_file(&path).unwrap();
         assert_eq!(strict.ipc_protocol, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_defaults_merge_under_operator_values() {
+        let text = r#"
+name = "example"
+[config_schema]
+endpoint = "description, not a value"
+[config_defaults]
+endpoint = "tcp://127.0.0.1:1"
+"#;
+        let declared = config_defaults_from_manifest_toml(text);
+        assert_eq!(
+            declared.get("endpoint").map(String::as_str),
+            Some("tcp://127.0.0.1:1")
+        );
+        assert!(!declared.contains_key("config_schema"));
+        let operator = HashMap::from([("rawtx".to_string(), String::new())]);
+        let merged = merge_module_declared_config(declared, operator);
+        assert_eq!(
+            merged.get("endpoint").map(String::as_str),
+            Some("tcp://127.0.0.1:1")
+        );
+        assert_eq!(merged.get("rawtx").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn config_defaults_are_read_from_the_manifest_above_the_binary() {
+        let dir = std::env::temp_dir().join(format!("blvm-defaults-{}", std::process::id()));
+        let binary_dir = dir.join("target").join("release");
+        std::fs::create_dir_all(&binary_dir).unwrap();
+        std::fs::write(
+            dir.join("module.toml"),
+            "[config_defaults]\nendpoint = \"tcp://127.0.0.1:1\"\n",
+        )
+        .unwrap();
+        let binary = binary_dir.join("example");
+        std::fs::write(&binary, b"").unwrap();
+        let defaults = config_defaults_for_binary(&binary);
+        assert_eq!(
+            defaults.get("endpoint").map(String::as_str),
+            Some("tcp://127.0.0.1:1")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

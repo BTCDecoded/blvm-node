@@ -1068,6 +1068,9 @@ impl ModuleManager {
             ModuleError::InitializationError(format!("Failed to create module data directory: {e}"))
         })?;
 
+        let declared = crate::module::registry::manifest::config_defaults_for_binary(binary_path);
+        let config =
+            crate::module::registry::manifest::merge_module_declared_config(declared, config);
         let mut merged_config = self.merge_module_config(module_name, config);
         self.apply_node_p2p_listen_to_module_config(&mut merged_config);
         merged_config.insert("version".to_string(), metadata.version.clone());

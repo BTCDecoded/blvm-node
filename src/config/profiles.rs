@@ -305,20 +305,7 @@ fn module_line(config: &NodeConfig) -> String {
     let mut names: Vec<&str> = modules.enabled_modules.keys().map(String::as_str).collect();
     names.sort_unstable();
     let registry = modules.registry_url.as_deref().unwrap_or("none");
-    let zmq = modules
-        .module_configs
-        .get("blvm-zmq")
-        .filter(|_| names.contains(&"blvm-zmq"))
-        .map(|entries| {
-            let mut binds: Vec<String> = entries
-                .iter()
-                .map(|(key, value)| format!("{key}={value}"))
-                .collect();
-            binds.sort();
-            format!("; zmq {}", binds.join(", "))
-        })
-        .unwrap_or_default();
-    format!("modules=on [{}] registry={registry}{zmq}", names.join(", "))
+    format!("modules=on [{}] registry={registry}", names.join(", "))
 }
 
 fn assume_valid_line(config: &NodeConfig) -> String {

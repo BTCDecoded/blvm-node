@@ -77,15 +77,16 @@ Subscribers filter on `sequence`. It uses `endpoint` unless this topic sets its 
 
 ## Configuration
 
-ZMQ notifications are configured in the node configuration file (TOML format):
+The module's `module.toml` `[config_defaults]` supplies the bind when the module loads. The node copies that table and does not name the keys. An operator override looks like this:
 
 ```toml
 [modules.blvm-zmq]
 endpoint = "tcp://127.0.0.1:28332"
 # hashblock = "tcp://127.0.0.1:28333"
+# rawtx = ""
 ```
 
-`endpoint` binds one PUB socket. `hashblock`, `hashtx`, `rawblock`, `rawtx`, and `sequence` are the subscribe topics on that socket. A topic key binds that topic on its own socket. Omit `endpoint` and every topic key to leave the module unbound.
+`endpoint` binds one PUB socket. `hashblock`, `hashtx`, `rawblock`, `rawtx`, and `sequence` are the subscribe topics on that socket. A topic key binds that topic on its own socket. `""` turns that topic off.
 
 ### Endpoint Format
 
@@ -113,7 +114,7 @@ To use ZMQ notifications:
 
 **Note:** Even though ZMQ is enabled by default, you can disable it in two ways:
 
-1. **Don't configure endpoints** - If no ZMQ endpoints are configured, the ZMQ publisher won't initialize (no performance impact)
+1. **Disable the module** - `disabled_modules = ["blvm-zmq"]`. A load with no operator keys still uses the module's `[config_defaults]`.
 
 2. **Build without ZMQ feature** - To completely exclude ZMQ from the build:
    ```bash
