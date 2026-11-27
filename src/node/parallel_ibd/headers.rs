@@ -720,7 +720,27 @@ pub(crate) async fn download_headers(
         }
     }
 
+    let now = crate::utils::current_timestamp();
+    let age_cap = super::headers_presync::header_walk_height_cap(now, genesis.header.timestamp);
+    let median = blockstore
+        .headers_before_height_for_mtp(current_height)
+        .unwrap_or_else(|_| Vec::new());
+    let median = blvm_protocol::bip113::get_median_time_past(&median);
+    if super::headers_presync::header_walk_clock_refused(median, now) {
+        warn!("header walk refused: clock is more than two hours behind the stored median time");
+        return Ok(HeaderSyncResult {
+            tip_height: current_height.saturating_sub(1),
+            may_assign: header_presync.releases_assigner(),
+        });
+    }
+
     while current_height <= end_height {
+        if !super::headers_presync::header_walk_accepts_peer_height(current_height, age_cap) {
+            warn!(
+                "header walk stopped: height {current_height} is past the clock age cap {age_cap}"
+            );
+            break;
+        }
         if peer_addrs.is_empty() {
             peer_addrs = network.get_connected_peer_addresses().await;
             if peer_addrs.is_empty() {
@@ -816,8 +836,19 @@ pub(crate) async fn download_headers(
                     Vec::with_capacity(headers.len());
                 let mut pending_work: Vec<(u64, u64, u64)> = Vec::with_capacity(headers.len());
                 let mut peer_fault = false;
+                let mut stop_for_age = false;
 
                 for header in &headers {
+                    if !super::headers_presync::header_walk_accepts_peer_height(
+                        current_height,
+                        age_cap,
+                    ) {
+                        warn!(
+                            "header walk stopped: height {current_height} is past the clock age cap {age_cap}"
+                        );
+                        stop_for_age = true;
+                        break;
+                    }
                     if !header_links_to_parent(blockstore, header, current_height, &last_hash)? {
                         // Live 2026-08-20: skip-to-tip + one-hash locator → genesis-start.
                         // leftover-c1t-recv0: peer rotate never rewound last_hash (5976×).
@@ -939,6 +970,9 @@ pub(crate) async fn download_headers(
 
                 let batch_count = batch_entries.len();
                 if batch_count == 0 {
+                    if stop_for_age {
+                        break;
+                    }
                     continue;
                 }
                 consecutive_failures = 0;
@@ -956,6 +990,9 @@ pub(crate) async fn download_headers(
                     batch_count,
                     store_start.elapsed()
                 );
+                if stop_for_age {
+                    break;
+                }
                 let short_batch = headers.len() < network.protocol_limits().max_headers_results;
                 if header_batch_rtt_should_rotate(latency_ms) && !short_batch {
                     warn!(

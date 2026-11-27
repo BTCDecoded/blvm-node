@@ -8,6 +8,7 @@ pub mod background_validation;
 pub mod block_processor;
 #[cfg(feature = "production")]
 pub mod chain_selector;
+pub mod chain_view;
 pub mod core_mempool_dat;
 pub mod data_dir_lock;
 pub mod event_publisher;

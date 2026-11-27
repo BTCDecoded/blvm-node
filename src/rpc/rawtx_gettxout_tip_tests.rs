@@ -6,6 +6,55 @@ use serde_json::json;
 use std::sync::Arc;
 
 #[tokio::test]
+async fn an_open_chain_view_does_not_return_the_coin() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            crate::node::chain_view::reset_for_test();
+        }
+    }
+    let _reset = Reset;
+    crate::node::chain_view::reset_for_test();
+    crate::node::chain_view::set_wait_for_test(std::time::Duration::from_millis(1));
+    let temp = tempfile::TempDir::new().unwrap();
+    let storage = Arc::new(Storage::new(temp.path()).unwrap());
+    let hash = [8u8; 32];
+    storage
+        .utxos()
+        .add_utxo(
+            &OutPoint { hash, index: 0 },
+            &UTXO {
+                value: 50_000,
+                script_pubkey: vec![0x51].into(),
+                height: 100,
+                is_coinbase: false,
+            },
+        )
+        .unwrap();
+    let rpc = RawTxRpc::with_dependencies(
+        Arc::clone(&storage),
+        Arc::new(MempoolManager::new()),
+        None,
+        None,
+    );
+    crate::node::chain_view::enter();
+    let txid = crate::storage::hashing::hash_to_rpc_hex(&hash);
+    let err = rpc.gettxout(&json!([txid, 0, false])).await.unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains(crate::node::chain_view::CHAIN_VIEW_MOVED),
+        "{text}"
+    );
+    assert!(text.contains("-32090"), "{text}");
+    assert!(!text.contains("-5"), "{text}");
+    assert!(
+        !text.contains("50000") && !text.contains("0.0005"),
+        "{text}"
+    );
+    assert!(crate::node::chain_view::is_odd());
+}
+
+#[tokio::test]
 async fn failed_tip_read_is_not_a_zero_bestblock() {
     let temp = tempfile::TempDir::new().unwrap();
     let storage = Arc::new(Storage::new(temp.path()).unwrap());
