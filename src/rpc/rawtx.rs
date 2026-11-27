@@ -1210,17 +1210,32 @@ impl RawTxRpc {
         };
 
         if let Some(ref storage) = self.storage {
+            let settle0 = tokio::task::spawn_blocking(crate::node::chain_view::wait_for_settle)
+                .await
+                .map_err(|error| {
+                    RpcError::internal_error(format!("chain view wait failed: {error}"))
+                })?;
+            let settled = |value: Value| -> RpcResult<Value> {
+                if crate::node::chain_view::refused(settle0) {
+                    Err(RpcError::chain_view_moved())
+                } else {
+                    Ok(value)
+                }
+            };
+            if crate::node::chain_view::refused(settle0) {
+                return Err(RpcError::chain_view_moved());
+            }
             // Check mempool first if requested
             if include_mempool && let Some(ref mempool) = self.mempool {
                 if mempool.spends_outpoint(&outpoint) {
-                    return Ok(Value::Null);
+                    return settled(Value::Null);
                 }
                 if let Some(tx) = mempool.get_transaction(&txid_array)
                     && (n as usize) < tx.outputs.len()
                 {
                     let output = &tx.outputs[n as usize];
                     let (best_hash, _) = storage.chain().get_tip_hash_and_height()?;
-                    return Ok(json!({
+                    return settled(json!({
                                 "bestblock": Self::rpc_txid(&best_hash),
                                 "confirmations": 0,
                                 "value": output.value as f64 / 100_000_000.0,
@@ -1302,7 +1317,7 @@ impl RawTxRpc {
                         })
                         .unwrap_or(0);
 
-                    Ok(json!({
+                    settled(json!({
                         "bestblock": Self::rpc_txid(&best_hash),
                         "confirmations": confirmations,
                         "value": utxo.value as f64 / 100_000_000.0,
@@ -1315,7 +1330,7 @@ impl RawTxRpc {
                         "coinbase": utxo.is_coinbase
                     }))
                 }
-                Ok(Ok(Ok(None))) => Ok(Value::Null),
+                Ok(Ok(Ok(None))) => settled(Value::Null),
                 Ok(Ok(Err(e))) => Err(RpcError::internal_error(format!("UTXO lookup failed: {e}"))),
                 Ok(Err(e)) => Err(RpcError::internal_error(format!(
                     "UTXO lookup task failed: {e}"

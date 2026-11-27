@@ -964,6 +964,7 @@ pub fn try_activate_heavier_fork(
     // publisher and the mempool still see one entry per disconnected block.
     let mut disk_disconnected: Vec<Block> = Vec::new();
     let mut disconnected_undos: Vec<BlockUndoLog> = Vec::new();
+    let mut chain_view_held = false;
     let (current_chain, mut new_chain, consensus_height) = if let Some(tree) = &live_tree {
         let (active, candidate) =
             fork_hash_chains(storage, blockstore, &active_tip, candidate_tip)?;
@@ -978,6 +979,10 @@ pub fn try_activate_heavier_fork(
         let mut tip_first = active[1..].to_vec();
         tip_first.reverse();
         let codec = storage.utxo_value_codec();
+        if !tip_first.is_empty() {
+            crate::node::chain_view::enter();
+            chain_view_held = true;
+        }
         for window in disconnect_body_windows(&tip_first) {
             match apply_disconnect_window(
                 blockstore,
@@ -1003,6 +1008,9 @@ pub fn try_activate_heavier_fork(
                         &disconnected_undos,
                         live_muhash.as_mut(),
                     )?;
+                    if chain_view_held {
+                        crate::node::chain_view::clear();
+                    }
                     let restored: Vec<&BlockUndoLog> = disconnected_undos.iter().rev().collect();
                     record_snapshot_coin_delta(
                         storage,
@@ -1161,6 +1169,9 @@ pub fn try_activate_heavier_fork(
                     &disconnected_undos,
                     live_muhash.as_mut(),
                 )?;
+                if chain_view_held {
+                    crate::node::chain_view::clear();
+                }
                 let restored: Vec<&BlockUndoLog> = disconnected_undos.iter().rev().collect();
                 record_snapshot_coin_delta(
                     storage,
@@ -1241,6 +1252,10 @@ pub fn try_activate_heavier_fork(
         // The run loop keeps using the store. This map is only the coins the connect touched.
         *utxo_set = UtxoSet::default();
     } else {
+        if !result.disconnected_blocks.is_empty() {
+            crate::node::chain_view::enter();
+            chain_view_held = true;
+        }
         storage.utxos().store_utxo_set(utxo_set)?;
     }
 
@@ -1264,6 +1279,9 @@ pub fn try_activate_heavier_fork(
             &result.connected_blocks,
             utxo_set,
         );
+    }
+    if chain_view_held {
+        crate::node::chain_view::clear();
     }
 
     publish_reorg_events(

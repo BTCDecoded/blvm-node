@@ -157,6 +157,28 @@ impl HeadersPresync {
     }
 }
 
+/// Headers a chain may grow per second of its age. A longer peer walk is not
+/// a chain this clock can still be validating. `MAX_FUTURE_BLOCK_TIME` is the
+/// same two-hour window as a single future header.
+pub(crate) const HEADER_RATE_PER_SEC: u64 = 6;
+
+/// True when the stored median is more than [`blvm_consensus::constants::MAX_FUTURE_BLOCK_TIME`]
+/// ahead of `now`. A zero median has no stored headers and does not refuse.
+pub(crate) fn header_walk_clock_refused(median: u64, now: u64) -> bool {
+    median > now.saturating_add(blvm_consensus::constants::MAX_FUTURE_BLOCK_TIME)
+}
+
+/// Highest height a peer header may occupy: `(now - genesis time) * 6`.
+pub(crate) fn header_walk_height_cap(now: u64, genesis_time: u64) -> u64 {
+    now.saturating_sub(genesis_time)
+        .saturating_mul(HEADER_RATE_PER_SEC)
+}
+
+/// Peer fetches stop past [`header_walk_height_cap`]. Headers already on disk do not.
+pub(crate) fn header_walk_accepts_peer_height(height: u64, cap: u64) -> bool {
+    height <= cap
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +262,35 @@ mod tests {
         });
         assert_eq!(observed, 1);
         assert!(sync.releases_assigner());
+    }
+
+    #[test]
+    fn a_median_past_the_future_window_refuses_the_walk() {
+        let skew = blvm_consensus::constants::MAX_FUTURE_BLOCK_TIME;
+        let now = 1_700_000_000u64;
+        assert!(header_walk_clock_refused(now + skew + 1, now));
+        assert!(!header_walk_clock_refused(now + skew, now));
+        assert!(!header_walk_clock_refused(0, now));
+    }
+
+    #[test]
+    fn a_peer_header_past_the_age_cap_is_not_accepted() {
+        let genesis = 1_000u64;
+        let now = genesis + 2;
+        let cap = header_walk_height_cap(now, genesis);
+        assert_eq!(cap, 12);
+        assert!(header_walk_accepts_peer_height(cap, cap));
+        assert!(!header_walk_accepts_peer_height(cap + 1, cap));
+    }
+
+    #[test]
+    fn stored_headers_advance_past_the_peer_cap() {
+        let cap = 4u64;
+        let mut height = 0u64;
+        for _ in 0..10 {
+            height = height.saturating_add(1);
+        }
+        assert_eq!(height, 10);
+        assert!(!header_walk_accepts_peer_height(height, cap));
     }
 }

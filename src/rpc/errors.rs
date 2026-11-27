@@ -84,6 +84,8 @@ pub enum RpcErrorCode {
     TxNotFound,
     /// UTXO not found (-5)
     UtxoNotFound,
+    /// A disconnect is visible and the mempool has not caught up (-32090)
+    ChainViewMoved,
 }
 
 impl RpcErrorCode {
@@ -104,6 +106,7 @@ impl RpcErrorCode {
             RpcErrorCode::BlockNotFound => -5,
             RpcErrorCode::TxNotFound => -5,
             RpcErrorCode::UtxoNotFound => -5,
+            RpcErrorCode::ChainViewMoved => -32090,
         }
     }
 
@@ -124,6 +127,7 @@ impl RpcErrorCode {
             RpcErrorCode::BlockNotFound => "Block not found",
             RpcErrorCode::TxNotFound => "Transaction not found",
             RpcErrorCode::UtxoNotFound => "No such UTXO",
+            RpcErrorCode::ChainViewMoved => crate::node::chain_view::CHAIN_VIEW_MOVED,
         }
     }
 }
@@ -215,6 +219,14 @@ impl RpcError {
     /// UTXO not found
     pub fn utxo_not_found() -> Self {
         Self::new(RpcErrorCode::UtxoNotFound, "No such UTXO")
+    }
+
+    /// The chain view moved during a disconnect. Not a missing coin.
+    pub fn chain_view_moved() -> Self {
+        Self::new(
+            RpcErrorCode::ChainViewMoved,
+            crate::node::chain_view::CHAIN_VIEW_MOVED,
+        )
     }
 
     /// Transaction already in mempool
