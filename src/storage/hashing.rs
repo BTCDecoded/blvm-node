@@ -40,6 +40,19 @@ pub fn double_sha256(data: &[u8]) -> [u8; 32] {
     }
 }
 
+/// Double SHA-256 of the 80-byte header. Version is `i32`; time, bits, and nonce are `u32`.
+#[inline]
+pub fn header_double_sha256(header: &blvm_protocol::BlockHeader) -> [u8; 32] {
+    let mut header_data = [0u8; 80];
+    header_data[0..4].copy_from_slice(&(header.version as i32).to_le_bytes());
+    header_data[4..36].copy_from_slice(&header.prev_block_hash);
+    header_data[36..68].copy_from_slice(&header.merkle_root);
+    header_data[68..72].copy_from_slice(&(header.timestamp as u32).to_le_bytes());
+    header_data[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());
+    header_data[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());
+    double_sha256(&header_data)
+}
+
 /// Calculate single SHA256 hash (for internal use)
 ///
 /// Performance optimization: Uses OptimizedSha256 in production mode for SHA-NI acceleration
@@ -102,6 +115,25 @@ pub fn hash_from_rpc_hex(hex_str: &str) -> Result<[u8; 32], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(feature = "production", feature = "profile", feature = "ctv"))]
+    #[test]
+    fn header_bytes_match_block_header_hash() {
+        use blvm_protocol::BlockHeader;
+        let header = BlockHeader {
+            version: -1,
+            prev_block_hash: [0x11; 32],
+            merkle_root: [0x22; 32],
+            timestamp: 1_700_000_000,
+            bits: 0x1d00ffff,
+            nonce: 7,
+        };
+        let wire = blvm_protocol::serialization::serialize_block_header(&header);
+        assert_eq!(
+            double_sha256(&wire),
+            blvm_consensus::block::block_header_hash(&header)
+        );
+    }
 
     #[test]
     fn test_double_sha256_empty() {

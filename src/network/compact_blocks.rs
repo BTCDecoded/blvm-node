@@ -25,7 +25,6 @@ use blvm_protocol::segwit::Witness;
 use blvm_protocol::{Block, BlockHeader, Hash, Transaction};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::hash::Hasher;
 use std::time::{Duration, Instant};
 
 pub use blvm_protocol::bip152::{CompactBlock, ShortTxId};
@@ -101,34 +100,7 @@ pub fn calculate_tx_hash(tx: &Transaction) -> Hash {
 
 /// Encode a number as a Bitcoin varint
 fn encode_varint(value: u64) -> Vec<u8> {
-    if value < 0xfd {
-        vec![value as u8]
-    } else if value <= 0xffff {
-        let mut result = vec![0xfd];
-        result.extend_from_slice(&(value as u16).to_le_bytes());
-        result
-    } else if value <= 0xffffffff {
-        let mut result = vec![0xfe];
-        result.extend_from_slice(&(value as u32).to_le_bytes());
-        result
-    } else {
-        let mut result = vec![0xff];
-        result.extend_from_slice(&value.to_le_bytes());
-        result
-    }
-}
-
-/// SipHash-2-4 keys for a compact-block short id.
-///
-/// The keys are the first two little-endian 64-bit integers of
-/// SHA256(80-byte header || compact-block nonce).
-fn short_id_keys(header: &BlockHeader, nonce: u64) -> (u64, u64) {
-    let mut data = blvm_protocol::serialization::serialize_block_header(header);
-    data.extend_from_slice(&nonce.to_le_bytes());
-    let hash = Sha256::digest(&data);
-    let k0 = u64::from_le_bytes(hash[0..8].try_into().expect("sha256 prefix"));
-    let k1 = u64::from_le_bytes(hash[8..16].try_into().expect("sha256 prefix"));
-    (k0, k1)
+    blvm_protocol::serialization::encode_varint(value)
 }
 
 /// Calculate a compact-block short transaction id.
@@ -136,14 +108,7 @@ fn short_id_keys(header: &BlockHeader, nonce: u64) -> (u64, u64) {
 /// `wtxid` is the witness transaction id. A transaction with no witness uses
 /// the transaction id. The SipHash keys come from `header` and `nonce`.
 pub fn calculate_short_tx_id(header: &BlockHeader, wtxid: &Hash, nonce: u64) -> ShortTxId {
-    let (k0, k1) = short_id_keys(header, nonce);
-    use siphasher::sip::SipHasher24;
-    let mut hasher = SipHasher24::new_with_keys(k0, k1);
-    hasher.write(wtxid);
-    let hash_result = hasher.finish();
-    let mut short_id = [0u8; 6];
-    short_id.copy_from_slice(&hash_result.to_le_bytes()[..6]);
-    short_id
+    blvm_protocol::bip152::short_tx_id(header, wtxid, nonce)
 }
 
 /// Reconstruct full block from compact block

@@ -20,8 +20,6 @@ use std::time::{Duration, Instant};
 use crate::network::NetworkManager;
 use crate::node::parallel_ibd::chunk_assigner::ChunkAssigner;
 use crate::storage::blockstore::BlockStore;
-use crate::storage::hashing::double_sha256;
-
 /// C1p grow depth used to turn one-block sojourn into implied tip BPS.
 const WAVE_DEPTH: f64 = 32.0;
 const KEEP_BPS: f64 = 80.0;
@@ -103,14 +101,7 @@ pub(crate) fn wave_bps_from_sojourn_ms(ms: u64) -> f64 {
 }
 
 fn header_hash(header: &blvm_protocol::BlockHeader) -> blvm_protocol::Hash {
-    let mut header_bytes = [0u8; 80];
-    header_bytes[0..4].copy_from_slice(&(header.version as i32).to_le_bytes());
-    header_bytes[4..36].copy_from_slice(&header.prev_block_hash);
-    header_bytes[36..68].copy_from_slice(&header.merkle_root);
-    header_bytes[68..72].copy_from_slice(&(header.timestamp as u32).to_le_bytes());
-    header_bytes[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());
-    header_bytes[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());
-    double_sha256(&header_bytes)
+    crate::storage::hashing::header_double_sha256(header)
 }
 
 fn note_ok(peer: &str, sojourn_ms: u64) {

@@ -261,16 +261,7 @@ impl BlockFilterService {
 
     /// Double-SHA256 of the 80-byte Bitcoin wire header (block id).
     pub(crate) fn calculate_block_hash(&self, header: &BlockHeader) -> Hash {
-        use crate::storage::hashing::double_sha256;
-
-        let mut header_data = [0u8; 80];
-        header_data[0..4].copy_from_slice(&(header.version as i32).to_le_bytes());
-        header_data[4..36].copy_from_slice(&header.prev_block_hash);
-        header_data[36..68].copy_from_slice(&header.merkle_root);
-        header_data[68..72].copy_from_slice(&(header.timestamp as u32).to_le_bytes());
-        header_data[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());
-        header_data[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());
-        double_sha256(&header_data)
+        crate::storage::hashing::header_double_sha256(header)
     }
 
     /// Get current chain height

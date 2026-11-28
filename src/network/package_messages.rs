@@ -146,18 +146,7 @@ fn has_repeat(wtxids: &[Hash]) -> bool {
 }
 
 fn write_compact_size(n: u64, out: &mut Vec<u8>) {
-    if n < 253 {
-        out.push(n as u8);
-    } else if n <= u16::MAX as u64 {
-        out.push(0xfd);
-        out.extend_from_slice(&(n as u16).to_le_bytes());
-    } else if n <= u32::MAX as u64 {
-        out.push(0xfe);
-        out.extend_from_slice(&(n as u32).to_le_bytes());
-    } else {
-        out.push(0xff);
-        out.extend_from_slice(&n.to_le_bytes());
-    }
+    out.extend(blvm_protocol::serialization::encode_varint(n));
 }
 
 fn read_compact_size(data: &[u8]) -> Option<(u64, usize)> {
