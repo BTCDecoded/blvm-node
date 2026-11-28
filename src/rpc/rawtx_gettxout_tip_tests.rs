@@ -13,6 +13,7 @@ async fn an_open_chain_view_does_not_return_the_coin() {
             crate::node::chain_view::reset_for_test();
         }
     }
+    let _guard = crate::node::chain_view::test_excl_guard();
     let _reset = Reset;
     crate::node::chain_view::reset_for_test();
     crate::node::chain_view::set_wait_for_test(std::time::Duration::from_millis(1));
