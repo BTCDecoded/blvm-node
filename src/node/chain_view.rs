@@ -148,12 +148,6 @@ pub fn refused(seen: u64) -> bool {
 }
 
 #[cfg(test)]
-#[must_use]
-pub(crate) fn test_excl_guard() -> impl Drop {
-    test_excl::guard()
-}
-
-#[cfg(test)]
 pub(crate) fn set_wait_for_test(wait: Duration) {
     let _excl = test_excl::exclude();
     *GATE.wait_max.lock().unwrap_or_else(|err| err.into_inner()) = wait;
