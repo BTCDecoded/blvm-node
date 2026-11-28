@@ -73,7 +73,6 @@ use crate::network::peer_scoring::PeerScorer;
 use crate::network::protocol::{GetHeadersMessage, ProtocolMessage, ProtocolParser};
 use crate::node::event_publisher::EventPublisher;
 use crate::storage::blockstore::BlockStore;
-use crate::storage::hashing::double_sha256;
 
 /// Result of a header download pass (sequential or parallel merge).
 pub(crate) struct HeaderSyncResult {
@@ -438,14 +437,7 @@ pub(crate) async fn download_header_range(
                         }
                     }
 
-                    let mut header_data = [0u8; 80];
-                    header_data[0..4].copy_from_slice(&(header.version as i32).to_le_bytes());
-                    header_data[4..36].copy_from_slice(&header.prev_block_hash);
-                    header_data[36..68].copy_from_slice(&header.merkle_root);
-                    header_data[68..72].copy_from_slice(&(header.timestamp as u32).to_le_bytes());
-                    header_data[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());
-                    header_data[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());
-                    let header_hash = double_sha256(&header_data);
+                    let header_hash = crate::storage::hashing::header_double_sha256(&header);
 
                     all_headers.push(header);
                     current_hash = header_hash;
@@ -947,14 +939,7 @@ pub(crate) async fn download_headers(
                         break;
                     }
 
-                    let mut header_data = [0u8; 80];
-                    header_data[0..4].copy_from_slice(&(header.version as i32).to_le_bytes());
-                    header_data[4..36].copy_from_slice(&header.prev_block_hash);
-                    header_data[36..68].copy_from_slice(&header.merkle_root);
-                    header_data[68..72].copy_from_slice(&(header.timestamp as u32).to_le_bytes());
-                    header_data[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());
-                    header_data[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());
-                    let header_hash = double_sha256(&header_data);
+                    let header_hash = crate::storage::hashing::header_double_sha256(header);
 
                     batch_entries.push((header_hash, header.clone(), current_height));
                     pending_work.push((current_height, header.bits, header.timestamp));

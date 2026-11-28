@@ -49,15 +49,7 @@ pub(crate) fn chunk_inventory<T: Clone>(items: Vec<T>, max_len: usize) -> Vec<Ve
 }
 
 fn block_hash_from_header(header: &BlockHeader) -> [u8; 32] {
-    use crate::storage::hashing::double_sha256;
-    let mut header_bytes = [0u8; 80];
-    header_bytes[0..4].copy_from_slice(&(header.version as i32).to_le_bytes());
-    header_bytes[4..36].copy_from_slice(&header.prev_block_hash);
-    header_bytes[36..68].copy_from_slice(&header.merkle_root);
-    header_bytes[68..72].copy_from_slice(&(header.timestamp as u32).to_le_bytes());
-    header_bytes[72..76].copy_from_slice(&(header.bits as u32).to_le_bytes());
-    header_bytes[76..80].copy_from_slice(&(header.nonce as u32).to_le_bytes());
-    double_sha256(&header_bytes)
+    crate::storage::hashing::header_double_sha256(header)
 }
 
 /// A short block `getdata` is a tip reply. Cooldown and the reputation step apply
