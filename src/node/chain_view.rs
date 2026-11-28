@@ -33,20 +33,60 @@ fn lock_wake() -> std::sync::MutexGuard<'static, ()> {
     GATE.wake.lock().unwrap_or_else(|err| err.into_inner())
 }
 
+// The gate is process-global. Lib tests run in parallel, and another test's
+// `set_wait_for_test(1ms)` was cutting this wait from 40ms to under 30ms.
+#[cfg(test)]
+mod test_excl {
+    use std::cell::Cell;
+    use std::sync::{Mutex, MutexGuard};
+
+    thread_local! {
+        static HELD: Cell<bool> = const { Cell::new(false) };
+    }
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    pub struct Guard(Option<MutexGuard<'static, ()>>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.0.take();
+            HELD.with(|held| held.set(false));
+        }
+    }
+
+    pub fn guard() -> Guard {
+        let held = LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        HELD.with(|flag| flag.set(true));
+        Guard(Some(held))
+    }
+
+    pub fn exclude() -> Option<MutexGuard<'static, ()>> {
+        if HELD.with(|flag| flag.get()) {
+            None
+        } else {
+            Some(LOCK.lock().unwrap_or_else(|err| err.into_inner()))
+        }
+    }
+}
+
 fn wait_max() -> Duration {
     *GATE.wait_max.lock().unwrap_or_else(|err| err.into_inner())
 }
 
 /// The generation is odd while a disconnect is visible and the mempool has not caught up.
 pub fn is_odd() -> bool {
+    #[cfg(test)]
+    let _excl = test_excl::exclude();
     GATE.generation.load(Ordering::SeqCst) % 2 == 1
 }
 
 /// Open the window. A second enter while it is already open does not move the generation.
 pub fn enter() {
+    #[cfg(test)]
+    let _excl = test_excl::exclude();
     let _wake = lock_wake();
     let generation = GATE.generation.load(Ordering::SeqCst);
-    if generation % 2 == 0 {
+    if generation.is_multiple_of(2) {
         GATE.generation.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -54,6 +94,8 @@ pub fn enter() {
 /// Close the window after the mempool has caught up, or after the coins were restored.
 /// Even generations are left alone.
 pub fn clear() {
+    #[cfg(test)]
+    let _excl = test_excl::exclude();
     let _wake = lock_wake();
     let generation = GATE.generation.load(Ordering::SeqCst);
     if generation % 2 == 1 {
@@ -65,8 +107,10 @@ pub fn clear() {
 /// Generation observed for this read. Waits at most [`CHAIN_VIEW_WAIT`] for an open window.
 /// A read that already gave up on this generation returns at once.
 pub fn wait_for_settle() -> u64 {
+    #[cfg(test)]
+    let _excl = test_excl::exclude();
     let generation = GATE.generation.load(Ordering::SeqCst);
-    if generation % 2 == 0 || GATE.gave_up_on.load(Ordering::SeqCst) == generation {
+    if generation.is_multiple_of(2) || GATE.gave_up_on.load(Ordering::SeqCst) == generation {
         return generation;
     }
     let started = Instant::now();
@@ -75,7 +119,7 @@ pub fn wait_for_settle() -> u64 {
     let generation = loop {
         let generation = GATE.generation.load(Ordering::SeqCst);
         let left = max.saturating_sub(started.elapsed());
-        if generation % 2 == 0
+        if generation.is_multiple_of(2)
             || left.is_zero()
             || GATE.gave_up_on.load(Ordering::SeqCst) == generation
         {
@@ -97,17 +141,27 @@ pub fn wait_for_settle() -> u64 {
 
 /// True when the window was open for `seen`, or the generation moved during the read.
 pub fn refused(seen: u64) -> bool {
+    #[cfg(test)]
+    let _excl = test_excl::exclude();
     let now = GATE.generation.load(Ordering::SeqCst);
     seen % 2 == 1 || now != seen
 }
 
 #[cfg(test)]
+#[must_use]
+pub(crate) fn test_excl_guard() -> impl Drop {
+    test_excl::guard()
+}
+
+#[cfg(test)]
 pub(crate) fn set_wait_for_test(wait: Duration) {
+    let _excl = test_excl::exclude();
     *GATE.wait_max.lock().unwrap_or_else(|err| err.into_inner()) = wait;
 }
 
 #[cfg(test)]
 pub(crate) fn reset_for_test() {
+    let _excl = test_excl::exclude();
     let _wake = lock_wake();
     GATE.generation.store(0, Ordering::SeqCst);
     GATE.gave_up_on.store(0, Ordering::SeqCst);
@@ -128,6 +182,7 @@ mod tests {
 
     #[test]
     fn an_error_after_enter_leaves_the_generation_odd() {
+        let _guard = test_excl::guard();
         let _reset = Reset;
         enter();
         let failed = (|| -> Result<(), ()> { Err(()) })();
@@ -139,6 +194,7 @@ mod tests {
 
     #[test]
     fn a_second_wait_on_the_same_generation_does_not_block() {
+        let _guard = test_excl::guard();
         let _reset = Reset;
         set_wait_for_test(Duration::from_millis(40));
         enter();
